@@ -43,7 +43,13 @@ def _read_map(path: Path, check: str) -> dict[tuple[str, str], str]:
 
 
 def load_scrubber(
-    entities: Path, key: str, *, salt: str, map_path: Path | None = None, ner_model: str | None
+    entities: Path,
+    key: str,
+    *,
+    salt: str,
+    map_path: Path | None = None,
+    ner_model: str | None,
+    jobs: int = 1,
 ) -> Scrubber:
     if len(key) < MIN_KEY:
         raise InvalidDocument([f"the scrub key must be at least {MIN_KEY} characters"])
@@ -52,8 +58,9 @@ def load_scrubber(
     check = key_check(scrub_key(key.encode(), salt))
     known = _read_map(map_path, check) if map_path is not None else {}
     return Scrubber(
-        load_entities(entities), key.encode(), salt=salt, ner_model=ner_model, known=known
-    )
+        load_entities(entities), key.encode(), salt=salt, ner_model=ner_model, known=known,
+        jobs=jobs,
+    )  # fmt: skip
 
 
 def save_map(scrubber: Scrubber, path: Path) -> None:

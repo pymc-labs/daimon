@@ -242,6 +242,7 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
         *(d for r in loaded.runs for d in (r.document, *r.items, *r.scores, *r.reviews)),
     ]
     names = _ref_names(documents)
+    scrubber.prefetch(list[JsonValue](documents))
     for document in documents:
         scrubber.learn(document)  # names learned anywhere are replaced everywhere
     report = ScrubReport(status="scrubbed", names_checked=scrubber.names_checked)

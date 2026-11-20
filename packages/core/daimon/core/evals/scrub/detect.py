@@ -11,9 +11,12 @@ optional: without it `Ner.available` is False and only the dictionary and patter
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
+import multiprocessing
 import re
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -281,7 +284,13 @@ _NER_KINDS: Final = {
     "PERSON": "person", "ORGANIZATION": "company", "LOCATION": "place", "PHONE_NUMBER": "phone",
 }  # fmt: skip
 _NER_CHUNK: Final = 50_000
-_NER_CACHE: Final = 100_000
+_NER_CACHE: Final = 1_000_000
+_NER_BATCH: Final = 64
+# spaCy labels Presidio has no entity for: ignored instead of warned about on every call.
+_NER_IGNORED: Final = (
+    "CARDINAL", "ORDINAL", "QUANTITY", "PERCENT", "MONEY", "DATE", "TIME", "LANGUAGE", "LAW",
+    "EVENT", "PRODUCT", "WORK_OF_ART", "NORP",
+)  # fmt: skip
 
 
 def namey(text: str) -> bool:
@@ -301,61 +310,131 @@ def _basic(value: str) -> bool:
         return False
 
 
-class Ner:
-    """Presidio over a spaCy model, built on first use. `available` tells whether it loaded."""
+def _engine(model: str) -> object | None:
+    """Presidio over `model`, or None when it or the library is missing."""
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
+        from presidio_analyzer.nlp_engine.ner_model_configuration import (
+            MODEL_TO_PRESIDIO_ENTITY_MAPPING,
+        )
 
-    def __init__(self, model: str) -> None:
+        provider = NlpEngineProvider(
+            nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": model}],
+                "ner_model_configuration": {
+                    "labels_to_ignore": list(_NER_IGNORED),
+                    "model_to_presidio_entity_mapping": {
+                        **MODEL_TO_PRESIDIO_ENTITY_MAPPING,
+                        "FAC": "LOCATION",
+                    },
+                },
+            }
+        )
+        return AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["en"])
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def _analyze(engine: object, texts: list[str]) -> list[list[tuple[int, int, str]]]:
+    """Names in each of `texts` (each at most `_NER_CHUNK` long), run through spaCy in batches."""
+    from presidio_analyzer import AnalyzerEngine
+
+    assert isinstance(engine, AnalyzerEngine)
+    out: list[list[tuple[int, int, str]]] = []
+    batches = engine.nlp_engine.process_batch  # pyright: ignore[reportUnknownMemberType]
+    for text, artifacts in batches(texts, "en", batch_size=_NER_BATCH):
+        found = engine.analyze(
+            text, language="en", entities=list(_NER_KINDS), score_threshold=0.4,
+            nlp_artifacts=artifacts,
+        )  # fmt: skip
+        out.append([(f.start, f.end, _NER_KINDS[f.entity_type]) for f in found])
+    return out
+
+
+_WORKER: dict[str, object] = {}
+
+
+def _worker_init(model: str) -> None:
+    _WORKER["engine"] = _engine(model)
+
+
+def _worker_ready() -> bool:
+    return _WORKER["engine"] is not None
+
+
+def _worker_analyze(texts: list[str]) -> list[list[tuple[int, int, str]]]:
+    return _analyze(_WORKER["engine"], texts)
+
+
+class Ner:
+    """Presidio over a spaCy model, built on first use. `available` tells whether it loaded.
+
+    Results are cached per text, so a scrub, its sweep and the learning pass run the model once.
+    `prefetch` runs many texts in batches. With `jobs` above 1 the model runs only in that many
+    worker processes.
+    """
+
+    def __init__(self, model: str, *, jobs: int = 1) -> None:
         self._model = model
+        self._jobs = jobs
         self._engine: object | None = None
-        self._tried = False
-        self._cache: dict[str, list[Hit]] = {}
+        self._ready: bool | None = None
+        self._cache: dict[bytes, tuple[Hit, ...]] = {}
+        self._pool: ProcessPoolExecutor | None = None
 
     @property
     def available(self) -> bool:
-        return self._load() is not None
+        if self._ready is None:
+            if self._jobs > 1:
+                self._pool = ProcessPoolExecutor(
+                    self._jobs, mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_worker_init, initargs=(self._model,),
+                )  # fmt: skip
+                self._ready = self._pool.submit(_worker_ready).result()
+            else:
+                self._engine = _engine(self._model)
+                self._ready = self._engine is not None
+        return self._ready
 
-    def _load(self) -> object | None:
-        if not self._tried:
-            self._tried = True
-            try:
-                from presidio_analyzer import AnalyzerEngine
-                from presidio_analyzer.nlp_engine import NlpEngineProvider
+    def _run(self, texts: list[str]) -> list[list[tuple[int, int, str]]]:
+        if not self.available:
+            return [[] for _ in texts]
+        if self._pool is None:
+            return _analyze(self._engine, texts)
+        size = max(1, min(_NER_BATCH, -(-len(texts) // self._jobs)))
+        chunks = [texts[i : i + size] for i in range(0, len(texts), size)]
+        return [r for part in self._pool.map(_worker_analyze, chunks) for r in part]
 
-                provider = NlpEngineProvider(
-                    nlp_configuration={
-                        "nlp_engine_name": "spacy",
-                        "models": [{"lang_code": "en", "model_name": self._model}],
-                    }
-                )
-                self._engine = AnalyzerEngine(
-                    nlp_engine=provider.create_engine(), supported_languages=["en"]
-                )
-            except (ImportError, OSError, ValueError):
-                self._engine = None
-        return self._engine
+    def prefetch(self, texts: Iterable[str]) -> None:
+        """Run the model over the `texts` not seen yet, in batches."""
+        todo = [t for t in dict.fromkeys(texts) if _digest(t) not in self._cache]
+        short = [t for t in todo if len(t) <= _NER_CHUNK]
+        for text, found in zip(short, self._run(short) if short else [], strict=True):
+            self._store(text, [Hit(a, b, k, _P_NER) for a, b, k in found])
 
     def find(self, text: str) -> list[Hit]:
-        """Names in `text`; a scrub, its sweep and the learning pass ask about the same text."""
-        if (cached := self._cache.get(text)) is not None:
-            return cached
-        from presidio_analyzer import AnalyzerEngine
+        """Names in `text`."""
+        if (cached := self._cache.get(_digest(text))) is not None:
+            return list(cached)
+        chunks = [text[base : base + _NER_CHUNK] for base in range(0, len(text), _NER_CHUNK)]
+        hits = [
+            Hit(n * _NER_CHUNK + a, n * _NER_CHUNK + b, k, _P_NER)
+            for n, found in enumerate(self._run(chunks) if chunks else [])
+            for a, b, k in found
+        ]
+        self._store(text, hits)
+        return hits
 
-        engine = self._load()
-        if not isinstance(engine, AnalyzerEngine):
-            return []
-        hits: list[Hit] = []
-        for base in range(0, len(text), _NER_CHUNK):
-            chunk = text[base : base + _NER_CHUNK]
-            for found in engine.analyze(
-                chunk, language="en", entities=list(_NER_KINDS), score_threshold=0.4
-            ):
-                hits.append(
-                    Hit(base + found.start, base + found.end, _NER_KINDS[found.entity_type], _P_NER)
-                )
+    def _store(self, text: str, hits: list[Hit]) -> None:
         if len(self._cache) >= _NER_CACHE:
             self._cache.clear()
-        self._cache[text] = hits
-        return hits
+        self._cache[_digest(text)] = tuple(hits)
+
+
+def _digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
 class Detector:
@@ -368,6 +447,11 @@ class Detector:
     @property
     def ner_available(self) -> bool:
         return self._ner is not None and self._ner.available
+
+    def prefetch(self, texts: Iterable[str]) -> None:
+        """Run NER ahead over `texts`, in batches, for `find` to reuse."""
+        if self._ner is not None:
+            self._ner.prefetch(v for t in texts if namey(v := fold(t).text))
 
     def add(self, terms: Iterable[Term]) -> list[Term]:
         """Add `terms` not known yet (by normalized text); returns the ones added."""

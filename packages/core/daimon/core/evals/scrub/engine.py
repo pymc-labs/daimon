@@ -14,7 +14,7 @@ import json
 import re
 import urllib.parse
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Final
 
 from daimon.core.evals.scrub.detect import (
@@ -230,6 +230,15 @@ def _inline_b64(word: str) -> tuple[str, bool] | None:
     return (text, urlsafe) if text and len(text.strip()) >= 4 else None
 
 
+def _strings(node: JsonValue) -> Iterator[str]:
+    if isinstance(node, str):
+        inner = _json_in(node)
+        yield from (node,) if inner is None else _strings(inner)
+    elif isinstance(node, list | dict):
+        for item in node.values() if isinstance(node, dict) else node:
+            yield from _strings(item)
+
+
 class Scrubber:
     def __init__(
         self,
@@ -239,13 +248,14 @@ class Scrubber:
         salt: str,
         ner_model: str | None = "en_core_web_sm",
         known: Mapping[tuple[str, str], str] | None = None,
+        jobs: int = 1,
     ) -> None:
         terms = terms_of(entities)
         self.key = scrub_key(key, salt)
-        self.detector = Detector(terms, Ner(ner_model) if ner_model else None)
+        self.detector = Detector(terms, Ner(ner_model, jobs=jobs) if ner_model else None)
         self.fakes = FakeMap(self.key, known=known, forbidden=[t.text for t in terms])
         self.counts: Counter[str] = Counter()
-        self._fake_cache: tuple[int, set[str]] = (-1, set())
+        self._fake_cache: tuple[int, set[str]] = (0, set())
         self._fake_index = TermIndex()
         self._indexed = 0
 
@@ -264,8 +274,13 @@ class Scrubber:
         added = self.detector.add(t for t in terms if len(t.text.strip()) >= MIN_PART)
         self.fakes.forbid(t.text for t in added)
 
+    def prefetch(self, node: JsonValue) -> None:
+        """Run NER ahead, in batches, over the strings in `node`."""
+        self.detector.prefetch(_strings(node))
+
     def learn(self, node: JsonValue, *, key: str = "") -> None:
         """Add what `node` names to the dictionary: replaced everywhere from now on."""
+        self.prefetch(node)
         terms: list[Term] = []
         self._learn(node, key, terms)
         self.add_terms(terms)
@@ -308,10 +323,10 @@ class Scrubber:
     # ---------- fakes ----------
 
     def _fake_keys(self) -> set[str]:
-        values = self.fakes.values()
-        if self._fake_cache[0] != len(values):
-            self._fake_cache = (len(values), {_fake_key(v) for v in values})
-        return self._fake_cache[1]
+        values, (seen, keys) = self.fakes.values(), self._fake_cache
+        keys.update(_fake_key(v) for v in values[seen:])
+        self._fake_cache = (len(values), keys)
+        return keys
 
     def _is_fake(self, text: str) -> bool:
         """Whether `text` is exactly one of our fakes."""
