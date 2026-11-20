@@ -9,6 +9,7 @@
   "unknown_ref",
   "not_upstream",
   "loop_limit",
+  "bad_event_source",
   "rule_of_two",
   "cost"
  ],
@@ -3908,6 +3909,193 @@
    "warnings": []
   },
   {
+   "name": "event sources other than a workflow never arrive",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     },
+     {
+      "id": "finished",
+      "kind": "event",
+      "source": "bluedot.meeting_ended"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "pause"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "pause": {
+      "kind": "wait",
+      "event": {
+       "source": "grafana"
+      },
+      "timeout": "1h",
+      "routes": {
+       "arrived": "review",
+       "timed_out": "stop"
+      }
+     }
+    }
+   },
+   "errors": [
+    "bad_event_source:",
+    "bad_event_source:pause"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a workflow is a valid event source",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     },
+     {
+      "id": "finished",
+      "kind": "event",
+      "source": "workflow:7c1d0b5e-3a44-4f0e-9a52-6b8e2d9f1a03"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "pause"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "pause": {
+      "kind": "wait",
+      "event": {
+       "source": "workflow:7c1d0b5e-3a44-4f0e-9a52-6b8e2d9f1a03"
+      },
+      "timeout": "1h",
+      "routes": {
+       "arrived": "review",
+       "timed_out": "stop"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": []
+  },
+  {
    "name": "seed lead",
    "spec": {
     "schema": "daimon.workflow/v1",
@@ -4198,9 +4386,12 @@
     "triggers": [
      {
       "id": "meeting_ended",
-      "kind": "event",
-      "source": "bluedot.meeting_ended",
-      "match": "${{ event.meeting.external }}"
+      "kind": "webhook",
+      "verify": "standard-webhooks",
+      "inputs": {
+       "meeting_id": "${{ payload.meeting.external }}"
+      },
+      "respond": "accepted"
      }
     ],
     "inputs": {
@@ -5113,8 +5304,8 @@
       "kind": "wait",
       "title": "Wait for resolve",
       "event": {
-       "source": "grafana",
-       "match": "${{ event.status == 'resolved' }}"
+       "source": "workflow:7c1d0b5e-3a44-4f0e-9a52-6b8e2d9f1a03",
+       "match": "${{ event.run.status == 'succeeded' }}"
       },
       "timeout": "2h",
       "routes": {

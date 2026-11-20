@@ -9,6 +9,7 @@ codes it shares are listed in the shared fixtures
 
 from __future__ import annotations
 
+import re
 from typing import Final, Literal
 
 from daimon.core.workflows.expressions import (
@@ -38,11 +39,13 @@ from daimon.core.workflows.spec import (
     ApprovalNode,
     BranchNode,
     CodeNode,
+    EventTrigger,
     FinishNode,
     ForEachNode,
     SchemaField,
     Spec,
     TransformNode,
+    WaitNode,
     WebhookTrigger,
     parse_duration,
     parse_spec,
@@ -53,6 +56,12 @@ from pydantic import BaseModel, JsonValue, ValidationError
 DEFAULT_RUN_BUDGET_USD: Final = 5.0
 #: A For each running agents this many at once earns a cost warning.
 _COSTLY_CONCURRENCY: Final = 5
+#: The only event source that fires: a finished run of that workflow.
+_EVENT_SOURCE: Final = re.compile(r"workflow:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+_BAD_EVENT_SOURCE: Final = (
+    "An event source is a workflow, as `workflow:<id>`; other events never arrive. "
+    "Use a webhook trigger for outside events"
+)
 _STEP_PARTS: Final = frozenset({"output", "summary", "route", "status", "files", "visits"})
 _ROOTS: Final[dict[str, frozenset[str]]] = {
     "node": frozenset({"inputs", "trigger", "steps", "run", "workflow"}),
@@ -285,6 +294,8 @@ def _check_node(
                 report.error("unknown_tool", f"Unknown tool: {inner.tool}", node_id)
             if (node.concurrency or 1) > _COSTLY_CONCURRENCY and isinstance(inner, AgentNode):
                 report.warn("cost", "Agent per item, high concurrency", node_id)
+        case WaitNode() if node.event and not _EVENT_SOURCE.fullmatch(node.event.source):
+            report.error("bad_event_source", _BAD_EVENT_SOURCE, node_id)
         case FinishNode() if node.deliver and node.deliver.to == "home" and spec.home is None:
             report.error("no_home", "Delivery to home needs a home channel", node_id)
         case _:
@@ -389,6 +400,11 @@ def _check_loops(spec: Spec, report: _Report) -> None:
 def _check_spec(spec: Spec, report: _Report) -> None:
     if spec.limits and spec.limits.deadline and parse_duration(spec.limits.deadline) > MAX_DEADLINE:
         report.error("limit", "A run's deadline is at most 90 days")
+    if any(
+        isinstance(t, EventTrigger) and not _EVENT_SOURCE.fullmatch(t.source)
+        for t in spec.triggers or []
+    ):
+        report.error("bad_event_source", _BAD_EVENT_SOURCE)
     webhooks = [t for t in spec.triggers or [] if isinstance(t, WebhookTrigger)]
     if (
         spec.concurrency

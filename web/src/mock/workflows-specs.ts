@@ -124,7 +124,7 @@ goal: Turn client meeting notes into a summary and Linear issues.
 home: {channel: C0DELIVERY}
 visibility: shared
 triggers:
-  - {id: meeting_ended, kind: event, source: bluedot.meeting_ended, match: "\${{ event.meeting.external }}"}
+  - {id: meeting_ended, kind: webhook, verify: standard-webhooks, inputs: {meeting_id: "\${{ payload.meeting.external }}"}, respond: accepted}
 inputs:
   type: object
   required: [meeting_id]
@@ -488,7 +488,7 @@ nodes:
   watch:
     kind: wait
     title: Wait for resolve
-    event: {source: grafana, match: "\${{ event.status == 'resolved' }}"}
+    event: {source: "workflow:7c1d0b5e-3a44-4f0e-9a52-6b8e2d9f1a03", match: "\${{ event.run.status == 'succeeded' }}"}
     timeout: 2h
     routes: {arrived: quiet, timed_out: escalate}
   quiet:
