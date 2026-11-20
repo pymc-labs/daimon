@@ -21,9 +21,16 @@ from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError
 from daimon.core.evals.access import Share, Subject
-from daimon.core.evals.bundle import open_path
+from daimon.core.evals.bundle import DirSource, open_path, to_zip
 from daimon.core.evals.format import Arm, JsonObject, to_document
-from daimon.core.evals.service import EvalRefused, EvalService, ExportRequest, Page, SuiteDraft
+from daimon.core.evals.service import (
+    EvalRefused,
+    EvalService,
+    ExportRequest,
+    Page,
+    SuiteDraft,
+    eval_service,
+)
 from daimon.core.evals.validate import InvalidDocument, validate_bundle
 from daimon.core.stores.tenants import get_tenant
 from pydantic import BaseModel, TypeAdapter
@@ -98,7 +105,8 @@ def _run(ctx: typer.Context, work: Callable[[EvalService, Subject], Awaitable[ob
                 operator=True,
             )
             try:
-                _print(await work(EvalService(rt.sessionmaker, rt.settings), actor))
+                service = eval_service(rt.sessionmaker, rt.settings, rt.anthropic)
+                _print(await work(service, actor))
             except EvalRefused as exc:
                 raise _Failed("; ".join((exc.message, *exc.problems))) from None
 
@@ -110,16 +118,23 @@ def suites_list(ctx: typer.Context) -> None:
     _run(ctx, lambda s, a: s.suites(a))
 
 
-@suites_app.command("get")
-def suites_get(ctx: typer.Context, suite_id: str, version: int | None = None) -> None:
+@suites_app.command("show")
+def suites_show(ctx: typer.Context, suite_id: str, version: int | None = None) -> None:
     _run(ctx, lambda s, a: s.suite(a, suite_id, version))
 
 
-@suites_app.command("save")
-def suites_save(ctx: typer.Context, draft: Path) -> None:
-    """Create a suite or save its next version from a JSON draft."""
+@suites_app.command("create")
+def suites_create(ctx: typer.Context, draft: Path) -> None:
+    """Create a suite with no cases from a JSON draft."""
     parsed = SuiteDraft.model_validate(_read_json(draft))
-    _run(ctx, lambda s, a: s.save_suite(a, parsed))
+    _run(ctx, lambda s, a: s.save_suite(a, parsed, new=True))
+
+
+@suites_app.command("edit")
+def suites_edit(ctx: typer.Context, draft: Path) -> None:
+    """Save a suite's next version from a JSON draft; its `cases` pin case revisions."""
+    parsed = SuiteDraft.model_validate(_read_json(draft))
+    _run(ctx, lambda s, a: s.save_suite(a, parsed, new=False))
 
 
 @suites_app.command("share")
@@ -139,14 +154,16 @@ def cases_list(ctx: typer.Context, suite_id: str, version: int | None = None) ->
     _run(ctx, lambda s, a: s.cases(a, suite_id, version))
 
 
-@cases_app.command("get")
-def cases_get(ctx: typer.Context, suite_id: str, case_id: str, revision: int | None = None) -> None:
+@cases_app.command("show")
+def cases_show(
+    ctx: typer.Context, suite_id: str, case_id: str, revision: int | None = None
+) -> None:
     _run(ctx, lambda s, a: s.case(a, suite_id, case_id, revision))
 
 
 @cases_app.command("put")
 def cases_put(ctx: typer.Context, suite_id: str, case: Path) -> None:
-    """Add a case from a JSON file, or save its next revision."""
+    """Add a case from a JSON file, or save its next revision; `suites edit` pins it."""
     document = _read_json(case)
     _run(ctx, lambda s, a: s.put_case(a, suite_id, document))
 
@@ -165,8 +182,8 @@ def arms_list(ctx: typer.Context) -> None:
     _run(ctx, lambda s, a: s.arms(a))
 
 
-@arms_app.command("save")
-def arms_save(ctx: typer.Context, arm: Path) -> None:
+@arms_app.command("create")
+def arms_create(ctx: typer.Context, arm: Path) -> None:
     parsed = Arm.model_validate(_read_json(arm))
     _run(ctx, lambda s, a: s.save_arm(a, parsed))
 
@@ -176,8 +193,8 @@ def items_list(ctx: typer.Context, run_id: str, offset: int = 0, limit: int = 50
     _run(ctx, lambda s, a: s.items(a, run_id, Page(offset=offset, limit=limit)))
 
 
-@items_app.command("get")
-def items_get(ctx: typer.Context, item_id: str) -> None:
+@items_app.command("show")
+def items_show(ctx: typer.Context, item_id: str) -> None:
     _run(ctx, lambda s, a: s.item(a, item_id))
 
 
@@ -186,9 +203,8 @@ def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] =
     """Check a bundle folder, zip or encrypted file, offline. Exits 1 on any problem."""
     try:
         report = validate_bundle(open_path(path, passphrase=passphrase))
-    except (InvalidDocument, OSError) as failed:
-        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
-        warnings, counts = [], {}
+    except InvalidDocument as failed:
+        problems, warnings, counts = list(failed.problems), [], {}
     else:
         problems, warnings = report.problems, report.warnings
         counts = {
@@ -217,16 +233,16 @@ def bundle_export(
         {
             "suites": [{"id": s} for s in suite or []],
             "runs": run or [],
-            "passphrase": passphrase,
             "include_identities": include_identities,
         }
     )
 
     async def work(s: EvalService, a: Subject) -> JsonObject:
-        ref = await s.export_bundle(a, request)
-        _, content = await s.blob(a, ref.sha256)
-        out.write_bytes(content)
-        return to_document(ref)
+        bundle = await s.export_bundle(a, request, passphrase=passphrase)
+        with out.open("wb") as target:
+            async for chunk in bundle.chunks():
+                target.write(chunk)
+        return {"name": bundle.name, "size": bundle.size, "sha256": bundle.sha256}
 
     _run(ctx, work)
 
@@ -238,8 +254,12 @@ def bundle_import(
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
     accept_unscrubbed: bool = False,
 ) -> None:
-    """Import a bundle zip or encrypted file into the workspace."""
-    data = path.read_bytes()
+    """Import a bundle folder, zip or encrypted file into the workspace."""
+    if path.is_dir():
+        source = DirSource(path)
+        data = to_zip({name: source.read(name) for name in source.names()})
+    else:
+        data = path.read_bytes()
 
     async def chunks() -> AsyncIterator[bytes]:
         yield data
