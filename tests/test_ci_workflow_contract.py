@@ -295,13 +295,15 @@ def test_defaults_verify_qa_exception_is_staging_only() -> None:
     assert "defaults verify $verify_tenant_arg" in script
 
 
-def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
+def test_prebuilt_staging_is_pinned_and_production_promotes_the_soaked_digests() -> None:
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     select = next(step for step in steps if step.get("id") == "images")
     assert "Prebuilt digests are restricted to staging" in select["run"]
+    assert "Soaked digests are promoted only to production" in select["run"]
     assert "^sha256:[0-9a-f]{64}$" in select["run"]
     assert "gcloud artifacts docker images describe" in select["run"]
     assert "Prebuilt digests need the selective main CI path" in select["run"]
+    assert select["env"]["SOURCE_REGISTRY"] == "${{ inputs.source_registry }}"
     builds = {
         step["name"]: without_freshness(step["if"])
         for step in steps
@@ -319,10 +321,22 @@ def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
             ("report-host", "report"),
         )
     }
-    promote = _workflow("promote.yml")["jobs"]
-    assert promote["deploy"]["needs"] == "validate"
-    assert promote["deploy"]["with"]["environment"] == "production"
-    assert "daimon_digest" not in promote["deploy"]["with"]
+    crane = next(step for step in steps if step.get("uses", "").startswith("imjasonh/setup-crane@"))
+    assert steps.index(crane) < steps.index(select), "crane must be on the path before the copy"
+    assert without_freshness(crane["if"]) == (
+        "inputs.environment == 'production' && inputs.source_registry != ''"
+    )
+
+    promote = _workflow("promote.yml")
+    assert promote["run-name"] == "Promote ${{ inputs.sha }}", "the release proposal reads the SHA"
+    validate, deploy = promote["jobs"]["validate"], promote["jobs"]["deploy"]
+    assert deploy["needs"] == "validate"
+    assert deploy["with"]["environment"] == "production"
+    digests = ("daimon_digest", "notebook_digest", "report_digest")
+    for name in digests:
+        assert deploy["with"][name] == f"${{{{ needs.validate.outputs.{name} }}}}"
+    assert deploy["with"]["source_registry"] == "${{ needs.validate.outputs.registry }}"
+    assert set(validate["outputs"]) == {*digests, "registry"}
 
 
 _DIGEST = {
@@ -469,6 +483,112 @@ def test_unusable_deployed_image_is_rebuilt(tmp_path: Path, recorded: str, serve
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert outputs["build_daimon"] == "true"
     assert outputs["daimon"] == f"example.test/test-project/images/daimon:{_RUN_TAG}"
+
+
+_SOURCE = "example.test/staging-project/images"
+
+
+@pytest.mark.parametrize(
+    ("rebuild", "tagged", "expected"),
+    [
+        (False, ("daimon", "notebook-host", "report-host"), {
+            **{f"{name}_digest": _DIGEST[name] for name in _TAGS}, "registry": _SOURCE,
+        }),
+        (False, ("daimon", "notebook-host"), None),
+        # rebuild keeps the old single check and passes no digest, so the deploy builds.
+        (True, ("daimon",), {}),
+        (True, (), None),
+    ],
+)  # fmt: skip
+def test_promote_resolves_the_soaked_digests_unless_rebuilding(
+    tmp_path: Path, rebuild: bool, tagged: tuple[str, ...], expected: dict[str, str] | None
+) -> None:
+    """A SHA without all three soaked tags fails before reviewers are paged."""
+    steps = _workflow("promote.yml")["jobs"]["validate"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "soaked")
+    digests = {"daimon": _DIGEST["daimon"], "notebook-host": _DIGEST["notebook"],
+               "report-host": _DIGEST["report"]}  # fmt: skip
+    cases = "".join(
+        f'    *"{_SOURCE}/{package}:abc1234"*) echo "{digests[package]}" ;;\n' for package in tagged
+    )
+    fake = f'gcloud() {{\n  case "$*" in\n{cases}    *) return 1 ;;\n  esac\n}}\n'
+    output = tmp_path / "outputs"
+    env = {
+        **os.environ,
+        "GITHUB_OUTPUT": str(output),
+        "SHA": "abc1234" + "0" * 33,
+        "REBUILD": str(rebuild).lower(),
+        "REGISTRY": _SOURCE,
+    }
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", fake + script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if expected is None:
+        assert result.returncode != 0, "a SHA staging never tagged must not promote"
+        return
+    assert result.returncode == 0, result.stderr
+    lines = output.read_text().splitlines() if output.exists() else []
+    assert dict(line.split("=", 1) for line in lines) == expected
+
+
+@pytest.mark.parametrize(
+    ("environment", "served", "ok"),
+    [("production", True, True), ("production", False, False), ("staging", True, False)],
+)
+def test_production_copies_the_soaked_digests_instead_of_building(
+    tmp_path: Path, environment: str, served: bool, ok: bool
+) -> None:
+    """Each soaked image is copied under the SHA tag and used by the digest it soaked as."""
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "images")
+    script = script.replace("${{ inputs.environment }}", environment)
+    script = script.replace("${{ vars.GCP_PROJECT_ID }}", "test-project")
+    for name, tag in _TAGS.items():
+        script = script.replace(f"${{{{ steps.tags.outputs.{name} }}}}", tag)
+    log = tmp_path / "calls"
+    fake = (
+        f'crane() {{ echo "crane $*" >> "{log}"; }}\n'
+        f'gcloud() {{ echo "gcloud $*" >> "{log}"; case "$*" in *images\\ describe*) '
+        f"{'echo ${5#*@}' if served else 'return 1'} ;; esac; }}\n"
+    )
+    output = tmp_path / "outputs"
+    env = {
+        **os.environ,
+        "GITHUB_OUTPUT": str(output),
+        "AR_HOST": "example.test",
+        "REPO": "images",
+        "SELECTIVE": "false",
+        "SOURCE_REGISTRY": _SOURCE,
+        **{f"{name.upper()}_DIGEST": digest for name, digest in _DIGEST.items()},
+    }
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", fake + script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    outputs = output.read_text() if output.exists() else ""
+    if not ok:
+        assert result.returncode != 0, "only production takes soaked digests, and only served ones"
+        assert "prebuilt=" not in outputs
+        return
+    assert result.returncode == 0, result.stderr
+    assert dict(line.split("=", 1) for line in outputs.splitlines()) == {
+        "prebuilt": "false",
+        **{f"build_{name}": "false" for name in _TAGS},
+        **{name: f"example.test/test-project/images/{pkg}@{_DIGEST[name]}"
+           for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))},
+    }  # fmt: skip
+    copies = [line for line in log.read_text().splitlines() if line.startswith("crane")]
+    assert copies == [
+        f"crane copy {_SOURCE}/{pkg}@{_DIGEST[name]} {_TAGS[name]}"
+        for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))
+    ]  # fmt: skip
 
 
 _RECORD_STEP = "Record deployed image digests for VM boot"

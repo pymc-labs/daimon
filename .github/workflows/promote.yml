@@ -1,17 +1,20 @@
 name: Promote
+run-name: Promote ${{ inputs.sha }}
 
 # Production promote/rollback path. The ONLY way code reaches production:
 # an operator dispatches this workflow with a full commit SHA that has
 # already soaked on staging. Rollback is the same operation pointed at an
-# older SHA. The `production` GitHub Environment enforces the required
-# reviewers before any deploy authority is granted.
+# older SHA, and works only when no migration landed in between. The
+# `production` GitHub Environment enforces the required reviewers before any
+# deploy authority is granted. The run name carries the SHA, so tools without
+# a checkout can read what production runs from the run list.
 #
-# Promotion is COMMIT-level, not artifact-level: the production deploy
-# rebuilds images from source at the promoted SHA (docker builds are not
-# reproducible — mutable base tags, network state at build time), so the
-# bytes that reach production are not the bytes that soaked on staging.
-# The validate job's image-exists check proves the commit passed the CI
-# test+build pipeline and had a staging image to soak — nothing more.
+# Promotion is ARTIFACT-level: the validate job resolves the digests staging
+# tagged with the SHA's short form (main CI's staging deploy publishes those
+# tags only after every gate passed), and the production deploy copies exactly
+# those images into its own registry. `rebuild` builds from source at the SHA
+# instead, as promotes did before; docker builds are not reproducible, so that
+# path ships bytes that never soaked.
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +22,10 @@ on:
         description: "Full 40-char commit SHA to promote to production"
         required: true
         type: string
+      rebuild:
+        description: "Build from source instead of promoting staging's soaked images"
+        type: boolean
+        default: false
 
 jobs:
   validate:
@@ -33,6 +40,11 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      daimon_digest: ${{ steps.soaked.outputs.daimon_digest }}
+      notebook_digest: ${{ steps.soaked.outputs.notebook_digest }}
+      report_digest: ${{ steps.soaked.outputs.report_digest }}
+      registry: ${{ steps.soaked.outputs.registry }}
     env:
       AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
     steps:
@@ -68,18 +80,34 @@ jobs:
         with:
           skip_install: true
 
-      - name: Assert soaked image exists for this SHA
+      # deploy.yml tags images with the first 7 chars of the full commit SHA
+      # (a fixed `cut -c1-7`, matching this truncation exactly). A missing tag
+      # means staging never passed its gates at this SHA: fail closed, before
+      # the production reviewers are paged.
+      - name: Resolve the soaked images for this SHA
+        id: soaked
         env:
           SHA: ${{ inputs.sha }}
+          REBUILD: ${{ inputs.rebuild }}
+          REGISTRY: ${{ env.AR_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_AR_REPO }}
         run: |
-          # deploy.yml tags images with the first 7 chars of the full commit
-          # SHA (a fixed `cut -c1-7`, matching this truncation exactly). A
-          # missing image means the SHA never passed the test+build pipeline —
-          # fail closed.
           SHORT=$(echo "$SHA" | cut -c1-7)
-          IMAGE="${{ env.AR_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_AR_REPO }}/daimon:$SHORT"
-          gcloud artifacts docker images describe "$IMAGE" \
-            || { echo "No image at $IMAGE — SHA was never built by CI" >&2; exit 1; }
+          if [ "$REBUILD" = true ]; then
+            gcloud artifacts docker images describe "$REGISTRY/daimon:$SHORT" \
+              || { echo "No image at $REGISTRY/daimon:$SHORT; SHA was never built by CI" >&2; exit 1; }
+            exit 0
+          fi
+          for image in daimon:daimon notebook:notebook-host report:report-host; do
+            name="${image%%:*}" package="${image#*:}"
+            digest=$(gcloud artifacts docker images describe "$REGISTRY/$package:$SHORT" \
+              --format='value(image_summary.digest)') || digest=""
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "No soaked image at $REGISTRY/$package:$SHORT: promote a SHA staging deployed" >&2
+              exit 1
+            }
+            echo "${name}_digest=$digest" >> "$GITHUB_OUTPUT"
+          done
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: Promote to production
@@ -91,3 +119,7 @@ jobs:
     with:
       environment: production
       sha: ${{ inputs.sha }}
+      daimon_digest: ${{ needs.validate.outputs.daimon_digest }}
+      notebook_digest: ${{ needs.validate.outputs.notebook_digest }}
+      report_digest: ${{ needs.validate.outputs.report_digest }}
+      source_registry: ${{ needs.validate.outputs.registry }}

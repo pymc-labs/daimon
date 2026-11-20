@@ -38,6 +38,10 @@ on:
         description: "Prebuilt staging report-host image digest from this CI run"
         required: false
         type: string
+      source_registry:
+        description: "Staging registry the digests soaked in; production copies them from it (promote.yml)"
+        required: false
+        type: string
       selective:
         description: "Refresh only what changed since the last staging deploy (main CI)"
         required: false
@@ -131,6 +135,12 @@ jobs:
         if: steps.fresh.outputs.superseded != 'true'
         run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
 
+      # Copies the soaked staging images into this registry (promote.yml).
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        if: (inputs.environment == 'production' && inputs.source_registry != '') && steps.fresh.outputs.superseded != 'true'
+        with:
+          version: v0.22.1
+
       - name: Compute image tags
         if: steps.fresh.outputs.superseded != 'true'
         id: tags
@@ -184,12 +194,40 @@ jobs:
           DAIMON_DIGEST: ${{ inputs.daimon_digest }}
           NOTEBOOK_DIGEST: ${{ inputs.notebook_digest }}
           REPORT_DIGEST: ${{ inputs.report_digest }}
+          SOURCE_REGISTRY: ${{ inputs.source_registry }}
           DAIMON_CHANGED: ${{ steps.plan.outputs.daimon_image }}
           NOTEBOOK_CHANGED: ${{ steps.plan.outputs.notebook_image }}
           REPORT_CHANGED: ${{ steps.plan.outputs.report_image }}
           VM_PREFIX: ${{ vars.GCP_AR_REPO }}
           RUN_TAG: deploy-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
+          # A promote ships the exact images that soaked on staging: each is copied
+          # under this SHA's tag, and only a digest this registry then serves is used.
+          promote_image() {
+            local name="$1" package="$2" digest="$3" tag="$4" served
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Malformed $name digest" >&2; return 1; }
+            crane copy "$SOURCE_REGISTRY/$package@$digest" "$tag"
+            served="$(gcloud artifacts docker images describe "$BASE/$package@$digest" \
+              --format='value(image_summary.digest)')"
+            [ "$served" = "$digest" ] || { echo "$BASE/$package@$digest is not served" >&2; return 1; }
+            echo "build_$name=false" >> "$GITHUB_OUTPUT"
+            echo "$name=$BASE/$package@$digest" >> "$GITHUB_OUTPUT"
+          }
+          if [ "$SELECTIVE" != true ] && [ -n "$SOURCE_REGISTRY" ]; then
+            if [ "${{ inputs.environment }}" != production ]; then
+              echo "Soaked digests are promoted only to production" >&2
+              exit 1
+            fi
+            [[ "$SOURCE_REGISTRY" =~ ^[a-z0-9.-]+/[a-z0-9-]+/[a-z0-9_-]+$ ]] \
+              || { echo "Malformed source registry" >&2; exit 1; }
+            gcloud auth configure-docker "${SOURCE_REGISTRY%%/*}" --quiet
+            promote_image daimon daimon "$DAIMON_DIGEST" "${{ steps.tags.outputs.daimon }}"
+            promote_image notebook notebook-host "$NOTEBOOK_DIGEST" "${{ steps.tags.outputs.notebook }}"
+            promote_image report report-host "$REPORT_DIGEST" "${{ steps.tags.outputs.report }}"
+            echo "prebuilt=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$SELECTIVE" != true ]; then
             if [ -n "$DAIMON_DIGEST$NOTEBOOK_DIGEST$REPORT_DIGEST" ]; then
               echo "Prebuilt digests need the selective main CI path" >&2
@@ -206,7 +244,6 @@ jobs:
             echo "Prebuilt digests are restricted to staging" >&2
             exit 1
           fi
-          BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
           # This run's candidate; else, unchanged since the last deploy, the image
           # the VM boots; else a build from source below. A malformed or missing
           # candidate fails rather than falling back to a build. A build here gets
@@ -250,7 +287,7 @@ jobs:
           scripts/ci/iap-ssh-key.sh run "$IAP_SSH_STATE" 180 "$REPO_NAME" "$ZONE" \
             >"$IAP_SSH_STATE/launcher.log" 2>&1 < /dev/null &
 
-      # Manual staging and production deploys still build from the pinned SHA.
+      # Manual staging deploys and rebuild promotes still build from the pinned SHA.
       # Main CI passes the images it built and reuses the deployed ones that did
       # not change, so it builds here only an image neither covers. No provenance
       # or SBOM attestations: they would turn the push into an image index, while
