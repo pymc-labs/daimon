@@ -7,6 +7,7 @@ opens the create dialog, which Action.Execute cannot do.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
@@ -18,7 +19,12 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
 )
 from daimon.core.cron_words import schedule_words
-from daimon.core.routines import can_manage_routine, derive_glyph, routine_label
+from daimon.core.routines import (
+    MOVED_TO_WORKFLOWS,
+    can_manage_routine,
+    derive_glyph,
+    routine_label,
+)
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.cards import (
     Action,
@@ -72,7 +78,10 @@ def _button(
     return button(VERB, title, op, style=style, **extra)
 
 
-def _routine(row: RoutineRow, *, can_manage: bool) -> Container:
+def _routine(
+    row: RoutineRow, *, can_manage: bool, moved: bool = False, url: str | None = None
+) -> Container:
+    """One row; a routine `moved` to Workflows is read-only, with its workflow's `url`."""
     schedule = schedule_words(clip(row.cron_expr, _CRON_MAX_CHARS), row.timezone)
     items: list[CardElement] = [
         TextBlock(text=f"{derive_glyph(row)} {routine_label(row)}", weight="Bolder", wrap=True),
@@ -96,9 +105,16 @@ def _routine(row: RoutineRow, *, can_manage: bool) -> Container:
             wrap=True,
         ),
     ]
-    if can_manage:
+    output = _button("Last output", "output", row)
+    if moved:
+        items.append(TextBlock(text=MOVED_TO_WORKFLOWS, size="Small", wrap=True))
+        actions: list[Action] = [output] if can_manage else []
+        if url:
+            actions.append(open_in_web(url))
+        if actions:
+            items.append(ActionSet(actions=actions))
+    elif can_manage:
         toggle = _button("Pause", "pause", row) if row.enabled else _button("Resume", "resume", row)
-        output = _button("Last output", "output", row)
         delete = _button("Delete", "delete", row, "destructive")
         items.append(ActionSet(actions=[toggle, output, delete]))
     return Container(items=items, separator=True)
@@ -112,15 +128,18 @@ def panel_card(
     is_admin: bool,
     notice: str | None = None,
     web_url: str | None = None,
+    moved: Mapping[uuid.UUID, str | None] | None = None,
 ) -> AdaptiveCard:
-    """The routines the caller passed; buttons show only where the viewer may act."""
+    """The routines the caller passed; buttons show only where the viewer may act. `moved`
+    holds each routine moved to Workflows, with its workflow link: read-only here."""
     body: list[CardElement] = [TextBlock(text="Routines", weight="Bolder", size="Medium")]
     if notice:
         body.append(TextBlock(text=notice, wrap=True))
     hidden += max(0, len(rows) - _ROWS_SHOWN)
     for row in rows[:_ROWS_SHOWN]:
         manage = can_manage_routine(row, user_id=user_id, is_admin=is_admin)
-        body.append(_routine(row, can_manage=manage))
+        links = moved or {}
+        body.append(_routine(row, can_manage=manage, moved=row.id in links, url=links.get(row.id)))
     if not rows:
         body.append(TextBlock(text=_EMPTY_HINT, wrap=True))
     if hidden:

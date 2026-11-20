@@ -127,11 +127,12 @@ class RoutinesPanel:
     ) -> AdaptiveCard:
         async with self._runtime.sessionmaker() as session:
             rows = await store.list_routines_for_tenant(session, tenant_id=tenant_id)
-        if not is_admin:
-            # A routine's label and trigger are its creator's work.
-            rows = [row for row in rows if row.created_by_user_id == user_id]
-        rows = [routine_for_reader(row, user_id=user_id) for row in rows]
-        shown, hidden = panel_rows(rows)
+            if not is_admin:
+                # A routine's label and trigger are its creator's work.
+                rows = [row for row in rows if row.created_by_user_id == user_id]
+            rows = [routine_for_reader(row, user_id=user_id) for row in rows]
+            shown, hidden = panel_rows(rows)
+            moved = await store.migrated_workflows(session, [row.id for row in shown])
         channel_id, thread_id = where
         links = await web_links(
             self._runtime,
@@ -148,6 +149,7 @@ class RoutinesPanel:
             is_admin=is_admin,
             notice=notice,
             web_url=links.routine() if links else None,
+            moved={r: links.workflow(w) if links else None for r, (w, _) in moved.items()},
         )
 
     def _service_caller(self, actor: Actor) -> RoutineCaller:
