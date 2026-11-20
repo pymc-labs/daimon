@@ -1,5 +1,5 @@
 // Pure spec logic shared by the canvas and the mock server: edges, references, validation, diffs and edits.
-import type { Change, Field, Grant, Kind, Node, Problem, RuleClass, Spec, Validation } from "./types"
+import type { AnswerShape, Change, Field, Grant, Kind, Node, Problem, RuleClass, Spec, Validation } from "./types"
 
 export type EdgeKind = "next" | "route" | "case" | "else" | "error" | "max"
 /** One edge of the graph. `slot` says where `from` points at `to`, so edits can rewire it. */
@@ -97,7 +97,7 @@ function exprsOf(n: Node): string[] {
     if (typeof v === "string") out.push(v)
     else if (v && typeof v === "object") Object.values(v).forEach(add)
   }
-  add([n.inputs, n.args, n.show, n.set, n.items, n.until, n.event?.match, finishDeliver(n)?.message, n.cases?.map((c) => c.when)])
+  add([n.inputs, n.args, n.show, n.attach, n.set, n.items, n.until, n.event?.match, finishDeliver(n)?.message, n.cases?.map((c) => c.when)])
   if (typeof n.output === "string") add(n.output)
   if (n.form) add(Object.values(n.form).map((f) => f.default))
   if (n.do) out.push(...exprsOf(n.do))
@@ -122,14 +122,26 @@ export const finishDeliver = (n: Node) => (typeof n.deliver === "object" ? n.del
 export function outputFields(n: Node): Record<string, Field> {
   switch (n.kind) {
     case "agent": case "code": return typeof n.output === "object" ? n.output : {}
-    case "approval": return { decision: { enum: ["approve", "reject"] }, comment: { type: "string" }, ...(n.form ?? {}) }
+    case "approval": return { route: { enum: Object.keys(n.routes ?? { approve: 1, reject: 1 }) }, text: { type: "string" }, values: { type: "object" }, files: { type: "array" }, by: { type: "string" }, via: { type: "string" }, ...(n.form ?? {}) }
     case "transform": return Object.fromEntries(Object.keys(n.set ?? {}).map((k) => [k, {}]))
     default: return {}
   }
 }
 
 const UNTRUSTED_OUT: Kind[] = ["action", "wait"]
+/** An approval that takes data (a form, text) from someone who may not be an owner or editor: what it returns is untrusted input. */
+export const humanAnswer = (n: Node) =>
+  n.kind === "approval" && (Object.keys(n.form ?? {}).length > 0 || n.answer === "text" || n.answer === "form") && [n.approvers ?? []].flat().some((a) => a !== "owner" && a !== "editors")
+const untrustedOut = (n?: Node) => !!n && (UNTRUSTED_OUT.includes(n.kind) || humanAnswer(n))
 const hasUntrustedTrigger = (spec: Spec) => (spec.triggers ?? []).some((t) => t.kind === "webhook" || t.kind === "event")
+
+/** Steps upstream that produce files, as references an ask can attach. */
+export function fileRefs(spec: Spec, id: string): RefGroup[] {
+  const up = ancestors(spec, id)
+  return Object.entries(spec.nodes)
+    .filter(([sid, n]) => up.has(sid) && (n.kind === "agent" || n.kind === "code" || n.kind === "for_each"))
+    .map(([sid, n]) => ({ id: sid, label: titleOf(sid, n), kind: n.kind, refs: [{ path: `steps.${sid}.files`, type: "files" }] }))
+}
 
 /** What a node may reference: inputs, the trigger and every upstream step's output. */
 export function upstreamRefs(spec: Spec, id: string): RefGroup[] {
@@ -143,7 +155,7 @@ export function upstreamRefs(spec: Spec, id: string): RefGroup[] {
   for (const [sid, n] of Object.entries(spec.nodes)) {
     if (!up.has(sid) || n.kind === "finish") continue
     const base = `steps.${sid}`
-    const untrusted = UNTRUSTED_OUT.includes(n.kind)
+    const untrusted = untrustedOut(n)
     const refs: Ref[] = [{ path: `${base}.output`, type: n.kind === "for_each" ? "list" : "object", untrusted }]
     for (const [k, f] of Object.entries(outputFields(n))) refs.push({ path: `${base}.output.${k}`, type: fieldType(f), untrusted })
     if (n.kind === "agent") refs.push({ path: `${base}.summary`, type: "text" })
@@ -223,7 +235,7 @@ export function safety(spec: Spec) {
       const fromInputs = u0 && refs.some((r) => r.startsWith("inputs") || r.startsWith("trigger"))
       const fromSteps = refs.some((r) => {
         const sid = r.split(".")[1]!
-        return r.startsWith("steps.") && (tainted.has(sid) || UNTRUSTED_OUT.includes(spec.nodes[sid]?.kind as Kind))
+        return r.startsWith("steps.") && (tainted.has(sid) || untrustedOut(spec.nodes[sid]))
       })
       const web = (n.builtins && n.builtins !== "none") || (n.do?.builtins && n.do.builtins !== "none") || (n.kind === "wait" && !!n.event)
       if (fromInputs || fromSteps || web) { tainted.add(id); changed = true }
@@ -281,14 +293,19 @@ const DEFAULT_ID: Record<Kind, string> = {
   wait: "wait", for_each: "each", workflow: "call", finish: "done",
 }
 
-export function blankNode(kind: Kind, next?: string): Node {
+/** `ask`: an approval that takes a free-text answer from someone and carries on. */
+export type Preset = "ask"
+
+export function blankNode(kind: Kind, next?: string, preset?: Preset): Node {
   switch (kind) {
     case "agent": return { kind, title: "New agent step", instructions: "", next }
     case "branch": return { kind, title: "New branch", cases: [], else: next }
     case "transform": return { kind, title: "New transform", set: {}, next }
     case "code": return { kind, title: "New code step", language: "python", source: "", network: "off", next }
     case "action": return { kind, title: "New action", tool: "", args: {}, next }
-    case "approval": return { kind, title: "Approve", approvers: ["owner"], routes: next ? { approve: next, reject: next } : {} }
+    case "approval":
+      if (preset === "ask") return { kind, title: "Ask a person", approvers: ["owner"], deliver: "dm", answer: "text", next }
+      return { kind, title: "Approve", approvers: ["owner"], routes: next ? { approve: next, reject: next } : {} }
     case "wait": return { kind, title: "Wait", for: "1h", next }
     case "for_each": return { kind, title: "For each", items: "", as: "item", do: { kind: "agent", instructions: "" }, concurrency: 3, next }
     case "workflow": return { kind, title: "Run workflow", workflow: "", version: "live", next }
@@ -310,14 +327,27 @@ function setSlot(n: Node, slot: string, to: string) {
 }
 
 /** Insert a `kind` node on an edge (or after a leaf, or before the start) and return the new spec and id. */
-export function insertNode(spec: Spec, at: { from: string | null; slot?: string; to?: string }, kind: Kind) {
+export function insertNode(spec: Spec, at: { from: string | null; slot?: string; to?: string }, kind: Kind, preset?: Preset) {
   const s = clone(spec)
   const id = newId(s, DEFAULT_ID[kind])
-  s.nodes[id] = blankNode(kind, at.to)
+  s.nodes[id] = blankNode(kind, at.to, preset)
   if (at.from == null) s.start = id
   else if (at.slot) setSlot(s.nodes[at.from]!, at.slot, id)
   else s.nodes[at.from]!.next = id
   return { spec: s, id }
+}
+
+/** Change how an approval is answered: the way out follows (routes for approve and choice, one next for text and form). */
+export function setAnswer(n: Node, shape: AnswerShape) {
+  const routes = Object.values(n.routes ?? {}).map((r) => (typeof r === "string" ? r : r.to))
+  const first = typeof n.next === "string" ? n.next : routes[0]
+  const to = (i: number) => routes[i] ?? first
+  const pair = (a: string, b: string) => Object.fromEntries([[a, to(0)], [b, to(1)]].filter(([, t]) => t))
+  n.answer = shape === "approve" ? undefined : shape
+  if (shape === "text" || shape === "form") { n.routes = undefined; n.next = first; return }
+  n.next = undefined
+  if (shape === "approve") n.routes = pair("approve", "reject")
+  else if (Object.keys(n.routes ?? {}).length < 2 || (n.routes && "approve" in n.routes)) n.routes = pair("option_1", "option_2")
 }
 
 export function removeNode(spec: Spec, id: string) {

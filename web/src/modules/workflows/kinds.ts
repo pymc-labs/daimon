@@ -62,6 +62,18 @@ export const STEP: Record<StepStatus, { icon: LucideIcon; label: string; cls: st
   unknown: { icon: CircleHelp, label: "Unknown", cls: "text-destructive" },
 }
 
+/** An approver as the person sees it: a name, a role, or who the ask reaches. */
+export function approverLabel(a: string, catalog?: Catalog) {
+  if (a === "thread") return "Anyone in the thread"
+  if (a === "triggered_by") return "Whoever started it"
+  if (a.startsWith("role:")) return `${a.charAt(5).toUpperCase()}${a.slice(6)}s`
+  const id = a.startsWith("person:") ? a.slice(7) : a
+  return catalog?.people.find((x) => x.id === id)?.name ?? id.charAt(0).toUpperCase() + id.slice(1)
+}
+
+/** What a step is called: an approval that takes anything but approve or reject is a question. */
+export const kindLabel = (n: Node) => (n.kind === "approval" && n.answer && n.answer !== "approve" ? "Question" : KIND[n.kind].label)
+
 /** The facts on the line under a card's title: what the step does, in a few words. */
 export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
   switch (n.kind) {
@@ -71,7 +83,7 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
       return [catalog?.agents.find((a) => a.key === key)?.name ?? key, ...(fields ? [`${fields} ${fields === 1 ? "field" : "fields"}`] : [])]
     }
     case "action": return [catalog?.tools.find((t) => t.id === n.tool)?.label ?? (n.tool || "No tool")]
-    case "approval": return [[n.approvers ?? []].flat().map((p) => catalog?.people.find((x) => x.id === p)?.name ?? p.charAt(0).toUpperCase() + p.slice(1)).join(", ")]
+    case "approval": return [[n.approvers ?? []].flat().map((p) => approverLabel(p, catalog)).join(", ")]
     case "branch": return [`${n.cases?.length ?? 0} ${n.cases?.length === 1 ? "case" : "cases"}`, ...(n.else ? ["else"] : [])]
     case "wait": return [n.event ? `Until ${n.event.source}` : n.until ? "Until a time" : `For ${n.for ?? "?"}`]
     case "for_each": return [`${n.concurrency ?? 1} at a time`]

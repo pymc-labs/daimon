@@ -10,7 +10,7 @@ import { useTestRun } from "./run/lib"
 import { SplitRun } from "./run/TestRun"
 import { Inspector } from "./inspector/Inspector"
 import { useLiveDraft } from "./live"
-import { clone, duplicateNode, insertNode, removeNode, validate } from "./spec"
+import { clone, duplicateNode, insertNode, removeNode, validate, type Preset } from "./spec"
 import { SpecView } from "./SpecView"
 import type { Kind, Node, Spec, Workflow } from "./types"
 
@@ -46,7 +46,7 @@ export function Design({ wf }: { wf: Workflow }) {
   }, [chat, draft])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const select = (id: string | null) => put(id ? { node: id, ask: null } : { node: null })
-  const add = (at: InsertAt, kind: Kind) => { const r = insertNode(spec, at, kind); editor.save(r.spec, 0); select(r.id) }
+  const add = (at: InsertAt, kind: Kind, preset?: Preset) => { const r = insertNode(spec, at, kind, preset); editor.save(r.spec, 0); select(r.id) }
   const remove = (id: string) => { editor.save(removeNode(spec, id), 0); if (node === id) select(null) }
   const duplicate = (id: string) => { const r = duplicateNode(spec, id); editor.save(r.spec, 0); select(r.id) }
   const set = (fn: (n: Node, s: Spec) => void, delay?: number) => {

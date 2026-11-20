@@ -12,6 +12,7 @@ import { KIND, STEP } from "../kinds"
 import type { Proposal, RunDetail, RunEvent, StepDetail, StepRun } from "../types"
 import { clock, stepTitle, until } from "./lib"
 import { FileList, JsonTree, StepIcon } from "./parts"
+import { answerRows, sentRows } from "./rows"
 
 const PROPOSAL: Record<Proposal["status"], string> = { proposed: "Proposed", approved: "Approved", rejected: "Rejected", sent: "Sent", would_send: "Would send" }
 
@@ -90,6 +91,9 @@ function waitFacts(s: StepRun, now: number): [string, React.ReactNode][] {
     ["Expires", w.status === "waiting" && w.expires_at && <span key="e" className="text-warning tabular">In {until(w.expires_at, now)}</span>],
     ["Decision", w.decision && <span key="x" className="capitalize">{w.decision.replace(/_/g, " ")}</span>],
     ["Decided by", w.decider?.name],
+    ...sentRows(w.sent),
+    ["Attached", w.attachments.length > 0 && <div key="a" className="-my-1"><FileList files={w.attachments} /></div>],
+    ...answerRows(w.answer),
   ]
 }
 

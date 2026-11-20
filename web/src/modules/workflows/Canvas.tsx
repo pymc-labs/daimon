@@ -13,7 +13,7 @@ import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { badgesOf, type BadgeKind, type CardBadge, cardHeight, MAX_BADGES } from "./cards"
 import { layout, NODE_W, pathOf, TRIGGERS, type LaidEdge, type Layout } from "./layout"
-import { titleOf } from "./spec"
+import { titleOf, type Preset } from "./spec"
 import type { EdgeState, NodeRun } from "./runs"
 import { Dot } from "./ui"
 import { KINDS, type Catalog, type Kind, type Spec, type Validation } from "./types"
@@ -31,7 +31,7 @@ export type RunOverlay = { nodes: Record<string, NodeRun>; edges: Record<string,
 
 type Ctx = {
   spec: Spec; validation?: Validation; catalog?: Catalog; changed: Set<string>; flash: Set<string>; selected: string | null; ro: boolean
-  select: (id: string | null) => void; add: (at: InsertAt, kind: Kind) => void; remove: (id: string) => void; duplicate: (id: string) => void
+  select: (id: string | null) => void; add: (at: InsertAt, kind: Kind, preset?: Preset) => void; remove: (id: string) => void; duplicate: (id: string) => void
   hover: string | null; setHover: (id: string | null) => void; menu: string | null; setMenu: (k: string | null) => void
   run?: RunOverlay
 }
@@ -168,6 +168,7 @@ function AddMenu({ k, at, className, children }: { k: string; at: InsertAt; clas
                 const K = KIND[kind]
                 return <CommandItem key={kind} value={K.label} onSelect={() => { setMenu(null); add(at, kind) }}><K.icon className={K.text} />{K.label}</CommandItem>
               })}
+              <CommandItem value="Ask a person" onSelect={() => { setMenu(null); add(at, "approval", "ask") }}><KIND.approval.icon className={KIND.approval.text} />Ask a person</CommandItem>
             </CommandGroup>
           </CommandList>
         </Command>

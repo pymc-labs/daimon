@@ -5,9 +5,9 @@ import { Prose } from "@/components/common"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
-import { finishDeliver, titleOf, toolWrites, upstreamRefs } from "../spec"
-import type { Node } from "../types"
-import { KIND } from "../kinds"
+import { fileRefs, finishDeliver, setAnswer, titleOf, toolWrites, upstreamRefs } from "../spec"
+import type { AnswerShape, AskWhere, Node } from "../types"
+import { approverLabel, KIND } from "../kinds"
 import { OutputTable } from "./OutputTable"
 import { AddButton, Field, Pick, RemoveButton, RouteRows, Section, Segmented, TargetSelect, type EditorProps } from "./parts"
 import { useLocal } from "./useLocal"
@@ -114,26 +114,43 @@ export function ApprovalEditor(p: EditorProps) {
   const { n, set, ro, catalog, spec } = p
   const approvers = [n.approvers ?? []].flat()
   const binds = [n.binds ?? []].flat()
-  const person = (id: string) => catalog?.people.find((x) => x.id === id)?.name ?? id.charAt(0).toUpperCase() + id.slice(1)
+  const where: AskWhere = typeof n.deliver === "string" ? n.deliver : "dm"
+  const shape: AnswerShape = n.answer ?? "approve"
   const chip = (label: React.ReactNode, onRemove: () => void, key: string) => (
     <span key={key} className="inline-flex h-6 items-center gap-1 rounded-md border bg-background pr-0.5 pl-2 text-xs">
       {label}{!ro && <button className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-accent" onClick={onRemove} aria-label="Remove"><X className="size-3" /></button>}
     </span>
   )
+  const people = (catalog?.people ?? []).map((x) => ({ value: `person:${x.id}`, label: x.name }))
+  const options = [{ value: "owner", label: "Owner" }, { value: "triggered_by", label: approverLabel("triggered_by") }, ...(where === "thread" ? [{ value: "thread", label: approverLabel("thread") }] : []), ...people]
+  const routes = Object.entries(n.routes ?? {})
   return (
     <>
       <Section>
         <div className="space-y-3">
           <Field label="Approvers" top>
             <div className="flex flex-wrap items-center gap-1.5 pt-1">
-              {approvers.map((a) => chip(person(a), () => set((x) => { x.approvers = approvers.filter((y) => y !== a) }), a))}
+              {approvers.map((a) => chip(approverLabel(a, catalog), () => set((x) => { x.approvers = approvers.filter((y) => y !== a) }), a))}
               {!ro && (
                 <Pick value="" placeholder="Add" className="h-6 w-20 text-xs" onChange={(v) => set((x) => { x.approvers = [...approvers, v] })}
-                  options={[{ value: "owner", label: "Owner" }, ...(catalog?.people ?? []).map((x) => ({ value: x.id, label: x.name }))].filter((o) => !approvers.includes(o.value))} />
+                  options={options.filter((o) => !approvers.includes(o.value))} />
               )}
             </div>
           </Field>
           <Field label="Needs"><Pick value={String(n.min_approvals ?? 1)} ro={ro} onChange={(v) => set((x) => { x.min_approvals = Number(v) })} options={approvers.map((_, i) => ({ value: String(i + 1), label: `${i + 1} of ${approvers.length}` }))} /></Field>
+          <Field label="Where">
+            <Segmented value={where} ro={ro} options={[["inbox", "Inbox"], ["dm", "Direct message"], ["thread", "Channel thread"]]}
+              onChange={(v) => set((x) => { x.deliver = v; if (v !== "thread") { x.channel = undefined; x.approvers = [x.approvers ?? []].flat().filter((a) => a !== "thread") } })} />
+          </Field>
+          {where === "thread" && (
+            <Field label="Channel">
+              <Pick value={n.channel ?? ""} ro={ro} placeholder="Home channel" onChange={(v) => set((x) => { x.channel = v })}
+                options={(catalog?.channels ?? []).map((c) => ({ value: c.id, label: `#${c.name}` }))} />
+            </Field>
+          )}
+          <Field label="Answer">
+            <Segmented value={shape} ro={ro} options={[["approve", "Approve or reject"], ["choice", "Choice"], ["text", "Text"], ["form", "Form"]]} onChange={(v) => set((x) => setAnswer(x, v))} />
+          </Field>
           <Field label="Remind every"><Text value={n.remind_every ?? ""} placeholder="Never" ro={ro} onChange={(v) => set((x) => { x.remind_every = v || undefined }, 400)} /></Field>
           <Field label="Timeout"><Text value={typeof n.timeout === "object" ? n.timeout.after : n.timeout ?? ""} placeholder="None" ro={ro} onChange={(v) => set((x) => { x.timeout = v ? { after: v, route: typeof x.timeout === "object" ? x.timeout.route : "reject" } : undefined }, 400)} /></Field>
         </div>
@@ -141,22 +158,45 @@ export function ApprovalEditor(p: EditorProps) {
       <Section title="Shows">
         <RefPicker value={n.show ?? ""} groups={upstreamRefs(spec, p.id)} ro={ro} onChange={(v) => set((x) => { x.show = v })} />
       </Section>
-      <Section title="Form"><OutputTable fields={n.form ?? {}} ro={ro} onChange={(f) => set((x) => { x.form = f })} /></Section>
-      <Section title="Covers">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {binds.map((b) => {
-            const K = KIND[spec.nodes[b]?.kind ?? "action"]
-            return chip(<span className="flex items-center gap-1.5"><K.icon className={cn("size-3.5", K.text)} />{titleOf(b, spec.nodes[b])}<PenLine className="size-3 text-muted-foreground" /></span>, () => set((x) => { x.binds = binds.filter((y) => y !== b) }), b)
-          })}
-          {!ro && (
-            <Pick value="" placeholder="Add step" className="h-6 w-28 text-xs" onChange={(v) => set((x) => { x.binds = [...binds, v] })}
-              options={Object.entries(spec.nodes).filter(([id, s]) => !binds.includes(id) && (s.kind === "action" || s.kind === "agent")).map(([id, s]) => ({ value: id, label: titleOf(id, s) }))} />
-          )}
-        </div>
+      {(shape === "approve" || shape === "form") && <Section title="Form"><OutputTable fields={n.form ?? {}} ro={ro} onChange={(f) => set((x) => { x.form = f })} /></Section>}
+      <Section title="Attach">
+        <RefPicker value={n.attach ?? ""} groups={fileRefs(spec, p.id)} ro={ro} onChange={(v) => set((x) => { x.attach = v || undefined })} />
       </Section>
-      <Section title="Routes">
-        <RouteRows rows={routeRows(n)} spec={spec} self={p.id} ro={ro} onTo={(name, to) => set((x) => setRoute(x, name, to))} />
-      </Section>
+      {shape === "approve" && (
+        <Section title="Covers">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {binds.map((b) => {
+              const K = KIND[spec.nodes[b]?.kind ?? "action"]
+              return chip(<span className="flex items-center gap-1.5"><K.icon className={cn("size-3.5", K.text)} />{titleOf(b, spec.nodes[b])}<PenLine className="size-3 text-muted-foreground" /></span>, () => set((x) => { x.binds = binds.filter((y) => y !== b) }), b)
+            })}
+            {!ro && (
+              <Pick value="" placeholder="Add step" className="h-6 w-28 text-xs" onChange={(v) => set((x) => { x.binds = [...binds, v] })}
+                options={Object.entries(spec.nodes).filter(([id, s]) => !binds.includes(id) && (s.kind === "action" || s.kind === "agent")).map(([id, s]) => ({ value: id, label: titleOf(id, s) }))} />
+            )}
+          </div>
+        </Section>
+      )}
+      {shape === "choice" ? (
+        <Section title="Options" action={!ro && <AddButton label="Add option" onClick={() => set((x) => { x.routes = { ...x.routes, [`option_${routes.length + 1}`]: routes[0] ? routeRows(x)[0]!.to : "" } })} />}>
+          <div className="space-y-2">
+            {routes.map(([name], i) => (
+              <div key={i} className="grid grid-cols-[112px_minmax(0,1fr)_28px] items-center gap-1.5">
+                <Text value={name} mono ro={ro} onChange={(v) => set((x) => { x.routes = Object.fromEntries(Object.entries(x.routes ?? {}).map(([k, r]) => [k === name ? v || k : k, r])) }, 400)} />
+                <TargetSelect spec={spec} self={p.id} value={routeRows(n)[i]!.to} ro={ro} onChange={(to) => set((x) => setRoute(x, name, to))} />
+                {!ro && routes.length > 2 ? <RemoveButton onClick={() => set((x) => { x.routes = Object.fromEntries(Object.entries(x.routes ?? {}).filter(([k]) => k !== name)) })} /> : <span />}
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : shape === "approve" ? (
+        <Section title="Routes">
+          <RouteRows rows={routeRows(n)} spec={spec} self={p.id} ro={ro} onTo={(name, to) => set((x) => setRoute(x, name, to))} />
+        </Section>
+      ) : (
+        <Section title="Then">
+          <TargetSelect spec={spec} self={p.id} value={typeof n.next === "string" ? n.next : undefined} ro={ro} onChange={(to) => set((x) => { x.next = to })} />
+        </Section>
+      )}
     </>
   )
 }

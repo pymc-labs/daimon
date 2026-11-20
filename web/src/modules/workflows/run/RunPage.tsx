@@ -182,6 +182,7 @@ function Banner({ run, events, now, act, skip, open }: { run: RunDetail; events:
       <Strip tone="warning" icon={Hourglass}>
         <span>{s.wait.kind === "approval" ? "Waiting for approval" : s.wait.kind === "question" ? "Waiting for an answer" : "Waiting"} at {at}</span>
         {who && <Fact label={s.wait.kind === "approval" ? "Approvers" : "Asked"}>{who}</Fact>}
+        {s.wait.sent[0] && <Fact label="Sent">{s.wait.sent[0].where}</Fact>}
         {s.wait.expires_at && <Fact label="Expires in"><span className="tabular">{until(s.wait.expires_at, now)}</span></Fact>}
       </Strip>
     )

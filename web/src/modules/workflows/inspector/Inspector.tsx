@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 import { PANEL } from "../Canvas"
 import { problemsAt, titleOf } from "../spec"
 import type { Validation } from "../types"
-import { KIND } from "../kinds"
+import { KIND, kindLabel } from "../kinds"
 import { ActionEditor, AgentEditor, ApprovalEditor, BasicEditor, BranchEditor, FinishEditor, ForEachEditor, WaitEditor } from "./editors"
 import { type EditorProps } from "./parts"
 import { useLocal } from "./useLocal"
@@ -26,7 +26,7 @@ export function Inspector({ close, validation, ...p }: EditorProps & { close: ()
     <aside aria-label="Step inspector" className={PANEL}>
       <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         <span className={cn("flex size-6 items-center justify-center rounded-md border bg-background", K.text)}><K.icon className="size-3.5" /></span>
-        <span className="text-xs font-medium text-muted-foreground">{K.label}</span>
+        <span className="text-xs font-medium text-muted-foreground">{kindLabel(p.n)}</span>
         <Button variant="ghost" size="icon-sm" className="ml-auto" onClick={close} aria-label="Close"><X /></Button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">

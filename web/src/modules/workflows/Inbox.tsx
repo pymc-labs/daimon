@@ -20,7 +20,8 @@ import { cn } from "@/lib/utils"
 import { useDecide, useInbox, useInboxItem, useNow } from "./api"
 import { GRANT } from "./kinds"
 import { choice, until } from "./run/lib"
-import { JsonTree } from "./run/parts"
+import { FileList, JsonTree } from "./run/parts"
+import { answerRows, sentRows } from "./run/rows"
 import type { Field, InboxDetail, InboxItem, InboxKind } from "./types"
 
 const KIND: Record<InboxKind, { icon: typeof ShieldCheck; label: string }> = {
@@ -179,6 +180,9 @@ function Detail({ d }: { d: InboxDetail }) {
           ["Asked by", d.asked_by],
           ["Waiting since", <Ago key="s" iso={d.since} />],
           ["Expires", d.expires_at && !done && `In ${until(d.expires_at)}`],
+          ...sentRows(d.sent),
+          ["Attached", d.attachments.length > 0 && <div key="a" className="-my-1"><FileList files={d.attachments} /></div>],
+          ...answerRows(d.answer),
         ]} />
       </PanelSection>
       {req && (
