@@ -15,6 +15,9 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._dm_groups import slack_groups, slack_http, teams_groups
 from daimon.adapters.mcp.tools._eval_threads import thread_source
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
+from daimon.adapters.mcp.tools.channels import (
+    _read_policy,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.dm_access import member_roles, resolve_groups
 from daimon.core.evals.access import GroupLookup, Share, Subject, WorkspaceRole, platform_groups
@@ -149,12 +152,13 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def eval_case_from_thread(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, suite_id: str, link: str
+        ctx: Context, suite_id: str, link: str, origin_context_id: str | None = None
     ) -> list[CaseRef]:
         """Make scrubbed eval cases from a thread you can read, given its link: one case per turn
-        the agent answered. People, places and secrets are replaced before anything is saved."""
+        the agent answered. People, places and secrets are replaced before anything is saved.
+        Threads under a sealed channel need origin_context_id, as read_thread does."""
         auth = await _auth(ctx)
-        source = thread_source(runtime, auth)
+        source = thread_source(runtime, auth, await _read_policy(runtime, auth, origin_context_id))
         return await _call(
             service.cases_from_thread(eval_subject(runtime, auth), source, link, suite_id)
         )
