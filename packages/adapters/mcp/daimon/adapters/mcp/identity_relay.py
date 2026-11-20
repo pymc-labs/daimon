@@ -19,6 +19,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
 from daimon.core.audience_gate import read_audience_mode
+from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
@@ -211,17 +212,29 @@ async def _held_in_audience_mode_on(
     tenant_id: uuid.UUID,
     platform: str,
 ) -> bool:
-    """Whether a held token meets `audience_hold` mode `on`. An unreadable hold or mode
-    counts as yes: the relay fails closed."""
+    """Whether a held token is one of a room outsiders may read, or nobody can vouch for, in
+    mode `on`. Such a session mounts no signed-identity server there, so the token is a
+    leftover. A relay-only hold of an internal room (`relay=True`) keeps working: the room's
+    facts are read again here. An unreadable hold, mode or fact counts as yes: fail closed."""
     try:
         hold = parse_hold_claim(raw_hold)
-        mode = await read_audience_mode(
-            sessionmaker, tenant_id=tenant_id, platform=hold.platform, channel_id=hold.channel_id
-        )
+        async with sessionmaker() as session:
+            mode = await read_audience_mode(
+                sessionmaker,
+                tenant_id=tenant_id,
+                platform=hold.platform,
+                channel_id=hold.channel_id,
+                session=session,
+            )
+            if mode != "on":
+                return False
+            audience = await channel_has_outsiders(
+                session, tenant_id=tenant_id, platform=hold.platform, channel_id=hold.channel_id
+            )
     except Exception:
         log.warning("mcp_identity.relay_hold_unreadable", exc_info=True)
         return True
-    return mode == "on"
+    return audience.contained
 
 
 def build_identity_relay_route(

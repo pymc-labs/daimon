@@ -39,8 +39,13 @@ import structlog
 from daimon.adapters.discord.member_sync import tenant_of
 from daimon.adapters.discord.outsiders import guild_rooms
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores import audience_facts as facts_store
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    load_access_policy,
+    lock_policy_writes_shared,
+)
 from daimon.core.stores.audience_facts import StoredRoom
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
@@ -169,6 +174,12 @@ class AudienceSync:
             tenant = await get_tenant(session, tenant_id)
             if tenant is None or tenant.archived_at is not None:
                 return False
+            try:
+                # Held to the end of this transaction: a policy write cannot commit between
+                # the role lists read below and the facts written from them.
+                await lock_policy_writes_shared(session, tenant_id=tenant_id)
+            except FenceUnavailable:
+                return False  # a policy write is in progress: the next tick publishes
             policy = await load_access_policy(session, tenant_id=tenant_id)
             policy_roles = (policy.internal_role_ids, policy.team_role_ids)
             if not policy.internal_role_ids:

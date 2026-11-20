@@ -771,3 +771,71 @@ async def test_renewal_keeps_ticking_after_a_tick_fails() -> None:
         await audience.run(lambda: [])
 
     assert ticks == [0, 1, 2], "the tick after a failure still runs; cancel still ends it"
+
+
+async def test_the_policy_fence_is_held_from_the_roles_read_to_the_facts_written(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy write takes the same fence exclusively, so it cannot commit between the role
+    lists the publisher read and the facts it writes from them. (The test connection is
+    shared, so the order of the steps is checked, not the lock itself.)"""
+    from daimon.adapters.discord import audience_sync
+
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    steps: list[str] = []
+    real_lock, real_load, real_publish = (
+        audience_sync.lock_policy_writes_shared,
+        audience_sync.load_access_policy,
+        store.publish_facts,
+    )
+
+    async def lock(*args: Any, **kwargs: Any) -> None:
+        steps.append("fence")
+        await real_lock(*args, **kwargs)
+
+    async def load(*args: Any, **kwargs: Any) -> TenantAccessPolicy:
+        steps.append("roles")
+        return await real_load(*args, **kwargs)
+
+    async def publish(*args: Any, **kwargs: Any) -> int:
+        steps.append("facts")
+        return await real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(audience_sync, "lock_policy_writes_shared", lock)
+    monkeypatch.setattr(audience_sync, "load_access_policy", load)
+    monkeypatch.setattr(store, "publish_facts", publish)
+    await audience.tick([_server()])  # type: ignore[list-item]
+    assert steps[-3:] == ["fence", "roles", "facts"]
+
+
+async def test_a_publish_waits_for_the_next_tick_while_a_policy_write_is_in_progress(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.discord import audience_sync
+    from daimon.core.session_fence_retry import FenceUnavailable
+
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    real = audience_sync.lock_policy_writes_shared
+    busy = [True]
+
+    async def lock(*args: Any, **kwargs: Any) -> None:
+        if busy[0]:
+            raise FenceUnavailable(0.0, "advisory")
+        await real(*args, **kwargs)
+
+    monkeypatch.setattr(audience_sync, "lock_policy_writes_shared", lock)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "nothing published"
+    busy[0] = False
+    clock.now += timedelta(seconds=60)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False)

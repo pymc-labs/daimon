@@ -782,6 +782,32 @@ async def _owner_is_outsider(
     return True
 
 
+async def private_delivery_refusal(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    row: RoutineRow,
+    *,
+    membership_resolver: MembershipResolver | None = None,
+) -> SkipReason | None:
+    """`owner_outside_team` when a direct message to the owner would go to an outsider in `on`.
+
+    For a send point that reaches the owner's DM although the destination is not a DM (a
+    channel routine's fallback and its attachments). The owner's roles are read fresh; a
+    failed lookup is an unknown standing, which `on` refuses.
+    """
+    if row.created_by_user_id is None:
+        return None
+    subject = await resolve_subject(
+        sessionmaker,
+        membership_resolver,
+        tenant_id=row.tenant_id,
+        user_id=row.created_by_user_id,
+        require_fresh=True,
+    )
+    if await _owner_is_outsider(sessionmaker, row, subject=subject):
+        return "owner_outside_team"
+    return None
+
+
 def discord_creator_may_post(
     *,
     administrator: bool,

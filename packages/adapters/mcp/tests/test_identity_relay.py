@@ -854,14 +854,59 @@ async def test_an_allowlist_naming_the_builtin_when_its_name_changed_then_admits
     assert bool(upstream.requests) is relayed, "a workspace's own namesake is never relayed"
 
 
-@pytest.mark.parametrize(("mode", "status"), [("off", 200), ("shadow", 200), ("on", 403)], ids=str)
-async def test_a_held_token_is_refused_only_in_audience_mode_on(
+@pytest.mark.parametrize(
+    ("mode", "contained", "relay", "status"),
+    [
+        ("off", True, False, 200),
+        ("shadow", True, False, 200),
+        ("on", True, False, 403),
+        ("on", True, True, 403),
+        ("on", False, True, 200),
+        ("on", False, False, 200),
+    ],
+    ids=str,
+)
+async def test_a_held_token_is_refused_only_for_a_contained_room_in_audience_mode_on(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    contained: bool,
+    relay: bool,
     status: int,
 ) -> None:
-    """A held session's identity server is gone in `on`; a leftover held token gets no answer."""
+    """A room outsiders may read has no identity server in `on`, so a leftover held token gets
+    no answer. A relay-only hold of an internal room keeps working."""
+    from daimon.core.channel_audience import ChannelAudience
+
+    person = await _person(db_session_factory)
+    _, mapping_id = await _chat_session(db_session_factory, person, "thread-9")
+    token = await _token(
+        db_session_factory,
+        person,
+        RelayBinding("Agent A", mapping_id),
+        TurnHold("discord", "chan-1", client=False, relay=relay),
+    )
+
+    async def read(*_: object, **__: object) -> str:
+        return mode
+
+    async def audience(*_: object, **__: object) -> ChannelAudience:
+        return ChannelAudience(
+            contained=contained, known=not contained, narrow=False, source="facts"
+        )
+
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.read_audience_mode", read)
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.channel_has_outsiders", audience)
+    upstream, key = _Upstream(), generate_signing_key()
+    async with _relay(db_session_factory, upstream, key) as client:
+        response = await _call(client, token)
+    assert response.status_code == status
+    assert len(upstream.requests) == (1 if status == 200 else 0)
+
+
+async def test_a_held_token_with_an_unreadable_room_is_refused_in_mode_on(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
     person = await _person(db_session_factory)
     _, mapping_id = await _chat_session(db_session_factory, person, "thread-9")
     token = await _token(
@@ -872,11 +917,13 @@ async def test_a_held_token_is_refused_only_in_audience_mode_on(
     )
 
     async def read(*_: object, **__: object) -> str:
-        return mode
+        return "on"
+
+    async def broken(*_: object, **__: object) -> object:
+        raise RuntimeError("database down")
 
     monkeypatch.setattr("daimon.adapters.mcp.identity_relay.read_audience_mode", read)
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.channel_has_outsiders", broken)
     upstream, key = _Upstream(), generate_signing_key()
     async with _relay(db_session_factory, upstream, key) as client:
-        response = await _call(client, token)
-    assert response.status_code == status
-    assert len(upstream.requests) == (1 if status == 200 else 0)
+        assert (await _call(client, token)).status_code == 403
