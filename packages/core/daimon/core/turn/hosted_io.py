@@ -859,7 +859,6 @@ SelfHostedBaselineLoader = Callable[
 
 class SelfHostedTurnIO(HostedTurnIO):
     codec = SELFHOSTED
-    host_calls = True
     _usage_pages, _usage_page_size = 5, 100
 
     def __init__(

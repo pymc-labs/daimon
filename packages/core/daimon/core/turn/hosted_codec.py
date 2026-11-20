@@ -181,11 +181,10 @@ def display_event(
     """Decode authoritative root display work without inspecting SDK/native JSON.
 
     An OpenAI function result request is not an approval. Unless the turn answers host
-    calls (`host_calls`: eval sessions; always on self-hosted), refuse that action instead
+    calls (`host_calls`: eval sessions only), refuse that action instead
     of letting AutoApprove answer it. Usage travels on the separate UsageObservation seam,
     never as a model span.
     """
-    host_calls = host_calls or codec is SELFHOSTED
     if event.session_id != session_id or event.native.provider != codec.provider:
         raise ScopeViolation(session_id, f"foreign event in {codec.codec_label} host codec")
     if event.authority not in ("record", "reconciled") or event.thread_id is not None:
