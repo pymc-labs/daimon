@@ -15,7 +15,14 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
-from mux.contracts.resources import Agent, AgentFilter, AgentPatch, AgentSpec
+from mux.contracts.resources import (
+    PROVIDER_WEB_TOOLS,
+    Agent,
+    AgentFilter,
+    AgentPatch,
+    AgentSpec,
+    eval_tools,
+)
 from mux.drivers.anthropic.resources._authorization import (
     ResourceAuthorization,
     authorize,
@@ -73,7 +80,8 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
             else None
         )
     if "tools" in fields and (spec.tools is not None or isinstance(spec, AgentPatch)):
-        compiled = [tool_payload(tool) for tool in spec.tools] if spec.tools is not None else None
+        tools = eval_tools(spec) if isinstance(spec, AgentSpec) else spec.tools
+        compiled = [tool_payload(tool) for tool in tools] if tools is not None else None
         if compiled is not None:
             builtin: dict[str, object] | None = None
             grouped: list[dict[str, object]] = []
@@ -128,7 +136,23 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
             payload.update({name: None for name in nulls.fields})
         else:
             raise ValueError(f"unsupported agent extension {extension.namespace!r}")
+    if isinstance(spec, AgentSpec) and spec.purpose == "eval" and payload.get("tools"):
+        payload["tools"] = [
+            _without_web_tools(t) for t in cast(list[dict[str, object]], payload["tools"])
+        ]
     return payload
+
+
+def _without_web_tools(tool: dict[str, object]) -> dict[str, object]:
+    """An eval agent's toolset: web tools run on the provider's side, so they are off."""
+    if tool.get("type") != "agent_toolset_20260401":
+        return tool
+    configs = [
+        c for c in cast(list[dict[str, object]], tool.get("configs") or [])
+        if c.get("name") not in PROVIDER_WEB_TOOLS
+    ]  # fmt: skip
+    off = [{"name": name, "enabled": False} for name in ("web_fetch", "web_search")]
+    return {**tool, "configs": [*configs, *off]}
 
 
 async def update_agent_ignored(

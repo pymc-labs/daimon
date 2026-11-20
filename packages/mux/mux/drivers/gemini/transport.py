@@ -56,6 +56,15 @@ class EnvironmentTransport(Protocol):
     async def delete_environment(self, environment_id: str) -> None: ...
 
 
+@runtime_checkable
+class SelfHostedTransport(Protocol):
+    """A self-hosted environment: the provider runs the agent, a worker of ours its tools."""
+
+    async def create_self_hosted_environment(self) -> tuple[str, str]:
+        """The environment's id and its one-time worker key."""
+        ...
+
+
 #: The one tool an agent request with no tools of its own allows: listing it keeps
 #: Gemini's built-ins (billable search among them) off. Never meant to be called;
 #: the host answers a call to it once (`daimon.core.turn.gemini`).
@@ -721,6 +730,23 @@ class SDKTransport:
         )
         try:
             return string(object_value(cast(JsonValue, response.json()))["id"])
+        except (KeyError, ValueError, TypeError):
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_environment"
+            ) from None
+
+    async def create_self_hosted_environment(self) -> tuple[str, str]:
+        response = await provider_call(
+            self._raw.post(
+                f"/{self._raw.api_version}/environments",
+                cast_to=httpx.Response,
+                body={"mode": "self_hosted"},
+                options={"headers": {"Api-Revision": API_REVISION}},
+            )
+        )
+        try:
+            made = object_value(cast(JsonValue, response.json()))
+            return string(made["id"]), string(made["environment_key"])
         except (KeyError, ValueError, TypeError):
             raise ProviderError(
                 "upstream", retryable=False, native_code="malformed_environment"

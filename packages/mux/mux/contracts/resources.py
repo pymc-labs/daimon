@@ -20,7 +20,7 @@ from pydantic import AfterValidator, Field, JsonValue, StringConstraints
 
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.actions import RequiredAction
-from mux.contracts.digest import additive
+from mux.contracts.digest import ADDITIVE, additive
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, SkillRef, ThreadRef
 
@@ -52,6 +52,19 @@ CapabilityDrop = Literal[
     "fast_mode",
     "inference_region",
 ]
+#: What a resource is for. Eval resources run enclosed items; nothing else may self-host.
+Purpose = Literal["agent", "eval"]
+#: Provider-run tools that reach the real web from the provider's side.
+PROVIDER_WEB_TOOLS: frozenset[str] = frozenset(
+    {"web_search", "web_fetch", "google_search", "url_context"}
+)
+
+
+def _purpose() -> Purpose:
+    """Additive, and left out of dumps while `agent`, so stored records and digests hold."""
+    return Field(
+        default="agent", exclude_if=lambda v: v == "agent", json_schema_extra={ADDITIVE: True}
+    )
 # A concrete MCP tool can be unavailable while the rest of its server survives.
 MCPToolDrop = Annotated[
     str, StringConstraints(pattern=r"^mcp_tool:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
@@ -120,6 +133,22 @@ class AgentSpec(Contract):
     metadata: FrozenMap[str, str] | None = None
     declared_drops: _DeclaredDrops = Field(default=(), exclude_if=lambda value: not value)
     """Explicit source capability reductions accepted during backend conversion."""
+    purpose: Purpose = _purpose()
+    """`eval`: the agent runs eval items, so drivers leave provider web tools out."""
+
+
+def eval_tools(spec: AgentSpec) -> tuple[ToolSpec, ...] | None:
+    """The agent's tools as a driver compiles them: an eval agent has no provider web tools."""
+    if spec.purpose != "eval" or spec.tools is None:
+        return spec.tools
+    return tuple(
+        t for t in spec.tools if not (t.kind == "builtin" and t.name in PROVIDER_WEB_TOOLS)
+    )
+
+
+def self_hosted_allowed(spec: EnvironmentSpec) -> bool:
+    """Hosted drivers self-host only eval environments."""
+    return spec.purpose == "eval"
 
 
 class AgentPatch(Contract):
@@ -185,6 +214,8 @@ class EnvironmentSpec(Contract):
     packages: FrozenMap[str, tuple[str, ...]] | None = None
     metadata: FrozenMap[str, str] | None = None
     native_config: ExtensionConfig | None = None
+    purpose: Purpose = _purpose()
+    """`eval`: an enclosed eval sandbox. Hosted drivers create `self_hosted` only for it."""
 
 
 class EnvironmentPatch(Contract):
@@ -479,6 +510,7 @@ class AgentThread(Contract):
 
 
 __all__ = [
+    "PROVIDER_WEB_TOOLS",
     "SESSION_CREATED",
     "Agent",
     "AgentFilter",
@@ -498,6 +530,9 @@ __all__ = [
     "EnvironmentSpec",
     "ExportRequirements",
     "ExtensionsByNamespace",
+    "Purpose",
+    "eval_tools",
+    "self_hosted_allowed",
     "Lifecycle",
     "MCPConnection",
     "MCPToolDrop",

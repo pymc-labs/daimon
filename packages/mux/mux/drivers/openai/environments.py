@@ -1,6 +1,13 @@
-"""Environment port maps reusable hosted templates, never self-hosted compute."""
+"""Environment port maps reusable hosted templates; eval environments are self-hosted.
+
+A self-hosted environment has no template: each session gets its own from the provider
+(`codex exec-server` connects to it), so the port returns one fixed reference for it.
+"""
 
 from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Final
 
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
@@ -10,6 +17,7 @@ from mux.contracts.resources import (
     EnvironmentPatch,
     EnvironmentSpec,
     WorkspaceSource,
+    self_hosted_allowed,
 )
 from mux.drivers.openai._common import (
     Context,
@@ -25,6 +33,10 @@ from mux.drivers.openai.mounts import path, workspace_sources
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.profiles import PACKAGE_MANAGERS
 from mux.profiles.openai import MAX_ALLOWED_HOSTS
+
+#: The environment reference sessions use to ask for a self-hosted environment.
+SELF_HOSTED: Final = "self_hosted"
+_EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class OpenAIEnvironments:
@@ -70,6 +82,8 @@ class OpenAIEnvironments:
     @owned
     async def create(self, scope: Scope, spec: EnvironmentSpec, *, key: str) -> Environment:
         self._c.authorize(scope, "environment")
+        if spec.execution == "self_hosted":
+            return self._self_hosted(scope, spec)
         if (
             spec.execution != "hosted"
             or spec.description is not None
@@ -99,9 +113,20 @@ class OpenAIEnvironments:
             scope, await self._c.call("POST", "/agents/environments/templates", body=body)
         )
 
+    def _self_hosted(self, scope: Scope, spec: EnvironmentSpec) -> Environment:
+        bare = EnvironmentSpec(name=spec.name, execution="self_hosted", purpose=spec.purpose)
+        if not self_hosted_allowed(spec) or spec != bare:
+            raise self._c.unsupported("self_hosted_environment")
+        ref = self._c.ref(scope, "environment", SELF_HOSTED)
+        return Environment(ref=ref, revision=Revision(local=1), spec=spec, created_at=_EPOCH)
+
     @owned
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
         self._c.check(scope, ref, "environment")
+        if ref.id == SELF_HOSTED:
+            return self._self_hosted(
+                scope, EnvironmentSpec(name=SELF_HOSTED, execution="self_hosted", purpose="eval")
+            )
         raw = await self._c.call("GET", "/agents/environments/templates/" + segment(ref.id))
         if raw.get("id") != ref.id:
             raise ValueError("wrong environment identity")

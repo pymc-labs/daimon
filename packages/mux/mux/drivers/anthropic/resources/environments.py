@@ -21,6 +21,7 @@ from mux.contracts.resources import (
     EnvironmentFilter,
     EnvironmentPatch,
     EnvironmentSpec,
+    self_hosted_allowed,
 )
 from mux.drivers.anthropic.resources._authorization import (
     ResourceAuthorization,
@@ -73,7 +74,20 @@ def environment_payload(spec: EnvironmentSpec | EnvironmentPatch) -> dict[str, o
     if "packages" in fields and spec.packages is not None:
         config = cast(dict[str, object], result.setdefault("config", {"type": "cloud"}))
         config["packages"] = {name: list(packages) for name, packages in spec.packages.items()}
+    if isinstance(spec, EnvironmentSpec):
+        _self_hosted(spec, result)
     return result
+
+
+def _self_hosted(spec: EnvironmentSpec, result: dict[str, object]) -> None:
+    """A self-hosted environment is an eval sandbox's, with no cloud config beside it."""
+    config = result.get("config")
+    native = cast(dict[str, object], config).get("type") if isinstance(config, dict) else None
+    if spec.execution != "self_hosted" and native != "self_hosted":
+        return
+    if not self_hosted_allowed(spec) or spec.network is not None or spec.packages is not None:
+        raise UnsupportedCapability(("self_hosted_environment",), "anthropic.managed_agents")
+    result["config"] = {"type": "self_hosted"}
 
 
 async def create_environment_ignored(

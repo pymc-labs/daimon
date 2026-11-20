@@ -13,6 +13,7 @@ from mux.contracts.resources import (
     AgentSpec,
     MCPConnection,
     ToolSpec,
+    eval_tools,
 )
 from mux.drivers.openai import mcp_auth
 from mux.drivers.openai._common import (
@@ -56,7 +57,7 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
         # Leave one native metadata slot for the tenant ownership marker.
         raise context.unsupported("agent_metadata_size")
     tools: list[JsonValue] = []
-    for tool in spec.tools or ():
+    for tool in eval_tools(spec) or ():
         if tool.permission != "auto":
             raise context.unsupported("tool_confirmation")
         if tool.kind == "custom":
