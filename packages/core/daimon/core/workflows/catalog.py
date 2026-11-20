@@ -6,7 +6,6 @@ validator reads it as a `taint.Catalog`.
 
 from __future__ import annotations
 
-import re
 import uuid
 
 from daimon.core.stores import web_people
@@ -54,11 +53,6 @@ class Options(BaseModel):
             agents={k: frozenset(v) for k, v in self.agent_tools.items()},
             tools={t.id: ToolFacts(writes=t.writes) for t in self.tools},
         )
-
-
-def slug(name: str) -> str:
-    """An agent's key in a spec: its name in lowercase words joined by dashes."""
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 async def people(session: AsyncSession, tenant_id: uuid.UUID) -> list[PersonOption]:

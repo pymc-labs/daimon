@@ -19,7 +19,17 @@ nodes:
     set:
       subject: Welcome, ${{ inputs.name }}
       body: Glad to have you here. Reply to this message if anything is unclear.
-    next: welcome
+    next: confirm
+  confirm:
+    kind: approval
+    title: Confirm the welcome
+    approvers: [owner]
+    allow_self_approval: true
+    binds: welcome
+    show: ${{ steps.prepare.output.subject }} to ${{ inputs.email }}
+    routes:
+      approve: welcome
+      reject: stopped
   welcome:
     kind: action
     title: Send the welcome
@@ -37,3 +47,6 @@ nodes:
   done:
     kind: finish
     title: Onboarded
+  stopped:
+    kind: finish
+    title: Not sent

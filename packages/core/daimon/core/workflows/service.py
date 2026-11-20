@@ -8,7 +8,7 @@ and names who can help. Runs start, stop and move only through `runs`.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -21,18 +21,18 @@ from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflows as store
 from daimon.core.stores.workflow_run_events import list_events
-from daimon.core.stores.workflow_runs import RunRow
+from daimon.core.stores.workflow_runs import GrantRow, RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow
 from daimon.core.workflows import context as turn_context
 from daimon.core.workflows import exchange, gate, run_views, runs, views
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
 from daimon.core.workflows.expressions import ExpressionError, render
-from daimon.core.workflows.preflight import Refusal
+from daimon.core.workflows.preflight import Place, Refusal, private_reach
 from daimon.core.workflows.runs import Sessions
-from daimon.core.workflows.spec import dump_spec, node_hash, parse_spec, spec_hash
+from daimon.core.workflows.spec import Spec, dump_spec, node_hash, parse_spec, spec_hash
 from daimon.core.workflows.taint import Catalog
 from daimon.core.workflows.templates import load_template
-from daimon.core.workflows.validate import Validation, validate_document
+from daimon.core.workflows.validate import Grant, Validation, validate_document
 from daimon.core.workflows.views import obj
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -453,13 +453,20 @@ async def publish(
         if validation.errors:
             first = validation.errors[0].message
             raise Invalid(f"Fix {len(validation.errors)} problem(s) before publishing: {first}")
-        if validation.grants:
+        parsed = parse_spec(workflow.draft_spec)
+        carried, new = await _held_grants(session, workflow, parsed, validation.grants)
+        if new and not env.who.admin:
             raise Refused(
-                "This version needs an admin's approval for "
-                f"{len(validation.grants)} thing(s). Request approval instead."
+                f"This version needs an admin's approval for {len(new)} thing(s). "
+                "Request approval instead."
             )
-        spec = dump_spec(parse_spec(workflow.draft_spec))
-        await store.publish_version(
+        place = Place(workflow.tenant_id, workflow, parsed, 0, "live", env.who.account_id)
+        if (private := await private_reach(session, place, env.who.account_id)) is not None:
+            raise Forbidden(
+                f"This workflow reaches {private}, which you cannot read. Ask an admin."
+            )
+        spec = dump_spec(parsed)
+        row = await store.publish_version(
             session,
             tenant_id=workflow.tenant_id,
             workflow_id=workflow.id,
@@ -470,6 +477,19 @@ async def publish(
             note=note.strip()[:500],
             now=env.now,
         )
+        for approver, grants in [
+            *((g.approved_by_account_id, [_carried(g)]) for g in carried),
+            (env.who.account_id, _grant_rows(parsed, [g.model_dump() for g in new], env.who)),
+        ]:
+            await publish_requests.add_grants(
+                session,
+                tenant_id=workflow.tenant_id,
+                workflow_id=workflow.id,
+                version=row.number,
+                grants=grants,
+                approved_by=approver or env.who.account_id,
+                now=env.now,
+            )
         changes = _sync(spec)
         if workflow.status == "needs_owner":
             changes["owner_account_id"] = env.who.account_id
@@ -484,6 +504,69 @@ async def publish(
         return view
 
 
+def _grant_rows(
+    spec: Spec, grants: Sequence[Mapping[str, Any]], publisher: Who | uuid.UUID
+) -> list[dict[str, Any]]:
+    """Grant rows pinned to the node as published and to its publisher."""
+    by = publisher.account_id if isinstance(publisher, Who) else publisher
+    return [
+        {
+            "kind": g["kind"],
+            "node_id": g.get("node"),
+            "pins": {"published_by": str(by)}
+            | (
+                {"node_hash": node_hash(spec.nodes[g["node"]])}
+                if g.get("node") in spec.nodes
+                else {}
+            ),
+        }
+        for g in grants
+    ]
+
+
+def _carried(grant: GrantRow) -> dict[str, Any]:
+    return {
+        "kind": grant.kind,
+        "node_id": grant.node_id,
+        "tool": grant.tool,
+        "params": grant.params,
+        "pins": grant.pins,
+    }
+
+
+async def _held_grants(
+    session: AsyncSession, workflow: WorkflowRow, spec: Spec, needed: Sequence[Grant]
+) -> tuple[list[GrantRow], list[Grant]]:
+    """Of the grants a spec needs, those the live version holds for the same unchanged node
+    (carried over), and those an admin must still approve."""
+    held = (
+        await runs_store.live_grants(
+            session, workflow_id=workflow.id, version=workflow.live_version
+        )
+        if workflow.live_version
+        else []
+    )
+    carried: list[GrantRow] = []
+    new: list[Grant] = []
+    for grant in needed:
+        pinned = node_hash(spec.nodes[grant.node]) if grant.node in spec.nodes else None
+        match = next(
+            (
+                g
+                for g in held
+                if g.kind == grant.kind
+                and g.node_id == grant.node
+                and (g.pins or {}).get("node_hash") == pinned
+            ),
+            None,
+        )
+        if match is None:
+            new.append(grant)
+        else:
+            carried.append(match)
+    return carried, new
+
+
 async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.Workflow:
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
@@ -493,7 +576,10 @@ async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.
             raise Invalid(
                 f"Fix {len(validation.errors)} problem(s) first: {validation.errors[0].message}"
             )
-        if not validation.grants:
+        _, new = await _held_grants(
+            session, workflow, parse_spec(workflow.draft_spec), validation.grants
+        )
+        if not new:
             raise Refused("Nothing here needs approval. Publish it.")
         await publish_requests.open_request(
             session,
@@ -546,16 +632,7 @@ async def decide_publish_request(
                 now=env.now,
             )
             version = row.number
-            grants = [
-                {
-                    "kind": g["kind"],
-                    "node_id": g.get("node"),
-                    "pins": {"node_hash": node_hash(parsed.nodes[g["node"]])}
-                    if g.get("node") in parsed.nodes
-                    else {},
-                }
-                for g in request.grants
-            ]
+            grants = _grant_rows(parsed, request.grants, requester)
             await publish_requests.add_grants(
                 session,
                 tenant_id=workflow.tenant_id,
@@ -762,11 +839,10 @@ async def start(
     spec = workflow.draft_spec if test is not None else (live.spec if live else workflow.draft_spec)
     pinned_from = uuid.UUID(test["pinned_from"]) if test and test.get("pinned_from") else None
     pins = await _pins(env, pinned_from, test.get("pinned") or []) if pinned_from and test else {}
-    run_as = (
-        env.who.account_id
-        if test is not None or live is None
-        else (live.published_by_account_id or env.who.account_id)
-    )
+    # A manual run runs as whoever pressed Run, under the publisher's grants; inputs from
+    # anyone but the publisher are untrusted.
+    run_as = env.who.account_id
+    trusted = live is not None and test is None and live.published_by_account_id == run_as
     result = await runs.start_run(
         env.sm,
         env.settings,
@@ -777,7 +853,7 @@ async def start(
             triggered_by={"kind": "person", "account_id": str(env.who.account_id)},
             inputs=inputs,
             mode="test" if test is not None else "live",
-            untrusted_inputs=True,
+            untrusted_inputs=not trusted,
             label=_label(spec, inputs, env.now),
             pinned=pins,
             pinned_from=pinned_from,

@@ -381,3 +381,8 @@ def node_hash(node: AnyNode) -> str:
 def spec_json_schema() -> dict[str, JsonValue]:
     """The spec's JSON Schema, for editors and the authoring tools."""
     return Spec.model_json_schema(by_alias=True)
+
+
+def slug(name: str) -> str:
+    """An agent's key in a spec: its name in lowercase words joined by dashes."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")

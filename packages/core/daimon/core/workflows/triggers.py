@@ -21,6 +21,7 @@ from daimon.core.stores import workflows
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_triggers import EventRow, TriggerRow
 from daimon.core.workflows import runs
+from daimon.core.workflows.access import may_run
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.runs import Sessions
@@ -301,15 +302,23 @@ async def start_called(
         if called
         else None
     )
-    if called is None or call is None:
+    if called is None or call is None or target is None:
         return Refusal("not_callable", "That workflow is not published with a call trigger.")
+    # A called run runs as the parent run's person, who must be allowed to run the child.
+    run_as = parent.run_as_account_id
+    async with sm() as session:
+        allowed = run_as is not None and await may_run(session, target, run_as)
+    if not allowed:
+        return Refusal(
+            "run_as_not_allowed", "The person this run runs as cannot run that workflow."
+        )
     return await runs.start_run(
         sm,
         settings,
         tenant_id=parent.tenant_id,
         start=runs.Start(
             workflow_id=workflow_id,
-            run_as_account_id=called.published_by_account_id,
+            run_as_account_id=run_as,
             triggered_by={"kind": "call", "run_id": str(parent.id), "depth": depth},
             trigger_kind="call",
             trigger_key=call.id,

@@ -6,6 +6,7 @@ names here, at read time: the stores hold account ids only.
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -17,7 +18,9 @@ from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow, WorkflowVersionRow
+from daimon.core.workflows import preflight
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
+from daimon.core.workflows.spec import parse_spec
 from daimon.core.workflows.validate import Validation
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -198,12 +201,27 @@ def person(people: Mapping[uuid.UUID, Person], account_id: uuid.UUID | None) -> 
     return people.get(account_id) or Person(id=str(account_id), name=GONE_PERSON)
 
 
-def status_of(workflow: WorkflowRow) -> Status:
+def status_of(workflow: WorkflowRow, *, unreviewed: bool = False) -> Status:
+    """`unreviewed`: the live version lacks a grant it needs (revoked, or never approved)."""
     if workflow.status == "needs_owner":
         return "needs_owner"
     if workflow.live_version is None:
         return "draft"
+    if unreviewed:
+        return "needs_review"
     return "paused" if workflow.status == "paused" else "live"
+
+
+async def unreviewed(
+    session: AsyncSession, workflow: WorkflowRow, live: WorkflowVersionRow | None
+) -> bool:
+    """The live version lacks a grant (the budget's is checked when a run starts)."""
+    if live is None:
+        return False
+    spec = parse_spec(live.spec)
+    return (
+        await preflight.missing_grant(session, workflow.id, live.number, spec, math.inf) is not None
+    )
 
 
 def _failing(runs: Sequence[RunRow]) -> bool:
@@ -244,6 +262,7 @@ def _summary(
     spend: float,
     who: Who,
     next_run: datetime | None = None,
+    unreviewed: bool = False,
 ) -> WorkflowSummary:
     spec = live.spec if live is not None else workflow.draft_spec
     changes = len(diff(live.spec if live else None, workflow.draft_spec)) if live else 0
@@ -253,7 +272,7 @@ def _summary(
         id=str(workflow.id),
         name=workflow.name,
         goal=str(spec.get("goal") or ""),
-        status=status_of(workflow),
+        status=status_of(workflow, unreviewed=unreviewed),
         owner=owner,
         run_as=run_as,
         live_version=workflow.live_version,
@@ -316,6 +335,7 @@ async def list_summaries(
             spend=float(spend.get(w.id, 0)),
             who=who,
             next_run=fires.get(w.id),
+            unreviewed=await unreviewed(session, w, lives.get(w.id)),
         )
         for w in seen
     ]
@@ -398,6 +418,7 @@ async def workflow_view(
         spend=float(spend),
         who=who,
         next_run=fires.get(workflow.id),
+        unreviewed=await unreviewed(session, workflow, live),
     )
     spec = _live_spec(workflow, versions)
     home = str(obj(spec.get("home")).get("channel") or workflow.home_channel_id or "")

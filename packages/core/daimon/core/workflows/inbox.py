@@ -4,10 +4,12 @@ admins. Deciding a wait goes through `waits.decide_wait`; a publish request thro
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Final, Literal
 
+from daimon.core.stores import workflow_proposals as proposals_store
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflow_waits as waits_store
@@ -27,7 +29,7 @@ KEPT: Final = timedelta(days=7)
 ASKED_BY: Final = "Daimon"
 _VERB: Final = {"approve": "Approved", "reject": "Rejected", "answer": "Answered"}
 
-Kind = Literal["approval", "question", "publish"]
+Kind = Literal["approval", "question", "publish", "proposals"]
 
 
 class Decision(BaseModel):
@@ -123,6 +125,29 @@ def _form(node: AnyNode | None, wait: Wait) -> dict[str, Any] | None:
     return {"type": "object", "required": ["text"], "properties": {"text": text}}
 
 
+def _bound(preview: dict[str, Any], approved: dict[str, Any]) -> dict[str, Any]:
+    """A bound Action as shown: the approved call once decided, else the preview."""
+    call = approved.get(preview["node"]) or preview
+    return {
+        "tool": call["tool"],
+        "label": call["tool"].replace("/", " "),
+        "step": preview["node"],
+        "args": call.get("args") or {},
+    }
+
+
+def _previews(shown: dict[str, Any]) -> list[dict[str, Any]]:
+    previews: list[dict[str, Any]] = shown.get("preview") or []
+    return previews
+
+
+async def _proposals(session: AsyncSession, step_id: uuid.UUID) -> list[dict[str, Any]]:
+    return [
+        {"id": str(p.id), "tool": p.tool, "title": p.tool, "detail": json.dumps(p.arguments)[:2000]}
+        for p in await proposals_store.proposals_of(session, step_id)
+    ]
+
+
 def _answer(wait: Wait, names: dict[uuid.UUID, Person]) -> dict[str, Any] | None:
     if wait.status != "completed" or wait.decided_by_account_id is None:
         return None
@@ -167,8 +192,10 @@ async def _wait_detail(
     workflow = await seen.workflow(run.tenant_id, run.workflow_id)
     node = (await seen.spec(run)).nodes.get(step.node_id)
     key = runs.key_of(step)
-    typed = _typed(node, wait)
+    kind = waits.kind_of(wait)
+    typed = kind != waits.PROPOSALS and _typed(node, wait)
     decision = None
+    shown = wait.shown or {}
     if wait.status == "completed" and wait.decision and wait.decided_by_account_id:
         decision = Decision(
             route=wait.decision,
@@ -176,11 +203,11 @@ async def _wait_detail(
             by=views.person(names, wait.decided_by_account_id),
             at=iso(wait.closed_at) or "",
             comment=wait.comment,
+            selected=shown.get("selected"),
         )
-    shown = wait.shown or {}
     return InboxDetail(
         id=str(wait.id),
-        kind="question" if typed else "approval",
+        kind="question" if typed else "proposals" if kind == waits.PROPOSALS else "approval",
         title=_question(node, wait, key)[:120]
         if typed
         else (node.title if node and node.title else key),
@@ -192,10 +219,12 @@ async def _wait_detail(
         expires_at=iso(wait.expires_at),
         decision=decision,
         show=shown.get("show"),
+        bound=[_bound(b, shown.get("binds") or {}) for b in _previews(shown)],
+        proposals=await _proposals(seen.session, step.id) if kind == waits.PROPOSALS else [],
         question=_question(node, wait, key) if typed else None,
         form=_form(node, wait),
         values=dict(shown.get("values") or {}),
-        routes=routes(node, wait.kind),
+        routes=routes(node, kind),
         answer=_answer(wait, names),
     )
 
@@ -308,7 +337,9 @@ async def decide(env: Env, item_id: uuid.UUID, body: Decide) -> InboxItem:
             env, item_id, approve=body.route == "approve", comment=body.comment
         )
     else:
-        answer = waits.Answer(route=body.route, comment=body.comment, values=body.values)
+        answer = waits.Answer(
+            route=body.route, comment=body.comment, values=body.values, selected=body.selected
+        )
         try:
             await waits.decide_wait(
                 env.sm, env.settings, env.who, item_id, answer, via="web", now=env.now

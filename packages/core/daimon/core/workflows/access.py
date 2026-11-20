@@ -12,7 +12,10 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal
 
+from daimon.core.stores import workflows as store
 from daimon.core.stores.workflows import AccessRole, WorkflowAccessRow, WorkflowRow
+from daimon.core.web_roles_rules import is_admin, role_of_account
+from sqlalchemy.ext.asyncio import AsyncSession
 
 Role = Literal["owner", "editor", "runner", "viewer"]
 _RANK: dict[Role, int] = {"viewer": 0, "runner": 1, "editor": 2, "owner": 3}
@@ -86,3 +89,19 @@ def rights_of(workflow: WorkflowRow, access: Collection[WorkflowAccessRow], who:
 def holders(access: Collection[WorkflowAccessRow], role: AccessRole) -> list[uuid.UUID]:
     """The accounts holding `role` by name; groups are listed apart."""
     return [r.account_id for r in access if r.role == role and r.account_id is not None]
+
+
+async def who_of(session: AsyncSession, tenant_id: uuid.UUID, account_id: uuid.UUID) -> Who | None:
+    """A run's person as the rules see them when nobody is calling: None when suspended."""
+    role = await role_of_account(
+        session, tenant_id=tenant_id, account_id=account_id, chat_admin=False
+    )
+    return None if role is None else Who(tenant_id, account_id, admin=is_admin(role))
+
+
+async def may_run(session: AsyncSession, workflow: WorkflowRow, account_id: uuid.UUID) -> bool:
+    who = await who_of(session, workflow.tenant_id, account_id)
+    if who is None:
+        return False
+    access = await store.list_access(session, tenant_id=workflow.tenant_id, workflow_id=workflow.id)
+    return rights_of(workflow, access, who).run

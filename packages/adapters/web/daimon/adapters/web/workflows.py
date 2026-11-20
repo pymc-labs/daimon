@@ -36,6 +36,7 @@ from daimon.core.workflows import catalog, inbox, run_views, service, templates,
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
+from daimon.core.workflows.spec import slug
 from daimon.core.workflows.taint import tool_writes
 from daimon.core.workflows.validate import Validation
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -178,7 +179,7 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
                         writes=tool_writes(tool_id, None),
                     ),
                 )
-            key = catalog.slug(name)
+            key = slug(name)
             agent_tools[key] = ids
             agents.append(catalog.AgentOption(key=key, id=agent.id, name=name, tools=len(ids)))
         return catalog.Options(

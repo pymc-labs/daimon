@@ -938,6 +938,9 @@ class GrantRow(_Row):
     kind: str
     node_id: str | None
     pins: dict[str, Any] | None
+    tool: str | None = None
+    params: dict[str, Any] | None = None
+    approved_by_account_id: uuid.UUID | None = None
 
 
 async def live_grants(

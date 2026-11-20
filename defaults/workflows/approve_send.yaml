@@ -28,6 +28,7 @@ nodes:
     title: Check the draft
     approvers: [owner]
     show: ${{ steps.draft.output.body }}
+    binds: send
     routes:
       approve: send
       reject: stopped
