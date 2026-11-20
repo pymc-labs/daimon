@@ -82,8 +82,9 @@ def _gateway() -> None:
             f"transparent@127.0.0.1:{EXEC_PORT}",
             f"dns@127.0.0.1:{DNS_PORT}",
         ]
-        opts = options.Options(confdir=str(confdir), mode=modes, connection_strategy="lazy")
+        opts = options.Options(confdir=str(confdir), mode=modes)
         master = DumpMaster(opts, with_termlog=True, with_dumper=False)
+        opts.update(connection_strategy="lazy")  # an addon option, known once addons load
         # The gateway answers every name itself; the stock resolver would look them up.
         master.addons.remove(master.addons.get("dnsresolver"))  # pyright: ignore[reportUnknownMemberType]
         master.addons.add(Gateway(config))  # pyright: ignore[reportUnknownMemberType]
