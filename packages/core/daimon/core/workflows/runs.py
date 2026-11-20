@@ -1219,6 +1219,8 @@ async def _park(
                 "addressees": list(park.addressees),
                 "expires_at": park.expires_at.isoformat() if park.expires_at else None,
             }
+            if attached := (park.shown or {}).get("attachments"):
+                data["attachments"] = attached
             if blocked:
                 data["reason"] = blocked.reason
             events.append(Event("wait.opened", key_of(step), data))

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from daimon.core.stores import workflow_proposals as proposals_store
 from daimon.core.stores import workflow_publish_requests as publish_requests
@@ -15,10 +15,11 @@ from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflow_waits as waits_store
 from daimon.core.stores import workflows as store
 from daimon.core.stores.workflow_publish_requests import PublishRequestRow
+from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_waits import Wait
 from daimon.core.stores.workflows import WorkflowRow
-from daimon.core.workflows import runs, service, views, waits
+from daimon.core.workflows import run_views, runs, service, views, waits
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AnyNode, ApprovalNode, Spec
 from daimon.core.workflows.views import Person, iso
@@ -151,14 +152,21 @@ async def _proposals(session: AsyncSession, step_id: uuid.UUID) -> list[dict[str
 def _answer(wait: Wait, names: dict[uuid.UUID, Person]) -> dict[str, Any] | None:
     if wait.status != "completed" or wait.decided_by_account_id is None:
         return None
-    return {
-        "by": views.person(names, wait.decided_by_account_id).model_dump(),
-        "via": wait.decided_via or "web",
-        "text": wait.answer_text,
-        "values": wait.answer_values or {},
-        "files": wait.answer_files or [],
-        "at": iso(wait.closed_at) or "",
-    }
+    return run_views.answer_view(wait, iso(wait.closed_at) or "", names)
+
+
+async def _sent(session: AsyncSession, wait: Wait) -> list[dict[str, Any]]:
+    """Where the ask was posted, from the run's `wait.posted` rows."""
+    posted = [
+        cast("dict[str, Any]", e.data["sent"])
+        for e in await list_events(session, wait.run_id)
+        if e.type == "wait.posted"
+        and e.data.get("id") == str(wait.id)
+        and isinstance(e.data.get("sent"), dict)
+    ]
+    ids = [uuid.UUID(a) for p in posted if isinstance(a := p.get("addressee"), str)]
+    names = await views.people_of(session, wait.tenant_id, ids)
+    return [run_views.sent_view(p, names) for p in posted]
 
 
 class _Seen:
@@ -225,6 +233,11 @@ async def _wait_detail(
         form=_form(node, wait),
         values=dict(shown.get("values") or {}),
         routes=routes(node, kind),
+        sent=await _sent(seen.session, wait),
+        attachments=[
+            run_views.file_view(run.id, f)
+            for f in cast("list[object]", shown.get("attachments") or [])
+        ],
         answer=_answer(wait, names),
     )
 

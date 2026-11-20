@@ -14,6 +14,9 @@ from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.stores import accounts, tenants, workflow_waits
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.workflows import inbox
+from daimon.core.workflows.access import Who
+from daimon.core.workflows.service import Env
 from daimon.testing.factories import make_account, make_platform_principal
 from daimon.testing.platform_surface import SurfaceRecorder
 from daimon.testing.slack_surface import OfflineSlackClient
@@ -121,10 +124,15 @@ async def test_ask_derick_by_dm_resolves_in_the_thread_under_it(
         [post] = await workflow_waits.posts_of_wait(s, wait_id)
     assert (post.thread_id, post.addressee_account_id) == (f"{HOME}:{post.message_id}", derick)
     assert "Approve" in str(ask), ask
+    env = Env(world.sm, world.settings, Who(world.tenant_id, derick), NOW)
+    [sent] = (await inbox.item(env, wait_id)).sent
+    assert (sent["platform"], sent["where"][:18]) == ("slack", "Direct message to "), sent
 
     assert not await _claims(runtime, world, "U2", "approve", ""), "no thread, no answer"
     assert await _claims(runtime, world, "U2", "approve", post.message_id)
     assert (await world.get(run.id)).status == "succeeded"
+    answer = (await inbox.item(env, wait_id)).answer
+    assert answer is not None and answer["via"] == "slack", answer
     await _deliver(world, runtime)
     [closed] = client.recorder.surviving_messages()
     assert "Approved by" in str(closed) and "actions" not in str(closed), closed

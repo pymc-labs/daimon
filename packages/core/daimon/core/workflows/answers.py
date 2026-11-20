@@ -19,6 +19,7 @@ from daimon.core.config import Settings
 from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits, workflows
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
+from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.workflow_run_events import NewEvent, append_events, list_events
 from daimon.core.stores.workflow_waits import Wait, WaitPost
 from daimon.core.workflows import asks, waits
@@ -26,7 +27,6 @@ from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.views import people_of
 from pydantic import JsonValue
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -90,15 +90,8 @@ class Claimed:
 async def _who(
     session: AsyncSession, tenant_id: uuid.UUID, platform: str, author: str
 ) -> Who | None:
-    # Imported here: the models module is heavy and only this lookup needs it.
-    from daimon.core._models import PlatformPrincipal
-
-    principal = await session.scalar(
-        select(PlatformPrincipal).where(
-            PlatformPrincipal.tenant_id == tenant_id,
-            PlatformPrincipal.platform == platform,
-            PlatformPrincipal.external_id == author,
-        )
+    principal = await find_platform_principal(
+        session, tenant_id=tenant_id, platform=platform, external_id=author
     )
     if principal is None or principal.foreign_home_id is not None:
         return None

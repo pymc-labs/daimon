@@ -233,7 +233,9 @@ def _wanted_accounts(events: Sequence[EventRow]) -> set[uuid.UUID]:
     for e in events:
         if (a := _account_of(e.actor)) is not None:
             found.add(a)
-        raw = [e.data.get("by"), *seq(e.data.get("addressees"))]
+        sent = obj(e.data.get("sent"))
+        posted = sent.get("addressee") if sent else None
+        raw = [e.data.get("by"), posted, *seq(e.data.get("addressees"))]
         for item in raw:
             if isinstance(item, str):
                 try:
@@ -257,14 +259,28 @@ async def event_views(session: AsyncSession, run: RunRow, *, after_seq: int = 0)
     return [event_view(e, names, found) for e in events]
 
 
-def _answer(wait: Wait, at: str, names: Mapping[uuid.UUID, Person]) -> dict[str, Any]:
+def answer_view(wait: Wait, at: str, names: Mapping[uuid.UUID, Person]) -> dict[str, Any]:
     return {
         "by": person(names, wait.decided_by_account_id).model_dump(),
         "via": wait.decided_via or "web",
         "text": wait.answer_text,
         "values": wait.answer_values or {},
-        "files": wait.answer_files or [],
+        "files": [file_view(wait.run_id, f) for f in wait.answer_files or []],
         "at": at,
+    }
+
+
+def sent_view(sent: Mapping[str, Any], names: Mapping[uuid.UUID, Person]) -> dict[str, Any]:
+    """Where an ask was posted (`wait.posted`), in words."""
+    who = sent.get("addressee")
+    where = "In a thread"
+    if sent.get("kind") == "dm" and isinstance(who, str):
+        where = f"Direct message to {person(names, uuid.UUID(who)).name}"
+    return {
+        "platform": sent.get("platform"),
+        "where": where,
+        "link": sent.get("link"),
+        "at": sent.get("at"),
     }
 
 
@@ -275,7 +291,11 @@ def event_view(
     answer = data.get("answer")
     if e.type == "wait.decided" and isinstance(answer, dict):
         wait = (waits or {}).get(uuid.UUID(str(data["id"])))
-        data["answer"] = _answer(wait, str(answer.get("at", "")), names) if wait else None  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        data["answer"] = answer_view(wait, str(answer.get("at", "")), names) if wait else None  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    if e.type == "wait.posted" and isinstance(sent := data.get("sent"), dict):
+        data["sent"] = sent_view(cast("dict[str, Any]", sent), names)
+    if e.type == "wait.opened" and isinstance(attached := data.get("attachments"), list):
+        data["attachments"] = [file_view(e.run_id, f) for f in cast("list[object]", attached)]
     if "by" in data:
         data["by"] = _hydrate(data["by"], names)
     if isinstance(data.get("addressees"), list):
@@ -722,7 +742,7 @@ async def step_detail(
         model=node.get("model") if node.get("kind") == "agent" else None,
         summary=step.summary if done else None,
         route={"name": route, "reason": ""} if route else None,
-        files=[_file_view(run, f) for f in step.files] if done else [],
+        files=[file_view(run.id, f) for f in step.files] if done else [],
         input=shown,
         output=step.output if done else None,
         untrusted=untrusted,
@@ -737,7 +757,7 @@ async def step_detail(
     )
 
 
-def _file_view(run: RunRow, ref: object) -> dict[str, Any]:
+def file_view(run_id: uuid.UUID, ref: object) -> dict[str, Any]:
     """A step's file as the web shows it, downloaded through the run's files route."""
     file: dict[str, Any] = cast("dict[str, Any]", ref) if isinstance(ref, dict) else {}
     return {
@@ -745,7 +765,7 @@ def _file_view(run: RunRow, ref: object) -> dict[str, Any]:
         "name": file.get("filename"),
         "type": file.get("mime_type"),
         "size": file.get("size_bytes"),
-        "url": f"/runs/{run.id}/files/{file.get('file_id')}",
+        "url": f"/runs/{run_id}/files/{file.get('file_id')}",
     }
 
 
