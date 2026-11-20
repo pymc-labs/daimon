@@ -22,6 +22,7 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
 from azure.identity.aio import get_bearer_token_provider
+from mux.drivers.selfhosted.wire import HostTool
 from openai import AsyncAzureOpenAI, AsyncOpenAI, BadRequestError
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -320,6 +321,27 @@ def builtin_tools(context: TurnContext, *, include_denied: bool = False) -> list
     return tools
 
 
+def host_tool(context: TurnContext, spec: HostTool) -> FunctionTool:
+    """A function the host runs: each call waits for the host's result (`TurnContext.tool`)."""
+
+    async def invoke(ctx: ToolContext[TurnContext], arguments: str) -> str:
+        args = cast(dict[str, JsonValue], JSON.validate_json(arguments))
+
+        async def never_execute() -> JsonValue:
+            raise AssertionError("a host tool runs on the host")
+
+        output = await context.tool(ctx.tool_call_id, spec.name, args, never_execute, host=True)
+        return json.dumps(output)
+
+    return FunctionTool(
+        name=spec.name,
+        description=spec.description or "Host tool",
+        params_json_schema=spec.input_schema or {"type": "object"},
+        strict_json_schema=False,
+        on_invoke_tool=invoke,
+    )
+
+
 async def context_tools(
     context: TurnContext,
     stack: AsyncExitStack,
@@ -328,7 +350,11 @@ async def context_tools(
     policy_names: dict[str, str] | None = None,
 ) -> list[Tool]:
     """Share the harness executors and MCP credential boundary between loops."""
-    tools = builtin_tools(context, include_denied=include_denied)
+    tools = builtin_tools(context, include_denied=include_denied) + [
+        host_tool(context, spec)
+        for spec in context.request.host_tools
+        if include_denied or context.permission(spec.name) != "deny"
+    ]
     if policy_names is not None:
         policy_names.update(
             {tool.name: tool.name for tool in tools if isinstance(tool, FunctionTool)}

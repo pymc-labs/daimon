@@ -136,11 +136,15 @@ class DirectTransport:
         token: str | None = None,
         token_provider: TokenProvider | None = None,
         session_pool: bool = False,
+        plain_http: bool = False,
     ) -> None:
+        """`plain_http`: a harness on a private network, e.g. an eval item's pod, reached
+        with a token made for it alone."""
         if (token is None) == (token_provider is None) or (token is not None and not token.strip()):
             raise ValueError("exactly one harness token or token provider is required")
         url = httpx.URL(base_url)
-        if not secure_url(base_url) or not url.host or url.userinfo or url.query or url.fragment:
+        secure = secure_url(base_url) or (plain_http and url.scheme == "http")
+        if not secure or not url.host or url.userinfo or url.query or url.fragment:
             raise ValueError("harness URL must use HTTPS except on loopback")
         if session_pool and (url.scheme != "https" or token_provider is None):
             raise ValueError("session pools require HTTPS and a refreshing Entra token provider")
