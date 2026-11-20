@@ -55,6 +55,27 @@ def model_losses(switched) -> tuple[str, ...]:
     return ("fast_mode",) if switched[4].backend == "openai" else ("effort_setting", "fast_mode")
 
 
+async def _as_record(native, sessions, tenant_id):
+    """`native` converted to a Daimon record born on Gemini, as `convert_agent_to_daimon` does."""
+    from daimon.core.defaults.owned import create_owned_record, owned_scope
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.mux_compat import source_agent_record
+    from mux.profiles import selectable_models
+
+    spec = source_agent_record(native, resource_scope(tenant_id=str(tenant_id))).spec
+    record = spec.model_copy(
+        update={
+            "model": ModelRef(provider="gemini", id=selectable_models("gemini")[0]),
+            "tools": None,
+            "skills": None,
+            "extensions": None,
+        }
+    )
+    return await create_owned_record(
+        sessions, record, scope=owned_scope(tenant_id, None), tenant_id=tenant_id
+    )
+
+
 @pytest.fixture
 async def switched_request(owned, request):
     params = getattr(request, "param", {})
@@ -68,6 +89,8 @@ async def switched_request(owned, request):
         mcp_servers=params.get("mcp_servers", ()),
         skills=params.get("skills", ()),
     )
+    if params.get("record"):
+        native = await _as_record(native, sessions, identity.tenant_id)
     environment = ma_environment(tenant_id=identity.tenant_id)
     if "execution_identity" in params:
         from mux.testing.drivers.anthropic.ma_models import ma_model_config
@@ -163,7 +186,7 @@ async def switched_request(owned, request):
         accepted = await service.set_backend(
             source,
             backend,
-            0,
+            1 if params.get("record") else 0,  # a record's first revision is its birth
             actor,
         )
         async with sessions.begin() as db:
@@ -1472,9 +1495,9 @@ async def test_agent_origin_openai_host_preserves_its_switch_before_paid_request
     """The OpenAI host runs a counterpart proven against the agent's switch, so a row
     that lost that switch's association is refused before the paid request.
 
-    Deliberate difference: the self-hosted host re-puts an agent revision with no
-    association (`test_an_agent_saved_on_a_selfhosted_model_runs_a_reply`), since it
-    runs the record itself and a record born on its provider stores none.
+    Only a record born on OpenAI stores none and runs
+    (`tests/simulated/test_without_anthropic.py`), as on the self-hosted host
+    (`test_an_agent_saved_on_a_selfhosted_model_runs_a_reply`).
     """
     import httpx
     from daimon.core._models import ChannelConfigRevision

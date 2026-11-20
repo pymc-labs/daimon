@@ -242,8 +242,9 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
     async with chat.runtime.session_factory() as session:
         owner = await agent_owners.owner_of(session, chat.auth.tenant_id, copy_id)
     assert owner == chat.auth.account_id
-    # Hand this thread to the copy while it is still on this provider: it answers
-    # nowhere yet, and it is theirs, so they may.
+    # Made without this turn's origin, the copy is an ordinary agent, so they may hand it
+    # this thread before its switch; a copy stamped as made here waits for its switch (j1).
+    assert "daimon_forked_in" not in chat.ma.agents[copy.id]["metadata"], "no stamp"
     from daimon.adapters.mcp.tools.task_continuity import (
         _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
     )

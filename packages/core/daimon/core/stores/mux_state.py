@@ -849,7 +849,7 @@ async def pending_outbox(session: AsyncSession, *, limit: int = 100) -> list[Out
 
 @dataclass(frozen=True)
 class PendingSettlement:
-    """An unapplied outbox row with what the host reads from its binding to settle it."""
+    """An outbox row with what the host reads from its binding to settle or re-read it."""
 
     row: OutboxRow
     tenant_id: uuid.UUID
@@ -876,6 +876,71 @@ async def pending_outbox_for_profiles(
     kept). A binding whose slot account
     erasure removed is read from its `AccountingBindingContext`, which records the same.
     """
+    return await _settlements(
+        session, profiles, AccountingOutbox.applied_at.is_(None), limit=limit, after=after
+    )
+
+
+async def not_final_outbox_for_profiles(
+    session: AsyncSession,
+    provider: str,
+    profiles: Collection[str],
+    *,
+    seen_since: datetime,
+    limit: int,
+    after: tuple[str, str, int] | None = None,
+) -> list[PendingSettlement]:
+    """Each `provider` observation's newest revision seen since `seen_since`, applied or
+    not, plus every pending one, unless its usage is final; read as
+    `pending_outbox_for_profiles` reads.
+
+    A billed fallback leaves no pending row, yet its turn's usage may still change. Rows
+    written before observations carried a provider (0216) are found as pending ones.
+    """
+    newer = aliased(AccountingOutbox)
+    superseded = (
+        select(newer.revision)
+        .where(
+            newer.binding_id == AccountingOutbox.binding_id,
+            newer.observation_id == AccountingOutbox.observation_id,
+            newer.revision > AccountingOutbox.revision,
+        )
+        .exists()
+    )
+    seen = tuple_(
+        AccountingOutbox.binding_id, AccountingOutbox.observation_id, AccountingOutbox.revision
+    ).in_(
+        select(
+            UsageObservation.binding_id, UsageObservation.observation_id, UsageObservation.revision
+        ).where(UsageObservation.provider == provider, UsageObservation.observed_at >= seen_since)
+    )
+    final = AccountingOutbox.row["observation"]["final"].astext
+    # Two index-driven reads, merged: one OR of them stops the planner starting from the
+    # observation index and scans the whole outbox instead.
+    found = {
+        (s.row.binding_id, s.row.observation_id, s.row.revision): s
+        for condition in (AccountingOutbox.applied_at.is_(None), seen)
+        for s in await _settlements(
+            session,
+            profiles,
+            condition,
+            ~superseded,
+            final.is_distinct_from("true"),
+            limit=limit,
+            after=after,
+        )
+    }
+    ordered = sorted(found.items(), key=lambda item: (*item[0][:2], -item[0][2]))
+    return [settlement for _, settlement in ordered[:limit]]
+
+
+async def _settlements(
+    session: AsyncSession,
+    profiles: Collection[str],
+    *where: ColumnElement[bool],
+    limit: int,
+    after: tuple[str, str, int] | None,
+) -> list[PendingSettlement]:
     generation = aliased(ProviderBinding)
     other = (
         select(generation.binding_id)
@@ -917,7 +982,7 @@ async def pending_outbox_for_profiles(
             AccountingBindingContext,
             AccountingBindingContext.binding_id == AccountingOutbox.binding_id,
         )
-        .where(AccountingOutbox.applied_at.is_(None), profile.is_not(None), or_(live, erased))
+        .where(*where, profile.is_not(None), or_(live, erased))
         .order_by(
             AccountingOutbox.binding_id,
             AccountingOutbox.observation_id,

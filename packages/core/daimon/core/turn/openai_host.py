@@ -25,7 +25,7 @@ from daimon.core.mux_backend import (
 )
 from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ReplaceSession
-from daimon.core.stores import mux_state
+from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import (
@@ -440,16 +440,17 @@ async def _prepare_with_runtime(
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
     if current.backend_revision_origin == "agent":
         # Admission retained this exact agent revision; a generic StateStore
-        # write has no agent-origin association and cannot recreate it.
+        # write has no agent-origin association and cannot recreate it. Only a
+        # record born on its provider stores none: a switch that lost it is refused.
+        agent_id = derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=current.agent.id)
         async with request.deps.sessionmaker.begin() as session:
             retained = await mux_state.get_config_agent_revision(
-                session,
-                revision,
-                agent_id=derive_agent_uuid(
-                    tenant_id=request.tenant_id, ma_agent_id=current.agent.id
-                ),
+                session, revision, agent_id=agent_id
             )
-            if retained is None:
+            setting = await agent_backends.current(session, request.tenant_id, agent_id)
+            if retained is None and (
+                setting is None or not setting.born or setting.backend != revision.backend
+            ):
                 raise ScopeViolation(request.thread_id, "missing original backend revision")
             await mux_state.put_agent_config_revision(session, revision, retained=retained)
     else:

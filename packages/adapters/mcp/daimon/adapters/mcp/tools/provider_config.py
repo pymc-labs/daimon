@@ -93,7 +93,8 @@ async def _request_provider_allowlist_impl(
         summary = (
             "Allowed providers will be: " + (", ".join(providers) or "none") + ". "
             "This applies across this server. Saving makes this list the server's own choice; "
-            "until an admin saves one, the server uses Anthropic only. "
+            "until an admin saves one, the server uses Anthropic only, or this install's "
+            "keyed providers when it has no Anthropic key. "
             "Enabling a provider sends this server's conversations, and the connector data "
             "they use, to that provider. "
             "Call request_provider_allowlist again with the same providers, expected_revision "
@@ -284,8 +285,9 @@ def register_provider_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Preview and confirm the server's allowed model providers. Admin-only.
 
         providers is the complete replacement list, not an addition. A server no
-        admin configured uses Anthropic only; adding another provider is the admin's
-        opt-in to send this server's conversations to that company.
+        admin configured uses Anthropic only, or this install's keyed providers when it
+        has no Anthropic key; adding another provider is the admin's opt-in to send
+        this server's conversations to that company.
         Preview first, explain the server-wide scope and full list, then call with
         the same providers and returned expected_revision and preview_digest for
         the admin's Confirm card. Pass this active turn's origin_context_id.

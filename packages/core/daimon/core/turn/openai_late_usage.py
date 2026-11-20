@@ -8,11 +8,11 @@ other usage.
 
 Two triggers start it. The process that ran the turn re-reads it (`LateUsage`), so a
 footer it posted can take the debit. The scheduler's `DurableRereads` reads turns
-whose usage is still pending `TAKE_AFTER` after it was seen, so a restart or a late
-answer past the hour still gets read; it gives up, with a log line, a day after the
-usage was seen. Reads of both overlap only in the long tail, harmlessly: a revision
-already recorded is ignored and ledger keys are idempotent. A turn whose fallback
-revision was already charged keeps no pending row, so only its own process re-reads it.
+whose newest usage revision is still not final, pending or billed as a fallback,
+`TAKE_AFTER` after it was seen, so a restart or a late answer past the hour still gets
+read; it gives up, with a log line, a day after the usage was seen. Reads of both
+overlap only in the long tail, harmlessly: a revision already recorded is ignored and
+ledger keys are idempotent.
 """
 
 from __future__ import annotations
@@ -215,7 +215,8 @@ PASS_BUDGET_S = 10.0
 
 
 class DurableRereads:
-    """Re-reads ended OpenAI turns whose pending usage is not final, from the scheduler.
+    """Re-reads ended OpenAI turns whose newest usage revision is not final, billed or
+    pending, from the scheduler.
 
     A turn is taken once `take_after` passed since its usage was seen: until then only
     the process that ran it re-reads it. Rows are durable, so a restart only resets the
@@ -237,7 +238,9 @@ class DurableRereads:
         self._delays, self._give_up_after, self._reads = tuple(delays_s), give_up_after, reads
         self._take_after, self._budget_s = take_after, budget_s
         self._due: dict[tuple[str, str], tuple[int, datetime]] = {}
-        self._given_up: set[tuple[str, str]] = set()
+        #: Turns given up on, or whose thread moved, by when their usage was seen: listed
+        #: still, never read again.
+        self._ended: dict[tuple[str, str], datetime] = {}
         self._cursor: tuple[str, str, int] | None = None
 
     async def run(
@@ -247,32 +250,39 @@ class DurableRereads:
         from daimon.core.stores import mux_state
         from daimon.core.turn.hosted_codec import OPENAI
 
+        # As long again past giving up, so a give-up during downtime is still logged.
+        seen_since = now - 2 * self._give_up_after
+        # Usage seen before then is skipped, so its keys go (a due time follows its sighting).
+        self._ended = {key: at for key, at in self._ended.items() if at >= seen_since}
+        self._due = {key: due for key, due in self._due.items() if due[1] >= seen_since}
         async with sessionmaker() as db:
-            rows = await mux_state.pending_outbox_for_profiles(
-                db, OPENAI.profiles, limit=PASS_ROWS, after=self._cursor
+            rows = await mux_state.not_final_outbox_for_profiles(
+                db,
+                OPENAI.provider,
+                OPENAI.profiles,
+                seen_since=seen_since,
+                limit=PASS_ROWS,
+                after=self._cursor,
             )
         last = rows[-1].row if len(rows) == PASS_ROWS else None
         self._cursor = (
             None if last is None else (last.binding_id, last.observation_id, last.revision)
         )
-        seen: set[tuple[str, str]] = set()
         reads = 0
         deadline = asyncio.get_running_loop().time() + self._budget_s
         for settlement in rows:
             row, observation = settlement.row, settlement.row.observation
             key = (row.binding_id, row.observation_id)
-            if key in seen:
+            if observation.turn_id is None or key in self._ended:
                 continue
-            seen.add(key)  # the newest revision comes first: a final one ends the turn
-            if observation.final or observation.turn_id is None:
-                continue
+            if observation.observed_at < seen_since:
+                continue  # a pending row long given up on
             if now - observation.observed_at < self._take_after:
                 continue  # the in-process re-reads come first
             if now - observation.observed_at > self._give_up_after:
-                if key not in self._given_up:
-                    self._given_up.add(key)
-                    self._due.pop(key, None)
-                    log.warning("openai_late_usage.gave_up", key=":".join(key), durable=True)
+                self._ended[key] = observation.observed_at
+                self._due.pop(key, None)
+                log.warning("openai_late_usage.gave_up", key=":".join(key), durable=True)
                 continue
             attempt, due = self._due.get(key, (0, now))
             if due > now or reads >= self._reads:
@@ -294,6 +304,7 @@ class DurableRereads:
                 done = False
             if done:
                 self._due.pop(key, None)
+                self._ended[key] = observation.observed_at
             else:
                 delay = self._delays[min(attempt, len(self._delays) - 1)]
                 self._due[key] = (attempt + 1, now + timedelta(seconds=delay))
@@ -309,7 +320,7 @@ async def _reread(
     markup: Decimal,
     now: datetime,
 ) -> bool:
-    """The shared re-check of a pending row's turn, read with the tenant's key."""
+    """The shared re-check of an outbox row's turn, read with the tenant's key."""
     from daimon.core.infrastructure_cost import known_infrastructure_usd
     from daimon.core.pricing import provider_prices
     from daimon.core.stores import mux_state

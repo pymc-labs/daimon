@@ -1170,6 +1170,7 @@ async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overr
     owned, monkeypatch
 ) -> None:
     service, agent, actor, sessions = owned
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "set")
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
     monkeypatch.delenv("DAIMON_CHANNEL_GEMINI_KEY", raising=False)
     default = await service.tenant_policy(agent.tenant_id)

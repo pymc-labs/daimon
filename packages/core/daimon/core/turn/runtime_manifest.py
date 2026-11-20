@@ -600,6 +600,15 @@ async def _capture_source_capabilities(
         spec, scope = source.effective_spec, source.resource_scope
         if spec is None or scope is None or scope != request.scope:
             raise ValueError("missing captured source")
+        if _host_supplies_tools(source) and request.deps.mcp.public_url is not None:
+            from daimon.core.defaults.owned import host_tools_spec
+
+            spec = host_tools_spec(
+                spec,
+                str(request.deps.mcp.public_url),
+                tool_safety=request.deps.tool_safety,
+                asks_before_publishing=bool(source.asks_before_publishing),
+            )
         pin = source_preservation_pin(source)
         represented: list[SourceRepresentation] = []
         candidates: list[tuple[dict[str, JsonValue], SourceCapabilities | _TemplateInputs]] = []
@@ -1608,6 +1617,11 @@ def classify_source_obligations(
     return frozenset(missing)
 
 
+def _host_supplies_tools(source: BackendAgent) -> bool:
+    """A Daimon record: it runs its provider's template representation, never its raw spec."""
+    return source.source is not None and source.source.ref.id.startswith("dm_agent_")
+
+
 def preview_source_drops(
     source: BackendAgent, model: ModelRef, *, effort: Effort | None = None
 ) -> AgentSpec:
@@ -1627,7 +1641,9 @@ def preview_source_drops(
         or model.options
     ):
         raise UnsupportedCapability(("source_context",), profile)
-    if profile == backend_selection(spec.model.provider).profile:
+    if profile == backend_selection(spec.model.provider).profile and not _host_supplies_tools(
+        source
+    ):
         target = spec.model_copy(update={"model": model})
         missing = classify_source_obligations(
             source,
@@ -1927,7 +1943,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         raise UnsupportedCapability(("source_definition",), revision.profile)
     target = None
     native = revision.profile == backend_selection(spec.model.provider).profile
-    # A Daimon record born on this profile runs natively: no switch.
+    # A Daimon record born on this profile runs there with no switch.
     born_native = setting is None and owned and native
     if born_native:
         target = preview_source_drops(
@@ -1951,8 +1967,13 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             ModelRef(provider=revision.backend, id=model or spec.model.id),
             effort=revision.effort,
         )
-    retain_native = born_native or (
-        setting is not None and target is not None and not target.declared_drops and native
+    # A record runs a counterpart built from its representation, as a switched source does.
+    retain_native = (
+        not owned
+        and setting is not None
+        and target is not None
+        and not target.declared_drops
+        and native
     )
     missing = classify_source_obligations(
         source,

@@ -3271,6 +3271,20 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     return settings
 
 
+class AnthropicEnvSettings(BaseSettings):
+    """Only `DAIMON_ANTHROPIC__*`, for the provider default handed no `Settings`."""
+
+    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
+
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
 def _registered_features(value: dict[str, str]) -> dict[str, str]:
     features = {deployment_key(key): raw for key, raw in without_removed_features(value).items()}
     for key, raw in features.items():

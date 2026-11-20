@@ -262,8 +262,9 @@ class TenantAccessPolicyRecord(Base):
         JSONB, server_default=text("'[\"anthropic\"]'::jsonb")
     )
     updated_at: Mapped[TsNow]
-    # False: an admin never chose; the tenant follows the deployment default (Anthropic)
-    # and `enabled_backends` keeps Anthropic only, which older builds still read safely.
+    # False: an admin never chose; the tenant follows the deployment default
+    # (`default_enabled_backends`) and `enabled_backends` keeps Anthropic only,
+    # which older builds still read safely.
     enabled_backends_explicit: Mapped[FalseFlag]
 
 

@@ -3,7 +3,9 @@
 A key makes a provider available, not enabled: sending a tenant's conversations
 to another company needs that tenant's admin to opt in
 (`request_provider_allowlist`, the web admin settings or the CLI). A tenant whose
-admin never chose therefore stays on Anthropic, however many keys the operator set.
+admin never chose therefore stays on Anthropic, however many keys the operator set,
+unless the deployment has no Anthropic key: then nothing else can answer, and it
+may use the keyed providers.
 
 Only deployment keys count (`DEFAULT_KEY_ENV`), never a tenant's runtime row: one
 tenant's row must not make a provider available to another. The code runtime
@@ -14,6 +16,7 @@ Self-hosted backends are operator-registered hosts, not a key.
 from __future__ import annotations
 
 import os
+from functools import cache
 
 from mux.contracts.ids import Provider
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
@@ -43,6 +46,26 @@ def deployment_keyed_providers() -> frozenset[Provider]:
     return frozenset({MANAGED_AGENTS.provider, *keyed})
 
 
+@cache
+def anthropic_key_present() -> bool:
+    """Whether the deployment's Anthropic key is set: the check its client is built by.
+
+    Read once per process: the settings re-read `.env` on each build, and the key
+    only changes with a restart. Tests reset it (`daimon.testing.pytest_plugin`).
+    """
+    from daimon.core.anthropic_guard import anthropic_key_configured
+    from daimon.core.config import AnthropicEnvSettings
+
+    return anthropic_key_configured(AnthropicEnvSettings().anthropic.resolved_api_key())
+
+
 def default_enabled_backends() -> tuple[Provider, ...]:
-    """What a tenant whose admin never chose may use: Anthropic only."""
+    """What a tenant whose admin never chose may use.
+
+    Anthropic only, or with no Anthropic key the keyed providers too, since
+    nothing else can answer there. An allowlist always lists Anthropic.
+    """
+    keyed: tuple[Provider, ...] = tuple(p for p in DEFAULT_KEY_ENV if provider_key_present(p))
+    if keyed and not anthropic_key_present():
+        return (MANAGED_AGENTS.provider, *keyed)
     return (MANAGED_AGENTS.provider,)

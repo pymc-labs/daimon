@@ -193,3 +193,28 @@ async def test_openai_environment_losses(openai_template, switched_request, fine
     """Preview, card, consent and preparation name the same environment losses on OpenAI."""
     request, quote, *_ = openai_template
     await _one_reading(request, quote, switched_request, relay=False, finer=finer)
+
+
+#: A record lists Daimon's server, as the seeded agent does, beside its connector.
+RECORD = {
+    **OPENAI_AGENT,
+    "record": True,
+    "mcp_servers": [
+        {"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"},
+        *OPENAI_AGENT["mcp_servers"],
+    ],
+}
+
+
+@pytest.mark.parametrize("switched_request", [RECORD], indirect=True)
+@pytest.mark.parametrize("openai_template", [{}, {"relay": True}], indirect=True)
+async def test_a_record_names_its_connector_as_a_managed_agents_agent_would(
+    openai_template,  # noqa: F811
+    switched_request,
+):
+    """A record converted with a public connector keeps it on its switch: named as lost,
+    since a record holds no toolset to relay it by, never silently dropped."""
+    request, quote, *_ = openai_template
+    assert request.admission.agent.id.startswith("dm_agent_"), "the source is a Daimon record"
+    assert "mcp_server:linear" in quote.declared_drops, quote.declared_drops
+    await _one_reading(request, quote, switched_request, relay=False, finer=("installed_packages",))

@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.
 
+- **A server set up with only an OpenAI or Gemini key replies out of the box.**
+  With no Anthropic key, a server whose admin never chose its providers may use
+  the keyed ones, and the seeded agent runs with that provider's tools. A server
+  that saved a list keeps it, and with an Anthropic key the default stays
+  Anthropic only.
+
 - **The outsider warning checks each person.** On Discord, `/here` and the
   Permissions screen now warn only when a person with none of your internal
   roles can view the channel. Bots no longer count, and a role nobody holds no
@@ -30,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn's usage after the turn ended, the summary line is edited to show that
   debit and the money left, unless a later turn has started in the thread.
   Daimon reads that usage again from 2 seconds after the turn, doubling up to
-  an hour, and the scheduler reads usage still unknown 10 minutes after the
+  an hour, and the scheduler reads usage not yet final 10 minutes after the
   turn. The line shows no cost
   while Daimon cannot know it, such as an unpriced model or usage the provider
   never reported.
@@ -57,9 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Unknown GPT usage survives a restart.** OpenAI can report a turn's usage long
   after the turn ends. Daimon re-read it only for about an hour, in the process
-  that ran the turn, so a restart or a later answer left the turn unbilled. The
-  scheduler now re-reads such turns from their pending usage for a day, then
-  logs that it gave up.
+  that ran the turn, so a restart or a later answer left the turn unbilled, or
+  billed at the estimate from its stream. The scheduler now re-reads such turns
+  for a day until their usage is final, then logs that it gave up.
 
 - **Refusals on GPT and Gemini say what actually happened.** A spent daily
   Gemini quota no longer says to try again in a minute; it says the quota

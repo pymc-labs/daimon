@@ -241,7 +241,7 @@ class Discord:
     async def settle(self) -> None:
         """Wait until all the work a message started is done, or it waits on a card."""
         busy: list[asyncio.Task[Any]] = []
-        for _ in range(200):
+        for _ in range(600):  # a provider-hosted turn takes about 10s here
             await asyncio.sleep(0.05)
             busy = [t for t in asyncio.all_tasks() - self._idle if t is not asyncio.current_task()]
             if (
@@ -251,7 +251,7 @@ class Discord:
             ):
                 return
         raise AssertionError(
-            f"still busy after 10s: {[t.get_name() for t in busy]} {self.texts()[-3:]}"
+            f"still busy after 30s: {[t.get_name() for t in busy]} {self.texts()[-3:]}"
         )
 
 
