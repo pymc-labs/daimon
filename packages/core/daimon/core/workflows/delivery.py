@@ -65,15 +65,20 @@ _TEAMS_THREAD: Final[str] = ";messageid="
 
 
 def target_for(
-    to: str, *, home: str | None, run: RunRow, owner: uuid.UUID | None
+    to: str,
+    *,
+    home: str | None,
+    mode: str,
+    run_as: uuid.UUID | None,
+    owner: uuid.UUID | None,
 ) -> dict[str, Any]:
     """Where `deliver.to` points: `home`, `owner`, `run_as`, or a channel or thread id.
 
     A Slack thread is `<channel>:<ts>`, a Teams one `<channel>;messageid=<id>`; a Discord
     thread is a channel id the poster resolves. A test run delivers to the tester only.
     """
-    if run.mode == "test" or to in ("owner", "run_as"):
-        account = owner if to == "owner" and run.mode == "live" else run.run_as_account_id
+    if mode == "test" or to in ("owner", "run_as"):
+        account = owner if to == "owner" and mode == "live" else run_as
         return {"kind": "dm", "account_id": None if account is None else str(account)}
     channel = home if to == "home" else to
     thread: str | None = None
@@ -123,7 +128,9 @@ async def queue_finish(
         # The engine rendered the same templates when the Finish ran, so this is unreachable
         # short of a changed context; the run keeps its output and posts nothing.
         return None
-    target = target_for(node.deliver.to, home=home, run=run, owner=owner)
+    target = target_for(
+        node.deliver.to, home=home, mode=run.mode, run_as=run.run_as_account_id, owner=owner
+    )
     delivery_id = await workflow_deliveries.queue_delivery(
         session,
         tenant_id=run.tenant_id,
@@ -166,7 +173,7 @@ async def queue_failure_notice(
         return None
     home = _home(spec, workflow.home_channel_id)
     target = (
-        target_for("home", home=home, run=run, owner=owner)
+        target_for("home", home=home, mode=run.mode, run_as=run.run_as_account_id, owner=owner)
         if home is not None
         else {"kind": "dm", "account_id": str(owner)}
     )

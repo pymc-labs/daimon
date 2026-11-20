@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 from daimon.adapters.discord import workflow_delivery
-from daimon.core._models import Tenant
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores import accounts, tenants
@@ -15,7 +14,6 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.testing.discord_surface import DiscordMessageCapture, DiscordSurfaceHarness
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.workflows import NOW, make_world
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -24,9 +22,12 @@ async def _delivered(
 ) -> DiscordMessageCapture:
     harness = DiscordSurfaceHarness(evidence_id="wf", session_id="s", root_turn_id="r")
     thread = harness.thread
-    world = await make_world(db_session, nodes, next(iter(nodes)), home=str(thread.id))
-    await db_session.execute(
-        update(Tenant).where(Tenant.id == world.tenant_id).values(external_id=str(thread.guild.id))
+    world = await make_world(
+        db_session,
+        nodes,
+        next(iter(nodes)),
+        home=str(thread.id),
+        workspace_id=str(thread.guild.id),
     )
     tenant = await tenants.get_tenant(db_session, world.tenant_id)
     owner = await accounts.get_account(db_session, world.owner)

@@ -104,9 +104,10 @@ async def make_world(
     *,
     platform: Platform = "discord",
     home: str | None = None,
+    workspace_id: str | None = None,
     **settings: Any,  # noqa: ANN401 - WorkflowSettings fields
 ) -> World:
-    tenant = await make_tenant(db_session, platform=platform)
+    tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
     owner = await make_account(db_session, tenant=tenant)
     await db_session.execute(
         update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")

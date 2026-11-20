@@ -11,7 +11,6 @@ from daimon.core.outbound.reach import ReachPlan
 from daimon.core.stores import accounts, tenants
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflow_deliveries import DeliveryRow
-from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.workflows.delivery import (
     DM_UNSUPPORTED,
     WorkflowPost,
@@ -124,8 +123,8 @@ async def test_post_time_rules_and_the_dm_gap(db_session: AsyncSession) -> None:
 
 
 def test_targets_name_threads_on_every_platform() -> None:
-    run = RunRow.model_construct(mode="live", run_as_account_id=None)
-    assert target_for("C01:1717.5", home=None, run=run, owner=None)["thread_id"] == "1717.5"
-    teams = target_for("19:a@thread.tacv2;messageid=42", home=None, run=run, owner=None)
+    run: dict[str, Any] = {"mode": "live", "run_as": None, "owner": None}
+    assert target_for("C01:1717.5", home=None, **run)["thread_id"] == "1717.5"
+    teams = target_for("19:a@thread.tacv2;messageid=42", home=None, **run)
     assert (teams["channel_id"], teams["thread_id"]) == ("19:a@thread.tacv2", "42")
-    assert target_for("home", home="555", run=run, owner=None)["home"] is True
+    assert target_for("home", home="555", **run)["home"] is True
