@@ -1,0 +1,295 @@
+"""`/api/workflows/*` as the web app calls it: shapes, rights, drafts, runs and the gate."""
+
+from __future__ import annotations
+
+import re
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, cast
+
+import httpx
+import pytest
+from daimon.adapters.web.runtime import WebRuntime
+from daimon.adapters.web.workflows import workflows_router
+from daimon.core.features.service import set_workspace_feature
+from daimon.core.stores import web_roles as roles_store
+from daimon.core.stores.domain import WebPersonRow
+from daimon.testing.turn_router import build_turn_router
+from fastapi.routing import APIRoute
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .chat_support import Workspace, build_turns, funded_workspace, signed_in
+from .conftest import PUBLIC_URL, WebClientFactory, discord_settings, web_settings
+from .test_routines_routes import _member  # pyright: ignore[reportPrivateUsage]
+
+_OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
+_DEFAULTS = Path(__file__).parents[4] / "defaults"
+_BLANK = {"from": "blank", "name": "Tidy up"}
+# Every request body the routes take at once, so a route refuses on the gate, not on its shape.
+_ANY_BODY: dict[str, object] = {
+    **_BLANK,
+    "base_revision": 1,
+    "spec": {},
+    "decision": "fail",
+    "note": "",
+    "inputs": {},
+}
+
+
+class Rig:
+    """A workspace with an owner and a member, signed in as either, workflows on or off."""
+
+    def __init__(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        web_client: WebClientFactory,
+    ) -> None:
+        self.factory, self.tmp_path, self.web_client = factory, tmp_path, web_client
+        self.ws: Workspace
+        self.member: WebPersonRow
+        self.client: httpx.AsyncClient
+
+    async def sign_in(self, who: str) -> None:
+        person = self.ws.person if who == "owner" else self.member
+        token = await signed_in(self.factory, person)
+        self.client.cookies.set("__Host-daimon_web", token, domain="web.example.com")
+
+    @asynccontextmanager
+    async def open(self, *, engine: bool = True, page: bool = True) -> AsyncIterator[Rig]:
+        self.ws = await funded_workspace(self.factory)
+        self.member = await _member(self.factory, self.ws.tenant_id, "Mia", discord_id="m-1")
+        async with self.factory.begin() as db:
+            await roles_store.set_workspace_role(
+                db,
+                tenant_id=self.ws.tenant_id,
+                account_id=self.ws.person.account_id,
+                role="owner",
+                granted_by_account_id=None,
+            )
+            await set_workspace_feature(
+                db,
+                None,
+                tenant_id=self.ws.tenant_id,
+                platform="web",
+                key="web.workflows",
+                value="on" if page else "off",
+                account_id=self.ws.person.account_id,
+                surface="web",
+            )
+        turns = build_turns(self.factory, build_turn_router(str(self.ws.tenant_id)), self.tmp_path)
+        settings = discord_settings(
+            features={"workflows": "on" if engine else "off"}, defaults_root=_DEFAULTS
+        )
+        async with self.web_client(
+            web_settings(), sessionmaker=self.factory, turns=turns, settings=settings
+        ) as client:
+            self.client = client
+            client.headers.update(_OWN)
+            await self.sign_in("owner")
+            yield self
+
+    async def make(self, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        res = await self.client.post("/api/workflows", json=body or _BLANK)
+        assert res.status_code == 201, f"the workflow is created: {res.text}"
+        return res.json()
+
+
+@pytest.fixture
+def rig(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> Rig:
+    return Rig(db_session_factory, tmp_path, web_client)
+
+
+@pytest.mark.parametrize(("engine", "page"), [(False, True), (False, False)])
+async def test_every_workflows_route_refuses_when_the_feature_is_off(
+    rig: Rig, engine: bool, page: bool
+) -> None:
+    async with rig.open(engine=engine, page=page) as r:
+        routes = [
+            (method, route.path)
+            for route in workflows_router(cast(WebRuntime, None)).routes
+            if isinstance(route, APIRoute)
+            for method in route.methods
+        ]
+        assert len(routes) > 30, f"the routes are found: {len(routes)}"
+        for method, path in routes:
+            url = re.sub(r"\{(workflow_id|run_id)\}", str(uuid.uuid4()), path)
+            url = re.sub(r"\{number\}", "1", url)
+            url = re.sub(r"\{\w+\}", "x", url)
+            res = await r.client.request(method, url, json=_ANY_BODY)
+            assert res.status_code == 403, (
+                f"{method} {path} refuses while workflows are off: {res.text}"
+            )
+
+
+async def test_a_blank_workflow_is_drafted_published_and_run_to_the_end(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        assert (made["status"], made["live_version"], made["mine"]) == ("draft", None, True)
+        assert made["owner"]["name"] and made["can_edit"] is True, "the owner may edit"
+
+        draft = (await r.client.get(f"/api/workflows/{made['id']}/draft")).json()
+        assert draft["validation"]["errors"] == [], "a blank workflow is valid"
+
+        published = await r.client.post(f"/api/workflows/{made['id']}/draft/publish", json={})
+        assert published.status_code == 200, published.text
+        assert (published.json()["status"], published.json()["live_version"]) == ("live", 1)
+
+        run = await r.client.post(f"/api/workflows/{made['id']}/runs", json={"inputs": {}})
+        assert run.status_code == 201, run.text
+        assert run.json()["status"] == "succeeded", "a lone Finish step ends at once"
+
+        detail = (await r.client.get(f"/api/workflows/runs/{run.json()['id']}")).json()
+        assert [s["key"] for s in detail["steps"]] == ["done"], "the run page lists its steps"
+        assert detail["outcome"] == "completed"
+
+        events = (await r.client.get(f"/api/workflows/runs/{detail['id']}/events")).json()
+        assert [e["type"] for e in events][:2] == ["run.queued", "run.started"], "the ledger"
+        verified = (await r.client.get(f"/api/workflows/runs/{detail['id']}/verify")).json()
+        assert verified == {"ok": True, "events": len(events)}, "the ledger chain holds"
+
+        by_number = await r.client.get(f"/api/workflows/{made['id']}/runs/{detail['number']}")
+        assert by_number.json()["id"] == detail["id"], "a run opens by its number too"
+        listed = (await r.client.get("/api/workflows")).json()
+        assert [w["ticks"][0]["status"] for w in listed] == ["succeeded"], "the list shows ticks"
+
+
+async def test_each_starter_template_creates_a_draft_that_validates(rig: Rig) -> None:
+    async with rig.open() as r:
+        starters = (await r.client.get("/api/workflows/templates")).json()
+        assert len(starters) == 6, f"the six starters are listed: {starters}"
+        for starter in starters:
+            made = await r.make({"from": "template", "template": starter["id"]})
+            draft = (await r.client.get(f"/api/workflows/{made['id']}/draft")).json()
+            assert draft["validation"]["errors"] == [], (
+                f"{starter['id']} starts without errors: {draft['validation']}"
+            )
+
+
+async def test_draft_save_when_the_revision_is_stale_answers_409_with_the_current_draft(
+    rig: Rig,
+) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        url = f"/api/workflows/{made['id']}/draft"
+        draft = (await r.client.get(url)).json()
+        spec = {**draft["spec"], "name": "Renamed"}
+        saved = await r.client.put(url, json={"base_revision": draft["revision"], "spec": spec})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["revision"] == draft["revision"] + 1, "a save bumps the revision"
+
+        stale = await r.client.put(url, json={"base_revision": draft["revision"], "spec": spec})
+        assert stale.status_code == 409, "the old revision is refused"
+        assert stale.json()["draft"]["revision"] == draft["revision"] + 1, "with the draft now"
+
+
+async def test_export_then_import_when_a_workflow_is_copied_then_the_spec_matches(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        exported = await r.client.get(f"/api/workflows/{made['id']}/export")
+        assert exported.status_code == 200, exported.text
+        copy = await r.make({"from": "import", "yaml": exported.text})
+        spec = (await r.client.get(f"/api/workflows/{copy['id']}/draft")).json()["spec"]
+        original = (await r.client.get(f"/api/workflows/{made['id']}/draft")).json()["spec"]
+        assert spec == original, "the import reads back what the export wrote"
+
+        bad = await r.client.post(
+            "/api/workflows", json={"from": "import", "yaml": "- just\n- a list"}
+        )
+        assert bad.status_code == 422, f"something else is refused: {bad.text}"
+
+
+async def test_a_private_workflow_is_hidden_from_a_member_until_it_is_shared(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        await r.sign_in("member")
+        assert (await r.client.get("/api/workflows")).json() == [], "private stays private"
+        assert (await r.client.get(f"/api/workflows/{made['id']}")).status_code == 404
+
+        await r.sign_in("owner")
+        shared = await r.client.patch(f"/api/workflows/{made['id']}", json={"visibility": "shared"})
+        assert shared.status_code == 200, shared.text
+
+        await r.sign_in("member")
+        seen = await r.client.get(f"/api/workflows/{made['id']}")
+        assert (seen.status_code, seen.json()["can_edit"]) == (200, False), "a viewer only reads"
+        refused = await r.client.put(
+            f"/api/workflows/{made['id']}/draft", json={"base_revision": 1, "spec": {}}
+        )
+        assert refused.status_code == 403, f"a viewer cannot edit: {refused.text}"
+
+
+async def test_versions_list_and_restore_when_a_workflow_is_published_twice(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        base = f"/api/workflows/{made['id']}"
+        await r.client.post(f"{base}/draft/publish", json={})
+        draft = (await r.client.get(f"{base}/draft")).json()
+        spec = {**draft["spec"], "name": "Second"}
+        await r.client.put(f"{base}/draft", json={"base_revision": draft["revision"], "spec": spec})
+        second = await r.client.post(f"{base}/draft/publish", json={"note": "two"})
+        assert second.status_code == 200, second.text
+
+        versions = (await r.client.get(f"{base}/versions")).json()
+        assert [v["number"] for v in versions] == [2, 1], "newest first"
+        restored = await r.client.post(f"{base}/versions/1/restore")
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["spec"]["name"] == "Tidy up", "the draft is version 1 again"
+
+
+async def test_run_stream_when_a_run_has_ended_replays_its_events_with_ledger_ids(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        await r.client.post(f"/api/workflows/{made['id']}/draft/publish", json={})
+        run = (await r.client.post(f"/api/workflows/{made['id']}/runs", json={"inputs": {}})).json()
+        events = (await r.client.get(f"/api/workflows/runs/{run['id']}/events")).json()
+
+        async with r.client.stream("GET", f"/api/workflows/runs/{run['id']}/stream") as res:
+            body = "".join([chunk async for chunk in res.aiter_text()])
+        ids = [line[4:] for line in body.splitlines() if line.startswith("id: ")]
+        assert ids == [str(e["seq"]) for e in events], f"one frame per ledger event: {body}"
+
+
+_ASKS = {
+    "schema": "daimon.workflow/v1",
+    "name": "Ask first",
+    "triggers": [{"id": "manual", "kind": "manual"}],
+    "start": "review",
+    "nodes": {
+        "review": {
+            "kind": "approval",
+            "title": "Check it",
+            "approvers": ["owner"],
+            "routes": {"approve": "done", "reject": "done"},
+        },
+        "done": {"kind": "finish", "title": "Done"},
+    },
+}
+
+
+async def test_a_test_run_that_has_not_finished_can_be_cancelled_and_forked_from_a_step(
+    rig: Rig,
+) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        base = f"/api/workflows/{made['id']}"
+        saved = await r.client.put(f"{base}/draft", json={"base_revision": 1, "spec": _ASKS})
+        assert saved.status_code == 200, saved.text
+        started = await r.client.post(f"{base}/runs", json={"inputs": {}, "test": {}})
+        assert started.status_code == 201, started.text
+        run = started.json()
+        assert run["test"] is not None, f"a draft runs as a test: {run}"
+        cancelled = await r.client.post(f"/api/workflows/runs/{run['id']}/cancel")
+        assert cancelled.json()["status"] == "cancelled", cancelled.text
+
+        again = await r.client.post(
+            f"/api/workflows/runs/{run['id']}/fork", json={"step": "review", "version": "draft"}
+        )
+        assert again.status_code == 200, again.text
+        assert again.json()["id"] != run["id"], "a fork is a new run"
