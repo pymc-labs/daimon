@@ -853,11 +853,14 @@ async def run_now(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID)
         if row is None or not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
-        if not row.enabled:
+        if not row.enabled and not await routines_store.migrated_workflows(session, [row.id]):
             raise RoutineRefused("This routine is paused. Resume it to run it.")
-        due = await routines_store.mark_due(
-            session, routine_id, tenant_id=caller.tenant_id, now=env.now()
-        )
+        try:
+            due = await routines_store.mark_due(
+                session, routine_id, tenant_id=caller.tenant_id, now=env.now()
+            )
+        except StoreError as err:
+            raise _store_refusal(err) from err
         if due is None:
             raise RoutineNotFound()
         await _record(env, session, "run_now", due)
@@ -872,6 +875,12 @@ async def delete_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uui
         if row is None or not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
-        if not await routines_store.delete_routine(session, routine_id, tenant_id=caller.tenant_id):
+        try:
+            deleted = await routines_store.delete_routine(
+                session, routine_id, tenant_id=caller.tenant_id
+            )
+        except StoreError as err:
+            raise _store_refusal(err) from err
+        if not deleted:
             raise RoutineNotFound()
         await _record(env, session, "deleted", row)

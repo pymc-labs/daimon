@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
@@ -48,7 +49,9 @@ class TriggerRow(_Row):
     enabled: bool
     next_fire_at: datetime | None
     last_fired_slot: datetime | None
+    seeded_after: datetime | None
     listening_until: datetime | None
+    from_routine_id: uuid.UUID | None
 
     @property
     def live(self) -> dict[str, Any] | None:
@@ -87,6 +90,18 @@ class EventRow(_Row):
     received_at: datetime
 
 
+@dataclass(frozen=True)
+class Cursor:
+    """A schedule's place taken over from a routine (or handed back to one)."""
+
+    routine_id: uuid.UUID
+    next_fire_at: datetime | None
+    last_fired_slot: datetime | None
+    seeded_after: datetime | None
+    #: Kept as `config.routine`: the routine's name and last result before the move.
+    snapshot: Mapping[str, Any] | None = None
+
+
 def _next_slot(spec: Mapping[str, Any], now: datetime) -> datetime | None:
     try:
         return validated_next_slot(str(spec.get("cron")), str(spec.get("timezone") or "UTC"), now)
@@ -101,9 +116,11 @@ async def sync_live(
     workflow_id: uuid.UUID,
     triggers: Sequence[Mapping[str, Any]],
     now: datetime,
+    cursors: Mapping[str, Cursor] | None = None,
 ) -> None:
     """Make the rows match a newly published version. A schedule whose cron or zone changed
-    restarts from the next slot after `now`; triggers the version dropped stop firing."""
+    restarts from the next slot after `now`; triggers the version dropped stop firing.
+    A schedule in `cursors` carries on from a routine's slot state and stays linked to it."""
     rows = {r.trigger_key: r for r in await list_triggers(session, workflow_id=workflow_id)}
     for spec in triggers:
         key, kind = str(spec["id"]), str(spec["kind"])
@@ -120,6 +137,15 @@ async def sync_live(
             )
             if not (same and old and old.next_fire_at):
                 values |= {"next_fire_at": _next_slot(spec, now), "seeded_after": now}
+            if (cursor := (cursors or {}).get(key)) is not None:
+                if cursor.snapshot is not None:
+                    values["config"] = {**values["config"], "routine": dict(cursor.snapshot)}
+                values |= {
+                    "from_routine_id": cursor.routine_id,
+                    "next_fire_at": cursor.next_fire_at or values.get("next_fire_at"),
+                    "last_fired_slot": cursor.last_fired_slot,
+                    "seeded_after": cursor.seeded_after or values.get("seeded_after"),
+                }
         else:
             values["next_fire_at"] = None
         if old is None:
@@ -195,6 +221,32 @@ async def set_listening(
 
 
 # --- schedules ---
+
+
+async def get_routine_trigger(
+    session: AsyncSession, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID
+) -> TriggerRow | None:
+    """The workflow's trigger that a routine moved into, locked until the transaction ends."""
+    orm = await session.scalar(
+        select(WorkflowTrigger)
+        .where(
+            WorkflowTrigger.tenant_id == tenant_id,
+            WorkflowTrigger.workflow_id == workflow_id,
+            WorkflowTrigger.from_routine_id.is_not(None),
+        )
+        .with_for_update()
+    )
+    return None if orm is None else TriggerRow.model_validate(orm)
+
+
+async def release_to_routine(session: AsyncSession, trigger: TriggerRow) -> None:
+    """Unlink a trigger whose routine took its cursor back. It has no next slot until the
+    workflow publishes again, so resuming the paused workflow alone fires nothing twice."""
+    await session.execute(
+        update(WorkflowTrigger)
+        .where(WorkflowTrigger.id == trigger.id)
+        .values(from_routine_id=None, next_fire_at=None)
+    )
 
 
 async def claim_due_schedules(
