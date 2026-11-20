@@ -41,6 +41,30 @@ Every call is logged with the effects it would have had, such as a created issue
 Pushes go to a private copy of the repository for that run only. Set the
 simulator with [`DAIMON_EVALS__SIMULATOR_MODEL`](configuration.md#daimon_evals__simulator_model).
 
+## Sandboxes
+
+Each item runs its tools in an enclosed sandbox pod. A gateway in the pod sends
+every request the tools make to the fake world. Only the provider worker that
+runs the agent reaches its provider, and agent commands never reach it.
+Package downloads reach the real registries unless the
+`eval_package_registries` feature blocks them.
+
+Pods run on a Docker host or in a Kubernetes namespace, chosen by
+[`DAIMON_EVALS__SANDBOX_RUNTIME`](configuration.md#daimon_evals__sandbox_runtime).
+The pod sets its own packet rules, so the platform must allow the `NET_ADMIN`
+capability. Managed container services that forbid it cannot host sandboxes.
+
+On Kubernetes, the eval worker's service account needs to create, read and
+delete pods, `pods/exec` and secrets in the namespace. The namespace needs the
+`privileged` pod security level. Pods get no service account token.
+
+Sandbox tools trust an eval CA. Create its key once and store it as
+[`DAIMON_EVALS__CA_KEY`](configuration.md#daimon_evals__ca_key):
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out eval-ca.pem
+```
+
 ## Who can do what
 
 | Person | Can |
