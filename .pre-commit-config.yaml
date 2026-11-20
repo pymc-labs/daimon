@@ -13,12 +13,6 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        # syrupy's block-scalar serializer indents every physical line of a
-        # multi-line string value, including blank paragraph-break lines —
-        # stripping that indentation here desyncs the committed snapshot
-        # from what a bare test run (re)generates, breaking the test the
-        # next time it runs without --snapshot-update.
-        exclude: (^|/)__snapshots__/.*\.ambr$
       - id: end-of-file-fixer
       - id: check-yaml
         exclude: ^mkdocs\.yml$

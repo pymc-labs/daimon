@@ -131,7 +131,7 @@ MERGE = "0168_merge_main_preview"
 # Linear, oldest first, read from the files so a rechain never edits this test; the first
 # sits on MERGE and the last is the single head.
 SCRIPT = ScriptDirectory(str(SCRIPTS))
-TAIL = tuple(r.revision for r in reversed(list(SCRIPT.iterate_revisions("heads", MERGE))))[1:]
+TAIL = tuple(r.revision for r in reversed(list(SCRIPT.iterate_revisions("heads", MERGE))))
 HEAD = TAIL[-1]
 
 

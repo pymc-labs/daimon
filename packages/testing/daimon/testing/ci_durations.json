@@ -466,7 +466,7 @@
   "packages/core/tests/test_ops_alerts.py": 0.1,
   "packages/core/tests/test_opus_fast.py": 0.01,
   "packages/core/tests/test_origin_session_urls.py": 0.01,
-  "packages/core/tests/test_orm_import_contract.py": 0.01,
+  "packages/core/tests/test_orm_import_contract.py": 1.58,
   "packages/core/tests/test_outbound_etiquette.py": 0.03,
   "packages/core/tests/test_output_delivery.py": 0.85,
   "packages/core/tests/test_output_pagination_port_requests.py": 0.05,
