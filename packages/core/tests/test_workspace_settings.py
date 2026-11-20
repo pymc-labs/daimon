@@ -204,3 +204,49 @@ async def test_a_person_of_another_workspace_cannot_be_listed(db_session: AsyncS
         await ws.set_invoker_people(
             db_session, tenant_id=tenant.id, subject=ADMIN, person_ids=[stranger.id]
         )
+
+
+@pytest.mark.parametrize(("busy_tries", "saved"), [(2, True), (6, False)])
+async def test_a_save_that_meets_a_short_fence_holder_tries_again(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    busy_tries: int,
+    saved: bool,
+) -> None:
+    """A fact publish holds the policy fence for a moment: the save waits it out (no real
+    wait in the test) and gives up with `PolicyBusyError` only after the last try."""
+    from daimon.core.stores import access_policy as store
+
+    monkeypatch.setattr(store, "POLICY_LOCK_RETRY_S", 0.0)
+    real = store.lock_policy_writes_exclusive
+    calls = 0
+
+    async def flaky(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= busy_tries:
+            raise store.PolicyBusyError()
+        await real(session, tenant_id=tenant_id)
+
+    monkeypatch.setattr(store, "lock_policy_writes_exclusive", flaky)
+    tenant = await make_tenant(db_session)
+    if saved:
+        stored = await ws.set_invokers(
+            db_session,
+            tenant_id=tenant.id,
+            subject=ADMIN,
+            platform="discord",
+            user_ids=[DISCORD_ID],
+        )
+        assert stored == (DISCORD_ID,)
+        assert calls == busy_tries + 2  # the save, then the policy write re-asks
+    else:
+        with pytest.raises(store.PolicyBusyError):
+            await ws.set_invokers(
+                db_session,
+                tenant_id=tenant.id,
+                subject=ADMIN,
+                platform="discord",
+                user_ids=[DISCORD_ID],
+            )
+        assert calls == store.POLICY_LOCK_ATTEMPTS

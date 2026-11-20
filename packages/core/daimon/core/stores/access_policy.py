@@ -9,6 +9,7 @@ A missing row is the open default. A row that no longer validates raises
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -143,6 +144,35 @@ async def lock_policy_writes_exclusive(session: AsyncSession, *, tenant_id: uuid
         )
     except FenceUnavailable:
         raise PolicyBusyError() from None
+
+
+#: An admin save that meets a short holder (a fact publish) tries again this often, this long.
+POLICY_LOCK_ATTEMPTS = 6
+POLICY_LOCK_RETRY_S = 0.1
+
+
+async def lock_policy_writes_exclusive_retrying(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    attempts: int | None = None,
+    delay_s: float | None = None,
+) -> None:
+    """Take the exclusive policy fence, trying again a few times when a short holder has it.
+
+    A failed try takes no lock and leaves the transaction intact, so trying again is safe
+    when nothing else ran first. Gives up with `PolicyBusyError` after the last try.
+    """
+    tries = POLICY_LOCK_ATTEMPTS if attempts is None else attempts
+    wait = POLICY_LOCK_RETRY_S if delay_s is None else delay_s
+    for attempt in range(1, tries + 1):
+        try:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+            return
+        except PolicyBusyError:
+            if attempt == tries:
+                raise
+            await asyncio.sleep(wait)
 
 
 @asynccontextmanager
@@ -368,7 +398,7 @@ async def _load_stored_policy(session: AsyncSession, *, tenant_id: uuid.UUID) ->
 async def set_access_policy(
     session: AsyncSession, *, tenant_id: uuid.UUID, policy: TenantAccessPolicy
 ) -> None:
-    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+    await lock_policy_writes_exclusive_retrying(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     if not await _roles_supported(session, tenant_id, policy):
         raise ValueError(
@@ -423,7 +453,7 @@ async def set_access_policy(
 
 async def clear_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     """Delete the tenant's row, putting it back on the open default. True if one existed."""
-    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+    await lock_policy_writes_exclusive_retrying(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     await _role_lists_changed(session, tenant_id, TenantAccessPolicy())
     result = await session.execute(
