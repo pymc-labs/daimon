@@ -9,8 +9,9 @@ memory read-only, nothing posted in the room. The room tells only the asker
 
 The offer lives in this process for an hour (`PrivateOffers`). The custom_id names a
 token only; a press is decided for the presser's live standing, the room's live facts
-and the server's DM setting. Mode `shadow` logs `private_offer` and shows nothing;
-mode `off` never reaches this module.
+and the server's DM setting. An offer the press would certainly refuse as things stand
+(DMs off, or an agent that never DMs) is not shown. Mode `shadow` logs `private_offer`
+and shows nothing; mode `off` never reaches this module.
 
 Template-disjointness: `pva:` must not overlap `tho:`, `mfb:`, `ztc:`, `sup:` or the
 wizard's `wz:`; discord.py fires every registered template that fullmatches.
@@ -31,6 +32,7 @@ from cachetools import TTLCache
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import member_role_ids
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.core.authz import AgentRef
 from daimon.core.channel_audience import AudienceMode
 from daimon.core.private_answer import (
     PrivateAnswerRefusal,
@@ -91,12 +93,14 @@ class PrivateOffer:
     """What a press needs: the asker, the room, the agent and the question.
 
     `channel_id` is the parent channel; `thread_id` the turn's thread when it has one.
+    `agent_ref` is the agent as its rules name it, for the offer's DM check.
     """
 
     tenant_id: uuid.UUID
     asker_id: int
     channel_id: str
     agent: str
+    agent_ref: AgentRef
     question: str
     mode: AudienceMode
     role_ids: tuple[str, ...] | None = None
@@ -155,6 +159,7 @@ async def show_private_offer(
                 thread_id=offer.thread_id,
                 mode=offer.mode,
                 agent=offer.agent,
+                agent_ref=offer.agent_ref,
                 event_role_ids=offer.role_ids,
                 resolver=bot.runtime.turn_deps.membership_resolver,
             )

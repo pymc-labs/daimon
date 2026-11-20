@@ -1,7 +1,8 @@
 """The Private answer from a contained room (`audience_hold`, BUILD-PLAN C4, E3).
 
 The offer shows in mode `on` only, to an internal asker, in a contained room that is
-not narrow. A press is checked again. The private turn is a DM with no source: the
+not narrow, unless the press would certainly be refused (DMs off, or an agent that never
+DMs). A press is checked again. The private turn is a DM with no source: the
 agent's budget channel is its spend channel, never a source whose seal refuses it, on
 the first turn and on follow-ups. Ids are fictional. Mode `on` comes from the table in
 `test_admission_audience`, because the registry has no `on` value yet.
@@ -15,7 +16,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core import direct_messages
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.authz import AgentRef
 from daimon.core.direct_messages import admit_cold_dm, reply_to_dm_result, start_cold_dm
 from daimon.core.private_answer import offer_private_answer, private_answer_refusal
 from daimon.core.stores.direct_messages import (
@@ -64,6 +66,21 @@ def _policy(**fields: object) -> TenantAccessPolicy:
     return TenantAccessPolicy(internal_role_ids=(INTERNAL,), **fields)  # type: ignore[arg-type]
 
 
+async def _offer_room(
+    db_session: AsyncSession,
+    facts: object,
+    *,
+    policy: TenantAccessPolicy | None = None,
+    dms: bool = True,
+) -> TenantRow:
+    """A server with the room's and thread's facts, and DMs on unless `dms` is False."""
+    tenant = await _seed_admittable_tenant(db_session, policy=policy or _policy())
+    await _facts(db_session, tenant, {ROOM: facts, THREAD: facts})  # type: ignore[dict-item]
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=dms)
+    await db_session.commit()
+    return tenant
+
+
 async def _offer(
     factory: async_sessionmaker[AsyncSession], tenant: TenantRow, mode: str, roles: tuple[str, ...]
 ) -> bool:
@@ -76,6 +93,7 @@ async def _offer(
             thread_id=THREAD,
             mode=mode,  # type: ignore[arg-type]
             agent="daimon",
+            agent_ref=AgentRef.of("daimon"),
             event_role_ids=roles,
         )
 
@@ -98,10 +116,53 @@ async def test_the_offer_shows_in_mode_on_to_an_internal_asker_in_a_contained_ro
     shown: bool,
 ) -> None:
     """Spec check 5: the button is for an internal asker in a contained room only."""
-    tenant = await _seed_admittable_tenant(db_session, policy=_policy())
-    await _facts(db_session, tenant, {ROOM: facts, THREAD: facts})  # type: ignore[dict-item]
+    tenant = await _offer_room(db_session, facts)
 
     assert await _offer(db_session_factory, tenant, "on", roles) is shown
+
+
+@pytest.mark.parametrize("mode", ["on", "shadow"])
+@pytest.mark.parametrize(
+    ("dms", "policy", "reason"),
+    [
+        (False, None, "dms_off"),
+        (  # a channel's own agent never DMs (decision 1)
+            True,
+            _policy(
+                agent_rules={"daimon": AgentRule(runs_in=(ROOM,))},
+                channel_rules={ROOM: ChannelRule(readers="own", writers="own")},
+            ),
+            "agent_no_dms",
+        ),
+    ],
+    ids=["dms-off", "own-agent"],
+)
+async def test_an_offer_the_press_would_refuse_is_skipped(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    mode: str,
+    dms: bool,
+    policy: TenantAccessPolicy | None,
+    reason: str,
+) -> None:
+    """The press's static checks run at offer time; a skip logs its reason, no text."""
+    tenant = await _offer_room(db_session, CONTAINED, policy=policy, dms=dms)
+
+    with capture_logs() as logs:
+        assert await _offer(db_session_factory, tenant, mode, (INTERNAL,)) is False
+
+    skipped = [log for log in logs if log["event"] == "audience.private_offer_skipped"]
+    assert skipped == [
+        {
+            "event": "audience.private_offer_skipped",
+            "log_level": "info",
+            "tenant_id": str(tenant.id),
+            "channel_id": ROOM,
+            "agent": "daimon",
+            "reason": reason,
+        }
+    ]
+    assert not [log for log in logs if log.get("kind") == "private_offer"]
 
 
 async def test_shadow_logs_the_offer_and_off_reads_nothing(
@@ -109,8 +170,7 @@ async def test_shadow_logs_the_offer_and_off_reads_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tenant = await _seed_admittable_tenant(db_session, policy=_policy())
-    await _facts(db_session, tenant, {ROOM: CONTAINED, THREAD: CONTAINED})
+    tenant = await _offer_room(db_session, CONTAINED)
     with capture_logs() as logs:
         assert await _offer(db_session_factory, tenant, "shadow", (INTERNAL,)) is False
     offers = [log for log in logs if log.get("kind") == "private_offer"]

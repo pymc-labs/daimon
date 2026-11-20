@@ -111,6 +111,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.audience_refusal import AUDIENCE_CONTAINED
+from daimon.core.authz import build_agent_ref
 from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import backend_refusal_causes
@@ -5625,6 +5626,9 @@ class DaimonBot(commands.Bot):
                 asker_id=message.author.id,
                 channel_id=parent_channel_id,
                 agent=admission.config.agent_name or agent.name,
+                agent_ref=build_agent_ref(
+                    agent.name, agent.metadata or {}, admission.config.agent_name
+                ),
                 question=content_override if content_override is not None else message.content,
                 mode=admission.audience_mode,
                 role_ids=tuple(member_role_ids(author))

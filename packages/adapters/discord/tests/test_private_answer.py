@@ -46,7 +46,7 @@ from daimon.adapters.discord.thread_handoff import build_custom_id as handover_i
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.audience_facts import RoomFacts
 from daimon.core.audience_refusal import AUDIENCE_CONTAINED
-from daimon.core.authz import Subject
+from daimon.core.authz import AgentRef, Subject
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.audience_facts import StoredRoom, publish_facts
@@ -111,6 +111,7 @@ def _offer(tenant_id: uuid.UUID, *, mode: str = "on", roles: tuple[str, ...] = (
         channel_id=ROOM,
         thread_id=THREAD,
         agent="helper",
+        agent_ref=AgentRef.of("helper"),
         question=QUESTION,
         mode=mode,  # type: ignore[arg-type]
         role_ids=roles,
@@ -210,6 +211,23 @@ async def test_the_offer_card_shows_for_an_internal_asker_only_and_never_in_shad
     offers = [e for e in logs if e.get("kind") == "private_offer"]
     assert [(e["event"], e["channel_id"], e["reason"]) for e in offers] == [
         ("audience.shadow", ROOM, "room_contained")
+    ]
+
+
+async def test_no_offer_card_where_dms_are_off(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A press there would be refused, so the room shows no button."""
+    tenant_id = await _tenant(db_session_factory, "720000955", dms=False)
+    bot, _cog = _world(db_session_factory)
+    send = AsyncMock()
+
+    with capture_logs() as logs:
+        assert not await show_private_offer(bot, _offer(tenant_id), send=send, refused=True)
+
+    send.assert_not_awaited()
+    assert [e["reason"] for e in logs if e["event"] == "audience.private_offer_skipped"] == [
+        "dms_off"
     ]
 
 
