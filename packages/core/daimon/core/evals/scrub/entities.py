@@ -138,7 +138,11 @@ def _company(entry: str | NamedEntry) -> list[Term]:
 
 def _person(entry: str | PersonEntry) -> list[Term]:
     person = PersonEntry(name=entry) if isinstance(entry, str) else entry
-    words = [w for w in person.name.split() if w.casefold().strip(".,") not in _TITLES]
+    # "Jane Roe (+3)", "Jane Roe (UTC+2)": a note in brackets and words without letters are no part.
+    clean = re.sub(r"[(\[][^)\]]*[)\]]", " ", person.name).split()
+    words = [
+        w for w in clean if w.casefold().strip(".,") not in _TITLES and re.search(r"[^\W\d_]", w)
+    ]
     terms = [Term("person", person.name)]
     if len(words) > 1:
         terms += [

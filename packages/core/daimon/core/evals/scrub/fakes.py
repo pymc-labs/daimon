@@ -13,6 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Final
 
+from daimon.core.evals.scrub.detect import common_words
 from daimon.core.evals.scrub.entities import normalize
 
 if TYPE_CHECKING:
@@ -40,10 +41,15 @@ def keyed_hash(key: bytes, kind: str, real: str) -> str:
 
 
 def shape_preserving(real: str, rng: random.Random) -> str:
-    """Random characters of the same classes: digits stay digits, a leading id letter stays."""
+    """Random characters of the same classes: digits stay digits, a leading id letter stays, and
+    a hex id (a UUID, a page id) stays hex."""
+    hexy = len(real) >= 32 and bool(re.fullmatch(r"[0-9a-fA-F-]+", real))
     out: list[str] = []
     for i, ch in enumerate(real):
-        if ch.isdigit():
+        if hexy and ch.isalnum():
+            digit = rng.randrange(16)
+            out.append(f"{digit:x}".upper() if ch.isupper() else f"{digit:x}")
+        elif ch.isdigit():
             out.append(str(rng.randrange(1 if i == 0 else 0, 10)))
         elif ch.isupper() and ch.isascii() and i > 0:
             out.append(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
@@ -115,7 +121,8 @@ class FakeMap:
             clash = (kind, normalize(candidate)) in self._taken
             # A fake never repeats a word of the real value ("Emily" for "Emily").
             echo = set(normalize(candidate).split()) & set(normalize(real).split())
-            if kind in _DERIVED or not (clash or echo or self._has_real(candidate)):
+            common = normalize(candidate) in common_words()
+            if kind in _DERIVED or not (clash or echo or common or self._has_real(candidate)):
                 break
         self._taken.add((kind, normalize(candidate)))
         self.added[(kind, digest)] = candidate

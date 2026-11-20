@@ -11,6 +11,7 @@ optional: without it `Ner.available` is False and only the dictionary and patter
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import html
 import multiprocessing
@@ -118,16 +119,59 @@ def _words(view: str) -> list[tuple[int, int, str]]:
     return [(m.start(), m.end(), m.group().casefold()) for m in _TOKEN.finditer(view)]
 
 
+# Function words, never a name on their own; with `common_words` they guard one-word terms.
+_STOP: Final = frozenset(
+    {"a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for", "from", "has",
+     "have", "he", "her", "his", "how", "i", "if", "in", "is", "it", "its", "me", "my", "no",
+     "not", "of", "on", "or", "our", "she", "so", "than", "that", "the", "their", "them", "then",
+     "there", "they", "this", "to", "up", "us", "was", "we", "what", "when", "where", "which",
+     "who", "why", "will", "with", "you", "your"}
+)  # fmt: skip
+
+
+@functools.cache
+def common_words() -> frozenset[str]:
+    """Everyday English words (Faker's and spaCy's lists when installed): no one-word term
+    matches them alone, and no fake is one."""
+    words = set(_STOP)
+    try:
+        from faker.providers.lorem.en_US import Provider
+
+        listed: list[str] = list(Provider.word_list)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        words.update(w.casefold() for w in listed)
+        from spacy.lang.en.stop_words import STOP_WORDS
+
+        words.update(w.casefold() for w in STOP_WORDS)
+    except ImportError:
+        pass
+    return frozenset(words)
+
+
 @dataclass(frozen=True)
 class _Entry:
     words: tuple[str, ...]
     gaps: tuple[str, ...]
     term: Term
+    alone: bool = False
+    """A one-word term: matched as a whole word only."""
+    exact: str | None = None
+    """A common word that is a name: matched only written this way."""
+
+
+def _whole(view: str, start: int, end: int) -> bool:
+    """Whether `view[start:end]` is a word of its own, not part of one ("PrimRose")."""
+    before = view[start - 1] if start else ""
+    after = view[end] if end < len(view) else ""
+    return not before.isalpha() and not after.isalpha()
 
 
 class TermIndex:
-    def __init__(self) -> None:
+    """Terms matched by word. `strict` guards one-word terms: whole words only, and a common word
+    only when capitalized and written as in the dictionary."""
+
+    def __init__(self, *, strict: bool = False) -> None:
         self._first: dict[str, list[_Entry]] = {}
+        self._strict = strict
 
     def add(self, term: Term) -> None:
         view = fold(term.text).text
@@ -136,7 +180,13 @@ class TermIndex:
             return
         words = tuple(w for _, _, w in found)
         gaps = tuple(view[a[1] : b[0]] for a, b in zip(found, found[1:], strict=False))
-        entries = [_Entry(words, gaps, term)]
+        alone = len(words) == 1
+        exact = None
+        if self._strict and alone and words[0] in common_words():
+            if not view.strip()[:1].isupper():
+                return  # "test", "status": a lowercase common word is never matched alone
+            exact = view.strip()
+        entries = [_Entry(words, gaps, term, alone and self._strict, exact)]
         joined = "".join(words)
         if len(words) > 1 and all(_joins(g) for g in gaps) and len(joined) >= _MIN_JOINED:
             entries.append(_Entry((joined,), (), term))  # ALICESMITH, alicesmith
@@ -145,17 +195,27 @@ class TermIndex:
             bucket.append(entry)
             bucket.sort(key=lambda e: len(e.words), reverse=True)
 
-    def find(self, view: str) -> Iterator[tuple[int, int, Term]]:
+    def find(self, view: str, *, alone: bool = True) -> Iterator[tuple[int, int, Term]]:
+        """Matches in `view`; without `alone`, one-word terms are left out."""
         found = _words(view)
         for i, (start, _, word) in enumerate(found):
             for entry in self._first.get(word, ()):
                 n = len(entry.words)
-                if i + n <= len(found) and all(
-                    found[i + j][2] == entry.words[j]
-                    and _same_gap(view[found[i + j - 1][1] : found[i + j][0]], entry.gaps[j - 1])
-                    for j in range(1, n)
+                end = found[i + n - 1][1] if i + n <= len(found) else 0
+                if (
+                    i + n <= len(found)
+                    and all(
+                        found[i + j][2] == entry.words[j]
+                        and _same_gap(
+                            view[found[i + j - 1][1] : found[i + j][0]], entry.gaps[j - 1]
+                        )
+                        for j in range(1, n)
+                    )
+                    and not (entry.alone and not alone)
+                    and (entry.exact is None or view[start:end] == entry.exact)
+                    and not (entry.alone and not _whole(view, start, end))
                 ):
-                    yield start, found[i + n - 1][1], entry.term
+                    yield start, end, entry.term
                     break
 
 
@@ -243,6 +303,8 @@ _EMAIL: Final = re.compile(
 _IDS: Final = re.compile(
     r"(?<![0-9A-Za-z])\d{15,20}(?![0-9A-Za-z])"  # Discord snowflakes and other long ids
     r"|\b[UWCDGT](?=[A-Z0-9]*\d)[A-Z0-9]{8,12}\b"  # Slack ids
+    r"|(?<![0-9A-Za-z])[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}(?![0-9A-Za-z])"  # UUIDs
+    r"|(?<![0-9A-Za-z])(?=[a-f]*\d)(?=\d*[a-f])[0-9a-f]{32}(?![0-9A-Za-z])"  # page and doc ids
     r"|\b(?:19|28|29):[0-9A-Za-z_-]{8,}(?:@thread\.[A-Za-z0-9]+|@unq\.gbl\.spaces)?"  # Teams ids
 )
 _DOC_IDS: Final = re.compile(
@@ -254,6 +316,23 @@ _PHONE: Final = re.compile(
 _HOST: Final = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:internal|local|corp|lan|intranet|home\.arpa)\b", re.IGNORECASE
 )
+# Any other host name, unless it is a public service's (subdomains included); the TLDs leave
+# out file extensions ("notes.md", "app.py").
+_PUBLIC_HOST: Final = re.compile(
+    r"(?<![\w.@-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|ai|dev|app|so|me|us"
+    r"|uk|de|fr|nl|eu|ca|au|in|jp|ch|se|no|fi|dk|es|it|pl|be|at|br|nz|sg|ie|il|xyz|info|biz"
+    r"|cloud|tech|site|online|gg|ly|tv|fm)(?![\w-]|\.[a-z])",
+    re.IGNORECASE,
+)
+_PUBLIC_SERVICES: Final = frozenset(
+    {"github.com", "githubusercontent.com", "gitlab.com", "bitbucket.org", "google.com",
+     "googleapis.com", "youtube.com", "notion.so", "notion.site", "slack.com", "discord.com",
+     "discord.gg", "microsoft.com", "office.com", "sharepoint.com", "atlassian.net", "zoom.us",
+     "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
+     "pypi.org", "npmjs.com", "amazonaws.com", "cloudflare.com", "example.com", "example.org",
+     "example.net"}
+)  # fmt: skip
+_SCHEME: Final = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://", re.IGNORECASE)
 # The tenant part of a hosted service's address names the customer.
 _TENANT_HOST: Final = re.compile(
     r"\b([a-z0-9][a-z0-9-]{1,62})\.(?:atlassian\.net|zoom\.us|slack\.com|sharepoint\.com"
@@ -270,7 +349,8 @@ _SHARED_HOSTS: Final = frozenset(
 )  # fmt: skip
 _IP: Final = re.compile(
     r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
-    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"
+    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b"  # CGNAT, tailnets
 )
 _REPOS: Final = [
     re.compile(p, re.IGNORECASE)
@@ -343,7 +423,7 @@ def _analyze(engine: object, texts: list[str]) -> list[list[tuple[int, int, str]
 
     assert isinstance(engine, AnalyzerEngine)
     out: list[list[tuple[int, int, str]]] = []
-    batches = engine.nlp_engine.process_batch  # pyright: ignore[reportUnknownMemberType]
+    batches = engine.nlp_engine.process_batch  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     for text, artifacts in batches(texts, "en", batch_size=_NER_BATCH):
         found = engine.analyze(
             text, language="en", entities=list(_NER_KINDS), score_threshold=0.4,
@@ -440,7 +520,7 @@ def _digest(text: str) -> bytes:
 class Detector:
     def __init__(self, terms: Iterable[Term], ner: Ner | None = None) -> None:
         self._terms: dict[str, Term] = {}
-        self._index = TermIndex()
+        self._index = TermIndex(strict=True)
         self._ner = ner
         self.add(terms)
 
@@ -464,14 +544,19 @@ class Detector:
                 added.append(term)
         return added
 
-    def find(self, text: str, *, names: bool = True) -> list[Hit]:
-        """Non-overlapping hits in `text`, in order. `names` adds the NER pass."""
+    def find(self, text: str, *, names: bool = True, words: bool = True) -> list[Hit]:
+        """Non-overlapping hits in `text`, in order. `names` adds the NER pass; without `words`,
+        one-word terms are left out (for JSON keys, which share words with names)."""
         view = fold(text)
         hits = list(self._patterns(view.text))
-        for start, end, term in self._index.find(view.text):
-            hits.append(Hit(start, end, term.kind, _P_KNOWN, term.of, canon=term.text))
+        found = [
+            Hit(start, end, term.kind, _P_KNOWN, term.of, canon=term.text)
+            for start, end, term in self._index.find(view.text, alone=words)
+        ]
         if names and self._ner is not None and namey(view.text):
-            hits += self._ner.find(view.text)
+            found += self._ner.find(view.text)
+        schemes = [m.span() for m in _SCHEME.finditer(view.text)]
+        hits += [h for h in found if not any(a < h.end and h.start < b for a, b in schemes)]
         out: list[Hit] = []
         for hit in _resolve(hits):
             start, end = view.span(hit.start, hit.end)
@@ -505,6 +590,10 @@ class Detector:
         for p in _REPOS:
             yield from (_group(m, "repo", _P_HOST) for m in p.finditer(text))
         yield from (Hit(m.start(), m.end(), "host", _P_HOST) for m in _HOST.finditer(text))
+        for m in _PUBLIC_HOST.finditer(text):
+            labels = m.group().casefold().split(".")
+            if not any(".".join(labels[i:]) in _PUBLIC_SERVICES for i in range(len(labels) - 1)):
+                yield Hit(m.start(), m.end(), "host", _P_HOST)
         for m in _TENANT_HOST.finditer(text):
             if m.group(1).casefold() not in _SHARED_HOSTS:
                 yield _group(m, "company", _P_HOST)

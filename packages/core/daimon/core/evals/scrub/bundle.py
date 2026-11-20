@@ -28,6 +28,7 @@ from daimon.core.evals.format import (
 from daimon.core.evals.scrub.engine import PAYLOAD, Scrubber
 from daimon.core.evals.scrub.fakes import keyed_hash
 from daimon.core.evals.scrub.files import rebuild
+from daimon.core.evals.scrub.shape import KEEP, Shape, field_shape, shape_of
 from daimon.core.evals.scrub.sweep import Leftover, sweep_blob, sweep_document
 from daimon.core.evals.validate import (
     BundleSource,
@@ -98,8 +99,9 @@ def _obj(value: JsonValue) -> JsonObject:
     return value if isinstance(value, dict) else {}
 
 
-def _pin_key(pin: JsonObject) -> tuple[str, int, str]:
-    return (str(pin.get("id")), int(str(pin.get("revision"))), str(pin.get("hash")))
+def _pin_key(pin: JsonObject) -> tuple[int, str]:
+    """A pin by revision and content hash: its id may be faked by the scrub."""
+    return int(str(pin.get("revision"))), str(pin.get("hash"))
 
 
 def _flag(case: JsonObject, reason: str, detail: str) -> None:
@@ -197,11 +199,12 @@ class _NewBlob:
     state: str
 
 
-def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob]) -> None:
+def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob], shape: Shape = None) -> None:
     """Point blob references (and the attachment or file around them) at the scrubbed blobs."""
+    shape = shape if shape is not None else shape_of(node)
     if isinstance(node, list):
         for item in node:
-            _retarget(item, mapping)
+            _retarget(item, mapping, shape)
     elif isinstance(node, dict):
         blob = node.get("blob")
         new = (
@@ -210,13 +213,13 @@ def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob]) -> None:
             else None
         )
         if new and ({"id", "name", "media_type"} <= node.keys() or "path" in node):
-            if new.state in ("rebuilt", "redacted"):
-                node["state"] = new.state
+            if new.state in ("rebuilt", "redacted") and field_shape(shape, "state") == KEEP:
+                node["state"] = new.state  # attachments and files have one; outputs do not
             for key, value in (("media_type", new.media_type), ("size", new.size)):
                 if key in node:
                     node[key] = value
-        for value in node.values():
-            _retarget(value, mapping)
+        for key, value in node.items():
+            _retarget(value, mapping, field_shape(shape, key))
     for ref in ref_nodes(node):
         if (new := mapping.get(str(ref["sha256"]))) is not None:
             ref["sha256"], ref["size"], ref["media_type"] = new.sha256, new.size, new.media_type
@@ -272,13 +275,13 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
             )
     for doc in documents:
         _retarget(doc, mapping)
-    new_hash: dict[tuple[str, int, str], str] = {}
+    new_hash: dict[tuple[int, str], str] = {}
     suites: list[LoadedSuite] = []
     partial: bool = bool(report.leftovers) or not scrubber.names_checked
     for suite in loaded.suites:
         cases: list[JsonObject] = []
         for case in suite.cases:
-            old = (str(case["id"]), int(str(case["revision"])), str(case.get("hash")))
+            old = _pin_key(case)
             fresh, left = scrub_case(scrubber, case, blobs=scrubbed_blobs)
             new_hash[old] = str(fresh["hash"])
             report.leftovers += left

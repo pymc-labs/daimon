@@ -8,10 +8,13 @@ import json
 import re
 import shutil
 import zipfile
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from daimon.core.evals.bundle import BundleHeader, DirSource, build_files, write_dir
+from daimon.core.evals.format import BlobEntry, SourceInfo, case_hash, sha256_hex
 from daimon.core.evals.from_thread import ThreadRecord, build_cases
 from daimon.core.evals.scrub.detect import Detector, Hit, Ner
 from daimon.core.evals.scrub.engine import Scrubber
@@ -19,7 +22,7 @@ from daimon.core.evals.scrub.entities import KnownEntities, load_entities, terms
 from daimon.core.evals.scrub.fakes import adapt
 from daimon.core.evals.scrub.files import rebuild
 from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, save_map, scrub_path
-from daimon.core.evals.validate import InvalidDocument
+from daimon.core.evals.validate import InvalidDocument, LoadedSuite, validate_bundle
 from faker import Faker
 from PIL import Image
 
@@ -341,3 +344,84 @@ def test_entities_when_yaml_is_broken_then_error_names_no_line(tmp_path: Path) -
     with pytest.raises(ValueError, match="line") as failed:
         load_entities(bad)
     assert "Alice" not in str(failed.value)
+
+
+def test_value_when_bundle_document_then_keys_and_schema_fields_kept() -> None:
+    scrubber = _scrubber(KnownEntities(phrases=["version", "Kestrel Ops"], projects=["relay"]))
+    scrubber.learn({"text": "write to helperbot@corp.example", "project": "weight"})
+    case = {
+        "schema": "daimon.eval.case/1",
+        "world": {"mcp_servers": [{"name": "tools", "kind": "relay"}]},
+        "turn": {"messages": [{"kind": "message", "text": "helperbot owns Kestrel Ops"}]},
+        "ext": {"version": 1, "weight": 2.0, "Kestrel Ops": "a"},
+    }
+    out = scrubber.value(case)
+    assert out["world"] == case["world"], "enums keep their values"
+    assert list(out["ext"])[:2] == ["version", "weight"], "keys keep words names share"
+    assert "Kestrel Ops" not in json.dumps(out) and "helperbot" not in json.dumps(out)
+    suite = scrubber.value({"schema": "daimon.eval.suite/1", "cases": [{"split": "test"}]})
+    assert suite["cases"] == [{"split": "test"}]
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("id d1e3a32d1766 and Jane Roe", "d1e3a32d1766"),  # no digit term from "(+3)"
+        ("PrimRose garden", "PrimRose garden"),  # one-word terms: whole words only
+        ("see https://github.com/x and notes.md", "https://github.com/x and notes.md"),
+    ],
+)
+def test_text_when_word_inside_another_or_url_scheme_then_kept(text: str, kept: str) -> None:
+    entities = KnownEntities.model_validate({"people": ["Jane Roe (+3)", "Rose Dunn"]})
+    scrubber = _scrubber(entities.model_copy(update={"phrases": ["https", "test"]}))
+    out = scrubber.text(text)
+    assert kept in out and "Roe" not in out, out
+
+
+@pytest.mark.parametrize(
+    "real",
+    [
+        "100.90.141.55",
+        "288838c5-de50-80c4-b6fb-f19866be187c",
+        "288838c5de5080c4b6fbf19866be187c",
+        "files.personal-site.co.uk",
+    ],
+)
+def test_text_when_tailnet_ip_hex_id_or_private_host_then_faked_same_shape(real: str) -> None:
+    out = _scrubber().text(f"see {real}/x and docs.google.com")
+    fake = out.split()[1].removesuffix("/x")
+    assert real not in out and "docs.google.com" in out, out
+    if "-" in real and real[0].isdigit() or len(real) == 32:
+        assert re.fullmatch(re.sub(r"[0-9a-f]", "[0-9a-f]", real), fake), fake
+
+
+def test_bundle_when_output_file_rebuilt_and_case_id_faked_then_valid(tmp_path: Path) -> None:
+    loaded = validate_bundle(DirSource(EXAMPLE))
+    assert loaded.manifest is not None
+    data = b"<p>Acme Corp report</p>"
+    blob = BlobEntry(
+        sha256=sha256_hex(data), size=len(data), media_type="text/html", scrub="unscrubbed"
+    )
+    case = {**loaded.suites[0].cases[0], "id": "288838c5-de50-80c4-b6fb-f19866be187c"}
+    case["hash"] = case_hash(case)
+    pin = {"id": case["id"], "revision": 1, "hash": case["hash"]}
+    suite = LoadedSuite({**loaded.suites[0].document, "cases": [pin]}, [case])
+    ref = blob.model_dump(include={"sha256", "size", "media_type"})
+    output = {"id": "o1", "name": "a.html", "media_type": "text/html", "blob": ref}
+    run = loaded.runs[0]
+    items = [{**run.items[0], "case": pin, "outputs": [output]}]
+    header = BundleHeader(
+        id="b", created_at=datetime.now(UTC), source=SourceInfo(kind="converter"),
+        scrub_status="unscrubbed",
+    )  # fmt: skip
+    source = DirSource(EXAMPLE)
+    blobs = {b: source.read(f"blobs/sha256/{b.sha256}") for b in loaded.manifest.blobs}
+    files = build_files(header, [suite], [replace(run, items=items)], {**blobs, blob: data})
+    write_dir(files, tmp_path / "raw")
+    scrub_path(tmp_path / "raw", tmp_path / "out", _scrubber())
+    report = validate_bundle(DirSource(tmp_path / "out"))
+    assert report.ok, report.problems
+    assert (
+        "288838c5"
+        not in (tmp_path / "out" / "suites").joinpath("support-basics", "cases.jsonl").read_text()
+    ), "the case id is faked and its pins follow"
