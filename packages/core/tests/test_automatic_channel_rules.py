@@ -6,12 +6,17 @@ Rooms below are fictional: OPEN reads like any room, NARROW has a computed `insi
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 import structlog.testing
+from anthropic.types.beta import BetaEnvironment
+from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
 from daimon.core import approval_gate, workspace_settings
+from daimon.core import channel_environments as environments
 from daimon.core.access_policy import (
     OPEN_RULE,
     ChannelRule,
@@ -25,8 +30,10 @@ from daimon.core.channel_changes import ChannelActor, Expected, set_access
 from daimon.core.channel_directory import _tags  # pyright: ignore[reportPrivateUsage]
 from daimon.core.channel_environments import (
     _sealed_moves,  # pyright: ignore[reportPrivateUsage]
+    update_needs_confirm,
 )
 from daimon.core.channel_rules import ChannelRuleRefused, set_category_rule, set_channel_rule
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.direct_messages import sealed_among
 from daimon.core.mcp_auth import coding_token_channel
 from daimon.core.permissions import (
@@ -648,3 +655,73 @@ async def test_an_admin_outside_a_narrow_room_cannot_change_its_rule(
     async with db_session_factory() as session:
         policy = await store.load_access_policy(session, tenant_id=tenant.id)
     assert policy.channel_rules == {}
+
+
+async def test_a_later_load_after_a_commit_reads_the_facts_again(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read is kept for one transaction only: facts can turn narrow between two."""
+    _mode(monkeypatch, "on")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4601")
+    await _publish(db_session, tenant.id, open_rooms=(HAND_OWN,))
+    first = await store.load_access_policy(db_session, tenant_id=tenant.id)
+    again = await store.load_access_policy(db_session, tenant_id=tenant.id)
+    assert effective_channel_rule(first, HAND_OWN).readers == "any" and again == first
+    await db_session.commit()
+    now = datetime.now(UTC)
+    await publish_facts(
+        db_session,
+        tenant_id=tenant.id,
+        rooms={HAND_OWN: StoredRoom(RoomFacts(contained=False, narrow=True))},
+        now=now,
+        fresh_until=now + timedelta(minutes=10),
+    )
+    later = await store.load_access_policy(db_session, tenant_id=tenant.id)
+    assert effective_channel_rule(later, HAND_OWN).readers == "inside"
+    await db_session.commit()
+    await _publish(db_session, tenant.id, fresh_for=timedelta(seconds=-5))
+    expired = await store.load_access_policy(db_session, tenant_id=tenant.id)
+    assert effective_channel_rule(expired, HAND_OWN).readers == "inside", "expired: narrow"
+    assert expired.automatic_facts_missing
+
+
+@pytest.mark.parametrize("facts", ["missing", "expired", "fresh"])
+async def test_a_room_in_the_workspace_default_environment_needs_confirmation_without_facts(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, facts: str
+) -> None:
+    """No channel pick at all: an unknown room runs in the workspace default."""
+    _mode(monkeypatch, "on")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id=f"47{facts[:2]}")
+    if facts == "expired":
+        await _publish(db_session, tenant.id, fresh_for=timedelta(seconds=-5))
+    elif facts == "fresh":  # every room known and open
+        now = datetime.now(UTC)
+        await publish_facts(
+            db_session,
+            tenant_id=tenant.id,
+            rooms={OPEN: StoredRoom(RoomFacts(contained=False, narrow=False))},
+            now=now,
+            fresh_until=now + timedelta(minutes=10),
+        )
+    await db_session.commit()
+    policy = await store.load_access_policy(db_session, tenant_id=tenant.id)
+    moves = await _sealed_moves(
+        db_session,
+        policy,
+        tenant_id=tenant.id,
+        default=DEFAULT,
+        change=lambda picks: replace(picks, workspace="open"),
+    )
+    assert moves == (frozenset() if facts == "fresh" else frozenset({"open"}))
+    monkeypatch.setattr(environments, "opens_network", lambda *_: True)
+    environment = cast(
+        "BetaEnvironment", SimpleNamespace(metadata={MA_METADATA_KEY_NAME: "default"})
+    )
+    needs = await update_needs_confirm(
+        db_session,
+        tenant_id=tenant.id,
+        environment=environment,
+        config=cast("BetaCloudConfigParams", {}),
+        default=DEFAULT,
+    )
+    assert needs is (facts != "fresh")

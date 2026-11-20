@@ -203,23 +203,37 @@ async def audience_mode(session: AsyncSession, tenant_id: uuid.UUID) -> str:
     return await read_mode(session, FeaturePlace(tenant_id, "discord"))
 
 
-_Automatic = tuple[dict[str, ChannelRule], bool]
+_Automatic = tuple[dict[str, ChannelRule], bool, bool]
+"""The rules, whether a room with no fact is narrow, and whether the facts are missing."""
 _CACHE_KEY = "audience_automatic_rules"
+_Held = tuple[object, dict[uuid.UUID, _Automatic | None]]
+"""A transaction and what was read inside it."""
 
 
 async def _with_automatic_rules(
     session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
 ) -> TenantAccessPolicy:
     """Attach the computed rules, if the mode is `on`. Off costs one mode read, and a
-    session reads each server once: a later load in it reuses the answer."""
-    cache = cast("dict[uuid.UUID, _Automatic | None]", session.info.setdefault(_CACHE_KEY, {}))
+    transaction reads each server once: a later load in it reuses the answer."""
+    # Valid for one transaction only: a commit or rollback starts a new one, and facts
+    # can expire or turn narrow between them.
+    transaction = session.get_transaction()
+    held = cast(
+        "tuple[object, dict[uuid.UUID, _Automatic | None]] | None", session.info.get(_CACHE_KEY)
+    )
+    if held is None or held[0] is not transaction:
+        held = (transaction, dict[uuid.UUID, _Automatic | None]())
+        session.info[_CACHE_KEY] = held
+    cache = held[1]
     if tenant_id not in cache:
         cache[tenant_id] = await _automatic_rules(session, tenant_id)
     automatic = cache[tenant_id]
     if automatic is None:
         return policy
-    rules, unknown_narrow = automatic
-    return attach_automatic_rules(policy, rules, unknown_narrow=unknown_narrow)
+    rules, unknown_narrow, facts_missing = automatic
+    return attach_automatic_rules(
+        policy, rules, unknown_narrow=unknown_narrow, facts_missing=facts_missing
+    )
 
 
 async def _automatic_rules(session: AsyncSession, tenant_id: uuid.UUID) -> _Automatic | None:
@@ -236,9 +250,9 @@ async def _automatic_rules(session: AsyncSession, tenant_id: uuid.UUID) -> _Auto
             rooms, usable = await _stored_rooms(session, tenant_id)
             _log_shadow(tenant_id, narrow=sum(room.narrow for room in rooms), usable=usable)
         return None
-    rooms, _ = await _stored_rooms(session, tenant_id)
+    rooms, usable = await _stored_rooms(session, tenant_id)
     rules = {room.channel_id: _INSIDE_RULE if room.narrow else OPEN_RULE for room in rooms}
-    return rules, True  # a room with no fact is narrow
+    return rules, True, not usable  # a room with no fact is narrow
 
 
 async def _stored_rooms(

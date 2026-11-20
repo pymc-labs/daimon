@@ -38,6 +38,7 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.permissions import (
     SEALED_REFUSAL,
+    facts_missing,
     home_of,
     limited_among,
     limited_ids,
@@ -521,6 +522,10 @@ async def authorize_environment_pick(
     return EnvironmentPick(decision=decision, needs_confirm=bool(decision) and open_network)
 
 
+_UNKNOWN_ROOM = ""
+"""Stands for a room with no fact and no pick of its own, in `_Picks.runs`."""
+
+
 @dataclass(frozen=True)
 class _Picks:
     """Each channel's own environment, and the workspace default."""
@@ -605,11 +610,16 @@ async def _sealed_moves(
     after = change(before)
     # A picked channel with unknown room facts is narrow: it is sealed too.
     seals = limited_ids(policy) | limited_among(policy, {*before.channels, *after.channels})
-    if not seals:
-        return frozenset()
-    places = await _seal_parents(
-        session, tenant_id=tenant_id, seals=seals, channels={*before.channels, *after.channels}
+    places = (
+        await _seal_parents(
+            session, tenant_id=tenant_id, seals=seals, channels={*before.channels, *after.channels}
+        )
+        if seals
+        else {}
     )
+    if facts_missing(policy):
+        # No room is known: one with no pick of its own runs in the workspace default.
+        places[_UNKNOWN_ROOM] = (None,)
     return frozenset(
         after.runs(seal, parent, default)
         for seal, parents in places.items()
@@ -666,6 +676,8 @@ async def update_needs_confirm(
     picks = await _load_picks(session, tenant_id=tenant_id)
     seals = limited_ids(policy) | limited_among(policy, picks.channels)
     places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=picks.channels)
+    if facts_missing(policy):
+        places[_UNKNOWN_ROOM] = (None,)  # a room with no pick runs in the workspace default
     return any(
         picks.runs(seal, parent, default) == name
         for seal, parents in places.items()

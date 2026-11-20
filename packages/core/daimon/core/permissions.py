@@ -311,6 +311,12 @@ def limited_among(policy: TenantAccessPolicy, ids: Iterable[str]) -> frozenset[s
     return frozenset(i for i in ids if i in limited)
 
 
+def facts_missing(policy: TenantAccessPolicy) -> bool:
+    """Whether the room facts are missing or expired while the audience mode is `on`:
+    no room is known, so a room that runs in the workspace default is narrow too."""
+    return policy.automatic_facts_missing
+
+
 def limited_ids(policy: TenantAccessPolicy) -> frozenset[str]:
     """Every id whose readers are inside or own: channels, Discord threads and
     Slack ``channel:ts`` keys. Lists known rooms only: a Discord room with no fact
@@ -753,6 +759,7 @@ __all__ = [
     "effective_channel_rule",
     "held_to",
     "home_of",
+    "facts_missing",
     "limited_among",
     "limited_ids",
     "limited_under",

@@ -163,6 +163,8 @@ class TenantAccessPolicy(BaseModel):
     )
     # Whether a Discord room with no entry above is narrow: its facts are unknown.
     automatic_unknown_narrow: bool = Field(default=False, exclude=True, repr=False)
+    # Whether the room facts are missing, incomplete or expired: no room is known.
+    automatic_facts_missing: bool = Field(default=False, exclude=True, repr=False)
 
     def __eq__(self, other: object) -> bool:
         """Equal when the stored fields are: a policy rebuilt from a dump carries no
@@ -241,16 +243,26 @@ class TenantAccessPolicy(BaseModel):
         }
 
 
-_AUTOMATIC_KEYS: Final = frozenset({"automatic_channel_rules", "automatic_unknown_narrow"})
+_AUTOMATIC_KEYS: Final = frozenset(
+    {"automatic_channel_rules", "automatic_unknown_narrow", "automatic_facts_missing"}
+)
 
 
 def attach_automatic_rules(
-    policy: TenantAccessPolicy, rules: dict[str, ChannelRule], *, unknown_narrow: bool
+    policy: TenantAccessPolicy,
+    rules: dict[str, ChannelRule],
+    *,
+    unknown_narrow: bool,
+    facts_missing: bool = False,
 ) -> TenantAccessPolicy:
     """The policy with computed rules. The one way to set them: they never pass validation,
     so a stored payload cannot carry them, and a rebuilt policy starts without them."""
     return policy.model_copy(
-        update={"automatic_channel_rules": dict(rules), "automatic_unknown_narrow": unknown_narrow}
+        update={
+            "automatic_channel_rules": dict(rules),
+            "automatic_unknown_narrow": unknown_narrow,
+            "automatic_facts_missing": facts_missing,
+        }
     )
 
 
