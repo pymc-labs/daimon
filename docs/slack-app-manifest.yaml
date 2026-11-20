@@ -46,6 +46,9 @@ features:
     - command: /routines
       description: Scheduled jobs
       should_escape: false
+    - command: /workflows
+      description: Run, pause or open a workflow
+      should_escape: false
     - command: /memory
       description: What the agent remembers
       should_escape: false

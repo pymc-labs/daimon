@@ -641,6 +641,28 @@ async def open_run(
     await edit(place, await start_on_card(env, workflow_id, inputs, test=test, place=place))
 
 
+async def open_pressed(
+    sm: Sessions,
+    settings: Settings,
+    presser: Presser,
+    workflow_id: uuid.UUID,
+    *,
+    test: bool,
+    post: Callable[[PostedCard], Awaitable[ChatPlace]],
+    edit: Callable[[ChatPlace, PostedCard], Awaitable[None]],
+) -> str | None:
+    """`Pressed.start`: open a run with no inputs as the presser; a refusal to tell them."""
+    env = await env_of(sm, settings, presser)
+    if env is None:
+        return UNAVAILABLE
+    try:
+        workflow = await service.get(env, workflow_id)
+    except WorkflowError as err:
+        return str(err)
+    await open_run(env, workflow_id, {}, test=test, name=workflow.name, post=post, edit=edit)
+    return None
+
+
 async def list_for(
     sm: Sessions, settings: Settings, presser: Presser
 ) -> list[views.WorkflowSummary] | str:

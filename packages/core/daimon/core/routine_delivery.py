@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Literal
@@ -926,12 +926,14 @@ async def run_delivery_poller(
     should_stop: Callable[[], bool],
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
     workflow: WorkflowPoster | None = None,
+    run_cards: Callable[[], Awaitable[int]] | None = None,
 ) -> None:
-    """Poll routine posts, and workflow posts with `workflow`, until `should_stop`."""
+    """Poll routine posts, workflow posts with `workflow` and run cards with `run_cards`,
+    until `should_stop`."""
     await run_poller(
         sessionmaker,
         platform=platform,
-        post=JobPoster(post, workflow),
+        post=JobPoster(post, workflow, run_cards),
         should_stop=should_stop,
         interval_s=interval_s,
     )
