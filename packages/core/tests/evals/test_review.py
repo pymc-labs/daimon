@@ -13,6 +13,7 @@ from daimon.core.evals.access import Share, Subject
 from daimon.core.evals.bundle import DirSource, to_zip
 from daimon.core.evals.format import ScoreValue
 from daimon.core.evals.review import (
+    CommentDraft,
     Criterion,
     ReviewService,
     ScoreDraft,
@@ -128,6 +129,23 @@ async def test_blind_task_when_served_then_payload_names_no_arm_model_or_reactio
     ]
     await review.submit(reader, task.id, [*answers, *drafts])
     assert await review.next(reader, f"{run_id}~q2") is None, "the one task is done"
+
+
+async def test_blind_comment_when_made_or_listed_then_it_names_no_author(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    _, review, _, reader = await _world(db_session, db_session_factory)
+    task = await review.next(reader, f"{_RUN}~q2")
+    assert task is not None
+    made = await review.comment(
+        reader, CommentDraft(text="Looks fine.", task_id=task.id, target="A")
+    )
+    [listed] = await review.task_comments(reader, task.id)
+    for comment in (made, listed):
+        payload = comment.model_dump_json(by_alias=True)
+        assert "web:rae" not in payload and _RUN not in payload, "no author or item id"
+        assert comment.author.display_name and comment.author.display_name.startswith("Reviewer")
+    assert made.author == listed.author, "one reviewer keeps one alias in the task"
 
 
 async def test_reviewer_when_queue_is_not_blind_then_the_task_is_blind_anyway(

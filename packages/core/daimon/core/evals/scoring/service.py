@@ -66,8 +66,13 @@ class JudgeRequest(_Out):
     """Set: the person approves the estimate and this spending ceiling, and judging runs."""
 
 
+class JudgeEstimate(Estimate):
+    admin_approval_usd: float
+    """Ceilings above this need an admin to approve them."""
+
+
 class JudgeOutcome(_Out):
-    estimate: Estimate
+    estimate: JudgeEstimate
     ran: bool
     scores: int = 0
     spent_usd: float = 0.0
@@ -259,7 +264,10 @@ class ScoringService:
         items = [i for i in found.items if i.status == "done"]
         try:
             planned = await plan_calls(deps, found.run, config, items, cases, aliases)
-            guess = estimate(planned, batch=deps.batch is not None, at=self._clock())
+            guess = JudgeEstimate(
+                **dict(estimate(planned, batch=deps.batch is not None, at=self._clock())),
+                admin_approval_usd=limit,
+            )
             if cap is None:
                 return JudgeOutcome(estimate=guess, ran=False)
             meter = JudgeMeter(cap_usd=cap)
