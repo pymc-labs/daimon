@@ -15,7 +15,15 @@ import tempfile
 import time
 import uuid
 import zipfile
-from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -38,6 +46,7 @@ from daimon.core.evals.access import (
     suite_role,
 )
 from daimon.core.evals.agents import AgentLookup, agent_lookup
+from daimon.core.evals.blind import arm_labels, arm_names, blind_item_view, is_blind
 from daimon.core.evals.blobs import ObjectStore, blob_path, blob_refs, object_key
 from daimon.core.evals.draft import (
     Complete,
@@ -62,7 +71,9 @@ from daimon.core.evals.format import (
     SourceInfo,
     Suite,
     SuiteDefaults,
+    SuitePin,
     ToolAlias,
+    TranscriptEvent,
     canonical_json,
     case_hash,
     sha256_hex,
@@ -91,7 +102,7 @@ from daimon.core.evals.validate import (
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores import eval_scrub
 from daimon.core.stores import evals as store
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -101,6 +112,7 @@ OFF: Final = "Evals are off here. Ask an admin or an owner to turn them on."
 _SPOOL_BYTES: Final = 8 * 1024 * 1024
 _IMPORT_SECONDS: Final = 120.0
 _UNFINISHED_RUN: Final = frozenset({"draft", "estimated", "approved", "running"})
+_EVENT: Final = TypeAdapter(TranscriptEvent)
 
 
 class EvalRefused(Exception):
@@ -267,36 +279,48 @@ def _label_people(document: JsonObject, secret: str) -> JsonObject:
     return walked
 
 
-def arm_labels(run: Run) -> dict[str, str]:
-    """The neutral name of each arm a blind reviewer sees."""
-    return run.blind_labels or {a.id: f"Arm {n}" for n, a in enumerate(run.arms, start=1)}
+class BlindRun(_Out):
+    """A run as a blind reader sees it: arms only as their neutral labels, and nothing that
+    names a model, an agent, an arm's kind, a cost or who approved it."""
+
+    id: str
+    suite: SuitePin
+    arms: list[str]
+    case_ids: list[str] | None
+    repeats: int
+    status: str
+    origin: str
+    started_at: datetime | None
+    finished_at: datetime | None
 
 
-def blind_run(run: Run) -> Run:
-    """A run as a blind reviewer sees it: arms under their neutral labels, and nothing that
-    names a model, an agent, a cost or who approved it."""
-    labels = arm_labels(run)
-    arms = [Arm(id=n, label=n, kind=a.kind) for a in run.arms if (n := labels.get(a.id, "Arm"))]
-    return Run(
-        id=run.id, suite=run.suite, arms=arms, case_ids=run.case_ids, repeats=run.repeats,
-        status=run.status, origin=run.origin, started_at=run.started_at,
-        finished_at=run.finished_at,
+def blind_run(run: Run) -> BlindRun:
+    return BlindRun(
+        id=run.id, suite=run.suite, arms=sorted(arm_labels(run).values()),
+        case_ids=run.case_ids, repeats=run.repeats, status=run.status, origin=run.origin.kind,
+        started_at=run.started_at, finished_at=run.finished_at,
     )  # fmt: skip
 
 
-def blind_item(document: JsonObject, labels: dict[str, str]) -> JsonObject:
-    """An item as a blind reviewer sees it: only what the agent said and did, under the arm's
-    neutral label. Usage, the enclosure, extensions and the stored transcript are left out."""
-    item = RunItem.model_validate(document)
-    events = item.transcript.events if item.transcript else None
-    quiet = [e.model_copy(update={"model": None, "usage": None}) for e in events or []]
-    blind = RunItem(
-        id=item.id, run_id=item.run_id, case=item.case, arm_id=labels.get(item.arm_id, "Arm"),
-        repeat=item.repeat, status=item.status, error=item.error, started_at=item.started_at,
-        finished_at=item.finished_at, transcript=EventStream(events=quiet) if events else None,
-        chat=item.chat, outputs=item.outputs, world_calls=item.world_calls,
-    )  # fmt: skip
-    return to_document(blind)
+def blind_item(item: RunItem, run: Run, item_id: str) -> RunItem:
+    """An item as a blind reader sees it (`blind_item_view`), under the arm's neutral label."""
+    label = arm_labels(run).get(item.arm_id, "Arm")
+    view = blind_item_view(item, item_id=item_id, label=label, names=arm_names(run))
+    return RunItem.model_validate(view)
+
+
+async def with_transcript(
+    item: RunItem, fetch: Callable[[str], Awaitable[bytes | None]]
+) -> RunItem:
+    """The item with its transcript read from the blob when it is stored there (NDJSON)."""
+    stream = item.transcript
+    if stream is None or stream.events is not None or stream.blob is None:
+        return item
+    data = await fetch(stream.blob.sha256)
+    if data is None:
+        return item
+    events = [_EVENT.validate_json(line) for line in data.splitlines() if line.strip()]
+    return item.model_copy(update={"transcript": EventStream(events=events, blob=stream.blob)})
 
 
 @dataclass
@@ -361,6 +385,17 @@ class EvalService:
         groups = await held_groups(actor, shares)
         role = suite_role(actor, owner_key=suite.owner_key, shares=shares, groups=groups)
         return role if role == "owner" or scrub == "scrubbed" else None
+
+    async def check_on(self, actor: Subject) -> None:
+        """Refuse unless `actor` may use evals here at all."""
+        await self._check_on(actor)
+
+    async def run_access(
+        self, session: AsyncSession, actor: Subject, run_id: str, action: Action
+    ) -> tuple[store.RunRow, SuiteRole]:
+        """A run of the actor's workspace and their role on its suite; refuses without `action`."""
+        found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
+        return await self._run(session, actor, found, action)
 
     async def _suite(
         self, session: AsyncSession, actor: Subject, key: str, action: Action, *, lock: bool = False
@@ -826,19 +861,20 @@ class EvalService:
             )
         return Arm.model_validate(row.document)
 
-    async def run(self, actor: Subject, run_id: str, *, blind: bool = False) -> Run:
+    async def run(self, actor: Subject, run_id: str, *, blind: bool = False) -> Run | BlindRun:
         """A run. Reviewers, and `blind`, get the blind view (`blind_run`)."""
         await self._check_on(actor)
         async with self._sessions() as session:
             found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
             run, role = await self._run(session, actor, found, "view")
         document = Run.model_validate(run.document)
-        return blind_run(document) if blind or role == "reviewer" else document
+        return blind_run(document) if is_blind(role, blind) else document
 
     async def items(
         self, actor: Subject, run_id: str, page: Page, *, blind: bool = False
     ) -> list[RunItemSummary]:
-        """A page of a run's items; reviewers, and `blind`, see arms by their neutral label."""
+        """A page of a run's items; reviewers, and `blind`, see arms by their neutral label and
+        no repeat index."""
         await self._check_on(actor)
         async with self._sessions() as session:
             found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
@@ -846,13 +882,13 @@ class EvalService:
             rows = await store.items_of_run(
                 session, run_id=run.id, offset=page.offset, limit=page.limit
             )
-        labels = arm_labels(Run.model_validate(run.document)) if blind or role == "reviewer" else {}
+        labels = arm_labels(Run.model_validate(run.document)) if is_blind(role, blind) else {}
         return [
             RunItemSummary(
                 id=str(r.id), key=str(r.id) if labels else r.key, case_id=r.case_key,
                 case_revision=r.case_revision,
-                arm_id=labels.get(r.arm_key, "Arm") if labels else r.arm_key, repeat=r.repeat,
-                status=r.status,
+                arm_id=labels.get(r.arm_key, "Arm") if labels else r.arm_key,
+                repeat=0 if labels else r.repeat, status=r.status,
             )
             for r in rows
         ]  # fmt: skip
@@ -871,11 +907,16 @@ class EvalService:
             run, role = await self._run(
                 session, actor, await store.run_by_id(session, row.run_id), "view"
             )
-        document = row.document
-        if blind or role == "reviewer":
-            document = blind_item(document, arm_labels(Run.model_validate(run.document)))
-            document = {**document, "id": str(row.id)}  # the stored id can name the arm
-        return RunItem.model_validate(document)
+        item = RunItem.model_validate(row.document)
+        if not is_blind(role, blind):
+            return item
+        item = await with_transcript(item, lambda sha: self.blob_bytes(actor.tenant_id, sha))
+        return blind_item(item, Run.model_validate(run.document), str(row.id))
+
+    async def blob_bytes(self, tenant_id: uuid.UUID, sha256: str) -> bytes | None:
+        """A blob's bytes wherever they are kept, for services that checked access already."""
+        async with self._sessions() as session:
+            return await self._read_blob(session, tenant_id, sha256)
 
     async def blob(self, actor: Subject, sha256: str) -> tuple[store.BlobRow, bytes]:
         """A blob the actor may read: one a live suite's cases or runs reference, at content

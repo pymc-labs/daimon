@@ -362,6 +362,26 @@ Agent commands never reach them.
 
 What an hour of one eval sandbox pod costs, for run cost reports.
 
+### `DAIMON_EVALS__JUDGE_MODELS`
+
+`list[JudgeModelSetting]` · optional · default unset
+
+The judge panel for eval runs that name none: each model scores each item and the panel
+votes. Every model needs a known price, and none may share a model or a provider with an
+arm it judges. Empty: judging names its models.
+
+### `DAIMON_EVALS__ADMIN_APPROVAL_USD`
+
+`float` · optional · default `25.0`
+
+Eval spending ceilings above this, in USD, need an admin to approve them.
+
+### `DAIMON_EVALS__KAPPA_WARN`
+
+`float` · optional · default `0.4`
+
+A judge whose kappa against human scores is below this is flagged.
+
 ## Long Jobs
 
 Read from `daimon.core.config.LongJobsSettings`. Prefix `DAIMON_LONG_JOBS__`.

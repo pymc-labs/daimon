@@ -63,19 +63,23 @@ def _glob(pattern: str) -> re.Pattern[str]:
     return re.compile(f"^{body}$")
 
 
-def _hits(pattern: str | None, value: str | None) -> bool:
+def glob_matches(pattern: str | None, value: str | None) -> bool:
+    """Whether `value` fits a glob (`*` within one dotted or slashed part, `**` across); a
+    missing pattern fits everything."""
     return pattern is None or (value is not None and bool(_glob(pattern).match(value)))
 
 
 def matches(pattern: CallPattern, call: CanonicalCall) -> bool:
     """Whether `call` fits `pattern`: every field set on the pattern glob-matches."""
-    effect_hit = pattern.effect is None or any(_hits(pattern.effect, e.verb) for e in call.effects)
+    effect_hit = pattern.effect is None or any(
+        glob_matches(pattern.effect, e.verb) for e in call.effects
+    )
     return (
         effect_hit
-        and _hits(pattern.tool, call.tool)
-        and _hits(pattern.server, call.server)
-        and _hits(pattern.service, call.service)
-        and _hits(pattern.surface, call.surface)
+        and glob_matches(pattern.tool, call.tool)
+        and glob_matches(pattern.server, call.server)
+        and glob_matches(pattern.service, call.service)
+        and glob_matches(pattern.surface, call.surface)
     )
 
 

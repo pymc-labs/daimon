@@ -255,6 +255,18 @@
   "POST /api/evals/cases/validate": {
    "tool": "eval_case_validate"
   },
+  "POST /api/evals/comments": {
+   "tool": "eval_comment_add"
+  },
+  "POST /api/evals/queues": {
+   "exempt": "review queue setup is done by a person in the web app or the CLI"
+  },
+  "POST /api/evals/runs/{run_id}/judge": {
+   "tool": "eval_judge_run"
+  },
+  "POST /api/evals/scores": {
+   "tool": "eval_review_submit"
+  },
   "POST /api/evals/suites": {
    "tool": "eval_suite_create"
   },

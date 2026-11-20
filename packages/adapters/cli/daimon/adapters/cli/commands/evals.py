@@ -1,4 +1,4 @@
-"""`daimon evals suites|cases|arms|items|bundle`: evals in a workspace, as the operator.
+"""`daimon evals suites|cases|arms|items|runs|review|bundle`: evals in a workspace, as the operator.
 
 The operator acts as an admin past the `evals` switch. Documents are read and printed as
 JSON. `daimon evals bundle validate` checks a bundle folder, zip or encrypted file offline:
@@ -25,6 +25,9 @@ from daimon.core.evals.bundle import DirSource, open_path, to_zip
 from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.from_thread import ThreadRecord, ThreadSource
+from daimon.core.evals.review import ReviewService, ScoreDraft
+from daimon.core.evals.scoring.client import MuxJudgeClient
+from daimon.core.evals.scoring.service import JudgeRequest, ScoringService
 from daimon.core.evals.scrub.engine import Scrubber
 from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, save_map, scrub_path
 from daimon.core.evals.scrub.sweep import Leftover
@@ -44,17 +47,21 @@ from daimon.core.stores.tenants import get_tenant
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 
-evals_app = typer.Typer(help="Eval suites, cases, arms, run items and bundles.")
+evals_app = typer.Typer(help="Eval suites, cases, arms, run items, results, review and bundles.")
 suites_app = typer.Typer(help="Eval suites.")
 cases_app = typer.Typer(help="Cases of an eval suite.")
 arms_app = typer.Typer(help="Arms: the agent setups a run compares.")
 items_app = typer.Typer(help="Items of an eval run.")
+runs_app = typer.Typer(help="Compare and judge eval runs.")
+review_app = typer.Typer(help="Review tasks: take the next one, submit scores.")
 bundle_app = typer.Typer(help="Validate, export and import bundles.")
 for name, sub in (
     ("suites", suites_app),
     ("cases", cases_app),
     ("arms", arms_app),
     ("items", items_app),
+    ("runs", runs_app),
+    ("review", review_app),
     ("bundle", bundle_app),
 ):
     evals_app.add_typer(sub, name=name)
@@ -83,6 +90,7 @@ _SALT = typer.Option(
 )
 _NER = typer.Option("--ner-model", help="spaCy model for names; empty to use known names only.")
 _JOBS = typer.Option("--jobs", min=1, help="Processes that run the names model, each loading it.")
+_DRAFTS = TypeAdapter(list[ScoreDraft])
 
 
 class _Failed(DaimonError):
@@ -113,13 +121,10 @@ def _read_json(path: Path) -> JsonObject:
     return document  # pyright: ignore[reportUnknownVariableType]
 
 
-def _run(ctx: typer.Context, work: Callable[[EvalService, Subject], Awaitable[object]]) -> None:
-    _run_rt(ctx, lambda s, a, _rt: work(s, a))
-
-
-def _run_rt(
+def _serve[S](
     ctx: typer.Context,
-    work: Callable[[EvalService, Subject, CliRuntime], Awaitable[object]],
+    make: Callable[[CliRuntime], S],
+    work: Callable[[S, Subject], Awaitable[object]],
 ) -> None:
     selector: TenantSelector | None = ctx.obj
 
@@ -139,12 +144,26 @@ def _run_rt(
                 operator=True,
             )
             try:
-                service = eval_service(rt.sessionmaker, rt.settings, rt.anthropic)
-                _print(await work(service, actor, rt))
+                _print(await work(make(rt), actor))
             except EvalRefused as exc:
                 raise _Failed("; ".join((exc.message, *exc.problems))) from None
 
     run_cli(go(), console=_console)
+
+
+def _evals(rt: CliRuntime) -> EvalService:
+    return eval_service(rt.sessionmaker, rt.settings, rt.anthropic)
+
+
+def _run(ctx: typer.Context, work: Callable[[EvalService, Subject], Awaitable[object]]) -> None:
+    _serve(ctx, _evals, work)
+
+
+def _run_rt(
+    ctx: typer.Context,
+    work: Callable[[EvalService, Subject, CliRuntime], Awaitable[object]],
+) -> None:
+    _serve(ctx, lambda rt: rt, lambda rt, a: work(_evals(rt), a, rt))
 
 
 @suites_app.command("list")
@@ -303,6 +322,67 @@ def items_list(ctx: typer.Context, run_id: str, offset: int = 0, limit: int = 50
 @items_app.command("show")
 def items_show(ctx: typer.Context, item_id: str) -> None:
     _run(ctx, lambda s, a: s.item(a, item_id))
+
+
+def _scoring(rt: CliRuntime) -> ScoringService:
+    return ScoringService(
+        rt.sessionmaker, rt.settings, _evals(rt), client=MuxJudgeClient(rt.anthropic)
+    )
+
+
+@runs_app.command("compare")
+def runs_compare(
+    ctx: typer.Context,
+    run_id: str,
+    arm: Annotated[list[str] | None, typer.Option("--arm", help="Only these arms.")] = None,
+    blind: bool = False,
+) -> None:
+    """Show the arms side by side, case by case."""
+    _serve(ctx, _scoring, lambda s, a: s.compare(a, run_id, arms=arm, blind=blind))
+
+
+@runs_app.command("judge")
+def runs_judge(
+    ctx: typer.Context,
+    run_id: str,
+    request: Annotated[Path | None, typer.Option("--request", help="JSON judge request.")] = None,
+    approve: Annotated[
+        float | None,
+        typer.Option("--approve", help="Run the judges, spending at most this many USD."),
+    ] = None,
+) -> None:
+    """Estimate judging a run with models; with --approve, run it up to that ceiling."""
+    body = JudgeRequest.model_validate(_read_json(request) if request else {})
+    ask = body.model_copy(update={"approve_cap_usd": approve})
+    _serve(ctx, _scoring, lambda s, a: s.judge(a, run_id, ask))
+
+
+def _review(rt: CliRuntime) -> ReviewService:
+    return ReviewService(rt.sessionmaker, _evals(rt))
+
+
+@review_app.command("queues")
+def review_queues(ctx: typer.Context) -> None:
+    """List the open review queues you may work."""
+    _serve(ctx, _review, lambda s, a: s.my_queues(a))
+
+
+@review_app.command("next")
+def review_next(ctx: typer.Context, queue: str) -> None:
+    """Take the next review task of a queue (`run~queue`)."""
+    _serve(ctx, _review, lambda s, a: s.next(a, queue))
+
+
+@review_app.command("submit")
+def review_submit(ctx: typer.Context, task_id: str, scores: Path) -> None:
+    """Submit scores for a task, from a JSON list of score drafts."""
+    parsed = _DRAFTS.validate_json(scores.read_bytes())
+
+    async def work(s: ReviewService, a: Subject) -> str:
+        await s.submit(a, task_id, parsed)
+        return "saved"
+
+    _serve(ctx, _review, work)
 
 
 @bundle_app.command("validate")

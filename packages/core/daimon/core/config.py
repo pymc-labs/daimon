@@ -2926,6 +2926,14 @@ class ComputeSettings(BaseModel):
     )
 
 
+class JudgeModelSetting(BaseModel):
+    backend: str | None = Field(
+        default=None, description="Provider that serves the model. Unset: the default one."
+    )
+    model: str = Field(description="Model id.")
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
 class EvalsSettings(BaseModel):
     signing_key: SecretStr | None = Field(
         default=None,
@@ -3045,6 +3053,25 @@ class EvalsSettings(BaseModel):
         ge=0,
         allow_inf_nan=False,
         description="What an hour of one eval sandbox pod costs, for run cost reports.",
+    )
+    judge_models: list[JudgeModelSetting] = Field(
+        default_factory=list[JudgeModelSetting],
+        description=(
+            "The judge panel for eval runs that name none: each model scores each item and the "
+            "panel votes. Every model needs a known price, and none may share a model or a "
+            "provider with an arm it judges. Empty: judging names its models."
+        ),
+    )
+    admin_approval_usd: float = Field(
+        default=25.0,
+        gt=0,
+        description="Eval spending ceilings above this, in USD, need an admin to approve them.",
+    )
+    kappa_warn: float = Field(
+        default=0.4,
+        ge=-1,
+        le=1,
+        description="A judge whose kappa against human scores is below this is flagged.",
     )
 
 

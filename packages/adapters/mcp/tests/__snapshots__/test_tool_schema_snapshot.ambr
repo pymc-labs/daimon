@@ -4072,6 +4072,303 @@
         'type': 'object',
       }),
     }),
+    'eval_comment_add': dict({
+      'description': 'Comment on an eval item or case, or from inside a review task by column letter.',
+      'parameters': dict({
+        '$defs': dict({
+          'Anchor': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'cells': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'element': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'end': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'item_id': dict({
+                'type': 'string',
+              }),
+              'page': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'quote': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'ref': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'region': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/Region',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'sheet': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'start': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'target': dict({
+                'enum': list([
+                  'message',
+                  'tool_call',
+                  'world_call',
+                  'output',
+                  'page',
+                  'image_region',
+                  'table_range',
+                  'text_range',
+                  'card_element',
+                  'diff_hunk',
+                ]),
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'target',
+              'item_id',
+            ]),
+            'type': 'object',
+          }),
+          'CommentDraft': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'anchors': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/Anchor',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'case_id': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'item_id': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'parent_id': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'run_id': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'target': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'task_id': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'text': dict({
+                'minLength': 1,
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'text',
+            ]),
+            'type': 'object',
+          }),
+          'Region': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'h': dict({
+                'type': 'number',
+              }),
+              'w': dict({
+                'type': 'number',
+              }),
+              'x': dict({
+                'type': 'number',
+              }),
+              'y': dict({
+                'type': 'number',
+              }),
+            }),
+            'required': list([
+              'x',
+              'y',
+              'w',
+              'h',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'comment': dict({
+            '$ref': '#/$defs/CommentDraft',
+          }),
+        }),
+        'required': list([
+          'comment',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_compare': dict({
+      'description': '''
+        Compare the arms of an eval run side by side, case by case, with each item's replies
+        and scores. `blind` hides arm and model names behind letters and shuffles the columns.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'arms': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'blind': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'run_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'run_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'eval_item_get': dict({
       'description': '''
         Read one eval run item: its transcript, calls and outcome. `blind` hides the arm
@@ -4120,6 +4417,471 @@
         }),
         'required': list([
           'run_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_judge_run': dict({
+      'description': '''
+        Estimate what judging an eval run with models would cost. Never runs the judges:
+        a person approves the estimate and a spending ceiling on the evals page or in the CLI.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'JudgeRequest': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'aggregate': dict({
+                'default': 'majority',
+                'enum': list([
+                  'majority',
+                  'mean',
+                  'all',
+                ]),
+                'type': 'string',
+              }),
+              'approve_cap_usd': dict({
+                'anyOf': list([
+                  dict({
+                    'exclusiveMinimum': 0,
+                    'type': 'number',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'batch': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+              'id': dict({
+                'default': 'judge',
+                'type': 'string',
+              }),
+              'kind': dict({
+                'default': 'rubric',
+                'enum': list([
+                  'rubric',
+                  'pairwise',
+                  'reference',
+                ]),
+                'type': 'string',
+              }),
+              'models': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/ModelChoice',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'ModelChoice': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'backend': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'effort': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'low',
+                      'medium',
+                      'high',
+                      'xhigh',
+                      'max',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'model': dict({
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'model',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'request': dict({
+            'anyOf': list([
+              dict({
+                '$ref': '#/$defs/JudgeRequest',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'run_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'run_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_review_next': dict({
+      'description': '''
+        Get your next review task from a queue (`run~queue`), or none when none is left.
+        The task is yours for 30 minutes. Columns are named A, B... by place; in a blind queue
+        nothing names an arm or a model.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'queue': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'queue',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_review_queues': dict({
+      'description': 'List the open eval review queues you may work, across every run you review.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'eval_review_submit': dict({
+      'description': '''
+        Submit your scores for a review task: one per criterion the task asks for, naming
+        the column (A, B...) each is about. Closes the task for you.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'Anchor': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'cells': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'element': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'end': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'item_id': dict({
+                'type': 'string',
+              }),
+              'page': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'quote': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'ref': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'region': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/Region',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'sheet': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'start': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'target': dict({
+                'enum': list([
+                  'message',
+                  'tool_call',
+                  'world_call',
+                  'output',
+                  'page',
+                  'image_region',
+                  'table_range',
+                  'text_range',
+                  'card_element',
+                  'diff_hunk',
+                ]),
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'target',
+              'item_id',
+            ]),
+            'type': 'object',
+          }),
+          'Region': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'h': dict({
+                'type': 'number',
+              }),
+              'w': dict({
+                'type': 'number',
+              }),
+              'x': dict({
+                'type': 'number',
+              }),
+              'y': dict({
+                'type': 'number',
+              }),
+            }),
+            'required': list([
+              'x',
+              'y',
+              'w',
+              'h',
+            ]),
+            'type': 'object',
+          }),
+          'ScoreDraft': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'anchors': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/Anchor',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'criterion': dict({
+                'type': 'string',
+              }),
+              'rationale': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'supersedes': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'target': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'value': dict({
+                '$ref': '#/$defs/ScoreValue',
+              }),
+            }),
+            'required': list([
+              'criterion',
+              'value',
+            ]),
+            'type': 'object',
+          }),
+          'ScoreValue': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'label': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'pass': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'preference': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'a',
+                      'b',
+                      'tie',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'score': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'number',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'unknown': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'boolean',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'scores': dict({
+            'items': dict({
+              '$ref': '#/$defs/ScoreDraft',
+            }),
+            'type': 'array',
+          }),
+          'task_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'task_id',
+          'scores',
         ]),
         'type': 'object',
       }),
