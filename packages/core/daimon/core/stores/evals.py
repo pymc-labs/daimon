@@ -142,6 +142,7 @@ class ItemRow(_Row):
     arm_key: str
     repeat: int
     status: str
+    attempts: int
     document: Document
 
 
@@ -745,8 +746,9 @@ async def update_run(
     session: AsyncSession, *, run_id: uuid.UUID, change: Callable[[Document], Document]
 ) -> RunRow:
     """Change a run's document under a row lock, so concurrent writers (judging, the runner)
-    never lose each other's spend; the status and spend columns follow the document."""
-    row = await session.get(EvalRun, run_id, with_for_update=True)
+    never lose each other's spend; the status and spend columns follow the document. The row
+    is read again under the lock: one this session loaded earlier may be stale."""
+    row = await session.get(EvalRun, run_id, with_for_update=True, populate_existing=True)
     if row is None:
         raise LookupError(run_id)
     document = change(row.document)

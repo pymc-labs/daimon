@@ -9,7 +9,7 @@ import json
 import re
 import tarfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -18,9 +18,11 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, ToolResultBlockParam
+from daimon.core._models import EvalRun
 from daimon.core.config import McpSettings, SelfhostedBillingSettings, SelfhostedModelPrice
 from daimon.core.confirmation import ConfirmationPrompt
 from daimon.core.credential_requests import mint_request_token
+from daimon.core.evals import spend
 from daimon.core.evals.access import Subject
 from daimon.core.evals.chat.cards import EvalCardNotice, press_eval_card
 from daimon.core.evals.chat.events import ChatLog
@@ -212,6 +214,31 @@ async def test_cap_when_next_item_would_pass_it_then_run_is_partial_after_the_fi
     run = await runs.status(alex, run_id)
     assert isinstance(run, Run) and run.status == "partial", run.status
     assert await run_next(deps) is False
+
+
+async def test_update_run_when_another_worker_settled_since_the_read_then_no_spend_is_lost(
+    db_committing_engine: AsyncEngine, db_clean: None
+) -> None:
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions() as db_session:
+        _, alex, run_id, _ = await _start(db_session, sessions, repeats=1, commit=True)
+    async with sessions() as session:
+        found = await store.run_by_key(session, tenant_id=alex.tenant_id, key=run_id)
+        assert found is not None, "the run is stored"
+        # The session still holds the row it read, as one with pending changes does.
+        held = await session.get(EvalRun, found.id)
+
+        def add(usd: float) -> Callable[[JsonObject], JsonObject]:
+            return lambda d: to_document(spend.add_spend(Run.model_validate(d), "agent", usd))
+
+        # Another worker settles $3 after this session read the run, before it locks it.
+        async with sessions.begin() as other:
+            await store.update_run(other, run_id=found.id, change=add(3.0))
+        updated = await store.update_run(session, run_id=found.id, change=add(2.0))
+        await session.commit()
+    assert held is not None and updated.document["spend"]["total_usd"] == 5.0, (
+        "both settlements count"
+    )
 
 
 class FakePods:
