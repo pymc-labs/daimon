@@ -160,6 +160,7 @@ async def test_a_blank_workflow_is_drafted_published_and_run_to_the_end(rig: Rig
 
         detail = (await r.client.get(f"/api/workflows/runs/{run.json()['id']}")).json()
         assert [s["key"] for s in detail["steps"]] == ["done"], "the run page lists its steps"
+        assert detail["untrusted_inputs"] is True, "a manual run's inputs are always untrusted"
         assert detail["outcome"] == "nothing_to_do", (
             "a Finish with nothing to deliver is a quiet end"
         )

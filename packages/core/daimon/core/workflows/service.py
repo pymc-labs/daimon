@@ -839,10 +839,9 @@ async def start(
     spec = workflow.draft_spec if test is not None else (live.spec if live else workflow.draft_spec)
     pinned_from = uuid.UUID(test["pinned_from"]) if test and test.get("pinned_from") else None
     pins = await _pins(env, pinned_from, test.get("pinned") or []) if pinned_from and test else {}
-    # A manual run runs as whoever pressed Run, under the publisher's grants; inputs from
-    # anyone but the publisher are untrusted.
+    # A manual run runs as whoever pressed Run, under the publisher's grants. Its inputs are
+    # untrusted whoever typed them: the publisher's grants never vouch for a form.
     run_as = env.who.account_id
-    trusted = live is not None and test is None and live.published_by_account_id == run_as
     result = await runs.start_run(
         env.sm,
         env.settings,
