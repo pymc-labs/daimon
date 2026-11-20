@@ -55,6 +55,7 @@ def _mode_table(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("daimon.core.turn.admission.audience_mode", mode)
     monkeypatch.setattr("daimon.core.channel_audience.audience_mode", mode)
+    monkeypatch.setattr("daimon.core.host_memory.audience_mode", mode)
 
 
 async def _mode(db_session: AsyncSession, tenant: TenantRow, value: str) -> None:
@@ -175,6 +176,7 @@ async def test_modes_off_and_shadow_hold_nothing_and_shadow_logs(
     if mode == "off":
         assert shadow == []
         return
+    shadow = [e for e in shadow if e["kind"] == "turn_held"]
     assert [(e["kind"], e["channel_id"], e["reason"]) for e in shadow] == [
         ("turn_held", ROOM, "room_contained")
     ]
@@ -427,7 +429,9 @@ async def test_a_mode_off_mention_turn_reads_the_mode_once_and_no_audience_rows(
     real = _real_audience_mode
 
     async def counting(*args: object, **kwargs: object) -> str:
-        reads.append("mode")
+        # The policy's own per-transaction read (`stores.access_policy`) has no channel.
+        if isinstance(args[1], FeaturePlace) and args[1].channel_id is not None:
+            reads.append("mode")
         return await real(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
     monkeypatch.setattr("daimon.core.turn.admission.audience_mode", counting)
@@ -475,3 +479,38 @@ async def test_admission_works_out_the_standing_in_its_own_transaction(
 
     assert outsider.hold is not None and outsider.hold.client
     assert internal.hold is None
+
+
+@pytest.mark.parametrize(("mode", "read_only"), [("off", False), ("shadow", False), ("on", True)])
+async def test_a_dm_turns_memory_is_read_only_only_in_mode_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mode: str,
+    read_only: bool,
+) -> None:
+    """The one audience rule (`audience_memory_read_only`) reaches a DM's mounted memory."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, mode)
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await db_session.commit()
+    deps = _deps(
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
+    )
+
+    dm = await admit_chat(
+        deps,
+        tenant,
+        platform="discord",
+        external_user_id=USER,
+        channel_id="dm-1",
+        is_dm=True,
+        role=Role.USER,
+        verified_membership=True,
+        now=_NOW,
+    )
+
+    assert dm.memory_read_only is read_only

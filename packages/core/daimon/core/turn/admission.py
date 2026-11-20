@@ -2663,9 +2663,19 @@ async def _dm_memory_read_only(deps: TurnDeps, grant: AdmissionGrant) -> bool:
     workspace-wide setting, so the platform only has to be one that offers it."""
     if not grant.is_dm:
         return False
+    # Lazy: host_memory reaches the rule views, which import the turn package.
+    from daimon.core.host_memory import audience_memory_read_only
+
     place = FeaturePlace(grant.tenant_id, "discord")
     async with deps.sessionmaker() as session:
-        return (await feature_in(session, None, place, "dm_memory_read_only")).on
+        setting = (await feature_in(session, None, place, "dm_memory_read_only")).on
+        # The audience mode makes a DM's shared memory read-only too: the one rule.
+        return setting or await audience_memory_read_only(
+            session,
+            place,
+            agent=next((name for name in grant.agent.names if name), None),
+            already_read_only=setting,
+        )
 
 
 def _memory_read_only(
