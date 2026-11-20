@@ -14,8 +14,10 @@ from datetime import UTC, datetime
 from typing import Final, Literal
 
 from daimon.core.authz import Subject
+from daimon.core.channel_audience import audience_mode, requester_standing
 from daimon.core.config import WebProvider
 from daimon.core.errors import UserFacingError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.hub_identity import resolve_hub_tenants
 from daimon.core.permissions import WEB_PLACE_PREFIX
 from daimon.core.spend_gate import SpendPerson, spend_person_of_account
@@ -317,13 +319,31 @@ async def principal_of(
     """A linked chat account if the person has one, else their own `web` principal."""
     platform, external_id = await linked_identity(session, person)
     visitor = person.kind == "visitor"
+    org = RequesterOrg.OTHER if visitor else RequesterOrg.HOST
+    if not visitor and platform == "discord":
+        org = await _linked_member_standing(session, person, external_id)
     return WebPrincipal(
         platform=platform,
         external_id=external_id,
         role=Role.ADMIN if role in ("owner", "admin") else Role.USER,
-        org=RequesterOrg.OTHER if visitor else RequesterOrg.HOST,
+        org=org,
         home_id=f"invite:{person.invite_id}" if visitor else None,
         groups=groups,
+    )
+
+
+async def _linked_member_standing(
+    session: AsyncSession, person: WebPersonRow, external_id: str
+) -> RequesterOrg:
+    """OUTSIDER for a member linked to a Discord account with no internal role, in a server
+    whose `audience_hold` is `on`; HOST otherwise. The web has no Discord client, so the
+    member mirror is the only source: a member it cannot say anything about is an outsider
+    here, as in `requester_standing`."""
+    mode = await audience_mode(session, FeaturePlace(person.tenant_id, "discord"))
+    if mode != "on":
+        return RequesterOrg.HOST
+    return await requester_standing(
+        session, tenant_id=person.tenant_id, user_id=external_id, mode=mode
     )
 
 

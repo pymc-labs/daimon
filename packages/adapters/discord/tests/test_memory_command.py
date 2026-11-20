@@ -61,6 +61,7 @@ async def _setup(db_session, db_session_factory, *, seed: dict[str, str]):
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.anthropic = client
     runtime.sessionmaker = db_session_factory
+    runtime.turn_deps = MagicMock(membership_resolver=None)
     # deployment_default supplies agent_name when no channel/tenant override exists
     from daimon.core.scope import DeploymentDefault
 

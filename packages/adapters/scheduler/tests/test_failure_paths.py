@@ -176,3 +176,92 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
         assert saved.last_error == ("owner_busy" if case == "dm_busy" else "execution_failed")
         assert saved.delivery_status is None
         assert saved.delivery_payload is None
+
+
+@pytest.mark.parametrize(
+    ("owner_roles", "standing"), [(("9002",), "outsider"), (("9001",), "host")]
+)
+async def test_a_dm_routine_fire_passes_the_owners_current_standing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    owner_roles: tuple[str, ...],
+    standing: str,
+) -> None:
+    """An owner who lost the internal role starts no private turn from a routine."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    async def mode_on(*_a: object, **_k: object) -> str:
+        return "on"
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", mode_on)
+    now = datetime.now(UTC)
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424243")
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="old_agent",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        next_fire_at=now - timedelta(seconds=1),
+        destination_kind="dm",
+        destination_id="123",
+        source_provenance_known=True,
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(internal_role_ids=("9001",))
+    )
+    await db_session.commit()
+    settings = _make_test_settings(monkeypatch).model_copy(
+        update={"direct_message_policies": {tenant.id: DirectMessagePolicy(mode="members")}}
+    )
+
+    async def member(*args: Any, **kwargs: Any) -> Membership:
+        return Membership(is_member=True, role_ids=owner_roles)
+
+    seen: list[str] = []
+
+    async def dm_turn(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        seen.append(kwargs["requester_org"].value)
+        return SimpleNamespace(text="ok", session_id="ses", producing_agent_id="old_agent")
+
+    async with AsyncAnthropic(api_key="offline") as client:
+        fire = await _build_fire(
+            client=client,
+            sm=db_session_factory,
+            settings=settings,
+            deployment_default=DeploymentDefault(),
+            resolver_cache=new_resolver_cache(),
+            membership_resolver=CachedMembershipResolver(member),
+        )
+        with (
+            unittest.mock.patch(
+                "daimon.adapters.scheduler.main.resolve_agent", return_value="old_agent"
+            ),
+            unittest.mock.patch(
+                "daimon.adapters.scheduler.main.resolve_environment", return_value="env"
+            ),
+            unittest.mock.patch(
+                "daimon.adapters.scheduler.main.run_dm_routine", side_effect=dm_turn
+            ),
+            unittest.mock.patch("daimon.core.routine_files.poll_output_files", return_value=[]),
+        ):
+            await run_one_tick(
+                now=now,
+                sm=db_session_factory,
+                fire=fire,
+                max_age=timedelta(minutes=15),
+                max_concurrent_fires=1,
+                dispatch_timeout_s=10,
+                wait_for_completion=True,
+            )
+    assert seen == [standing]

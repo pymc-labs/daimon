@@ -70,3 +70,67 @@ def test_only_a_host_member_is_not_a_client_on_the_web(org: RequesterOrg, client
         platform="discord", external_id="u-1", role=Role.USER, org=org, home_id=None
     )
     assert principal.subject.client is client
+
+
+@pytest.mark.parametrize(
+    ("mirror_roles", "mode", "org"),
+    [
+        (["9002"], "on", RequesterOrg.OUTSIDER),
+        (None, "on", RequesterOrg.OUTSIDER),
+        (["9001"], "on", RequesterOrg.HOST),
+        (["9002"], "shadow", RequesterOrg.HOST),
+        (["9002"], "off", RequesterOrg.HOST),
+    ],
+)
+async def test_a_linked_member_with_no_internal_role_is_an_outsider_on_the_web_in_mode_on(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    mirror_roles: list[str] | None,
+    mode: str,
+    org: RequesterOrg,
+) -> None:
+    """The hub treats an outsider as a client, so every private surface refuses them."""
+    from datetime import UTC, datetime
+
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.authz import Action, Surface, authorize
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.workspace_members import upsert_member
+    from daimon.core.web_identity import principal_of
+    from daimon.testing.factories import make_account, make_platform_principal, make_web_person
+
+    async def fake_mode(*_a: object, **_k: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", fake_mode)
+    monkeypatch.setattr("daimon.core.web_identity.audience_mode", fake_mode)
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g-web")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="8123", tenant=tenant, account=account
+    )
+    person = await make_web_person(db_session, tenant=tenant, account=account)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(internal_role_ids=("9001",))
+    )
+    await upsert_member(
+        db_session,
+        tenant_id=tenant.id,
+        platform_user_id="8123",
+        is_admin=False,
+        now=datetime.now(UTC),
+        role_ids=mirror_roles,
+    )
+
+    principal = await principal_of(db_session, person, "member")
+
+    assert principal.org is org
+    if org is RequesterOrg.OUTSIDER:
+        assert principal.subject.client
+        for surface in (Surface.HUB, Surface.AGENT_CHAT):
+            assert not authorize(
+                TenantAccessPolicy(),
+                subject=principal.subject,
+                action=Action.START_TURN,
+                surface=surface,
+            )

@@ -989,6 +989,7 @@ async def test_a_dm_routine_runs_to_the_unattended_limit(db_session_factory, mon
 
     from daimon.core import direct_messages
     from daimon.core.direct_messages import run_dm_routine
+    from daimon.core.turn_hold import RequesterOrg
     from daimon.testing.turn_fakes import deps_for
 
     class _Bound(Exception):
@@ -1012,6 +1013,7 @@ async def test_a_dm_routine_runs_to_the_unattended_limit(db_session_factory, mon
             prompt="seed",
             source=None,
             budget_channel_id=None,
+            requester_org=RequesterOrg.HOST,
         )
     deadline = bind.await_args.kwargs["deadline"]
     assert (

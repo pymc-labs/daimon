@@ -247,8 +247,14 @@ async def _automatic_rules(session: AsyncSession, tenant_id: uuid.UUID) -> _Auto
     if mode == "shadow":
         # Compute and log, at most once a minute for each server; enforce nothing.
         if _shadow_due(tenant_id):
-            rooms, usable = await _stored_rooms(session, tenant_id)
-            _log_shadow(tenant_id, narrow=sum(room.narrow for room in rooms), usable=usable)
+            # Shadow enforces nothing: a failed facts read is logged, never a refusal.
+            try:
+                async with session.begin_nested():
+                    rooms, usable = await _stored_rooms(session, tenant_id)
+            except Exception:
+                log.warning("audience.shadow_facts_failed", tenant_id=str(tenant_id), exc_info=True)
+            else:
+                _log_shadow(tenant_id, narrow=sum(room.narrow for room in rooms), usable=usable)
         return None
     rooms, usable = await _stored_rooms(session, tenant_id)
     rules = {room.channel_id: _INSIDE_RULE if room.narrow else OPEN_RULE for room in rooms}
