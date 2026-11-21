@@ -50,7 +50,7 @@ from daimon.core.workflows.spec import (
     parse_duration,
     parse_spec,
 )
-from daimon.core.workflows.taint import Catalog, node_writes, tainted_steps
+from daimon.core.workflows.taint import Catalog, node_writes, offers, tainted_steps
 from daimon.core.workflows.unattended import bound_by
 from pydantic import BaseModel, JsonValue, ValidationError
 
@@ -276,7 +276,7 @@ def _check_node(
                 report.error("limit", "An agent step runs at most 45 minutes", node_id)
         case CodeNode() if node.timeout and parse_duration(node.timeout) > MAX_CODE_TIMEOUT:
             report.error("limit", "A code step runs at most 60 minutes", node_id)
-        case ActionNode() if catalog is not None and node.tool not in catalog.tools:
+        case ActionNode() if catalog is not None and not offers(catalog.tools, node.tool):
             report.error("unknown_tool", f"Unknown tool: {node.tool}", node_id)
         case ApprovalNode():
             _check_approval(spec, node_id, node, report)
@@ -294,7 +294,7 @@ def _check_node(
             if (
                 isinstance(inner, ActionNode)
                 and catalog is not None
-                and inner.tool not in catalog.tools
+                and not offers(catalog.tools, inner.tool)
             ):
                 report.error("unknown_tool", f"Unknown tool: {inner.tool}", node_id)
             if (node.concurrency or 1) > _COSTLY_CONCURRENCY and isinstance(inner, AgentNode):
@@ -319,7 +319,7 @@ def _check_agent(
         report.error("unknown_agent", f"Unknown agent: {agent}", node_id)
         return
     for tool in node.tools if isinstance(node.tools, list) else []:
-        if tool not in catalog.agents[agent]:
+        if not offers(catalog.agents[agent], tool):
             report.error("unknown_tool", f"{agent} cannot call {tool}", node_id)
 
 

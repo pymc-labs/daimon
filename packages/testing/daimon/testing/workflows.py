@@ -37,6 +37,7 @@ def ma_agents_with(
     """One agent per key, each with these `server/tool` MCP tools; `tenant_id` tags them for
     a platform listing."""
     allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    off = {**allow, "enabled": False}  # exactly these tools, no `server/*`
     return [
         ma_agent(
             id=f"agent_{key}",
@@ -46,7 +47,7 @@ def ma_agents_with(
                 {
                     "type": "mcp_toolset",
                     "mcp_server_name": server,
-                    "default_config": allow,
+                    "default_config": off,
                     "configs": [
                         {"name": t.split("/", 1)[1], **allow}
                         for t in ids

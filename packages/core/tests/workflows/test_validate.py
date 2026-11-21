@@ -11,11 +11,13 @@ import pytest
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.workflows import service
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.catalog import spec_agent_tools, tool_catalog
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import parse_spec
 from daimon.core.workflows.taint import Catalog, catalog_of, tool_facts
 from daimon.core.workflows.unattended import exposed_at_run
-from daimon.core.workflows.validate import validate_document
+from daimon.core.workflows.validate import validate_document, validate_spec
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.workflows import NOW, agents_with, make_world
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,3 +102,37 @@ async def test_every_validation_classes_the_agents_tools(db_session: AsyncSessio
     spec = parse_spec(draft.spec)
     run_catalog = catalog_of(OPEN_TOOL_SAFETY, tools)
     assert exposed_at_run(spec, "read", untrusted_inputs=False, catalog=run_catalog), "at run"
+
+
+async def test_a_toolset_on_by_default_offers_its_unlisted_tools() -> None:
+    """A server attached with only `default_config` (as `mcp_attach` does) enables every tool:
+    its reads taint the agent's writes, and a spec may name its tools."""
+    on = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    gmail = {"type": "mcp_toolset", "mcp_server_name": "gmail", "default_config": on, "configs": []}
+
+    async def agents() -> list[Any]:
+        return [ma_agent(id="agent_triage", name="triage", tools=[gmail])]
+
+    catalog = await tool_catalog(OPEN_TOOL_SAFETY, agents)
+    spec = parse_spec(
+        {
+            "schema": "daimon.workflow/v1",
+            "name": "triage",
+            "start": "read",
+            "nodes": {
+                "read": {
+                    "kind": "agent",
+                    "agent": "triage",
+                    "instructions": "x",
+                    "writes": "allow",
+                    "next": "send",
+                },
+                "send": {"kind": "action", "tool": "gmail/send_message", "args": {}, "next": "f"},
+                "f": {"kind": "finish"},
+            },
+        }
+    )
+    codes = [p.code for p in validate_spec(spec, catalog).errors]
+    assert "rule_of_two" in codes and "unknown_tool" not in codes, codes
+    stored = catalog_of(OPEN_TOOL_SAFETY, spec_agent_tools(spec, catalog))
+    assert exposed_at_run(spec, "read", untrusted_inputs=False, catalog=stored), "at run"

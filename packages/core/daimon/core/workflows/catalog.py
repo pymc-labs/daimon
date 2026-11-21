@@ -18,7 +18,7 @@ from daimon.core.stores import workflow_reads as reads
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.workflows.lanes import agent_of
 from daimon.core.workflows.spec import AgentNode, ForEachNode, Spec, slug
-from daimon.core.workflows.taint import Catalog, catalog_of
+from daimon.core.workflows.taint import ANY_TOOL, Catalog, catalog_of
 from daimon.core.workflows.views import Person
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -73,14 +73,17 @@ def agent_name(agent: BetaManagedAgentsAgent) -> str:
 
 
 def agent_tool_ids(agent: BetaManagedAgentsAgent) -> list[str]:
-    """The `server/tool` ids of the agent's enabled MCP tools."""
-    return [
-        f"{t.mcp_server_name}/{c.name}"
-        for t in agent.tools
-        if t.type == "mcp_toolset"
-        for c in t.configs
-        if c.enabled is not False
-    ]
+    """The `server/tool` ids of the agent's enabled MCP tools. A toolset on by default
+    enables tools it does not list, as run time reads it (`tool_client._enabled`), and
+    Managed Agents lists only the configured ones, so it adds `server/*`."""
+    ids: list[str] = []
+    for t in agent.tools:
+        if t.type != "mcp_toolset":
+            continue
+        ids += [f"{t.mcp_server_name}/{c.name}" for c in t.configs if c.enabled is not False]
+        if t.default_config.enabled is not False:
+            ids.append(f"{t.mcp_server_name}/{ANY_TOOL}")
+    return ids
 
 
 async def tool_catalog(policy: ToolSafetyPolicy, agents: AgentLister | None) -> Catalog:

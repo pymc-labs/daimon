@@ -178,7 +178,8 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
         agents: list[catalog.AgentOption] = []
         tools: dict[str, catalog.ToolOption] = {}
         for agent in sorted(await usable_agents(caller), key=lambda a: a.name.lower()):
-            ids = catalog.agent_tool_ids(agent)
+            # `server/*` names no tool to pick; a spec may still name one under it.
+            ids = [t for t in catalog.agent_tool_ids(agent) if not t.endswith("/*")]
             for tool_id in ids:
                 tools.setdefault(
                     tool_id,

@@ -9,7 +9,7 @@ earlier. Taint follows references until nothing changes.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Final
 
 from daimon.core.tool_safety import (
@@ -33,6 +33,9 @@ from daimon.core.workflows.spec import (
 from pydantic import BaseModel, ConfigDict
 
 _TRUSTED_ANSWERERS: Final = frozenset({"owner", "editors"})
+#: The tool name for every tool of a server whose toolset is on by default (`server/*`):
+#: its tools are not listed, so it counts as unknown, a write and an untrusted read.
+ANY_TOOL: Final = "*"
 
 
 class ToolFacts(BaseModel):
@@ -69,7 +72,14 @@ def tool_facts(policy: ToolSafetyPolicy, tool: str) -> ToolFacts:
     server, _, name = tool.rpartition("/")
     writes = classify_tool(policy, server_name=server, tool_name=name) == "write"
     # A third-party read returns outside content (mail, tickets, chat, web); Daimon's own do not.
-    return ToolFacts(writes=writes, untrusted=not writes and server != DAIMON_SERVER_NAME)
+    reads = not writes or name == ANY_TOOL
+    return ToolFacts(writes=writes, untrusted=reads and server != DAIMON_SERVER_NAME)
+
+
+def offers(tools: Collection[str], tool: str) -> bool:
+    """`tools` includes `tool`, by name or under its server's `server/*`."""
+    server, _, name = tool.rpartition("/")
+    return name != ANY_TOOL and (tool in tools or f"{server}/{ANY_TOOL}" in tools)
 
 
 def tool_writes(tool: str, catalog: Catalog | None) -> bool:
