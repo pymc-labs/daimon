@@ -15,6 +15,7 @@ from daimon.adapters.sidecar.main import create_app
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.watch_imports import (
+    INSTRUCTIONS_LIMIT,
     ImportedCallbackWatch,
     ImportedTimer,
     WatchExport,
@@ -674,7 +675,11 @@ async def test_owner_over_the_live_cap_is_skipped_not_fatal(db_session_factory, 
 async def test_oversize_instructions_are_clipped_and_counted(db_session_factory, moved):
     item = await _import(db_session_factory, moved, instructions="  " + "x" * 5000)
     assert item.truncated and item.watch is not None
-    assert len(item.watch.instructions) == 2000, len(item.watch.instructions)
+    assert len(item.watch.instructions) == INSTRUCTIONS_LIMIT, len(item.watch.instructions)
+    full = "y" * INSTRUCTIONS_LIMIT
+    kept = await _import(db_session_factory, moved, legacy_id=str(uuid.uuid4()), instructions=full)
+    assert not kept.truncated and kept.watch is not None, "a full-length instruction is kept"
+    assert kept.watch.instructions == full, "a full-length instruction is stored whole"
 
 
 async def test_rerun_updates_an_unconfirmed_watch_and_leaves_a_confirmed_one(

@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An agent that calls other agents decides their writes with its own value.
   A deleted agent's value is cleared with `--agent ID`.
 
+- **Watch instructions can be up to 4000 characters.** Creating, editing and
+  importing a watch all allowed 2000, so longer imported instructions were cut.
+
+- **`daimon routines sandbox-tools --agent` works while a channel is private.**
+  The operator's command was refused with "This channel is private" once any
+  channel was kept to its own agents. It now acts as the operator, like
+  `daimon features set`.
+
 - **"Approvals in direct messages" no longer changes Approvals for everyone.**
   Setting it, from the CLI, the web app or an agent, wrote the server-wide
   Approvals value instead of its own, so Off turned Allow writes on everywhere.

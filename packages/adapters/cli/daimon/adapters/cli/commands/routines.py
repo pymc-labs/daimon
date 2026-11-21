@@ -503,7 +503,7 @@ async def _feature_target(rt: CliRuntime, tenant_id: uuid.UUID) -> _CliFeatureTa
     async def is_admin(_: object) -> bool:
         return True  # whoever holds the database credentials is the operator
 
-    actor = FeatureActor(tenant_id, principal.account_id, "cli", None, is_admin)
+    actor = FeatureActor(tenant_id, principal.account_id, "cli", None, is_admin, operator=True)
     return _CliFeatureTarget(tenant.platform, actor)
 
 
