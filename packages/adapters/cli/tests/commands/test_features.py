@@ -196,7 +196,7 @@ async def test_an_agents_own_name_is_not_taken_for_its_cli_change(
     selector = await _tenant(db_session_factory)
     tenant_id = uuid.UUID(str(selector.tenant_id))
     agents = [_agent_json(agent_id="ag_helper", name="helper", tenant_id=tenant_id)]
-    change = AsyncMock(side_effect=ChannelChangeRefused("stop"))
+    change = AsyncMock(side_effect=ChannelChangeRefused("stop", kind="stop"))
     monkeypatch.setattr(features_cmd, "change_feature", change)
     console, _ = _console()
     with pytest.raises(StoreError, match="stop"):

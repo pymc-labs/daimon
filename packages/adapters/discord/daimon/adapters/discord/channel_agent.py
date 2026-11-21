@@ -25,4 +25,6 @@ async def channel_agent_id(
     except SQLAlchemyError:
         _log.warning("channel_agent.read_failed", exc_info=True)
         return None
+    if config.agent_name is None:
+        return None
     return runtime.resolver_cache.get((tenant_id, "agent", config.agent_name))
