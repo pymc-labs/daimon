@@ -3,8 +3,8 @@
 Pure: the caller passes the trigger's live secrets (the newest first, then any still in
 their rotation overlap), the request headers with lowercase names, the raw body and the
 clock. Every comparison is constant time; timestamped schemes refuse a delivery more than
-`TOLERANCE` off the clock. GitHub and bearer carry no timestamp, so ingress also dedupes
-their bodies by hash.
+`TOLERANCE` off the clock. GitHub carries no timestamp, so ingress also dedupes its bodies
+by hash; a bearer token is the whole credential, so a bearer delivery is deduped only by id.
 """
 
 from __future__ import annotations

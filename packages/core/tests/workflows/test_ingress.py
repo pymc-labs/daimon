@@ -228,24 +228,44 @@ async def test_a_listening_test_url_captures_one_delivery_as_a_test_run(
     assert mode == "test", mode
 
 
-async def test_a_replayed_bearer_body_is_a_duplicate_even_past_retention(
+async def test_a_replayed_github_body_is_a_duplicate_even_past_retention(
     db_session: AsyncSession,
 ) -> None:
-    """Bearer signs no timestamp: the same body again, kept past the log's retention, is a
-    duplicate, while a different body starts."""
-    hook = await make_hook(db_session, verify="bearer")
-    auth = {"content-type": "application/json", "authorization": f"Bearer {hook.secret}"}
+    """GitHub signs no timestamp: the same body under a new delivery id, kept past the log's
+    retention, is a duplicate, while a different body starts."""
+    hook = await make_hook(db_session, verify="github")
     body = json.dumps(GOOD).encode()
-    first = await hook.post(headers=auth, body=body)
+
+    def sent(raw: bytes, delivery: str) -> dict[str, Any]:
+        mac = hmac.new(hook.secret.encode(), raw, hashlib.sha256).hexdigest()
+        headers = {
+            "content-type": "application/json",
+            "x-hub-signature-256": f"sha256={mac}",
+            "x-github-delivery": delivery,
+        }
+        return {"headers": headers, "body": raw}
+
+    first = await hook.post(**sent(body, "d1"))
     assert first.status == 202, first
     async with hook.sm.begin() as s:
         await store.delete_events_before(s, before=NOW + timedelta(days=365))
     kept = await db_session.scalar(select(WorkflowTriggerEvent))
     assert kept is not None and kept.payload is None, "retention clears the payload"
-    again = await hook.post(headers=auth, body=body)
+    again = await hook.post(**sent(body, "d2"))
     assert again.body.get("duplicate") is True, f"a replay is a duplicate: {again}"
-    other = await hook.post(headers=auth, body=json.dumps(GOOD | {"x": 1}).encode())
+    other = await hook.post(**sent(json.dumps(GOOD | {"x": 1}).encode(), "d3"))
     assert other.status == 202, f"a new body is a new delivery: {other}"
+
+
+async def test_a_repeated_bearer_body_starts_each_time(db_session: AsyncSession) -> None:
+    """The bearer token is the whole credential, so the same body twice is two real events."""
+    hook = await make_hook(db_session, verify="bearer")
+    auth = {"content-type": "application/json", "authorization": f"Bearer {hook.secret}"}
+    body = json.dumps(GOOD).encode()
+    first = await hook.post(headers=auth, body=body)
+    again = await hook.post(headers=auth, body=body)
+    assert (first.status, again.status) == (202, 202), (first, again)
+    assert not again.body.get("duplicate"), f"a repeat is not a replay: {again}"
 
 
 async def test_a_body_nested_too_deep_is_refused_before_it_is_stored(

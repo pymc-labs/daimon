@@ -42,8 +42,10 @@ _MAX_DELIVERY_ID: Final = 200
 _MINUTE: Final = timedelta(minutes=1)
 #: Deeper bodies are refused: evaluating one would overflow the interpreter's stack.
 MAX_DEPTH: Final = 64
-#: Schemes that sign no timestamp: a captured request replays unless its body is deduped.
-_UNTIMED: Final = frozenset({"github", "bearer"})
+#: GitHub signs no timestamp and its delivery header is unsigned, so a captured request
+#: replays unless its body is deduped. Bearer is not: the token is the whole credential, so a
+#: body hash adds no replay protection and would drop a legitimate repeated body.
+_BODY_DEDUPED: Final = "github"
 
 
 @dataclass(frozen=True)
@@ -269,10 +271,10 @@ async def receive(
             return Reply(200, {"challenge": payload.get("challenge")})
         context: dict[str, JsonValue] = {"payload": payload, "headers": kept}
         delivery = _delivery_id(scheme, config, headers, context, now)
-        # No timestamp is signed, so a replayed body is caught by its hash.
+        # GitHub signs no timestamp, so a replayed body is caught by its hash.
         digest = (
             f"{'test:' if test else ''}{hashlib.sha256(body).hexdigest()}"
-            if scheme in _UNTIMED
+            if scheme == _BODY_DEDUPED
             else None
         )
         try:
