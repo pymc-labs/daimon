@@ -110,6 +110,13 @@ def kind_of(wait: Wait) -> str:
     return PROPOSALS if (wait.shown or {}).get("kind") == PROPOSALS else wait.kind
 
 
+def step_title(node: AnyNode | None, key: str) -> str:
+    """The step's title, else its key in words (as the canvas and the web inbox show it)."""
+    return (node.title if node and node.title else None) or key[:1].upper() + key[1:].replace(
+        "_", " "
+    )
+
+
 def routes_of(node: AnyNode | None, kind: str) -> list[str]:
     """The answers a wait takes, in button order (the primary last)."""
     if kind == PROPOSALS:
@@ -257,7 +264,7 @@ class ApprovalExecutor:
         if not addressees and not tokens:
             return engine.Failed("fatal", "No one can answer this approval")
         shown_text = show if isinstance(show, str) or show is None else json.dumps(show)
-        title = node.title or work.step.node_id
+        title = step_title(node, work.step.node_id)
         files = _attachments(attach)
         body = "\n\n".join(p for p in (title, shown_text, bound_text(binds)) if p)
         ask = asks.Ask(

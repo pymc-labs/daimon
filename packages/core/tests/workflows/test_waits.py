@@ -183,6 +183,18 @@ async def test_an_event_wait_takes_the_first_matching_buffered_event(
     assert (await world.steps(run.id))["f"].output == {"status": "done"}, "the match arrived"
 
 
+async def test_a_chat_ask_names_an_untitled_step_in_words(db_session: AsyncSession) -> None:
+    spec = {"review_lead": {"kind": "approval", "next": "f"}, **FINISH}
+    world = await make_world(db_session, spec, "review_lead")
+    run = await world.run()
+    wait_id = await _park(world, run.id, "review_lead")
+    async with world.sm() as s:
+        wait = await workflow_waits.get_wait(s, wait_id)
+    assert wait is not None and (wait.shown or {}).get("title") == "Review lead", (
+        "the ask carries the step's key in words, as the web inbox shows it, not the raw id"
+    )
+
+
 async def test_the_inbox_lists_and_decides_for_the_addressee(db_session: AsyncSession) -> None:
     world = await make_world(db_session, {"ok": {"kind": "approval", "next": "f"}, **FINISH}, "ok")
     stranger = await _person(db_session, world)
