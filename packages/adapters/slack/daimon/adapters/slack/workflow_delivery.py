@@ -24,6 +24,7 @@ from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, buil
 from daimon.adapters.slack.routine_delivery import destination_refusal
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.workflow_asks import ask_blocks
+from daimon.adapters.slack.workflow_cards import web_at
 from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope, job_payload
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import DeliveryTarget
@@ -66,9 +67,7 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
         )
 
     async def cleared(row: DeliveryRow) -> WorkflowPost | str:
-        return await clear_post(
-            runtime.sessionmaker, row, platform="slack", web=runtime.settings.web
-        )
+        return await clear_post(runtime.sessionmaker, row, platform="slack", links=web_at(runtime))
 
     async def _post(row: DeliveryRow) -> DeliveryOutcome:
         post = await cleared(row)

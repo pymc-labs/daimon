@@ -89,7 +89,13 @@ def _surface(world: World, monkeypatch: pytest.MonkeyPatch) -> tuple[AskClient, 
 
     monkeypatch.setattr(workflow_delivery, "resolve_web_client", resolve)
     monkeypatch.setattr(workflow_asks, "resolve_web_client", resolve)
-    runtime = SimpleNamespace(sessionmaker=world.sm, settings=world.settings, anthropic=MagicMock())
+    runtime = SimpleNamespace(
+        sessionmaker=world.sm,
+        settings=world.settings,
+        anthropic=MagicMock(),
+        deployment_default=MagicMock(),
+        resolver_cache=MagicMock(),
+    )
     return client, cast(SlackRuntime, runtime)
 
 

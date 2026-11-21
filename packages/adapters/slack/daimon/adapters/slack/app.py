@@ -250,6 +250,7 @@ from daimon.adapters.slack.workflow_cards import (
     handle_workflows_command,
     is_workflow_action,
     submit_job,
+    web_at,
 )
 from daimon.adapters.slack.workflow_delivery import make_slack_workflow_poster
 from daimon.core.access_policy import DM_SCOPE_PREFIX
@@ -995,8 +996,8 @@ class SlackApp:
                 workflow=make_slack_workflow_poster(self.runtime),
                 run_cards=chat_cards.follower(
                     self.runtime.sessionmaker,
-                    self.runtime.settings,
                     platform="slack",
+                    links=web_at(self.runtime),
                     edit=card_editor(self.runtime),
                 ),
                 should_stop=lambda: self.draining,

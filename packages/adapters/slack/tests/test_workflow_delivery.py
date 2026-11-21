@@ -78,7 +78,13 @@ async def _deliver(world: World, monkeypatch: pytest.MonkeyPatch) -> SurfaceReco
     monkeypatch.setattr(workflow_delivery, "resolve_web_client", resolve)
     runtime = cast(
         SlackRuntime,
-        SimpleNamespace(sessionmaker=world.sm, settings=world.settings, anthropic=MagicMock()),
+        SimpleNamespace(
+            sessionmaker=world.sm,
+            settings=world.settings,
+            anthropic=MagicMock(),
+            deployment_default=MagicMock(),
+            resolver_cache=MagicMock(),
+        ),
     )
 
     async def no_routine(row: RoutineRow) -> DeliveryOutcome:

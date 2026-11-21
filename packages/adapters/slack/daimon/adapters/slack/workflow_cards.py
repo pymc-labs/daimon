@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.web_button import web_links_at
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls import PostedCard
 from daimon.core.posted_controls.slack_blocks import build_card_blocks, card_notification_text
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from daimon.core.workflows.views import obj, seq
@@ -35,6 +37,20 @@ PREFIXES = ("wfc:", "wfl:")
 FORM_CALLBACK_ID = "workflow_run_form"
 #: Fields a run form shows before the web app runs it instead.
 FORM_LIMIT = 10
+
+
+def web_at(runtime: SlackRuntime) -> WebAt:
+    """The web links a workflow card may offer at a channel or thread, where `web_awareness`
+    is On there."""
+
+    async def at(
+        tenant_id: uuid.UUID, channel_id: str | None, thread_id: str | None
+    ) -> TenantLinks | None:
+        return await web_links_at(
+            runtime, tenant_id, admin=False, channel_id=channel_id, thread_id=thread_id
+        )
+
+    return at
 
 
 def is_workflow_action(action_id: str) -> bool:
@@ -157,7 +173,13 @@ async def handle_workflow_click(runtime: SlackRuntime, payload: dict[str, Any]) 
     if client is None or not channel:
         return
     chat = _Chat(client, channel, user, thread)
-    presser = Presser(derive_tenant_uuid(platform="slack", workspace_id=team), "slack", user)
+    presser = Presser(
+        derive_tenant_uuid(platform="slack", workspace_id=team),
+        "slack",
+        user,
+        channel_id=channel,
+        thread_id=thread,
+    )
     response_url = str(payload.get("response_url") or "")
 
     async def show(card: PostedCard) -> None:
@@ -172,7 +194,7 @@ async def handle_workflow_click(runtime: SlackRuntime, payload: dict[str, Any]) 
     try:
         if action_id == chat_cards.PICK_ID:
             picked = str(obj(action.get("selected_option")).get("value") or "")
-            await show(await chat_cards.pick(sm, settings, presser, picked))
+            await show(await chat_cards.pick(sm, settings, presser, picked, web_at(runtime)))
             return
         pressed = await chat_cards.press(
             sm,
@@ -180,6 +202,7 @@ async def handle_workflow_click(runtime: SlackRuntime, payload: dict[str, Any]) 
             presser=presser,
             custom_id=action_id,
             place=ChatPlace("slack", channel, message_ts, thread),
+            links=web_at(runtime),
             card_text=card_text(obj(payload.get("message")).get("blocks")),
             form_limit=FORM_LIMIT,
         )
@@ -193,7 +216,14 @@ async def handle_workflow_click(runtime: SlackRuntime, payload: dict[str, Any]) 
         elif pressed.start is not None:
             workflow_id, test = pressed.start
             refusal = await chat_cards.open_pressed(
-                sm, settings, presser, workflow_id, test=test, post=chat.post, edit=chat.edit
+                sm,
+                settings,
+                presser,
+                workflow_id,
+                test=test,
+                links=web_at(runtime),
+                post=chat.post,
+                edit=chat.edit,
             )
             if refusal:
                 await chat.say(refusal)
@@ -223,7 +253,13 @@ def submit_job(
         if client is None or not meta.get("channel"):
             return
         chat = _Chat(client, str(meta["channel"]), user, meta.get("thread"))
-        presser = Presser(derive_tenant_uuid(platform="slack", workspace_id=team), "slack", user)
+        presser = Presser(
+            derive_tenant_uuid(platform="slack", workspace_id=team),
+            "slack",
+            user,
+            channel_id=str(meta["channel"]),
+            thread_id=meta.get("thread"),
+        )
         submitted = await chat_cards.submit_form(
             runtime.sessionmaker,
             runtime.settings,
@@ -242,6 +278,7 @@ def submit_job(
             inputs,
             test=form.test,
             name=form.title,
+            links=web_at(runtime),
             post=chat.post,
             edit=chat.edit,
         )
@@ -257,7 +294,9 @@ async def handle_workflows_command(runtime: SlackRuntime, payload: dict[str, Any
     if client is None:
         return
     chat = _Chat(client, channel, user, None)
-    presser = Presser(derive_tenant_uuid(platform="slack", workspace_id=team), "slack", user)
+    presser = Presser(
+        derive_tenant_uuid(platform="slack", workspace_id=team), "slack", user, channel_id=channel
+    )
     listed = await chat_cards.list_for(runtime.sessionmaker, runtime.settings, presser)
     if isinstance(listed, str):
         await chat.say(listed)
