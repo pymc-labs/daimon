@@ -568,6 +568,18 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     ) -> run_views.RunDetail:
         return await service.get_run_by_number(await env_of(caller), workflow_id, number)
 
+    # ----- saved state -----
+
+    @router.get("/{workflow_id}/state")
+    @speaks
+    async def saved_state(workflow_id: uuid.UUID, caller: Viewer) -> views.SavedState:  # pyright: ignore[reportUnusedFunction]
+        return await service.saved_state(await env_of(caller), workflow_id)
+
+    @router.delete("/{workflow_id}/state")
+    @speaks
+    async def clear_state(workflow_id: uuid.UUID, caller: Member) -> views.SavedState:  # pyright: ignore[reportUnusedFunction]
+        return await service.clear_state(await env_of(caller), workflow_id)
+
     # ----- triggers and webhooks -----
 
     def base_url() -> str:

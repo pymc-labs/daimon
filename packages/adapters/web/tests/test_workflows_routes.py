@@ -193,6 +193,15 @@ async def test_a_blank_workflow_is_drafted_published_and_run_to_the_end(rig: Rig
         assert [w["ticks"][0]["status"] for w in listed] == ["succeeded"], "the list shows ticks"
 
 
+async def test_the_saved_state_is_read_and_cleared_through_the_routes(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        shown = await r.client.get(f"/api/workflows/{made['id']}/state")
+        assert shown.json() == {"state": {}, "updated_at": None}, "nothing saved yet"
+        cleared = await r.client.delete(f"/api/workflows/{made['id']}/state")
+        assert cleared.status_code == 200 and cleared.json()["state"] == {}, cleared.text
+
+
 async def test_a_run_file_downloads_for_a_viewer_and_no_other_file_does(rig: Rig) -> None:
     async with rig.open() as r:
         made = await r.make()

@@ -8,6 +8,7 @@ the `--owner` it names, who owns the new draft. Each refuses while `workflows` i
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -33,6 +34,8 @@ from pydantic import BaseModel
 from rich.console import Console
 
 workflows_app = typer.Typer(help="Workflows: list, show, move files, look after runs, convert.")
+state_app = typer.Typer(help="What a workflow saves between runs.")
+workflows_app.add_typer(state_app, name="state")
 
 Tenant = Annotated[uuid.UUID, typer.Option("--tenant", help="The workspace's tenant uuid.")]
 Version = Annotated[
@@ -266,6 +269,22 @@ async def to_routine(
     return routine_id
 
 
+async def show_state(
+    rt: CliRuntime, console: Console, tenant_id: uuid.UUID, workflow_id: uuid.UUID
+) -> None:
+    env = await operator_env(rt, tenant_id)
+    saved = await _say(service.saved_state(env, workflow_id))
+    console.print_json(json.dumps(saved.state), highlight=False)
+
+
+async def clear_state(
+    rt: CliRuntime, console: Console, tenant_id: uuid.UUID, workflow_id: uuid.UUID
+) -> None:
+    env = await operator_env(rt, tenant_id)
+    await _say(service.clear_state(env, workflow_id))
+    console.print("The saved state is cleared.", markup=False, highlight=False)
+
+
 def _run(make: Callable[[CliRuntime, Console], Awaitable[object]]) -> None:
     settings = load_settings()
     console = Console(highlight=False)
@@ -311,6 +330,18 @@ def import_command(
 ) -> None:
     """Create a private draft from a workflow file; its owner publishes it in the web app."""
     _run(lambda rt, c: import_workflow(rt, c, tenant, path, owner))
+
+
+@state_app.command("show")
+def state_show_command(workflow: uuid.UUID, tenant: Tenant) -> None:
+    """Print what the workflow's runs saved (`workflow.state`) as JSON."""
+    _run(lambda rt, c: show_state(rt, c, tenant, workflow))
+
+
+@state_app.command("clear")
+def state_clear_command(workflow: uuid.UUID, tenant: Tenant) -> None:
+    """Forget everything the workflow's runs saved."""
+    _run(lambda rt, c: clear_state(rt, c, tenant, workflow))
 
 
 @workflows_app.command("runs")
