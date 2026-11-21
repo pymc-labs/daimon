@@ -32,6 +32,12 @@ _READERS = (
     "slack/daimon/adapters/slack/routines_panel/read.py",
     "teams/daimon/adapters/teams/routines_panel.py",
 )
+#: Where each panel's pause and resume buttons land; a card shown before the move still has them.
+_ACTIONS = (
+    "discord/daimon/adapters/discord/routines_panel/panel.py",
+    "slack/daimon/adapters/slack/routines_panel/actions.py",
+    "teams/daimon/adapters/teams/routines_panel.py",
+)
 WORKFLOW = uuid.uuid4()
 LINKS = WebLinks("https://app.example.com", frozenset({"routines", "workflows"})).for_tenant(
     uuid.uuid4(), admin=True
@@ -67,6 +73,12 @@ def test_every_panel_reads_the_move() -> None:
             if isinstance(n, ast.Name | ast.Attribute)
         }
         assert "migrated_workflows" in names, f"{path} must read which routines moved"
+
+
+def test_every_stale_pause_or_resume_says_the_routine_moved() -> None:
+    for path in _ACTIONS:
+        source = (_ADAPTERS / path).read_text()
+        assert "apply_routine_action(" in source and "MOVED_TO_WORKFLOWS" in source, path
 
 
 def test_discord_shows_the_move_and_links_the_workflow() -> None:
