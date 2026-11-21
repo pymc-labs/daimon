@@ -223,9 +223,9 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
     that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
     plain = agent_toolset(_snapshot(plain=True), _agent())
-    assert plain.hidden_daimon_tools == (
-        CAPABILITY_TOOLS["long_jobs"] | SELF_KNOWLEDGE_TOOLS
-    ), "long jobs and Knows Daimon are Off"
+    assert plain.hidden_daimon_tools == (CAPABILITY_TOOLS["long_jobs"] | SELF_KNOWLEDGE_TOOLS), (
+        "long jobs and Knows Daimon are Off"
+    )
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)

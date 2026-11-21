@@ -733,6 +733,11 @@ def test_self_knowledge_on_points_the_agent_at_its_docs_tools() -> None:
     off = render_turn_origin(_origin(), effective_is_admin=False, features=_features())
     assert _controls(on)["self_knowledge"] == SELF_KNOWLEDGE_HINT, "On: the hint is there"
     assert "self_knowledge" not in _controls(off), "Off by default: no hint"
+    for held in ({"sender_foreign": True}, {"shared_channel": True}):
+        rendered = render_turn_origin(
+            _origin(**held), effective_is_admin=False, features=_features(self_knowledge="on")
+        )
+        assert "self_knowledge" not in _controls(rendered), f"a held turn refuses the tools: {held}"
 
 
 def test_web_awareness_off_drops_the_web_links() -> None:

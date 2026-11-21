@@ -21,6 +21,15 @@ SELF_KNOWLEDGE_HINT: Final = (
     "answering how Daimon works, how to set it up or why it behaves as it does."
 )
 """The turn controls' note where `self_knowledge` is On: the tools sit behind `search_tools`."""
+
+
+def controls_hint(*, on: bool, held: bool) -> str | None:
+    """`SELF_KNOWLEDGE_HINT` for a turn's controls where the feature is On, none for a held
+    turn: it refuses these tools (`mcp_hold.HELD_TOOL_ALLOWLIST`). Every renderer of a
+    `<turn_controls>` element that opens a person's or a routine's turn calls this."""
+    return SELF_KNOWLEDGE_HINT if on and not held else None
+
+
 OVERVIEW_PAGE: Final = "how-daimon-works.md"
 PAGE_INDEX: Final = "llms.txt"
 SOURCE_DIRS: Final = ("packages", "defaults")

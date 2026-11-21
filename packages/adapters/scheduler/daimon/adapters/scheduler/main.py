@@ -121,6 +121,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     record_routine_failure,
     render_routine_controls,
+    routine_knows,
     routine_links,
 )
 from daimon.core.routine_files import collect_routine_files
@@ -504,6 +505,7 @@ async def _build_fire(
                 platform="discord",
                 direct_post=direct_post,
                 web=await routine_links(sm, settings, row, "discord"),
+                knows=await routine_knows(sm, settings, row, "discord"),
             )
             + "\n"
             + row.trigger_message
@@ -1004,6 +1006,7 @@ async def _build_fire(
                     platform=platform,
                     direct_post=direct_post,
                     web=await routine_links(sm, settings, row, platform),
+                    knows=await routine_knows(sm, settings, row, platform),
                     held=fire_hold is not None,
                 )
                 + "\n"

@@ -330,6 +330,52 @@ def test_every_turn_origin_render_gets_the_turn_features() -> None:
         assert passes, f"{path.name}:{call.lineno} must pass features= or **backend_facts()"
 
 
+# Every function that builds a `<turn_controls>` element. Those that open a person's or a
+# routine's turn call `controls_hint` (Knows Daimon); the MCP agent chat and the CLI send their
+# message as it is, so they render no controls and are not found here.
+_CONTROLS = "core/daimon/core"
+_CONTROLS_RENDERERS = {
+    f"{_CONTROLS}/turn_origin.py::render_turn_origin": "chat, direct messages, helpers, web",
+    f"{_CONTROLS}/routine_delivery.py::render_routine_controls": "a routine fire's destination",
+}
+_CONTROLS_EXEMPT = {
+    f"{_CONTROLS}/handoff_context.py::render_checkpoint_controls": "a host checkpoint, no person",
+}
+
+
+def _controls_renderers() -> dict[str, bool]:
+    """`path::function` of each function holding a `<turn_controls>` literal, and whether it
+    calls `controls_hint`."""
+    found: dict[str, bool] = {}
+    for path in _PRODUCT:
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            nodes = list(ast.walk(fn))
+            if any(
+                isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and n.value == "<turn_controls>\n"
+                for n in nodes
+            ):
+                where = f"{path.relative_to(_ROOT / 'packages').as_posix()}::{fn.name}"
+                found[where] = any(
+                    isinstance(n, ast.Call) and getattr(n.func, "id", "") == "controls_hint"
+                    for n in nodes
+                )
+    return found
+
+
+def test_every_controls_renderer_adds_the_knows_daimon_hint() -> None:
+    """One core helper (`controls_hint`) puts the hint in a turn's controls, held turns left out."""
+    found = _controls_renderers()
+    assert set(found) == {*_CONTROLS_RENDERERS, *_CONTROLS_EXEMPT}, (
+        "a new `<turn_controls>` renderer: call controls_hint or list it as exempt with a reason"
+    )
+    missing = [name for name in _CONTROLS_RENDERERS if not found[name]]
+    assert not missing, f"these renderers must call controls_hint: {missing}"
+
+
 _LINK_BUILDERS = {"panel_links", "for_tenant", "TenantLinks"}
 _UNGATED_LINKS = {
     "core/web_links.py::panel_links": "a builder",
