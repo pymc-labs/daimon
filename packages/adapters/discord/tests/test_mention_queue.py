@@ -29,6 +29,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.slots import wait_for_slot
 from daimon.testing.builders import provision_workspace
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -41,7 +42,7 @@ def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DiscordRuntime:
     _ = tenant_id  # runtime no longer carries tenant_id
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
