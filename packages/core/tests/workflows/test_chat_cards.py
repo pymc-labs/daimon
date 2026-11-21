@@ -9,14 +9,18 @@ from typing import Any
 
 from daimon.core._models import PlatformPrincipal
 from daimon.core.config import WebSettings
+from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.posted_controls import PostedCard, card_text
-from daimon.core.stores import workflow_runs
+from daimon.core.stores import workflow_runs, workflows
 from daimon.core.web_links import WebAt, WebLinks
 from daimon.core.workflows import chat_cards, gate, service
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.catalog import tenant_agents, tenant_skills
 from daimon.core.workflows.chat_cards import ChatPlace, Presser
 from daimon.core.workflows.service import Env
-from daimon.testing.workflows import NOW, World, agents_with, make_world
+from daimon.testing.builders import skill_listed
+from daimon.testing.workflows import NOW, World, ma_agents_with, make_world
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 NODES: dict[str, Any] = {
@@ -53,10 +57,18 @@ def _ids(card: PostedCard) -> list[str]:
 
 async def test_the_draft_card_publishes_its_own_revision_only(db_session: AsyncSession) -> None:
     world, presser = await _world(db_session)
-    agents = agents_with({"default": []})
-    owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW, agents)
+    listed = MARouter()  # a card press lists the workspace's agents and skills itself
+    listed.add_agent_list(*ma_agents_with({"default": []}, world.tenant_id))
+    title = tenant_scoped_display_title(tenant_id=world.tenant_id, name="deck")
+    skill = skill_listed(id="skill_deck", display_title=title).model_dump(mode="json")
+    listed.add("GET", r"/v1/skills", lambda _r, _m: list_response([skill]))
+    client = build_fake_anthropic(listed.dispatch)
+    who = Who(world.tenant_id, world.owner)
+    agents, skills = tenant_agents(client, world.tenant_id), tenant_skills(client, world.tenant_id)
+    owner = Env(world.sm, world.settings, who, NOW, agents, skills)
     draft = await service.get_draft(owner, world.workflow_id)
-    spec = draft.spec | {"name": "Deals"}
+    think = draft.spec["nodes"]["think"] | {"skills": ["deck"]}
+    spec = draft.spec | {"name": "Deals", "nodes": draft.spec["nodes"] | {"think": think}}
     saved = await service.save_draft(
         owner, world.workflow_id, base_revision=draft.revision, spec=spec
     )
@@ -76,9 +88,14 @@ async def test_the_draft_card_publishes_its_own_revision_only(db_session: AsyncS
         custom_id=publish,
         place=PLACE,
         links=NO_LINKS,
-        agents=agents,
+        client=client,
     )
     assert done.card is not None and done.card.headline == "✅ Deals: version 2 is live"
+    async with world.sm() as session:
+        live = await workflows.get_version(
+            session, tenant_id=world.tenant_id, workflow_id=world.workflow_id, number=2
+        )
+    assert live is not None and live.skills == {"deck": {"id": "skill_deck", "version": "1"}}
     stranger = Presser(world.tenant_id, "discord", "u2")
     refused = await chat_cards.press(
         world.sm, world.settings, presser=stranger, custom_id=publish, place=PLACE, links=NO_LINKS

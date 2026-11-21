@@ -25,7 +25,6 @@ from daimon.core.posted_controls.teams_card import CONTROL_VERB, build_adaptive_
 from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards
-from daimon.core.workflows.catalog import tenant_agents
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from daimon.core.workflows.views import seq
 from microsoft_teams.api import MessageActivityInput
@@ -134,7 +133,13 @@ async def answer(
         if custom_id.startswith("wff:"):
             raw = {k: str(v) for k, v in fields.items() if k not in ("action", "custom_id")}
             submitted = await chat_cards.submit_form(
-                sm, settings, presser=presser, form_id=custom_id, raw=raw, limit=FORM_LIMIT
+                sm,
+                settings,
+                presser=presser,
+                form_id=custom_id,
+                raw=raw,
+                limit=FORM_LIMIT,
+                client=runtime.anthropic,
             )
             if isinstance(submitted, str):
                 return toast(submitted)
@@ -152,14 +157,14 @@ async def answer(
             place=place,
             links=links,
             form_limit=FORM_LIMIT,
-            agents=tenant_agents(runtime.anthropic, presser.tenant_id, runtime.sessionmaker),
+            client=runtime.anthropic,
         )
         if pressed.form is not None:
             return replace_card(form_card(pressed.form))
         if pressed.card is not None:
             return replace_card(_adaptive(pressed.card))
         if pressed.start is not None:
-            env = await chat_cards.env_of(sm, settings, presser)
+            env = await chat_cards.env_of(sm, settings, presser, client=runtime.anthropic)
             if env is None:
                 return toast(chat_cards.UNAVAILABLE)
             workflow_id, test = pressed.start

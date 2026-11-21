@@ -22,7 +22,6 @@ from daimon.core.posted_controls.slack_blocks import build_card_blocks, card_not
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards
-from daimon.core.workflows.catalog import tenant_agents
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from daimon.core.workflows.views import obj, seq
 from slack_sdk.errors import SlackApiError
@@ -206,7 +205,7 @@ async def handle_workflow_click(runtime: SlackRuntime, payload: dict[str, Any]) 
             links=web_at(runtime),
             card_text=card_text(obj(payload.get("message")).get("blocks")),
             form_limit=FORM_LIMIT,
-            agents=tenant_agents(runtime.anthropic, presser.tenant_id, runtime.sessionmaker),
+            client=runtime.anthropic,
         )
         if pressed.form is not None:
             await client.views_open(  # pyright: ignore[reportUnknownMemberType]
@@ -224,6 +223,7 @@ async def handle_workflow_click(runtime: SlackRuntime, payload: dict[str, Any]) 
                 workflow_id,
                 test=test,
                 links=web_at(runtime),
+                client=runtime.anthropic,
                 post=chat.post,
                 edit=chat.edit,
             )
@@ -269,6 +269,7 @@ def submit_job(
             form_id=str(meta.get("form") or ""),
             raw=raw,
             limit=FORM_LIMIT,
+            client=runtime.anthropic,
         )
         if isinstance(submitted, str):
             await chat.say(submitted)
