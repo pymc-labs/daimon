@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Callback watches and relay wake links work in Discord DMs.** A callback watch
+  made in a DM, including the one behind a relay server's `_meta.wake_url`, was
+  refused, so a job started from a DM never woke the conversation and the agent
+  had to check on it. Each post now runs a fresh private turn of the owner in
+  that DM, the way a DM timer runs, under the same read-and-report rules as any
+  watch. Slack still refuses one made in a DM: it has no way to run a watch's
+  fire there.
+
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎
   feedback, voice messages and the card's model footer. Pings are joined with a
