@@ -31,8 +31,8 @@ export function DraftTools({ wf, draft, ask }: { wf: Workflow; draft: Draft; ask
   const [test, setTest] = useState(false)
   return (
     <>
-      <Button variant="outline" size="sm" className="bg-popover shadow-xs" onClick={ask}><Sparkles />Ask Daimon</Button>
-      <Button variant="outline" size="sm" className="bg-popover shadow-xs" onClick={() => setTest(true)}><FlaskConical />Test run</Button>
+      <Button variant="outline" size="sm" className="bg-popover shadow-xs" onClick={ask} aria-label="Ask Daimon"><Sparkles /><span className="max-sm:hidden">Ask Daimon</span></Button>
+      <Button variant="outline" size="sm" className="bg-popover shadow-xs" onClick={() => setTest(true)} aria-label="Test run"><FlaskConical /><span className="max-sm:hidden">Test run</span></Button>
       <TestRunSheet wf={wf} draft={draft} open={test} onOpenChange={setTest} />
     </>
   )
