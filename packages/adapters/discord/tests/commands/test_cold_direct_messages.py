@@ -113,6 +113,8 @@ async def setup(db_session_factory, monkeypatch, count=1):
     fetch = AsyncMock(return_value=Membership(is_member=True, role_ids=("123",)))
     resolver = CachedMembershipResolver(fetch)
     bot = MagicMock()
+    bot.working_mark = AsyncMock(return_value="👀")
+    bot.turn_model_marks = AsyncMock(return_value=())
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.settings = SimpleNamespace(
@@ -889,6 +891,7 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
         grant=row_reply.grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -937,6 +940,7 @@ async def test_dm_answer_pings_only_where_dm_completion_pings_and_completion_pin
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda key, *_args: shown.get(key, False),
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -1020,6 +1024,7 @@ async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_fac
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -1062,6 +1067,7 @@ async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -1087,6 +1093,7 @@ async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -1109,6 +1116,7 @@ async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monk
         grant=grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -1154,6 +1162,7 @@ async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                display_name=lambda fallback: fallback,
                 answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
@@ -1186,6 +1195,7 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                display_name=lambda fallback: fallback,
                 answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
@@ -1260,6 +1270,7 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                display_name=lambda fallback: fallback,
                 answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
@@ -1389,11 +1400,19 @@ async def test_a_reply_to_an_earlier_message_carries_that_message(db_session_fac
     await cog.cog_unload()
 
 
-@pytest.mark.parametrize("kind", ["nothing", "voice"])
-async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch, kind):
+async def test_a_dm_voice_message_reaches_the_turn_as_an_attachment(
+    db_session_factory, monkeypatch
+):
     cog, _, _, reply = await setup(db_session_factory, monkeypatch)
-    files = [attachment("voice.ogg", voice=True)] if kind == "voice" else []
-    msg = dm_message(content="", attachments=files)
+    monkeypatch.setattr(module, "prepare_attachments", AsyncMock(return_value=("voice", None)))
+    await cog.on_message(dm_message(content="", attachments=[attachment("voice.ogg", voice=True)]))
+    assert reply.await_args.kwargs["history_notes"] == ["[attachment: voice.ogg]"]
+    await cog.cog_unload()
+
+
+async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    msg = dm_message(content="", attachments=[])
     await cog.on_message(msg)
     assert [sent_text(call) for call in msg.channel.send.await_args_list][
         -1

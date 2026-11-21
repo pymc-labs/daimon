@@ -48,6 +48,12 @@ Where each feature can be set, and its default.
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |  |
 | Answer messages | `answer_messages` | Chat | 5 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
 | Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  |  | Only Discord |
+| Display name | `display_name` | Chat | The agent's id |  |  | ✓ |  |  |  |  |
+| Thread title style | `thread_title_style` | Chat | Sentence case | ✓ | ✓ |  | ✓ |  |  | Only Discord |
+| Thread archive time | `thread_auto_archive` | Chat | 1 week | ✓ | ✓ |  | ✓ |  |  | Only Discord |
+| Status reactions | `status_reactions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  | Only Discord |
+| Lock reaction | `protected_notice_reaction` | Chat | On | ✓ | ✓ |  | ✓ |  |  | Only Discord |
+| Text before tool calls | `pre_tool_messages` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
@@ -510,6 +516,78 @@ A thread Daimon starts is titled from its opening message by a short model call.
 | Levels | Deployment, Workspace, Channel |
 | Combines | Off above is a ceiling |
 | Deprecated | `DAIMON_THREAD_NAMING__ENABLED` |
+
+## Display name
+
+The name people see for an agent, up to 40 characters. Its id stays the identifier.
+
+| | |
+| --- | --- |
+| Key | `display_name` |
+| Values | `id` (The agent's id), or any name up to 40 characters |
+| Default | `id` |
+| Levels | Agent |
+| Combines | Most specific wins |
+
+## Thread title style
+
+Sentence case up to 50 characters, or Title Case up to 100, for a thread opened to answer a mention.
+
+| | |
+| --- | --- |
+| Key | `thread_title_style` |
+| Values | `sentence` (Sentence case), `title` (Title Case) |
+| Default | `sentence` |
+| Levels | Deployment, Workspace, Channel |
+| Combines | Most specific wins |
+
+## Thread archive time
+
+How long an idle thread opened to answer a mention stays open.
+
+| | |
+| --- | --- |
+| Key | `thread_auto_archive` |
+| Values | `10080` (1 week), `1440` (1 day) |
+| Default | `10080` |
+| Levels | Deployment, Workspace, Channel |
+| Combines | Most specific wins |
+
+## Status reactions
+
+⏳ while a turn runs, then ✅ first however it ended, and 📨 instead of a notice on a queued message. Off shows 👀, and ✅ only with Completion pings.
+
+| | |
+| --- | --- |
+| Key | `status_reactions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Channel |
+| Combines | Most specific wins |
+
+## Lock reaction
+
+A 🔒 on a mention the agent may not answer, besides the direct message saying why.
+
+| | |
+| --- | --- |
+| Key | `protected_notice_reaction` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace, Channel |
+| Combines | Most specific wins |
+
+## Text before tool calls
+
+Text written before a tool call is posted as its own message. Off keeps it on the working card.
+
+| | |
+| --- | --- |
+| Key | `pre_tool_messages` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
 
 ## Typed mentions
 

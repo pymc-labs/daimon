@@ -722,10 +722,11 @@ def _all_embeds(sends: list[Any], edits: list[Any]) -> list[discord.Embed]:
 
 def _assert_stopped_card(edit_kwargs: dict[str, Any]) -> None:
     """The last card write is the red Stopped embed with its next step, and no reply text."""
-    assert not edit_kwargs.get("content"), "no plain text: the card is the whole notice"
+    content = edit_kwargs.get("content") or ""
+    assert content in ("", "<@123>"), "no plain text past the asker's mention: the card is it"
     (card,) = edit_kwargs["embeds"]
     assert card.title == "Stopped."
-    assert card.description == "Send a message to start again."
+    assert card.description.startswith("Send a message to start again.\n\n-# Stopped after ")
     assert card.colour is not None and card.colour.value == COLOR_RED
     assert edit_kwargs.get("view") is None, "the Stop button is gone"
 
@@ -946,7 +947,8 @@ class TestDebounce:
         await lc.on_render(running)
 
         assert len(sends) == 1
-        assert [e[1]["embeds"][0].footer.text for e in edits] == ["12s", "24s"]
+        footers = [e[1]["embeds"][0].footer.text for e in edits]
+        assert [text.split("\u2003")[0] for text in footers] == ["12s", "24s"]
 
     async def test_terminal_flushes_immediately_with_no_render_tick(self) -> None:
         """Terminal success bypasses on_render and the debounce entirely --
@@ -1474,8 +1476,8 @@ class TestErrorEmbed:
         last_edit = edits[-1]
         assert last_edit[0] is _SENTINEL_REF, "edit should use stored message ref"
         assert "embeds" in last_edit[1], "error embed should be present"
-        assert last_edit[1].get("content") is None or "content" not in last_edit[1], (
-            "error path should NOT clean replace (embed stays visible)"
+        assert last_edit[1].get("content") in (None, "<@123>"), (
+            "error path should NOT clean replace (embed stays visible); it only pings the asker"
         )
 
     async def test_error_embed_has_red_color(self) -> None:
@@ -2670,7 +2672,7 @@ async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
     await lifecycle.post_initial()
     await lifecycle.on_terminal_success(_make_success_state("Done <@456> @everyone"))
     assert len(sends) == 2
-    assert sends[-1]["content"] == "<@123>\nDone <@456> @everyone"
+    assert sends[-1]["content"] == "<@123> Done <@456> @everyone"
     mentions = sends[-1]["allowed_mentions"].to_dict()
     assert mentions["users"] == [123]
     assert "everyone" not in mentions["parse"]
@@ -2746,8 +2748,7 @@ async def test_final_table_is_attached_to_answer(notify):
     )
     answer = sends[-1] if notify else edits[-1][1]
     attachment_key = "files" if notify else "attachments"
-    assert "table-1.png" in answer["content"]
-    assert "| ---" not in answer["content"]
+    assert "| ---" not in answer["content"] and "table-1.png" not in answer["content"]
     assert len(answer[attachment_key]) == 1
     assert answer[attachment_key][0].fp.read(8) == b"\x89PNG\r\n\x1a\n"
     assert len(sends) == (2 if notify else 1)
@@ -2925,7 +2926,8 @@ async def test_missing_card_is_replaced_before_answer_delivery(missing_at, rende
     assert lifecycle.card_message_id == "1000", "retire the original durable card intent"
     assert lifecycle.was_answered
     answer = sent[-1][1] if missing_at == "answer" else sent[-1][0].kwargs
-    assert ("table-1.png" if render_tables else text) in answer["content"]
+    if not render_tables:
+        assert text in answer["content"]
     if missing_at == "answer":
         assert answer["embeds"], "a replacement answer must keep its summary"
         assert "attachments" not in answer and "view" not in answer

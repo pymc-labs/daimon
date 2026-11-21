@@ -86,11 +86,13 @@ async def resolve_agent_identity(
     enabled: bool = False,
     background_sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     wait_for_face: bool = False,
+    display_name: str | None = None,
 ) -> AgentIdentity:
     """Resolve the identity once when a turn admits an agent.
 
     Built-in turns keep the platform app's own name and icon. `wait_for_face`
     is for answer paths only: panels with a platform deadline must not wait.
+    `display_name` is the name people see in place of `agent_name`, the identifier.
     """
     if is_builtin or not enabled:
         return AgentIdentity(name=agent_name, avatar_url=None, builtin=True)
@@ -116,7 +118,7 @@ async def resolve_agent_identity(
         log.warning("agent_identity.avatar_lookup_failed", error_type=type(exc).__name__)
     base = public_base_url.rstrip("/") if public_base_url else None
     url = f"{base}/avatars/{avatar.token}/{avatar.sha256[:12]}.png" if base and avatar else None
-    return AgentIdentity(name=agent_name, avatar_url=url, builtin=False)
+    return AgentIdentity(name=display_name or agent_name, avatar_url=url, builtin=False)
 
 
 def queue_agent_face(

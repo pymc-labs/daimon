@@ -39,6 +39,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_escalation import answer_place
 from daimon.adapters.discord.support_post import post_to_support_channel
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.domain import MessageFeedbackRow
 from daimon.core.stores.message_feedback import attach_feedback_text
 from daimon.core.stores.tenants import get_tenant
@@ -96,8 +97,23 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
 
         _log.info("feedback_modal.submit", feedback_id=str(self._feedback_id))
         bot = cast(commands.Bot, interaction.client)
-        channel_id = await support_channel_for(
-            self._runtime, bot, tenant_id=updated_row.tenant_id, channel_id=updated_row.channel_id
+        async with self._runtime.sessionmaker() as session:
+            in_dm = await get_conversation(
+                session,
+                platform="discord",
+                route_key=updated_row.channel_id,
+                external_user_id=updated_row.platform_user_id,
+            )
+        # Feedback on a private answer stays private.
+        channel_id = (
+            None
+            if in_dm is not None
+            else await support_channel_for(
+                self._runtime,
+                bot,
+                tenant_id=updated_row.tenant_id,
+                channel_id=updated_row.channel_id,
+            )
         )
         if channel_id is not None:
             # Best-effort: the text is already recorded, whatever the post does.

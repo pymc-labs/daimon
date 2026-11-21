@@ -182,11 +182,15 @@ def format_summary(
 
 
 def format_headline(
-    *, is_working: bool, elapsed_seconds: float | None, bold: Callable[[str], str]
+    *,
+    is_working: bool,
+    elapsed_seconds: float | None,
+    bold: Callable[[str], str],
+    waiting: bool = False,
 ) -> str:
     """One short working label; timing belongs in card details."""
     del is_working, elapsed_seconds
-    return bold("Working on it…")
+    return bold("Waiting for the AI service…" if waiting else "Working on it…")
 
 
 def format_draft(text: str) -> str:

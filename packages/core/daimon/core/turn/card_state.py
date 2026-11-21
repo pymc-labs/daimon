@@ -81,6 +81,10 @@ class CardState:
     """Approved title for a terminal notice; never populated from exception text."""
     notice: str = ""
     """Rendered termination notice; the ERROR card's body."""
+    model_label: str = ""
+    """The model the turn runs on, in the working card's footer."""
+    waiting: bool = False
+    """The model is rate limited and the turn waits for it."""
 
 
 _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
@@ -126,4 +130,5 @@ def update_activity(state: CardState, turn: TurnState) -> CardState:
         phase=phase,
         tool_lines=lines,
         plan_lines=plan,
+        waiting=turn.rate_limit_wait,
     )

@@ -75,6 +75,7 @@ from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
     provider_action_options,
 )
+from daimon.adapters.discord.reactions import QUEUED, WORKING
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
@@ -209,7 +210,8 @@ from daimon.core.stores.turn_card_intents import (
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
 from daimon.core.stores.watches import NoticeAttempt, Refused, SentNotice, Unclear
 from daimon.core.thread_naming import (
-    THREAD_NAME_MAX_CHARS,
+    TITLE_MAX_CHARS,
+    TitleStyle,
     fallback_thread_name,
     naming_text,
     strip_mentions,
@@ -2900,22 +2902,38 @@ class DaimonBot(commands.Bot):
             await place_feature(self.runtime.sessionmaker, self.runtime.settings, place, key)
         ).on
 
-    async def _plain_text_mentions_on(self, message: discord.Message) -> bool:
-        """Read the tenant's switch for a message that already names the bot as text."""
-        assert message.guild is not None
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
-        # A failed read leaves the message unaddressed, as with the switch off.
+    async def _message_feature_on(
+        self, message: discord.Message, tenant_id: uuid.UUID, key: str
+    ) -> bool:
+        """A chat-behaviour feature where `message` was posted; a failed read keeps the default."""
         # A thread's setting lives under its parent channel; its own id is no channel.
         channel = message.channel
         if isinstance(channel, discord.Thread):
             place = FeaturePlace.of(tenant_id, "discord", str(channel.parent_id), str(channel.id))
         else:
             place = FeaturePlace.of(tenant_id, "discord", str(channel.id))
-        enabled = (
-            await place_feature(
-                self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
-            )
+        return (
+            await place_feature(self.runtime.sessionmaker, self.runtime.settings, place, key)
         ).on
+
+    async def working_mark(self, message: discord.Message, tenant_id: uuid.UUID) -> str:
+        """The reaction a message shows while its turn runs: ⏳ with status reactions, else 👀."""
+        if await self._message_feature_on(message, tenant_id, "status_reactions"):
+            return WORKING
+        return "👀"
+
+    async def _place_value(self, place: FeaturePlace, key: str) -> str:
+        """A choice feature's value at `place`; a failed read keeps the registry default."""
+        return (
+            await place_feature(self.runtime.sessionmaker, self.runtime.settings, place, key)
+        ).value
+
+    async def _plain_text_mentions_on(self, message: discord.Message) -> bool:
+        """Read the tenant's switch for a message that already names the bot as text."""
+        assert message.guild is not None
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
+        # A failed read leaves the message unaddressed, as with the switch off.
+        enabled = await self._message_feature_on(message, tenant_id, "plain_text_mentions")
         if enabled:
             log.info(
                 "plain_text_mention.accepted",
@@ -2929,9 +2947,10 @@ class DaimonBot(commands.Bot):
 
         Called where the turn was already refused as protected. The protection
         still holds: no turn runs and no message goes into the channel. The
-        one exception is a 🔒 reaction on the mention itself, so "not allowed
-        here" doesn't look like "Daimon is down"; the reason and who can
-        change it go to the author by direct message.
+        one exception is a 🔒 reaction on the mention itself (unless
+        `protected_notice_reaction` is off), so "not allowed here" doesn't look
+        like "Daimon is down"; the reason and who can change it go to the
+        author by direct message.
 
         Only a rule that positively matches is told. A refusal that came from
         failing closed (an unresolved category while some category is
@@ -2979,8 +2998,14 @@ class DaimonBot(commands.Bot):
             self._protected_reacted_ids.popitem(last=False)
         reacted = False
         try:
-            await message.add_reaction(PROTECTED_CHANNEL_REACTION)
-            reacted = True
+            # Off, the notice is the direct message alone: nothing shows in the channel.
+            if await self._message_feature_on(
+                message,
+                derive_tenant_uuid(platform="discord", workspace_id=str(guild_id)),
+                "protected_notice_reaction",
+            ):
+                await message.add_reaction(PROTECTED_CHANNEL_REACTION)
+                reacted = True
         except Exception as exc:  # cosmetic: never fails the (already dropped) turn
             log.warning(
                 "protected_channel_notice.reaction_failed",
@@ -3027,8 +3052,8 @@ class DaimonBot(commands.Bot):
 
         Only a real content edit counts (pins, flags and embed updates carry no
         edit time). A message older than the admission ledger's horizon is left
-        alone, since the ledger can no longer tell whether it was answered, as
-        is one that already has a thread.
+        alone, since the ledger can no longer tell whether it was answered. One
+        that already has a thread is answered in that thread.
         """
         if self.user is None or payload.guild_id is None:
             return
@@ -3061,7 +3086,7 @@ class DaimonBot(commands.Bot):
                 "discord.edit_fetch_failed", message_id=payload.message_id, status=exc.status
             )
             return
-        if message.author.bot or message.thread is not None:
+        if message.author.bot:
             return
         await self.on_message(message)
 
@@ -3517,6 +3542,15 @@ class DaimonBot(commands.Bot):
         self._thread_queue.enqueue(thread_id, message)
         generation = self._processing.generation(thread_id)
         notify = self._processing.should_notify(thread_id)
+        if message.guild is not None and await self._message_feature_on(
+            message,
+            derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id)),
+            "status_reactions",
+        ):
+            # 📨 says it joins the next turn, whose ⏳ replaces it; no notice is posted.
+            self._queued_reactions.discard(id(message))
+            await self._add_mention_reaction(message, QUEUED)
+            return
         try:
             if self._thread_lost(message):
                 return  # no reaction in a gone or closed thread; the release finishes the row
@@ -3737,11 +3771,13 @@ class DaimonBot(commands.Bot):
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
         surface = _TurnFailureSurface()
+        working = "👀"
         try:
             # Before admit(): resolving seeded agents/environments can take tens
             # of seconds. Queued mentions already have their own hourglass.
             if not unprompted and content_override is None:
-                await self._add_mention_reaction(message, "👀")
+                working = await self.working_mark(message, tenant_id)
+                await self._add_mention_reaction(message, working)
             await self._orchestrate(
                 message,
                 guild_id,
@@ -3807,8 +3843,9 @@ class DaimonBot(commands.Bot):
             # admission instead of keeping the slot (wait_for_slot).
             release_turn_slot()
             structlog.contextvars.unbind_contextvars("rid")
+            # With status reactions the turn's card has put ✅ in its place, or no turn ran.
             if not unprompted and content_override is None:
-                await self._remove_mention_reaction(message, "👀")
+                await self._remove_mention_reaction(message, working)
 
     async def _offer_after_refusal(
         self, message: discord.Message, exc: AdmissionDenied, surface: _TurnFailureSurface
@@ -3998,8 +4035,8 @@ class DaimonBot(commands.Bot):
         finally:
             await self._release_and_clear(thread.id, tenant_id, clear_reactions=False)
 
-    async def _model_marks(
-        self, admission: Admission, *, tenant_id: uuid.UUID, thread_id: int
+    async def turn_model_marks(
+        self, admission: Admission, *, tenant_id: uuid.UUID, thread_id: int | str
     ) -> tuple[str, ...]:
         """The model and effort emoji for a prompted turn's trigger message, when the setting
         is on and they differ from the pair last shown in this thread."""
@@ -4632,6 +4669,7 @@ class DaimonBot(commands.Bot):
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
+                    display_name=admission.display_name(agent.name),
                     is_builtin=is_builtin_agent(
                         name=agent.name,
                         metadata=agent.metadata,
@@ -4717,12 +4755,14 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
                 answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,
@@ -4895,6 +4935,8 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
                 answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
@@ -4902,7 +4944,7 @@ class DaimonBot(commands.Bot):
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,
@@ -5677,7 +5719,20 @@ class DaimonBot(commands.Bot):
         is_thread_mention = thread is not None
         if thread is None:
 
+            def _answer_in(opened: discord.Thread) -> discord.Thread:
+                # Not recorded as an `auto_thread` post: it is not our thread to tidy.
+                self._processing.add(opened.id)
+                self._thread_stops.claim(opened.id)
+                self._track_processing_task(opened.id)
+                if created_thread_ids is not None:
+                    created_thread_ids.append(opened.id)
+                return opened
+
             async def _open_thread() -> discord.Thread:
+                # An edit added the mention to a message someone had already threaded.
+                started = message.thread
+                if started is not None and started.parent_id == message.channel.id:
+                    return _answer_in(started)
                 async with self.runtime.sessionmaker() as session:
                     unposted_thread_id = await unposted_thread_for_message(
                         session, tenant_id=tenant_id, message_id=str(message.id)
@@ -5699,6 +5754,14 @@ class DaimonBot(commands.Bot):
                 # The fallback title quotes the message, never the agent's
                 # internal name (a slug means nothing to the reader).
                 naming = self.runtime.settings.thread_naming
+                place = FeaturePlace.of(tenant_id, "discord", parent_channel_id)
+                style: TitleStyle = (
+                    "title"
+                    if (await self._place_value(place, "thread_title_style")) == "title"
+                    else "sentence"
+                )
+                archive = await self._place_value(place, "thread_auto_archive")
+                archive_after: Literal[1440, 10080] = 1440 if archive == "1440" else 10080
                 bot_names = self._plain_text_names(message.guild)
                 message_text = strip_mentions(message.content, bot_names)
                 attachment_names = [a.filename for a in message.attachments]
@@ -5709,9 +5772,10 @@ class DaimonBot(commands.Bot):
                     "\n".join(
                         strip_mentions(line, bot_names) for line in message.content.splitlines()
                     ),
-                    default=attachment_names[0][:THREAD_NAME_MAX_CHARS]
+                    default=attachment_names[0][: TITLE_MAX_CHARS[style]]
                     if attachment_names
                     else f"Chat with {_resolve_bot_display_name(self.runtime.settings)}",
+                    max_chars=TITLE_MAX_CHARS[style],
                 )
                 try:
                     if (
@@ -5740,6 +5804,7 @@ class DaimonBot(commands.Bot):
                                 timeout_seconds=naming.timeout_seconds,
                                 channel_id=admission.budget_channel_id,
                                 agent_id=agent.id,
+                                style=style,
                                 provider=(
                                     admission.backend_revision.backend
                                     if admission.backend_revision is not None
@@ -5747,7 +5812,8 @@ class DaimonBot(commands.Bot):
                                 ),
                             )
                     opened = await message.create_thread(
-                        name=thread_name, auto_archive_duration=10080
+                        name=thread_name,
+                        auto_archive_duration=archive_after,
                     )
                 except Exception as exc:
                     # Another bot may have threaded this message first; answer there.
@@ -5757,13 +5823,7 @@ class DaimonBot(commands.Bot):
                         await _explain_thread_open_failure(message)
                         raise _ThreadOpenFailed(str(exc)) from exc
                     log.info("discord.thread_reused_foreign", thread_id=opened.id)
-                    # Not recorded as an `auto_thread` post: it is not our thread to tidy.
-                    self._processing.add(opened.id)
-                    self._thread_stops.claim(opened.id)
-                    self._track_processing_task(opened.id)
-                    if created_thread_ids is not None:
-                        created_thread_ids.append(opened.id)
-                    return opened
+                    return _answer_in(opened)
                 # No await between creation and registration: follow-ups must queue
                 # behind this turn. The channel branch owns the eventual cleanup.
                 self._processing.add(opened.id)
@@ -5794,6 +5854,7 @@ class DaimonBot(commands.Bot):
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
+                    display_name=admission.display_name(agent.name),
                     is_builtin=is_builtin_agent(
                         name=agent.name,
                         metadata=agent.metadata,
@@ -5839,7 +5900,9 @@ class DaimonBot(commands.Bot):
         self._thread_stops.watch(thread.id, cancel)
         self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
-        marks_to_show = await self._model_marks(admission, tenant_id=tenant_id, thread_id=thread.id)
+        marks_to_show = await self.turn_model_marks(
+            admission, tenant_id=tenant_id, thread_id=thread.id
+        )
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -5855,13 +5918,15 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
                 answer_message_cap=admission.answer_message_cap,
                 model_marks=marks_to_show,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,
@@ -6402,12 +6467,14 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
                 answer_message_cap=admission.answer_message_cap,
                 send=turn_send,
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=agent.model.id,

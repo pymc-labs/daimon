@@ -34,9 +34,11 @@ from daimon.adapters.discord.context import (
     forwarded_names,
     input_context,
 )
+from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.private_answer import PrivateOffers
+from daimon.adapters.discord.reactions import remove_own_reaction
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
@@ -91,7 +93,7 @@ from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.stores.thread_session_lineage import request_fresh_start
-from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.stores.thread_sessions import get_live_thread_session, record_model_marks
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
@@ -149,12 +151,8 @@ class _DmRequest:
 
 
 def _attachments(message: discord.Message | _DmRequest) -> list[discord.Attachment]:
-    """The files a message carries that an agent can use; a voice message is not one."""
-    return [
-        a
-        for a in getattr(message, "attachments", None) or ()
-        if not (isinstance(a, discord.Attachment) and a.is_voice_message())
-    ]
+    """The files a message carries; a voice message is one, as in a thread."""
+    return list(getattr(message, "attachments", None) or ())
 
 
 @dataclass
@@ -597,10 +595,11 @@ class DirectMessageCog(commands.Cog):
             return None
         guild = self.bot.get_guild(int(tenant.external_id))
         server_name = guild.name if guild else tenant.external_id
+        name = admission.display_name(admission.config.agent_name or admission.agent.name)
 
         # The only message that carries the controls; /dm-settings shows them again.
         await message.channel.send(
-            f"Private conversation with {admission.config.agent_name} in {server_name}.\n"
+            f"Private conversation with {name} in {server_name}.\n"
             "Run `/dm-settings` to switch server or start a new conversation.",
             view=self._switch_control(
                 user_id=message.author.id,
@@ -1329,6 +1328,7 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         conversation: DirectMessageRow,
         cards: list[DiscordTurnLifecycle],
+        feedback: list[DiscordTurnLifecycle],
     ) -> DmTurnCard:
         """Build the same progress card a thread gets, gated like a DM answer.
 
@@ -1388,20 +1388,33 @@ class DirectMessageCog(commands.Cog):
                 await sent.delete()
 
             pings = admission.shown("dm_completion_pings") and admission.shown("completion_pings")
+            trigger = message if isinstance(message, discord.Message) else None
             card = DiscordTurnLifecycle(
                 send=channel.send,
                 edit=edit,
                 # With no delete a late replacement edits the card, as before the toggle.
                 delete=delete if pings else None,
-                agent_name=admission.agent.name,
+                agent_name=admission.display_name(admission.agent.name),
                 model_id=admission.agent.model.id,
                 markup=runtime.turn_deps.markup,
                 cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel),
                 requester_id=message.author.id,
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
+                # The same reactions as a thread turn: this turn's own working mark, ✅ and
+                # the model and effort emoji on the message it answers.
+                trigger_message=trigger,
+                acknowledgment_managed=True,
+                model_marks_for=partial(
+                    self.bot.turn_model_marks,
+                    admission,
+                    tenant_id=conversation.tenant_id,
+                    thread_id=conversation.scope_id,
+                ),
                 notify_on_completion=pings,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
                 answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
@@ -1410,6 +1423,8 @@ class DirectMessageCog(commands.Cog):
             )
             card.set_output_authorization(OutputAuthorization(still_allowed))
             cards.append(card)
+            if admission.shown("message_feedback"):
+                feedback.append(card)
             return card
 
         return build
@@ -1475,6 +1490,7 @@ class DirectMessageCog(commands.Cog):
         assert isinstance(message.channel, discord.DMChannel), "a DM turn runs in a DM"
         runtime = self.bot.runtime
         cards: list[DiscordTurnLifecycle] = []
+        feedback: list[DiscordTurnLifecycle] = []
         try:
             subject = await self._subject(conversation.tenant_id, message.author.id)
             async with runtime.sessionmaker() as session:
@@ -1527,6 +1543,15 @@ class DirectMessageCog(commands.Cog):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
+            working: str | None = None
+            if isinstance(message, discord.Message):
+                working = await self.bot.working_mark(message, conversation.tenant_id)
+                if working == _SEEN_REACTION:
+                    # A held message already shows 👀 while it is answered (DmBurst).
+                    working = None
+                else:
+                    with contextlib.suppress(discord.HTTPException):
+                        await message.add_reaction(working)
             try:
                 async with message.channel.typing():
                     if await ticket.wait(asyncio.Event()) != "started":
@@ -1600,11 +1625,28 @@ class DirectMessageCog(commands.Cog):
                             account_id=admission.account_id,
                             admission=admission,
                         ),
-                        card_for=lambda claimed: self._turn_card(message, claimed, cards),
+                        card_for=lambda claimed: self._turn_card(message, claimed, cards, feedback),
                         platform_channel_id=str(message.channel.id),
                     )
             finally:
                 ticket.release()
+                if working is not None and isinstance(message, discord.Message):
+                    # With status reactions the card has put ✅ in its place.
+                    await remove_own_reaction(message, working)
+            if cards and cards[-1].model_marked:
+                async with runtime.sessionmaker.begin() as session:
+                    await record_model_marks(
+                        session,
+                        tenant_id=conversation.tenant_id,
+                        platform="discord",
+                        thread_id=conversation.scope_id,
+                        marks=cards[-1].model_marks,
+                    )
+            last = cards[-1] if cards else None
+            if last in feedback and last.was_answered and last.feedback_message_id is not None:
+                await seed_feedback_reactions(
+                    message.channel, message_id=last.feedback_message_id, escalate=False
+                )
             if reply is not None and not (cards and (cards[-1].was_answered or cards[-1].ended)):
                 # The card shows the outcome unless a recovery replaced it; then the text goes here.
                 answer = reply.text
