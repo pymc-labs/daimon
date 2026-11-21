@@ -101,6 +101,33 @@ async def test_runs_are_listed_redriven_cancelled_and_verified(db_session: Async
     assert await cli.verify_run(rt, console, world.tenant_id, failed.id), "the ledger holds"
 
 
+async def test_the_board_and_the_calendar_print_one_workflows_runs(
+    db_session: AsyncSession,
+) -> None:
+    world = await make_world(db_session, AGENT, "a")
+    rt, out, console = _rig(world)
+    await world.run()
+    await cli.list_runs(
+        rt, console, world.tenant_id, world.workflow_id, limit=10, as_json=True, view="board"
+    )
+    assert '"stage": "In progress"' in out.getvalue(), out.getvalue()
+    with pytest.raises(UserFacingError, match="--workflow"):
+        await cli.list_runs(
+            rt, console, world.tenant_id, None, limit=10, as_json=True, view="board"
+        )
+    with pytest.raises(UserFacingError, match="YYYY-MM"):
+        await cli.list_runs(
+            rt,
+            console,
+            world.tenant_id,
+            world.workflow_id,
+            limit=10,
+            as_json=True,
+            view="calendar",
+            month="soon",
+        )
+
+
 async def test_from_routine_previews_without_moving_then_moves_and_moves_back(
     db_session: AsyncSession,
 ) -> None:

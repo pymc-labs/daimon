@@ -546,8 +546,16 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/{workflow_id}/runs")
     @speaks
-    async def runs(workflow_id: uuid.UUID, caller: Viewer) -> list[run_views.RunSummary]:  # pyright: ignore[reportUnusedFunction]
-        return await service.list_runs(await env_of(caller), workflow_id)
+    async def runs(  # pyright: ignore[reportUnusedFunction]
+        workflow_id: uuid.UUID,
+        caller: Viewer,
+        view: Literal["list", "board", "calendar"] = "list",
+        month: str | None = None,
+    ) -> list[run_views.RunSummary] | run_views.Board | run_views.Calendar:
+        env = await env_of(caller)
+        if view == "list":
+            return await service.list_runs(env, workflow_id)
+        return await service.runs_view(env, workflow_id, view, month)
 
     @router.post("/{workflow_id}/runs", status_code=201)
     @speaks

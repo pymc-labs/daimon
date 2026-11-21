@@ -53,6 +53,15 @@ class _RunLine(BaseModel):
     cost_usd: float
 
 
+class _CardLine(BaseModel):
+    stage: str
+    date: str
+    number: int
+    status: str
+    attention: str
+    card: str
+
+
 async def operator_env(
     rt: CliRuntime, tenant_id: uuid.UUID, *, owner: uuid.UUID | None = None
 ) -> Env:
@@ -168,8 +177,32 @@ async def list_runs(
     *,
     limit: int,
     as_json: bool,
+    view: str = "list",
+    month: str | None = None,
 ) -> None:
     env = await operator_env(rt, tenant_id)
+    if view != "list":
+        if workflow_id is None or view not in ("board", "calendar"):
+            raise UserFacingError("The board and the calendar show one workflow: pass --workflow.")
+        shown = await _say(service.runs_view(env, workflow_id, view, month))
+        cards = (
+            [c for column in shown.columns for c in column.cards]
+            if isinstance(shown, run_views.Board)
+            else shown.cards
+        )
+        lines = [
+            _CardLine(
+                stage=c.stage,
+                date=c.date or "",
+                number=c.run.number,
+                status=c.run.status,
+                attention="yes" if c.attention else "",
+                card=", ".join(f"{k}: {v}" for k, v in c.card.items()),
+            )
+            for c in cards
+        ]
+        emit_rows(console, lines, columns=tuple(_CardLine.model_fields), as_json=as_json)
+        return
     found = await _say(service.list_runs(env, workflow_id, limit=limit))
     rows = [
         _RunLine(
@@ -350,9 +383,15 @@ def runs_command(
     workflow: Annotated[uuid.UUID | None, typer.Option("--workflow")] = None,
     limit: Annotated[int, typer.Option(min=1, max=500)] = 50,
     as_json: Annotated[bool, JSON_OPTION] = False,
+    view: Annotated[str, typer.Option(help="list, board or calendar.")] = "list",
+    month: Annotated[str | None, typer.Option(help="The calendar's month, YYYY-MM.")] = None,
 ) -> None:
-    """The newest runs, of one workflow or all of them."""
-    _run(lambda rt, c: list_runs(rt, c, tenant, workflow, limit=limit, as_json=as_json))
+    """The newest runs, of one workflow or all of them; or one workflow's board or calendar."""
+    _run(
+        lambda rt, c: list_runs(
+            rt, c, tenant, workflow, limit=limit, as_json=as_json, view=view, month=month
+        )
+    )
 
 
 @workflows_app.command("cancel")

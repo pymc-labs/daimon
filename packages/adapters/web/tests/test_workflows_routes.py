@@ -202,6 +202,19 @@ async def test_the_saved_state_is_read_and_cleared_through_the_routes(rig: Rig) 
         assert cleared.status_code == 200 and cleared.json()["state"] == {}, cleared.text
 
 
+async def test_runs_answer_as_a_board_or_a_calendar(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        base = f"/api/workflows/{made['id']}/runs"
+        board = (await r.client.get(f"{base}?view=board")).json()
+        assert [c["stage"] for c in board["columns"]] == ["In progress", "Done", "Failed"], board
+        month = (await r.client.get(f"{base}?view=calendar&month=2026-11")).json()
+        assert month == {"view": "calendar", "month": "2026-11", "cards": []}, month
+        assert (await r.client.get(f"{base}?view=calendar&month=soon")).status_code == 422
+        assert (await r.client.get(f"{base}?view=wall")).status_code == 422, "an unknown view"
+        assert (await r.client.get(base)).json() == [], "the list stays the default"
+
+
 async def test_a_run_file_downloads_for_a_viewer_and_no_other_file_does(rig: Rig) -> None:
     async with rig.open() as r:
         made = await r.make()
