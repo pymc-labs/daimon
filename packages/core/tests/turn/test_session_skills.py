@@ -235,7 +235,10 @@ def test_every_skill_version_daimon_publishes_forgets_its_remembered_latest() ->
     """Each production call that publishes or deletes a skill version sits in a
     function that drops the remembered latest version."""
     root = Path(__file__).resolve().parents[4]
-    publishing = re.compile(r"\.(publish_version|versions\.create|delete_version)\(")
+    # A workflow store's `publish_version` is a database write, not a skill version.
+    publishing = re.compile(
+        r"(?<!store)(?<!workflows)\.(publish_version|versions\.create|delete_version)\("
+    )
     callers = {
         path.relative_to(root).as_posix()
         for package in ("packages/core/daimon", "packages/adapters")
