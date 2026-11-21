@@ -56,15 +56,29 @@ class AskModal(discord.ui.Modal):
         self._route = route
         self._message_id = message_id
         self._inputs: dict[str, discord.ui.TextInput[AskModal]] = {}
-        for name, title in form.fields[:5]:
-            box: discord.ui.TextInput[AskModal] = discord.ui.TextInput(
-                label=title[:45] or name, style=discord.TextStyle.paragraph, max_length=2000
+        self._picks: dict[str, discord.ui.Select[AskModal]] = {}
+        for box in form.fields[:5]:
+            if box.choices:
+                pick: discord.ui.Select[AskModal] = discord.ui.Select(
+                    options=[discord.SelectOption(label=c[:100]) for c in box.choices[:25]],
+                    min_values=1 if box.required else 0,
+                    required=box.required,
+                )
+                self._picks[box.name] = pick
+                self.add_item(discord.ui.Label(text=box.title[:45] or box.name, component=pick))
+                continue
+            text: discord.ui.TextInput[AskModal] = discord.ui.TextInput(
+                label=box.title[:45] or box.name,
+                style=discord.TextStyle.paragraph,
+                max_length=2000,
+                required=box.required,
             )
-            self._inputs[name] = box
-            self.add_item(box)
+            self._inputs[box.name] = text
+            self.add_item(text)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         values = {name: str(box.value or "") for name, box in self._inputs.items()}
+        values |= {name: (pick.values or [""])[0] for name, pick in self._picks.items()}
         sent, comment = answers.form_answer(self._route, values)
         runtime = _runtime(interaction)
         claimed = await answers.press(
