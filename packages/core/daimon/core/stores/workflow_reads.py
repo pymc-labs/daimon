@@ -77,6 +77,48 @@ async def list_runs(
     return [RunRow.model_validate(orm) for orm in rows]
 
 
+async def board_runs(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    workflow_id: uuid.UUID,
+    month: str | None = None,
+    date_field: str | None = None,
+    limit: int = 200,
+) -> list[RunRow]:
+    """A workflow's live runs, newest first; with `month`, those whose card `date_field`
+    falls in it (`YYYY-MM`)."""
+    query = select(WorkflowRun).where(
+        WorkflowRun.tenant_id == tenant_id,
+        WorkflowRun.workflow_id == workflow_id,
+        WorkflowRun.mode == "live",
+    )
+    if month is not None and date_field is not None:
+        query = query.where(WorkflowRun.card[date_field].astext.startswith(month))
+    rows = await session.scalars(query.order_by(WorkflowRun.created_at.desc()).limit(limit))
+    return [RunRow.model_validate(orm) for orm in rows]
+
+
+async def stage_steps(
+    session: AsyncSession, run_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[str, str]]]:
+    """(node, status) of each run's steps that have started, oldest first."""
+    if not run_ids:
+        return {}
+    rows = await session.execute(
+        select(WorkflowStep.run_id, WorkflowStep.node_id, WorkflowStep.status)
+        .where(
+            WorkflowStep.run_id.in_(list(run_ids)),
+            WorkflowStep.status.notin_(("pending", "skipped")),
+        )
+        .order_by(WorkflowStep.created_at)
+    )
+    out: dict[uuid.UUID, list[tuple[str, str]]] = defaultdict(list)
+    for run_id, node_id, status in rows.tuples():
+        out[run_id].append((node_id, status))
+    return out
+
+
 async def run_by_number(
     session: AsyncSession, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID, number: int
 ) -> RunRow | None:

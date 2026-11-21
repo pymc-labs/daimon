@@ -27,7 +27,7 @@ from daimon.core.stores import (
 )
 from daimon.core.stores.workflow_run_events import NewEvent, append_events, posted_links
 from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
-from daimon.core.workflows import asks, callbacks, delivery, engine
+from daimon.core.workflows import asks, board, callbacks, delivery, engine
 from daimon.core.workflows.asks import Ask
 from daimon.core.workflows.clock import add_duration, run_times
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
@@ -384,6 +384,9 @@ async def _apply(
         )
     rows = await workflow_runs.list_steps(session, run.id)
     events = list(before) + list(transition.events)
+    if loaded.spec.card is not None:
+        card = board.render_card(loaded.spec, [_view(r) for r in rows], loaded.facts, now=now)
+        await workflow_runs.update_run(session, run.id, card=card)
     for r in rows:
         if (r.node_id, r.visit) in stale:
             # A cancelled attempt is over: a later claim never reattaches to it.

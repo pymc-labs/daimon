@@ -25,9 +25,9 @@ from daimon.core.stores import workflows as store
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import GrantRow, RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow
+from daimon.core.workflows import board, exchange, gate, run_views, runs, views
 from daimon.core.workflows import catalog as tool_catalogs
 from daimon.core.workflows import context as turn_context
-from daimon.core.workflows import exchange, gate, run_views, runs, views
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
 from daimon.core.workflows.preflight import (
     Place,
@@ -850,6 +850,50 @@ async def list_runs(
             ):
                 kept.append(run)
         return await run_views.summaries(session, kept, {i: w.name for i, (w, _) in known.items()})
+
+
+async def runs_view(
+    env: Env,
+    workflow_id: uuid.UUID,
+    view: Literal["board", "calendar"],
+    month: str | None = None,
+) -> run_views.Board | run_views.Calendar:
+    """A workflow's live runs by stage, or by the day on their card (`month` is `YYYY-MM`)."""
+    if month is not None and not board.valid_month(month):
+        raise Invalid("The month is written YYYY-MM.")
+    async with env.sm() as session:
+        workflow, _, rights = await _load(session, env, workflow_id)
+        version = (
+            await store.get_version(
+                session,
+                tenant_id=workflow.tenant_id,
+                workflow_id=workflow.id,
+                number=workflow.live_version,
+            )
+            if workflow.live_version is not None
+            else None
+        )
+        live = parse_spec(version.spec) if version else None
+        date_field = live.card.date if live and live.card else None
+        month = month or env.now.strftime("%Y-%m")
+        found = (
+            []
+            if view == "calendar" and not date_field
+            else await reads.board_runs(
+                session,
+                tenant_id=workflow.tenant_id,
+                workflow_id=workflow.id,
+                month=month if view == "calendar" else None,
+                date_field=date_field,
+            )
+        )
+        kept = [
+            r for r in found if rights.sees_run(own=run_views.started_by_me(r, env.who.account_id))
+        ]
+        cards = await run_views.run_cards(session, kept, {workflow.id: workflow.name}, date_field)
+        if view == "board":
+            return run_views.board_of(cards, board.stages_of(live) if live else [])
+        return run_views.Calendar(month=month, cards=cards)
 
 
 async def get_run(env: Env, run_id: uuid.UUID) -> run_views.RunDetail:

@@ -170,6 +170,7 @@ class RunChanges(TypedDict, total=False):
     redrive_count: int
     started_at: datetime | None
     ended_at: datetime | None
+    card: dict[str, Any] | None
 
 
 async def create_run(

@@ -20,7 +20,7 @@ from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.workflow_run_events import EventRow, list_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow
 from daimon.core.stores.workflow_waits import Wait
-from daimon.core.workflows import ledger
+from daimon.core.workflows import board, ledger
 from daimon.core.workflows.engine import (
     RunFacts,
     StepView,
@@ -29,7 +29,7 @@ from daimon.core.workflows.engine import (
     step_key,
 )
 from daimon.core.workflows.expressions import ExpressionError, Ref, render, template_refs
-from daimon.core.workflows.spec import parse_spec
+from daimon.core.workflows.spec import Spec, parse_spec
 from daimon.core.workflows.views import Person, iso, obj, people_of, person, seq
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +64,32 @@ class RunSummary(BaseModel):
     waiting_reason: str | None
     triggered_by: Person | None
     redriven: bool
+
+
+class RunCard(BaseModel):
+    """A run on the board or the calendar: its stage, its card fields, and its calendar day."""
+
+    run: RunSummary
+    stage: str
+    card: dict[str, Any]
+    attention: bool
+    date: str | None = None
+
+
+class Column(BaseModel):
+    stage: str
+    cards: list[RunCard]
+
+
+class Board(BaseModel):
+    view: Literal["board"] = "board"
+    columns: list[Column]
+
+
+class Calendar(BaseModel):
+    view: Literal["calendar"] = "calendar"
+    month: str
+    cards: list[RunCard]
 
 
 class Attempt(BaseModel):
@@ -700,6 +726,47 @@ async def summaries(
             )
         )
     return out
+
+
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+async def run_cards(
+    session: AsyncSession,
+    runs: Sequence[RunRow],
+    names_of: Mapping[uuid.UUID, str],
+    date_field: str | None,
+) -> list[RunCard]:
+    """Each run with the stage it is in now, read from its current step."""
+    steps = await reads.stage_steps(session, [r.id for r in runs])
+    specs: dict[tuple[uuid.UUID, int], dict[str, Any]] = {}
+    parsed: dict[tuple[uuid.UUID, int], Spec] = {}
+    out: list[RunCard] = []
+    for run, summary in zip(runs, await summaries(session, runs, names_of), strict=True):
+        key = (run.workflow_id, run.version)
+        if key not in parsed:
+            parsed[key] = parse_spec(await _spec_of(session, run, specs))
+        card = run.card or {}
+        day = card.get(date_field) if date_field else None
+        match = _DAY.match(day) if isinstance(day, str) else None
+        out.append(
+            RunCard(
+                run=summary,
+                stage=board.stage_of(parsed[key], steps.get(run.id, []), run.status),
+                card=card,
+                attention=board.needs_attention(run.status, run.waiting_reason),
+                date=match.group(0) if match else None,
+            )
+        )
+    return out
+
+
+def board_of(cards: Sequence[RunCard], stages: Sequence[str]) -> Board:
+    """Columns: the spec's stages (or one for running runs), then Done and Failed."""
+    names = list(stages) or [board.ACTIVE]
+    names += [c.stage for c in cards if c.stage not in (*names, board.DONE, board.FAILED)]
+    names = [*dict.fromkeys(names), board.DONE, board.FAILED]
+    return Board(columns=[Column(stage=n, cards=[c for c in cards if c.stage == n]) for n in names])
 
 
 def _overlay(state: RunState, run: RunRow) -> RunState:
