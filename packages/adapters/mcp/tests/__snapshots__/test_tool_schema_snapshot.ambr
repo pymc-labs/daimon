@@ -10345,6 +10345,48 @@
         'type': 'object',
       }),
     }),
+    'share_secret_with': dict({
+      'description': '''
+        Send one of this agent's saved keys to a person's Discord DMs, where they can
+        reveal it once within a day. Use it when someone asks for a key's value; never
+        paste a value in chat. It goes to the person who asked unless an admin names
+        someone else. The result never holds the value.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'key_name': dict({
+            'description': "The agent's key, e.g. TOGGL_API_TOKEN.",
+            'type': 'string',
+          }),
+          'label': dict({
+            'description': 'What the person sees, up to 100 characters.',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'recipient_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': 'Discord user ID; omit to send it to the person who asked.',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'key_name',
+          'label',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'show_watch': dict({
       'description': '''
         Show your watch's immutable destination, source, status and expiry. Admins may inspect

@@ -1320,6 +1320,10 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.commands.settings import SettingsCog
+        from daimon.adapters.discord.commands.share_secret import (
+            SecretShareRevealButton,
+            ShareSecretCog,
+        )
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
@@ -1334,6 +1338,8 @@ class DaimonBot(commands.Bot):
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))
         await self.add_cog(ModelCog(self))
+        await self.add_cog(ShareSecretCog(self))
+        self.add_dynamic_items(SecretShareRevealButton)
         await self.add_cog(FeedbackReactionCog(self))
 
         # One-time CLASS registration (not per-button) for the chat-initiated

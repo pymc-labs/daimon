@@ -21,6 +21,7 @@ from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.commands.privacy import PrivacyCog
 from daimon.adapters.discord.commands.routines import RoutinesCog
 from daimon.adapters.discord.commands.settings import SettingsCog
+from daimon.adapters.discord.commands.share_secret import ShareSecretCog
 from daimon.core.platform_words import DESCRIPTIONS, WORDS
 
 
@@ -166,6 +167,7 @@ class TestSharedDescriptions:
             PrivacyCog,
             RoutinesCog,
             SettingsCog,
+            ShareSecretCog,
         ]
         registered = {
             f"/{command.qualified_name}": command.description

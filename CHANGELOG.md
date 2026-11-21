@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Share a secret with one person on Discord.** With the new Secret sharing
+  feature on (off by default; an admin turns it on), `/share-secret` sends a
+  secret to a person's DMs, and the `share_secret_with` tool sends one of the
+  agent's keys to whoever asked, or to anyone an admin names. The person
+  reveals it once within a day; the value is encrypted, never in chat or the
+  tool's result, and deleted on reveal or expiry.
+
+- **A relay server's requester fields come from the turn that made the call.**
+  Each call is stamped from the turn holding its session, so concurrent or
+  queued turns in one thread never lend it their person or message; a call
+  made while no turn holds the session names nobody.
+
 - **Images over 5 MiB, or over 8000 px on an edge, are resized instead of sent
   as a link.** In Discord, Slack, Teams and the web app, an image of up to 25
   MiB is shrunk to fit the model's limits and shown to the agent inline, with
