@@ -393,8 +393,10 @@ async def test_a_write_grant_is_requested_approved_and_carried_over(
     await inbox.decide(approver, uuid.UUID(item.id), inbox.Decide(route="approve"))
     assert await status() == "live", "the admin's approval granted the write"
     tools = FakeTools()
-    await drive(world, (await world.run()).id, {}, tools)
+    run = await world.run()
+    await drive(world, run.id, {}, tools)
     assert [t for _, t, _ in tools.calls] == ["send_message"], "it runs under the grant"
+    assert (await world.get(run.id)).outcome == "completed", "a run that acted did something"
     draft = await service.get_draft(owner, world.workflow_id)
     assert draft.new_grants == [], "an unchanged node carries its grant over"
     await service.publish(owner, world.workflow_id, "Again")

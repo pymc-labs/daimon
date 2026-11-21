@@ -22,6 +22,7 @@ from typing import Final, Literal
 from daimon.core.workflows.expressions import ExpressionError, evaluate, expressions_in, render
 from daimon.core.workflows.graph import Edge, ancestors, back_edges, edges_of
 from daimon.core.workflows.spec import (
+    ActionNode,
     AgentNode,
     AnyNode,
     ApprovalNode,
@@ -453,9 +454,14 @@ class _Walk:
                 reason = "approval_rejected" if rejected else "step_failed"
                 self.fail_run(reason, f"Ended at {_title(step.node_id, node)}", done.key)
             else:
-                # A Finish with nothing to deliver or return is a quiet end, as a week with
-                # nothing to report.
-                quiet = node.output is None and node.deliver is None
+                # A Finish with nothing to deliver or return, after no action ran, is a quiet
+                # end, as a week with nothing to report.
+                acted = any(
+                    s.status == "succeeded"
+                    and isinstance(self.spec.nodes.get(s.node_id), ActionNode)
+                    for s in self.steps
+                )
+                quiet = node.output is None and node.deliver is None and not acted
                 outcome_of = "nothing_to_do" if quiet else "completed"
                 self.end_run(RunEnd("succeeded", outcome=outcome_of, step=done.key))
             return
