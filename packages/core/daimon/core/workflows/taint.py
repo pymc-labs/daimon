@@ -32,7 +32,7 @@ from daimon.core.workflows.spec import (
     WaitNode,
     WriteScope,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 _TRUSTED_ANSWERERS: Final = frozenset({"owner", "editors"})
 #: The tool name for every tool of a server whose toolset is on by default (`server/*`):
@@ -52,6 +52,15 @@ class ToolFacts(BaseModel):
     untrusted: bool = False
 
 
+class SkillPin(BaseModel):
+    """A library skill at the version a publish saw."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    version: str
+
+
 class Catalog(BaseModel):
     """What the editor's agents can call, keyed `server/tool`; built by the caller."""
 
@@ -63,14 +72,22 @@ class Catalog(BaseModel):
     policy: ToolSafetyPolicy = OPEN_TOOL_SAFETY
     #: The workspace library's skill names; None skips the skill check.
     skills: frozenset[str] | None = None
+    #: Those skills by name, at their versions (the library's now, or as published).
+    skill_pins: dict[str, SkillPin] = Field(default_factory=dict[str, SkillPin])
 
 
-def catalog_of(policy: ToolSafetyPolicy, agent_tools: Mapping[str, Sequence[str]]) -> Catalog:
+def catalog_of(
+    policy: ToolSafetyPolicy,
+    agent_tools: Mapping[str, Sequence[str]],
+    skills: Mapping[str, SkillPin] | None = None,
+) -> Catalog:
     """Agents' tools, each classed by the operator's policy as the run-time calls are."""
     return Catalog(
         agents={k: frozenset(v) for k, v in agent_tools.items()},
         tools={t: tool_facts(policy, t) for ids in agent_tools.values() for t in ids},
         policy=policy,
+        skills=frozenset(skills) if skills is not None else None,
+        skill_pins=dict(skills or {}),
     )
 
 
@@ -105,7 +122,7 @@ def node_writes(node: AnyNode, catalog: Catalog | None) -> bool:
             scoped = any(s.tool == node.tool for s in node.writes_to or [])
             return tool_writes(node.tool, catalog) and not scoped
         case AgentNode():
-            return node.writes == "allow" or node.review == "auto"
+            return node.writes in ("allow", "routine") or node.review == "auto"
         case CodeNode():
             return node.network == "on"
         case ForEachNode():

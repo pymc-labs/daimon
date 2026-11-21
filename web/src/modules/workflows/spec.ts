@@ -248,7 +248,7 @@ const boundBy = (spec: Spec, id: string) =>
 
 /** A write beyond the step's `writes_to` scopes. */
 export const writes = (n: Node) =>
-  (n.kind === "action" && toolWrites(n.tool) && !(n.writes_to ?? []).some((s) => s.tool === n.tool)) || (n.kind === "agent" && n.writes === "allow")
+  (n.kind === "action" && toolWrites(n.tool) && !(n.writes_to ?? []).some((s) => s.tool === n.tool)) || (n.kind === "agent" && (n.writes === "allow" || n.writes === "routine"))
 const scopesOf = (n: Node) => (n.kind === "for_each" && n.do ? n.do : n).writes_to ?? []
 
 /** Rule of Two classes per step and the grants the spec needs. */

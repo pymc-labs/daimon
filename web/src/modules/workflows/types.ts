@@ -29,7 +29,7 @@ export type Node = {
   agent?: string; model?: string; instructions?: string; inputs?: Record<string, string>
   /** Agent, code: fields. Finish: an expression. */
   output?: Record<string, Field> | string
-  routes?: Record<string, string | Route>; tools?: "inherit" | string[]; writes?: "refuse" | "propose" | "allow"
+  routes?: Record<string, string | Route>; tools?: "inherit" | string[]; writes?: "refuse" | "propose" | "allow" | "routine"
   builtins?: "none" | "read" | "all"; session?: string; can_ask?: boolean; can_finish_early?: boolean; untrusted_waiver?: string
   /** Agent, action: writes that go out unattended. Agent: skills from the library. */
   writes_to?: WriteScope[]; skills?: string[]

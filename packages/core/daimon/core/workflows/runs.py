@@ -46,7 +46,7 @@ from daimon.core.workflows.spec import (
     Spec,
     parse_spec,
 )
-from daimon.core.workflows.taint import Catalog, catalog_of
+from daimon.core.workflows.taint import Catalog, SkillPin, catalog_of
 from pydantic import JsonValue
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -112,6 +112,8 @@ class Start:
     version: int | None = None
     #: The chat message the run started from (`deliver.to: origin`).
     origin: dict[str, Any] | None = None
+    #: A test run's library skills, pinned as a publish would (`catalog.spec_skills`).
+    skills: dict[str, dict[str, str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -247,16 +249,17 @@ async def spec_of(session: AsyncSession, run: RunRow) -> Spec:
 
 async def _version_of(
     session: AsyncSession, run: RunRow
-) -> tuple[Spec, Mapping[str, Sequence[str]]]:
-    """The run's spec and its agents' tools as published (none for a test run)."""
+) -> tuple[Spec, Mapping[str, Sequence[str]], Mapping[str, Any]]:
+    """The run's spec, its agents' tools (none for a test run) and skills as published."""
     if run.mode == "test" and run.test_options is not None:
-        return parse_spec(run.test_options["spec"]), {}
+        options = run.test_options
+        return parse_spec(options["spec"]), {}, options.get("skills") or {}
     version = await workflows.get_version(
         session, tenant_id=run.tenant_id, workflow_id=run.workflow_id, number=run.version
     )
     if version is None:
         raise LookupError(f"Run {run.id} has no version {run.version}")
-    return parse_spec(version.spec), version.agent_tools or {}
+    return parse_spec(version.spec), version.agent_tools or {}, version.skills or {}
 
 
 def _max_steps(spec: Spec, settings: Settings) -> int:
@@ -269,7 +272,7 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
         session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
     )
     assert workflow is not None, "a run's workflow outlives it"
-    spec, agent_tools = await _version_of(session, run)
+    spec, agent_tools, skills = await _version_of(session, run)
     pinned = (run.test_options or {}).get("pinned", {})
     facts = RunFacts(
         inputs=run.inputs,
@@ -290,7 +293,9 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
         },
     )
     steps = await workflow_runs.list_steps(session, run.id)
-    return Loaded(run, workflow, spec, steps, facts, catalog_of(settings.tool_safety, agent_tools))
+    pins = {k: SkillPin.model_validate(v) for k, v in skills.items()}
+    catalog = catalog_of(settings.tool_safety, agent_tools, pins or None)
+    return Loaded(run, workflow, spec, steps, facts, catalog)
 
 
 async def _lock(session: AsyncSession, run_id: uuid.UUID) -> RunRow | None:
@@ -822,6 +827,7 @@ async def start_run(
                 return Refusal("not_found", "That run is gone.")
         if start.mode == "test" and start.version is None:
             spec_document: dict[str, Any] = workflow.draft_spec
+            skills = start.skills or {}
             version = workflow.live_version or 0
         elif workflow.status != "active":
             return Refusal("paused", "This workflow is paused. Ask its owner.")
@@ -836,7 +842,7 @@ async def start_run(
             )
             if row is None:
                 return Refusal("not_found", f"Version {version} of this workflow is gone.")
-            spec_document = row.spec
+            spec_document, skills = row.spec, row.skills or {}
         source_steps = await workflow_runs.list_steps(session, source.id) if source else []
     spec = parse_spec(spec_document)
     given = start.inputs if start.inputs is not None else (source.inputs if source else {})
@@ -900,6 +906,7 @@ async def start_run(
                     "spec": spec_document,
                     "pinned": start.pinned,
                     "pinned_from": str(start.pinned_from) if start.pinned_from else None,
+                    "skills": skills,
                 }
                 if start.mode == "test"
                 else None

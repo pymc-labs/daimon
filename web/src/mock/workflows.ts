@@ -405,6 +405,11 @@ export const workflowsHandlers: HttpHandler[] = [
     if ("error" in r) return HttpResponse.json({ detail: r.error }, { status: 422 })
     return HttpResponse.json(detail(r.w), { status: 201 })
   }),
+  http.get("/api/workflows/from-routine/:id", ({ params }) => {
+    const r = routineOf(params.id)
+    if (!r) return notFound()
+    return HttpResponse.json({ paused: !r.enabled, grants: [{ kind: "unattended_write", node: "run", detail: r.name ?? "Run" }] })
+  }),
   http.post("/api/workflows/from-routine/:id", async ({ params }) => {
     await wait(400)
     const m = me()

@@ -53,6 +53,9 @@ Values come from `${{ }}` expressions, such as `${{ steps.draft.output.text }}`.
 A step reads only the inputs and the steps before it. A loop needs a most-visits
 limit. Validation names each problem, and a draft with errors cannot be published.
 
+An Agent step can load skills from the workspace library by name. Each publish
+pins the version it saw, so a later library edit reaches runs after a republish.
+
 ## Triggers
 
 A workflow starts by hand, on a schedule, from a webhook, or when another
@@ -124,6 +127,10 @@ The workflow takes over the routine's schedule, and a paused routine moves
 paused. A routine that posts to its owner's direct messages becomes a step in
 that conversation, which is skipped while the owner is busy. A routine that is
 running, or already moved, stays.
+
+A moved routine's step writes as the routine did, under the same tool policy.
+The preview lists what the admin approves by moving it, including a waiver when
+the step reads outside content.
 
 ## CLI
 

@@ -101,7 +101,7 @@ export function AgentEditor(p: EditorProps) {
         <div className="space-y-3">
           <Field label="Tools"><Pick value={Array.isArray(n.tools) ? "custom" : "inherit"} ro={ro} onChange={(v) => set((x) => { x.tools = v === "inherit" ? undefined : [] })}
             options={[{ value: "inherit", label: `Inherit (${agent?.tools ?? 0})` }, { value: "custom", label: Array.isArray(n.tools) ? `Custom (${n.tools.length})` : "Custom" }]} /></Field>
-          <Field label="Writes"><Segmented value={n.writes ?? "refuse"} ro={ro} onChange={(v) => set((x) => { x.writes = v === "refuse" ? undefined : v })} options={[["refuse", "Refuse"], ["propose", "Propose"], ["allow", "Allow"]]} /></Field>
+          <Field label="Writes"><Segmented value={n.writes ?? "refuse"} ro={ro} onChange={(v) => set((x) => { x.writes = v === "refuse" ? undefined : v })} options={[["refuse", "Refuse"], ["propose", "Propose"], ["allow", "Allow"], ...(n.writes === "routine" ? [["routine", "As routine"] as ["routine", string]] : [])]} /></Field>
           <Field label="Built-ins"><Segmented value={n.builtins ?? "none"} ro={ro} onChange={(v) => set((x) => { x.builtins = v === "none" ? undefined : v })} options={[["none", "None"], ["read", "Read"], ["all", "All"]]} /></Field>
         </div>
       </Section>

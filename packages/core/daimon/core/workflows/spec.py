@@ -156,7 +156,8 @@ class AgentNode(_Flow):
     output: dict[str, SchemaField] | None = None
     routes: dict[str, str | Route] | None = None
     tools: Literal["inherit"] | list[str] | None = None
-    writes: Literal["refuse", "propose", "allow"] | None = None
+    #: `routine`: as the routine it was converted from, under the operator's policy unchanged.
+    writes: Literal["refuse", "propose", "allow", "routine"] | None = None
     review: Literal["auto"] | list[str] | None = None
     builtins: Literal["none", "read", "all"] | None = None
     session: str | None = None

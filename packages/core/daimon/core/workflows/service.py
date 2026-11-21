@@ -85,6 +85,8 @@ class Env:
     now: datetime
     #: The caller's agents; every validation classes their tools (none means no agents).
     agents: tool_catalogs.AgentLister | None = None
+    #: The workspace's library skills; none means a step's `skills` cannot be checked.
+    skills: tool_catalogs.SkillLister | None = None
 
 
 class Patch(BaseModel):
@@ -165,7 +167,7 @@ async def _view(
 
 
 async def _catalog(env: Env) -> Catalog:
-    return await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents)
+    return await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents, env.skills)
 
 
 async def _validate(env: Env, spec: dict[str, Any], catalog: Catalog | None = None) -> Validation:
@@ -540,10 +542,11 @@ async def publish(
             note=note.strip()[:500],
             now=env.now,
             agent_tools=tool_catalogs.spec_agent_tools(parsed, catalog),
+            skills=tool_catalogs.spec_skills(parsed, catalog),
         )
         for approver, grants in [
             *((g.approved_by_account_id, [_carried(g)]) for g in carried),
-            (env.who.account_id, _grant_rows(parsed, [g.model_dump() for g in new], env.who)),
+            (env.who.account_id, grant_rows(parsed, [g.model_dump() for g in new], env.who)),
         ]:
             await publish_requests.add_grants(
                 session,
@@ -568,7 +571,7 @@ async def publish(
         return view
 
 
-def _grant_rows(
+def grant_rows(
     spec: Spec, grants: Sequence[Mapping[str, Any]], publisher: Who | uuid.UUID
 ) -> list[dict[str, Any]]:
     """Grant rows pinned to the node as published and to its publisher."""
@@ -709,9 +712,10 @@ async def decide_publish_request(
                 approved_by=env.who.account_id,
                 now=env.now,
                 agent_tools=tool_catalogs.spec_agent_tools(parsed, catalog),
+                skills=tool_catalogs.spec_skills(parsed, catalog),
             )
             version = row.number
-            grants = _grant_rows(parsed, request.grants, requester)
+            grants = grant_rows(parsed, request.grants, requester)
             await publish_requests.add_grants(
                 session,
                 tenant_id=workflow.tenant_id,
@@ -892,6 +896,11 @@ async def _pins(env: Env, from_run: uuid.UUID, nodes: Sequence[str]) -> dict[str
     }
 
 
+async def _draft_skills(env: Env, workflow: WorkflowRow) -> dict[str, dict[str, str]]:
+    """The library skills a test run of the draft loads, at their versions now."""
+    return tool_catalogs.spec_skills(parse_spec(workflow.draft_spec), await _catalog(env))
+
+
 async def start(
     env: Env,
     workflow_id: uuid.UUID,
@@ -930,6 +939,7 @@ async def start(
             pinned=pins,
             pinned_from=pinned_from,
             origin=origin,
+            skills=await _draft_skills(env, workflow) if test is not None else None,
         ),
         now=env.now,
     )
@@ -1028,6 +1038,7 @@ async def rerun(
             rerun_of=None if step else run.id,
             label=run.label,
             version=workflow.live_version if version == "live" else picked,
+            skills=await _draft_skills(env, workflow) if test else None,
         ),
         now=env.now,
     )

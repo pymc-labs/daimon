@@ -30,7 +30,7 @@ from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards, exchange, run_views, service, views
 from daimon.core.workflows import edits as edits_module
 from daimon.core.workflows.access import Who
-from daimon.core.workflows.catalog import tenant_agents
+from daimon.core.workflows.catalog import tenant_agents, tenant_skills
 from daimon.core.workflows.chat_cards import ChatPlace
 from daimon.core.workflows.service import Env, NewWorkflow, Patch, WorkflowError
 from daimon.core.workflows.validate import Validation
@@ -59,6 +59,7 @@ def _env(runtime: McpRuntime, auth: AuthIdentity) -> Env:
         who=who,
         now=datetime.now(UTC),
         agents=tenant_agents(runtime.client, auth.tenant_id, runtime.session_factory),
+        skills=tenant_skills(runtime.client, auth.tenant_id),
     )
 
 

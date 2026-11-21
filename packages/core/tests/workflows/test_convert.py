@@ -28,11 +28,19 @@ from daimon.core.stores.routine_move import (
     rollback_rows,
     seed_routines,
 )
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
+from daimon.core.turn.approvals import unattended_decider
+from daimon.core.turn.posture import PolicyApproval
 from daimon.core.workflows import convert, triggers
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.agent_step import step_decider, step_policy
 from daimon.core.workflows.catalog import AgentLister
 from daimon.core.workflows.lanes import OWNER_DM
+from daimon.core.workflows.preflight import missing_grant
 from daimon.core.workflows.service import Env, Forbidden, Refused
+from daimon.core.workflows.spec import AgentNode, parse_spec
+from daimon.core.workflows.unattended import exposed_at_run
+from daimon.core.workflows.validate import DEFAULT_RUN_BUDGET_USD
 from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.workflows import NOW, agents_with, make_settings
@@ -287,3 +295,66 @@ async def test_seed_refuses_a_routine_that_runs_as_a_workflow(db_session: AsyncS
     async with env.sm.begin() as s:
         with pytest.raises(StoreError, match="runs as a workflow"):
             await seed_routines(s, [entry], tenant_id=env.who.tenant_id, now=NOW, apply=True)
+
+
+@pytest.mark.parametrize("tools", [[], ["crm/search"]], ids=["channel", "tainted"])
+async def test_converted_step_decides_like_its_routine(
+    db_session: AsyncSession, tools: list[str]
+) -> None:
+    """`writes: routine` keeps the operator's routine policy: each call goes out, or not, as
+    it did from the routine. A step reading outside content keeps doing so under a waiver. A DM
+    routine's step runs as the owner's DM turn, the routine's own decider."""
+    env = await _env(db_session, agents=agents_with({"daimon": tools}))
+    routine_id = await _routine(db_session, env)
+    plan = await convert.preview(env, routine_id)
+    spec = parse_spec(plan.spec)
+    node = spec.nodes[convert.STEP]
+    assert isinstance(node, AgentNode) and node.writes == "routine"
+    assert (node.untrusted_waiver is not None) == bool(tools), node.untrusted_waiver
+    assert not plan.validation.errors, "the Rule of Two holds through the waiver"
+    assert ("untrusted_waiver" in {g.kind for g in plan.validation.grants}) == bool(tools)
+    policy = ToolSafetyPolicy(
+        enabled=True, unattended_writes=("crm/create_deal",), denied=("crm/delete_deal",)
+    )
+    trusted = frozenset({DAIMON_SERVER_NAME})
+    routine = unattended_decider(policy, trusted_servers=trusted)
+    exposed = exposed_at_run(spec, convert.STEP, untrusted_inputs=False, catalog=plan.catalog)
+    step = step_decider(
+        node,
+        attempt_id=uuid.uuid4(),
+        policy=policy,
+        writes="routine",
+        propose=None,
+        exposed=exposed,
+    )(
+        PolicyApproval(
+            decide=unattended_decider(step_policy(policy, "routine"), trusted_servers=trusted)
+        )
+    )
+
+    def daimon(tool: str) -> ToolCall:
+        return ToolCall(
+            tool_use_id="t",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="call_tool",
+            input={"name": tool, "arguments": {}},
+        )
+
+    calls = [
+        *(
+            ToolCall(tool_use_id="t", server_name="crm", tool_name=t)
+            for t in ("search", "create_deal", "update_deal", "delete_deal")
+        ),
+        daimon("send_message"),
+        daimon("list_channels"),
+        ToolCall(tool_use_id="t", server_name=None, tool_name="bash"),
+    ]
+    for call in calls:
+        want = (await routine(call)).allow
+        assert (await step.decide(call)).allow is want, f"{call.server_name}/{call.tool_name}"
+    flow = await convert.from_routine(env, routine_id)
+    async with env.sm() as s:
+        workflow = await workflows.get_workflow(s, tenant_id=env.who.tenant_id, workflow_id=flow)
+        assert workflow is not None
+        held = await missing_grant(s, workflow, 1, spec, DEFAULT_RUN_BUDGET_USD, policy)
+    assert held is None, "the move records the grants the admin approved"

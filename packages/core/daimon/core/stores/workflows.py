@@ -77,6 +77,7 @@ class WorkflowVersionRow(_Row):
     published_by_account_id: uuid.UUID | None
     approved_by_account_id: uuid.UUID | None
     agent_tools: dict[str, list[str]] | None
+    skills: dict[str, dict[str, str]] | None
     published_at: datetime
 
 
@@ -223,6 +224,7 @@ async def publish_version(
     now: datetime | None = None,
     cursors: Mapping[str, workflow_triggers.Cursor] | None = None,
     agent_tools: Mapping[str, Sequence[str]] | None = None,
+    skills: Mapping[str, Mapping[str, str]] | None = None,
 ) -> WorkflowVersionRow:
     """Add the next version and make it live with its triggers; the draft now begins from it."""
     workflow = await get_workflow(session, tenant_id=tenant_id, workflow_id=workflow_id, lock=True)
@@ -242,6 +244,7 @@ async def publish_version(
         published_by_account_id=published_by,
         approved_by_account_id=approved_by,
         agent_tools={k: list(v) for k, v in agent_tools.items()} if agent_tools else None,
+        skills={k: dict(v) for k, v in skills.items()} if skills else None,
     )
     session.add(orm)
     await session.flush()

@@ -23,6 +23,7 @@ from typing import Final, Literal, Protocol, cast
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from anthropic.types.beta.beta_managed_agents_custom_skill import BetaManagedAgentsCustomSkill
 from daimon.core.capability_tools import WORKFLOW_AUTHORING_TOOLS
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
@@ -74,7 +75,7 @@ from daimon.core.workflows.unattended import (
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
-Writes = Literal["refuse", "propose", "allow"]
+Writes = Literal["refuse", "propose", "allow", "routine"]
 READ_BUILTINS: Final = frozenset({"read", "glob", "grep", "web_fetch", "web_search"})
 #: Daimon tools a step never calls: no step builds more automation.
 AUTHORING_TOOLS: Final = WORKFLOW_AUTHORING_TOOLS | {
@@ -155,8 +156,10 @@ def step_policy(
     policy: ToolSafetyPolicy, writes: Writes, scopes: Sequence[WriteScope] = ()
 ) -> ToolSafetyPolicy:
     """The tool policy a step runs under: `allow` lets third-party writes through (rules still
-    deny); `refuse` and `propose` let none through unattended but its scoped tools, whose
-    arguments `decide_unattended_call` checks first."""
+    deny); `routine` keeps the operator's; `refuse` and `propose` let none through unattended
+    but its scoped tools, whose arguments `decide_unattended_call` checks first."""
+    if writes == "routine":
+        return policy
     allowed = ("*",) if writes == "allow" else tuple(dict.fromkeys(s.tool for s in scopes))
     return policy.model_copy(update={"unattended_writes": allowed})
 
@@ -173,6 +176,16 @@ def tools_of(node: AgentNode) -> StepTools:
     if isinstance(node.tools, list):
         listed = frozenset(ServerTool(*key.split("/", 1)) for key in node.tools if "/" in key)
     return StepTools(builtins or frozenset(), listed, OWN_TOOLS)
+
+
+def pinned_skills(work: StepWork, node: AgentNode) -> list[BetaManagedAgentsCustomSkill]:
+    """The step's `skills` at the versions its version (or test run) pinned."""
+    pins = work.catalog.skill_pins if work.catalog is not None else {}
+    return [
+        BetaManagedAgentsCustomSkill(type="custom", skill_id=p.id, version=p.version)
+        for p in (pins.get(name) for name in node.skills or [])
+        if p is not None
+    ]
 
 
 def _key(work: StepWork) -> str:
@@ -451,6 +464,7 @@ class AgentStepExecutor:
             on_session=on_session,
             resume=resume and asked is None,
             on_render=_Activity(self.sm, work, self.clock, set(), paths),
+            skills=pinned_skills(work, node),
         )
         result: step_tools.Recorded | None = None
         for _ in range(waits.MAX_QUESTIONS + 1):

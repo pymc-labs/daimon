@@ -500,6 +500,7 @@ def create_tables() -> None:
         sa.Column("published_by_account_id", sa.UUID(), nullable=True),
         sa.Column("approved_by_account_id", sa.UUID(), nullable=True),
         sa.Column("agent_tools", sa.JSON(), nullable=True),
+        sa.Column("skills", sa.JSON(), nullable=True),
         sa.Column(
             "published_at",
             sa.DateTime(timezone=True),

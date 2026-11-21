@@ -27,7 +27,7 @@ from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.workflows import convert, exchange, run_views, service
 from daimon.core.workflows.access import Who, who_of
-from daimon.core.workflows.catalog import tenant_agents
+from daimon.core.workflows.catalog import tenant_agents, tenant_skills
 from daimon.core.workflows.service import Env, NewWorkflow, WorkflowError
 from pydantic import BaseModel
 from rich.console import Console
@@ -71,7 +71,12 @@ async def operator_env(
         raise UserFacingError(f"Account {owner} is not an active member of this tenant.")
     agents = tenant_agents(rt.anthropic, tenant_id, rt.sessionmaker)
     env = Env(
-        sm=rt.sessionmaker, settings=rt.settings, who=who, now=datetime.now(UTC), agents=agents
+        sm=rt.sessionmaker,
+        settings=rt.settings,
+        who=who,
+        now=datetime.now(UTC),
+        agents=agents,
+        skills=tenant_skills(rt.anthropic, tenant_id),
     )
     await _say(service.ensure_on(env))
     return env
@@ -241,6 +246,10 @@ async def from_routine(
             highlight=False,
         )
         console.print(exchange.dump(plan.spec, "yaml"), markup=False, highlight=False)
+        for grant in plan.validation.grants:
+            console.print(
+                f"You approve {grant.kind}: {grant.detail}", markup=False, highlight=False
+            )
     if not apply:
         console.print("Preview only. Add --apply and --routine to move.", highlight=False)
     return made

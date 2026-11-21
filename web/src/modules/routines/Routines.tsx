@@ -18,9 +18,13 @@ import { rowProps, useListParam, useParam } from "@/lib/filters"
 import { absolute, channelLabel, plural } from "@/lib/format"
 import { useCan, useMe } from "@/lib/hooks"
 import { Pill } from "../agents/bits"
+import { GRANT } from "../workflows/kinds"
+import type { Grant } from "../workflows/types"
 import { Editor } from "./Editor"
 import { RunNow } from "./RunNow"
 import type { Choices, Routine } from "./types"
+
+type MovePreview = { paused: boolean; grants: Grant[] }
 
 const LIST = ["routines", "list"]
 const CHOICES = ["routines", "choices"]
@@ -167,7 +171,11 @@ function Detail({ routine: r, choices }: { routine: Routine; choices: Choices })
         )}
         menu={manage ? [...(movable ? [{
           label: "Move to Workflows", icon: <Workflow />, disabled: move.isPending,
-          onSelect: async () => { if (await confirm({ title: "Move to Workflows?", body: `${r.title}, ${r.schedule}`, action: "Move" })) move.mutate() },
+          onSelect: async () => {
+            const plan = await api.get<MovePreview>(`/api/workflows/from-routine/${r.id}`)
+            const body = <>{r.title}, {r.schedule}{plan.paused && ", starts paused"}{plan.grants.map((g) => <span key={g.kind + g.detail} className="block">{GRANT[g.kind]}: {g.detail}</span>)}</>
+            if (await confirm({ title: "Move to Workflows?", body, action: "Move" })) move.mutate()
+          },
         }] : []), {
           label: "Delete", icon: <Trash2 />, destructive: true, disabled: del.isPending,
           onSelect: async () => { if (await confirm({ title: "Delete routine?", body: `${r.title}, ${r.schedule}`, action: "Delete", destructive: true })) del.mutate() },

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -24,7 +24,7 @@ from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPoli
 from daimon.core.turn.approvals import unattended_decider
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.turn.state import ToolUseBlock, TurnState
-from daimon.core.workflows import answers, brief, inbox, run_views, runs, step_tools, waits
+from daimon.core.workflows import answers, brief, inbox, run_views, runs, service, step_tools, waits
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.agent_step import (
     AgentStepExecutor,
@@ -36,7 +36,8 @@ from daimon.core.workflows.agent_step import (
 from daimon.core.workflows.runs import StepWork
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AgentNode, SchemaField, WriteScope, parse_spec
-from daimon.testing.workflows import NOW, World, make_world
+from daimon.core.workflows.taint import SkillPin
+from daimon.testing.workflows import NOW, World, agents_with, make_world
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -484,6 +485,47 @@ async def test_a_scoped_call_goes_out_unwatched_only_when_its_arguments_fit() ->
     assert await sends("update_page", page_id="p1", text="hi"), "a page this turn created"
     assert not await sends("update_page", page_id="p1", text="hi", title="x"), "an extra arg"
     assert not await sends("create_page", title="x"), "an unscoped write stays refused"
+
+
+async def test_a_step_loads_its_skills_as_published_until_republished(
+    db_session: AsyncSession,
+) -> None:
+    nodes = {
+        "a": {
+            "kind": "agent",
+            "agent": "daimon",
+            "instructions": "Triage",
+            "skills": ["triage"],
+            "next": "f",
+        },
+        "f": {"kind": "finish"},
+    }
+    world = await make_world(db_session, nodes, "a")
+    library = {"triage": SkillPin(id="skill_1", version="1")}
+
+    async def skills() -> dict[str, SkillPin]:
+        return dict(library)
+
+    async def nothing() -> dict[str, SkillPin]:
+        return {}
+
+    who = Who(world.tenant_id, world.owner)
+    owner = Env(world.sm, world.settings, who, NOW, agents_with({"daimon": []}), skills)
+    for env in (replace(owner, skills=None), replace(owner, skills=nothing)):
+        with pytest.raises(service.Invalid, match="Unknown skill: triage"):
+            await service.publish(env, world.workflow_id, "No library")
+
+    async def loaded() -> list[str]:
+        lane = Lane(world, [completes({})])
+        await drive(world, (await world.run()).id, lane)
+        assert lane.step is not None
+        return [f"{s.skill_id}@{s.version}" for s in lane.step.skills]
+
+    await service.publish(owner, world.workflow_id, "Pin")
+    library["triage"] = SkillPin(id="skill_1", version="2")
+    assert await loaded() == ["skill_1@1"], "a library edit waits for a republish"
+    await service.publish(owner, world.workflow_id, "Again")
+    assert await loaded() == ["skill_1@2"]
 
 
 def test_the_brief_carries_the_contract_and_untrusted_inputs() -> None:

@@ -44,10 +44,11 @@ from daimon.core.workflows import (
     webhooks,
 )
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.catalog import tenant_skills
 from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
 from daimon.core.workflows.taint import tool_facts
-from daimon.core.workflows.validate import Validation
+from daimon.core.workflows.validate import Grant, Validation
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -97,6 +98,13 @@ class DraftPut(BaseModel):
     spec: dict[str, Any]
 
 
+class MovePreview(BaseModel):
+    """What moving a routine would do: whether it starts paused, the grants the admin gives."""
+
+    paused: bool
+    grants: list[Grant]
+
+
 class Note(BaseModel):
     note: str = ""
 
@@ -143,6 +151,7 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
             who=who,
             now=runtime.now(),
             agents=lambda: usable_agents(caller),
+            skills=tenant_skills(client(), person.tenant_id),
         )
         try:
             await service.ensure_on(env)
@@ -381,6 +390,12 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
         return await inbox.decide(await env_of(caller), item_id, body)
 
     # ----- moving routines -----
+
+    @router.get("/from-routine/{routine_id}")
+    @speaks
+    async def from_routine_preview(routine_id: uuid.UUID, caller: Member) -> MovePreview:  # pyright: ignore[reportUnusedFunction]
+        plan = await convert.preview(await env_of(caller), routine_id)
+        return MovePreview(paused=plan.paused, grants=plan.validation.grants)
 
     @router.post("/from-routine/{routine_id}", status_code=201)
     @speaks

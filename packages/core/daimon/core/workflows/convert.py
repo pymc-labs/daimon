@@ -22,6 +22,7 @@ from daimon.core.routine_sandbox import opted_in_by_many
 from daimon.core.routines import routine_label
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import tenants
+from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflow_triggers as triggers_store
 from daimon.core.stores import workflows as store
@@ -37,6 +38,7 @@ from daimon.core.workflows.service import (
     NotFound,
     Refused,
     ensure_on,
+    grant_rows,
 )
 from daimon.core.workflows.spec import (
     AgentNode,
@@ -46,7 +48,8 @@ from daimon.core.workflows.spec import (
     parse_spec,
     spec_hash,
 )
-from daimon.core.workflows.validate import validate_document
+from daimon.core.workflows.taint import Catalog, tainted_steps
+from daimon.core.workflows.validate import Validation, validate_document
 from daimon.core.workflows.views import iso
 from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +68,8 @@ def routine_spec(row: RoutineRow, *, builtins: bool) -> dict[str, Any]:
         "kind": "agent",
         "title": row.name or routine_label(row),
         "instructions": row.trigger_message,
+        # The operator's routine tool policy, unchanged: what the routine could write.
+        "writes": "routine",
         "next": DONE,
     }
     if row.destination_kind == "dm":
@@ -147,12 +152,15 @@ async def _on_other_backend(session: AsyncSession, row: RoutineRow, platform: st
 
 @dataclass(frozen=True)
 class Plan:
-    """What `from_routine` would do: the spec, and whether the workflow starts paused."""
+    """What `from_routine` would do: the spec, the grants the converting admin approves, and
+    whether the workflow starts paused."""
 
     routine: RoutineRow
     spec: dict[str, Any]
     paused: bool
     other_backend: bool
+    catalog: Catalog
+    validation: Validation
 
 
 async def _plan(session: AsyncSession, env: Env, routine_id: uuid.UUID) -> Plan:
@@ -168,8 +176,13 @@ async def _plan(session: AsyncSession, env: Env, routine_id: uuid.UUID) -> Plan:
     builtins = (await opted_in_by_many(session, [row], tenant.platform))[row.id] is not None
     other = await _on_other_backend(session, row, tenant.platform)
     spec = routine_spec(row, builtins=builtins)
+    catalog = await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents, env.skills)
+    if STEP in tainted_steps(parse_spec(spec), catalog):
+        # The routine read outside content and wrote anyway; that stays, approved and shown.
+        spec["nodes"][STEP]["untrusted_waiver"] = f"Moved from routine {spec['name']}"
     paused = other or not row.enabled
-    return Plan(row, spec, paused=paused, other_backend=other)
+    validation = validate_document(spec, catalog)
+    return Plan(row, spec, paused, other, catalog, validation)
 
 
 def _admin(env: Env) -> None:
@@ -200,8 +213,7 @@ async def from_routine(env: Env, routine_id: uuid.UUID) -> uuid.UUID:
             platform=tenant.platform,
             external_id=row.created_by_user_id,
         )
-        catalog = await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents)
-        validation = validate_document(plan.spec, catalog)
+        catalog, validation = plan.catalog, plan.validation
         if validation.errors:
             raise Invalid(validation.errors[0].message)
         parsed = parse_spec(plan.spec)
@@ -221,7 +233,7 @@ async def from_routine(env: Env, routine_id: uuid.UUID) -> uuid.UUID:
             seeded_after=row.seeded_after,
             snapshot=_snapshot(row, env.now),
         )
-        await store.publish_version(
+        version = await store.publish_version(
             session,
             tenant_id=row.tenant_id,
             workflow_id=workflow.id,
@@ -230,11 +242,23 @@ async def from_routine(env: Env, routine_id: uuid.UUID) -> uuid.UUID:
             source="routine",
             published_by=owner.account_id,
             note="Moved from a routine",
-            # The routine's built-ins opt-in was an admin's; the converting admin carries it.
+            # The routine's built-ins opt-in and writes were an admin's; the converting admin
+            # carries them, and the waiver when the step reads outside content.
             approved_by=env.who.account_id if validation.grants else None,
             now=env.now,
             cursors={TRIGGER: cursor},
             agent_tools=tool_catalogs.spec_agent_tools(parsed, catalog),
+            skills=tool_catalogs.spec_skills(parsed, catalog),
+        )
+        grants = [g.model_dump() for g in validation.grants]
+        await publish_requests.add_grants(
+            session,
+            tenant_id=row.tenant_id,
+            workflow_id=workflow.id,
+            version=version.number,
+            grants=grant_rows(parsed, grants, owner.account_id),
+            approved_by=env.who.account_id,
+            now=env.now,
         )
         if plan.paused:
             await store.set_status(

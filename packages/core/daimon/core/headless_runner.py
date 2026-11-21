@@ -52,18 +52,19 @@ import asyncio
 import functools
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_skills import skill_room
 from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
@@ -83,6 +84,7 @@ from daimon.core.routine_sandbox import RoutineSandbox, run_matches_pin
 from daimon.core.routine_sandbox import builtins_allowed as _routine_builtins_allowed
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.session_ports_compat import retrieve_session_record
+from daimon.core.session_snapshot import MaSkill
 from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -153,6 +155,14 @@ class StepTurn:
     resume: bool = False
     #: The turn so far, every render and at the end: the step's live activity.
     on_render: Callable[[TurnState], Awaitable[None]] | None = None
+    #: Library skills the step pins; a new session adds those its agent lacks.
+    skills: Sequence[MaSkill] = ()
+
+
+def _step_skills(agent: BetaManagedAgentsAgent, pinned: Sequence[MaSkill]) -> list[MaSkill]:
+    """A step's pinned skills its agent does not hold, as many as the session has room for."""
+    held = {s.skill_id for s in agent.skills}
+    return [s for s in pinned if s.skill_id not in held][: skill_room(agent)]
 
 
 class _NoOpLifecycle(TurnLifecycle):
@@ -696,6 +706,7 @@ async def run_turn_impl(
             identity=identity,
             workflow_run_id=step.workflow_run_id if step is not None else None,
             workflow_step_id=step.workflow_step_id if step is not None else None,
+            channel_skills=_step_skills(agent, step.skills) if step is not None else (),
         )
 
     entry_point: UnattendedEntryPoint = "routine" if step is None else "workflow_step"
