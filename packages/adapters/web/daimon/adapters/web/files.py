@@ -7,6 +7,7 @@ rendered on the app's own origin.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import Callable, Sequence
@@ -18,10 +19,10 @@ from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.media.attachments import AttachedFile, attachment_lines
 from daimon.core.media.filenames import attachment_disposition
 from daimon.core.media.vision import (
-    MAX_VISION_IMAGE_BYTES,
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGES,
     build_image_block,
-    sniff_image_media_type,
+    fit_vision_image,
 )
 from daimon.core.output_delivery import DeliverableFile
 from daimon.core.stores import file_uploads
@@ -130,14 +131,11 @@ async def attachment_prompt(
     for file in files:
         upload = held.get(file.id)
         data = upload.content if upload is not None else None
-        kind = sniff_image_media_type(data) if data else None
-        if (
-            data
-            and kind
-            and len(data) <= MAX_VISION_IMAGE_BYTES
-            and len(blocks) < MAX_VISION_IMAGES
-        ):
-            blocks.append(build_image_block(data, kind))
+        image = None
+        if data and len(blocks) < MAX_VISION_IMAGES and len(data) <= MAX_DOWNSCALE_SOURCE_BYTES:
+            image = await asyncio.to_thread(fit_vision_image, data)
+        if image is not None:
+            blocks.append(build_image_block(*image))
             shared.append(AttachedFile(file.name, inlined=True))
         elif data and link is not None:
             shared.append(AttachedFile(file.name, url=link(file.id)))

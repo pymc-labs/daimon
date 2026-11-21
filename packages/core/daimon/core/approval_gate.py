@@ -1,6 +1,6 @@
 """Admin-owned overrides for the attended third-party write confirmation gate.
 
-No category inheritance: only the exact tenant, channel and thread count.
+No category inheritance: only the exact tenant, agent, channel and thread count.
 The stored setter travels with the effective choice for each auto-allow log.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from daimon.core.access_policy import Approvals, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentApprovals, Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.errors import DaimonError, StaleChannelValue
 from daimon.core.permissions import SEALED_REFUSAL, sealed_outside
@@ -38,13 +38,15 @@ class ApprovalGate:
 @dataclass(frozen=True)
 class ApprovalChange:
     """How a change is recorded in `channel_changes`: the channel (None for the server),
-    the thread key for a thread's own setting, the actor's account and the surface."""
+    the thread key for a thread's own setting, the actor's account and the surface.
+    An agent's own setting is recorded on the server with the agent's id."""
 
     channel_id: str | None
     thread_id: str | None
     actor_account_id: uuid.UUID | None
     surface: ChangeSurface
     on_write: WriteHook | None = None
+    agent_id: str | None = None
 
 
 def resolve_approval_gate(
@@ -53,9 +55,14 @@ def resolve_approval_gate(
     platform: str,
     channel_id: str | None,
     thread_id: str | None,
+    agent_id: str | None = None,
 ) -> ApprovalGate:
-    """Most specific explicit value wins, including on below off and off below on."""
+    """Most specific explicit value wins, including on below off and off below on:
+    the server, then the agent's own, then the channel, then the thread."""
     result = ApprovalGate(policy.approvals, "server", policy.approvals_set_by)
+    own = policy.agent_approvals.get(agent_id) if agent_id is not None else None
+    if own is not None:
+        result = ApprovalGate(own.approvals, f"agent:{agent_id}", own.approvals_set_by)
     keys = [(channel_id, "channel")]
     if thread_id is not None and channel_id is not None:
         key = f"{channel_id}:{thread_id}" if platform == "slack" else thread_id
@@ -78,20 +85,23 @@ async def set_approval_gate(
     record: ApprovalChange | None = None,
     expected: Approvals | None = None,
     note: str | None = None,
+    agent_id: str | None = None,
 ) -> ApprovalGate:
     """Authorize before I/O, then merge and audit atomically under the policy lock.
 
     Adapters must supply a fresh native server-admin check, never a requester's
-    ownership of a thread. None targets the server, otherwise an exact rule key.
+    ownership of a thread. None targets the server (or `agent_id`'s own setting),
+    otherwise an exact rule key.
     With `record`, the change is also written to `channel_changes` in the same
     transaction; with `expected`, a target whose own value differs is refused as stale.
     `note` (an operator's stated reason) is added to the audit row.
     """
     if not authorize(TenantAccessPolicy(), subject=subject, action=Action.SET_APPROVAL_GATE):
         raise DaimonError("Only a server or workspace admin can change approval settings.")
-    if value not in ("inherit", "off", "on") or target == "":
+    if value not in ("inherit", "off", "on") or target == "" or (agent_id and target):
         raise DaimonError("Invalid approval setting.")
     setter = subject.platform_user_id
+    scope = f"agent:{agent_id}" if agent_id else target or "server"
     if not setter:
         raise DaimonError("Approval changes require an identified administrator.")
     async with policy_write_transaction(factory, tenant_id=tenant_id) as session:
@@ -99,7 +109,14 @@ async def set_approval_gate(
         policy = await load_access_policy(session, tenant_id=tenant_id)
         if sealed_outside(policy, subject.inside, channel_ids=(target,), operator=subject.operator):
             raise DaimonError(SEALED_REFUSAL)
-        if target is None:
+        if agent_id:
+            agents = dict(policy.agent_approvals)
+            had = agents.pop(agent_id, None)
+            before = "inherit" if had is None else had.approvals
+            if value != "inherit":
+                agents[agent_id] = AgentApprovals(approvals=value, approvals_set_by=setter)
+            changed = policy.model_copy(update={"agent_approvals": agents})
+        elif target is None:
             before = policy.approvals
             changed = policy.model_copy(
                 update={
@@ -133,13 +150,13 @@ async def set_approval_gate(
             tool_name="approval_gate",
             operation=Action.SET_APPROVAL_GATE,
             outcome="allowed",
-            reason=f"{target or 'server'}:{before}->{value}" + (f" ({note})" if note else ""),
+            reason=f"{scope}:{before}->{value}" + (f" ({note})" if note else ""),
         )
         if record is not None:
             await _record(
                 session, record, tenant_id=tenant_id, platform=platform, before=before, after=value
             )
-    return ApprovalGate(value, target or "server", setter, tenant_id, before)
+    return ApprovalGate(value, scope, setter, tenant_id, before)
 
 
 async def _record(
@@ -151,9 +168,11 @@ async def _record(
     before: Approvals,
     after: Approvals,
 ) -> None:
-    thread = record.thread_id
+    thread, agent = record.thread_id, record.agent_id
 
     def shown(value: Approvals) -> object:
+        if agent is not None:
+            return {"agent": agent, "value": value}
         return value if thread is None else {"thread": thread, "mode": value}
 
     await record_change(
