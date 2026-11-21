@@ -394,6 +394,45 @@ async def test_the_decider_holds_the_step_to_its_grant_tools_and_writes() -> Non
     }, got
 
 
+async def test_daimons_own_writes_follow_the_unattended_decision_and_its_reads_stay_trusted() -> (
+    None
+):
+    """A post from a `writes: allow` step untrusted data can reach goes nowhere unreviewed."""
+    node = AgentNode.model_validate({"kind": "agent", "instructions": "x", "writes": "allow"})
+
+    def decide_as(writes: Writes, *, exposed: bool = False, test: bool = False):
+        return step_decider(
+            node,
+            attempt_id=uuid.uuid4(),
+            policy=ToolSafetyPolicy(),
+            writes=writes,
+            propose=None,
+            exposed=exposed,
+            test=test,
+        )(PolicyApproval(decide=_allow)).decide
+
+    def daimon(tool: str) -> ToolCall:
+        return ToolCall(
+            tool_use_id="t",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="call_tool",
+            input={"name": tool, "arguments": {}},
+        )
+
+    post, read, plan = daimon("send_message"), daimon("list_channels"), daimon("update_plan")
+    steps = {
+        "trusted allow": (decide_as("allow"), True),
+        "exposed allow": (decide_as("allow", exposed=True), False),
+        "refuse": (decide_as("refuse"), False),
+        "test run": (decide_as("allow", test=True), False),
+    }
+    for name, (decide, sent) in steps.items():
+        assert (await decide(post)).allow is sent, f"a Daimon-own write on a {name} step"
+    for name, (decide, _) in steps.items():
+        assert (await decide(read)).allow, f"a Daimon-own read stays trusted on a {name} step"
+        assert (await decide(plan)).allow, f"the plan tool stays open on a {name} step"
+
+
 def test_the_brief_carries_the_contract_and_untrusted_inputs() -> None:
     spec = parse_spec(
         {"schema": "daimon.workflow/v1", "name": "Digest", "start": "collect", "nodes": COLLECT}

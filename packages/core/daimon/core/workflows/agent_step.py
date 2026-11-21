@@ -181,14 +181,15 @@ def step_decider(
     test: bool = False,
 ) -> Callable[[PolicyApproval], PolicyApproval]:
     """Wrap the unattended decider with the step's grant, its `tools` list and its `writes`;
-    third-party calls go through `decide_unattended_call` (`exposed`: untrusted data can steer
-    this step in this run)."""
+    every other call, Daimon's own included, goes through `decide_unattended_call` (`exposed`:
+    untrusted data can steer this step in this run); Daimon's own step tools and plan stay open."""
     listed = {k for k in node.tools} if isinstance(node.tools, list) else None
 
     def wrap(base: PolicyApproval) -> PolicyApproval:
         async def decide(call: ToolCall) -> ToolConfirmationResult:
             inner = unwrap_daimon_call(call, _DAIMON)
-            if inner.server_name == DAIMON_SERVER_NAME:
+            own = inner.server_name == DAIMON_SERVER_NAME
+            if own:
                 if inner.tool_name in step_tools.STEP_TOOLS:
                     if inner.input.get("step") != str(attempt_id):
                         return _deny(f'Refused {inner.tool_name}: pass step="{attempt_id}".')
@@ -203,14 +204,20 @@ def step_decider(
                     and inner.key not in listed
                 ):
                     return _deny(f"Refused {inner.key}: this step may only use its listed tools.")
-            elif inner.server_name is not None:
+            if inner.server_name is not None and not (own and inner.tool_name in OWN_TOOLS):
                 decision = decide_unattended_call(
                     policy,
                     Call(inner.server_name, inner.tool_name, writes, test=test, exposed=exposed),
                 )
-                if decision.verdict == "refuse" and decision.reason != "writes_refused":
+                # Daimon's server is trusted by the base decider, so it cannot refuse a
+                # `writes: refuse` step for us; reads of its own stay allowed above.
+                if decision.verdict == "refuse" and (own or decision.reason != "writes_refused"):
                     return _deny(f"Refused {inner.key}: {decision.message}")
                 if decision.verdict == "propose":
+                    if own:
+                        return _deny(
+                            f"Refused {inner.key}: Daimon's own writes cannot wait for review."
+                        )
                     if propose is None:
                         return _deny(f"Refused {inner.key}: proposed writes are not available.")
                     return await propose(inner, decision.reason)
