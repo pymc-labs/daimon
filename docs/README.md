@@ -25,7 +25,7 @@ server](https://daimon.decision.ai/) instead.
   [Repository memory](repo-memory.md),
   [Context providers](context-providers.md),
   [Lead intake](lead-intake.md), [Ask a person](support.md) and
-  [Evals](evals.md) to test agents on real work. [Move routines in](routine-migration.md)
+  [Evals](evals.md) and [Eval runs](eval-runs.md) to test agents on real work. [Move routines in](routine-migration.md)
   and [people in](people-migration.md) from another system.
 
 ## Understand it
