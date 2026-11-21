@@ -853,7 +853,7 @@ async def start_run(
             trigger_key=start.trigger_key,
             inputs=inputs,
             untrusted_inputs=start.untrusted_inputs or bool(source and source.untrusted_inputs),
-            label=start.label,
+            label=start.label if start.label is not None else _label(spec_document, inputs, now),
             concurrency_key=key,
             budget_usd=_budget(spec, settings, start, cleared),
             deadline_at=_deadline(spec, settings, now),
@@ -884,11 +884,12 @@ async def start_run(
                     {"run": str(start.fork_of[0]), "node": start.fork_of[1]},
                 )
             )
+        who = start.triggered_by.get("account_id") if start.trigger_kind == "manual" else None
         await append_events(
             session,
             run_id=run.id,
             events=[NewEvent(e.type, e.step, dict(e.data)) for e in queued],
-            actor=ENGINE,
+            actor=account_actor(uuid.UUID(who)) if isinstance(who, str) else ENGINE,
             at=now,
         )
         if active < limit:
@@ -898,6 +899,18 @@ async def start_run(
         result = await workflow_runs.get_run(session, run.id)
     assert result is not None
     return result
+
+
+def _label(spec: dict[str, Any], inputs: dict[str, Any], now: datetime) -> str | None:
+    """The run's name in lists, from the spec's `label` template."""
+    template = spec.get("label")
+    if not isinstance(template, str):
+        return None
+    try:
+        text = render(template, {"inputs": inputs}, now=now)
+    except ExpressionError:
+        return None
+    return str(text)[:120] if text not in (None, "") else None
 
 
 async def _replace(

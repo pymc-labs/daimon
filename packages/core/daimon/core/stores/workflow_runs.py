@@ -685,6 +685,25 @@ async def list_attempts(session: AsyncSession, step_id: uuid.UUID) -> list[Attem
     return [AttemptRow.model_validate(orm) for orm in rows]
 
 
+async def list_attempt_costs(
+    session: AsyncSession, run_id: uuid.UUID
+) -> list[tuple[str, int, int | None, datetime, Decimal]]:
+    """Each attempt's step (node, visit, item), start and cost, oldest first."""
+    rows = await session.execute(
+        select(
+            WorkflowStep.node_id,
+            WorkflowStep.visit,
+            WorkflowStep.item_index,
+            WorkflowAttempt.started_at,
+            WorkflowAttempt.cost_usd,
+        )
+        .join(WorkflowStep, WorkflowStep.id == WorkflowAttempt.step_id)
+        .where(WorkflowStep.run_id == run_id)
+        .order_by(WorkflowAttempt.started_at)
+    )
+    return list(rows.tuples())
+
+
 async def renew_leases(
     session: AsyncSession, *, owner: str, held: Mapping[uuid.UUID, int], until: datetime
 ) -> set[uuid.UUID]:

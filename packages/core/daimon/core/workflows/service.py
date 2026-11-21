@@ -26,7 +26,6 @@ from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow
 from daimon.core.workflows import context as turn_context
 from daimon.core.workflows import exchange, gate, run_views, runs, views
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
-from daimon.core.workflows.expressions import ExpressionError, render
 from daimon.core.workflows.preflight import Place, Refusal, member_reads, private_reach
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.spec import Spec, dump_spec, node_hash, parse_spec, spec_hash
@@ -778,17 +777,6 @@ async def step(env: Env, run_id: uuid.UUID, key: str, attempt: int | None) -> ru
     return found
 
 
-def _label(spec: dict[str, Any], inputs: dict[str, Any], now: datetime) -> str | None:
-    template = spec.get("label")
-    if not isinstance(template, str):
-        return None
-    try:
-        text = render(template, {"inputs": inputs}, now=now)
-    except ExpressionError:
-        return None
-    return str(text)[:120] if text not in (None, "") else None
-
-
 def _refused(refusal: Refusal) -> WorkflowError:
     error = NotFound if refusal.reason == "not_found" else Refused
     return error(refusal.message)
@@ -826,16 +814,6 @@ async def start(
     """A manual run of the live version, or a test run of the draft (`test` options)."""
     async with env.sm() as session:
         workflow, _, rights = await _load(session, env, workflow_id)
-        live = (
-            await store.get_version(
-                session,
-                tenant_id=workflow.tenant_id,
-                workflow_id=workflow.id,
-                number=workflow.live_version,
-            )
-            if workflow.live_version
-            else None
-        )
     if test is not None:
         if not rights.edit:
             raise Forbidden("Only the owner or an editor can test a workflow.")
@@ -843,7 +821,6 @@ async def start(
             raise Refused("Test runs cannot write for real yet. Leave live writes off.")
     elif not rights.run:
         raise Forbidden("You can see this workflow but not run it. Ask its owner.")
-    spec = workflow.draft_spec if test is not None else (live.spec if live else workflow.draft_spec)
     pinned_from = uuid.UUID(test["pinned_from"]) if test and test.get("pinned_from") else None
     pins = await _pins(env, pinned_from, test.get("pinned") or []) if pinned_from and test else {}
     # A manual run runs as whoever pressed Run, under the publisher's grants. Its inputs are
@@ -860,7 +837,6 @@ async def start(
             inputs=inputs,
             mode="test" if test is not None else "live",
             untrusted_inputs=True,
-            label=_label(spec, inputs, env.now),
             pinned=pins,
             pinned_from=pinned_from,
         ),

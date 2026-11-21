@@ -21,7 +21,13 @@ from daimon.core.stores.workflow_run_events import EventRow, list_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow
 from daimon.core.stores.workflow_waits import Wait
 from daimon.core.workflows import ledger
-from daimon.core.workflows.engine import RunFacts, StepView, expression_context, step_key
+from daimon.core.workflows.engine import (
+    RunFacts,
+    StepView,
+    expression_context,
+    item_key,
+    step_key,
+)
 from daimon.core.workflows.expressions import ExpressionError, Ref, render, template_refs
 from daimon.core.workflows.spec import parse_spec
 from daimon.core.workflows.views import Person, iso, obj, people_of, person, seq
@@ -171,43 +177,110 @@ class Verify(BaseModel):
 # ---------- ledger rows ----------
 
 _DETAIL: dict[str, str] = {
-    "run.queued": "Run queued",
-    "run.started": "Run started",
-    "run.waiting": "Run waiting",
-    "run.resumed": "Run resumed",
-    "run.succeeded": "Run finished",
+    "run.waiting": "Waiting",
+    "run.resumed": "Resumed",
+    "run.succeeded": "Succeeded",
     "run.failed": "Run failed",
-    "run.cancelled": "Run cancelled",
-    "run.timed_out": "Run timed out",
-    "run.redriven": "Retried from failure",
-    "run.forked_from": "Started from an earlier run",
+    "run.cancelled": "Cancelled",
+    "run.timed_out": "Deadline reached",
     "step.ready": "Ready",
     "step.skipped": "Skipped",
     "step.started": "Started",
-    "step.succeeded": "Done",
+    "step.succeeded": "Succeeded",
     "step.failed": "Failed",
     "step.cancelled": "Cancelled",
     "step.unknown": "Outcome unknown",
     "step.resolved_by": "Settled by its owner",
     "step.retry_scheduled": "Will retry",
+    "step.brief_sent": "Brief sent",
+    "step.output_recorded": "Output recorded",
+    "step.contract_rejected": "Output rejected",
+    "step.question_asked": "Asked a question",
+    "step.nudged": "Nudged to finish",
     "wait.opened": "Waiting",
+    "wait.posted": "Posted",
+    "wait.reminded": "Reminder sent",
+    "wait.answer_refused": "Answer refused",
     "wait.decided": "Decided",
     "wait.timed_out": "Timed out",
+    "delivery.queued": "Delivery queued",
 }
+_TRIGGER = {
+    "schedule": "Schedule",
+    "webhook": "Webhook delivery",
+    "event": "Event",
+    "call": "Called by a workflow",
+}
+_WAITING = {
+    "approval": "Waiting for approval",
+    "question": "Waiting for an answer",
+    "unknown": "Needs a decision",
+    "event": "Waiting for an event",
+}
+_DECIDED = {"approve": "Approved", "reject": "Rejected", "cleared": "Cleared", "arrived": "Arrived"}
+_DELIVERY = {"ask": "Ask queued", "finish": "Result queued", "notice": "Notice queued"}
 
 
-def _detail(event: EventRow) -> str:
-    data = event.data
+def _name(value: object) -> str | None:
+    """A hydrated person's name (`_hydrate`)."""
+    return _str(value.get("name")) if isinstance(value, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+
+
+def _detail(e: EventRow, data: Mapping[str, Any], actor: str, run: RunRow | None) -> str:
+    """The ledger row in words, as the run page shows it."""
     text = data.get("message") or data.get("reason")
-    if isinstance(text, str) and event.type in ("run.failed", "step.failed", "step.unknown"):
-        return text
-    if event.type == "run.queued":
-        return f"Run queued ({data.get('trigger', 'manual')})"
-    if event.type == "step.skipped" and isinstance(data.get("reason"), str):
-        return f"Skipped ({data['reason']})"
-    if event.type == "step.resolved_by":
-        return f"Settled by its owner: {data.get('decision', '')}".strip()
-    return _DETAIL.get(event.type, event.type)
+    by = _name(data.get("by")) or (actor if _account_of(e.actor) else None)
+    match e.type:
+        case "run.failed" | "step.failed" | "step.unknown" if isinstance(text, str):
+            return text
+        case "run.queued":
+            trigger = obj(data.get("trigger")).get("kind") or data.get("trigger") or "manual"
+            words = _TRIGGER.get(str(trigger), "Queued")
+            if trigger == "manual":
+                return f"Run by {by}" if by else "Started by hand"
+            return words
+        case "run.started" if run is not None:
+            return "Test run on the draft" if run.mode == "test" else f"Version {run.version}"
+        case "run.waiting":
+            return _WAITING.get(str(data.get("reason")), "Waiting")
+        case "run.cancelled" | "step.cancelled" if by:
+            return f"Cancelled by {by}"
+        case "run.redriven":
+            return f"Retried from failure by {by}" if by else "Retried from failure"
+        case "run.forked_from":
+            return "Started from an earlier run"
+        case "step.ready" if (visit := data.get("visit")) and isinstance(visit, int) and visit > 1:
+            return f"Visit {visit}"
+        case "step.started" if (n := data.get("attempt")) and isinstance(n, int) and n > 1:
+            return f"Attempt {n}"
+        case "step.skipped" if data.get("reason") == "max_visits":
+            return "Visited too many times"
+        case "step.route_chosen":
+            return f"Chose {data.get('route')}"
+        case "step.succeeded" if data.get("reused"):
+            return "Reused pinned output" if data["reused"] == "pinned" else "Reused from a run"
+        case "step.retry_scheduled" if isinstance(text, str):
+            return f"{text.rstrip('.')}, retrying in {data.get('after_s', 0)}s"
+        case "step.resolved_by":
+            return f"Settled by {by or 'its owner'}: {data.get('decision', '')}".strip(": ")
+        case "wait.decided":
+            if data.get("answer"):
+                return f"Answered by {by}" if by else "Answered"
+            words = _DECIDED.get(str(data.get("decision")), str(data.get("decision") or "Decided"))
+            return f"{words.capitalize()} by {by}" if by else words.capitalize()
+        case "wait.opened":
+            names = ", ".join(n for a in seq(data.get("addressees")) if (n := _name(a)))
+            kind = data.get("kind")
+            if names and kind in ("approval", "question"):
+                return f"{'Approval from' if kind == 'approval' else 'Question for'} {names}"
+            return _WAITING.get(str(kind), "Waiting")
+        case "wait.posted":
+            return f"Posted: {obj(data.get('sent')).get('where') or 'in chat'}"
+        case "delivery.queued":
+            return _DELIVERY.get(str(data.get("kind")), "Delivery queued")
+        case _:
+            pass
+    return _DETAIL.get(e.type, e.type)
 
 
 def _hydrate(value: object, names: Mapping[uuid.UUID, Person]) -> object:
@@ -256,7 +329,33 @@ async def event_views(session: AsyncSession, run: RunRow, *, after_seq: int = 0)
         if e.type == "wait.decided" and isinstance(e.data.get("answer"), dict)
     ]
     found = await waits_store.waits_by_id(session, answered)
-    return [event_view(e, names, found) for e in events]
+    views = [event_view(e, names, found, run) for e in events]
+    await _add_costs(session, run, views)
+    return views
+
+
+#: Rows that end an attempt carry its cost, as `runs.ts` `project` reads it.
+_ENDS_ATTEMPT = {"step.succeeded", "step.failed", "step.retry_scheduled", "step.cancelled"}
+
+
+async def _add_costs(session: AsyncSession, run: RunRow, views: Sequence[RunEvent]) -> None:
+    """Each row that ends an attempt gets its cost, and a success its time taken."""
+    ends = [v for v in views if v.type in _ENDS_ATTEMPT and v.step]
+    if not ends:
+        return
+    by_key: dict[str, list[tuple[datetime, float]]] = {}
+    for node, visit, index, started, cost in await runs_store.list_attempt_costs(session, run.id):
+        key = step_key(node, visit) if index is None else item_key(node, visit, index)
+        by_key.setdefault(key, []).append((started, float(cost)))
+    for v in ends:
+        at = datetime.fromisoformat(v.at)
+        started, cost = next(
+            ((s, c) for s, c in reversed(by_key.get(v.step or "", [])) if s <= at), (None, 0.0)
+        )
+        if cost:
+            v.data["cost"] = cost
+        if v.type == "step.succeeded" and started and not v.data.get("reused"):
+            v.detail = f"Succeeded in {max(1, round((at - started).total_seconds()))}s"
 
 
 def answer_view(wait: Wait, at: str, names: Mapping[uuid.UUID, Person]) -> dict[str, Any]:
@@ -285,7 +384,10 @@ def sent_view(sent: Mapping[str, Any], names: Mapping[uuid.UUID, Person]) -> dic
 
 
 def event_view(
-    e: EventRow, names: Mapping[uuid.UUID, Person], waits: Mapping[uuid.UUID, Wait] | None = None
+    e: EventRow,
+    names: Mapping[uuid.UUID, Person],
+    waits: Mapping[uuid.UUID, Wait] | None = None,
+    run: RunRow | None = None,
 ) -> RunEvent:
     data = dict(e.data)
     answer = data.get("answer")
@@ -301,13 +403,14 @@ def event_view(
     if isinstance(data.get("addressees"), list):
         data["addressees"] = [_hydrate(a, names) for a in data["addressees"]]
     account = _account_of(e.actor)
+    actor = person(names, account).name if account is not None else e.actor
     return RunEvent(
         seq=e.seq,
         at=iso(e.at) or "",
         type=e.type,
         step=e.step_key,
-        actor=person(names, account).name if account is not None else e.actor,
-        detail=_detail(e),
+        actor=actor,
+        detail=_detail(e, data, actor, run),
         data=data,
         hash=e.hash,
     )

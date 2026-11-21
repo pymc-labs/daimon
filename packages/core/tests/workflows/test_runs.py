@@ -24,7 +24,7 @@ from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, workflow_runs
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.workflows import engine, preflight, runs
+from daimon.core.workflows import engine, preflight, run_views, runs
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.spec import parse_spec
 from daimon.testing.workflows import NOW, make_settings, make_world
@@ -60,6 +60,25 @@ async def test_a_manual_run_goes_through_branch_transform_finish(db_session: Asy
     )
     assert audit is not None and str(run.head_hash) in audit, (
         "the finished head reaches the audit log"
+    )
+
+
+async def test_specs_keep_their_key_order_and_ledger_rows_read_in_words(
+    db_session: AsyncSession,
+) -> None:
+    world = await make_world(db_session, INLINE, "b")
+    run = await world.run(inputs={"n": 3})
+    async with world.sm() as s:
+        version = await workflows_store.get_version(
+            s, tenant_id=world.tenant_id, workflow_id=world.workflow_id, number=1
+        )
+        rows = await run_views.event_views(s, run)
+    assert version is not None and list(version.spec["nodes"]) == ["b", "t", "f"], (
+        "the stored spec keeps the author's node order"
+    )
+    details = {e.type: e.detail for e in rows}
+    assert (details["run.queued"], details["run.started"]) == ("Started by hand", "Version 1"), (
+        details
     )
 
 
