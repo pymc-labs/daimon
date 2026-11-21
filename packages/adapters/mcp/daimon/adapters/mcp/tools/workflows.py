@@ -21,10 +21,12 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_session_turn_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._own_card import post_own_card
+from daimon.adapters.mcp.tools._web_url import tenant_links
 from daimon.core.access_policy import DM_SCOPE_PREFIX, place_thread_id
 from daimon.core.posted_controls import PostedCard
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.teams_threads import conversation_of
+from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards, exchange, run_views, service, views
 from daimon.core.workflows import edits as edits_module
 from daimon.core.workflows.access import Who
@@ -125,6 +127,15 @@ async def _workflow_view(env: Env, workflow_id: uuid.UUID) -> Json:
     }
 
 
+def _links_of(runtime: McpRuntime, auth: AuthIdentity) -> WebAt:
+    """The links at the turn's place: `tenant_links` reads it from the session's turn origin."""
+
+    async def at(*_: object) -> TenantLinks | None:
+        return await tenant_links(runtime, auth)
+
+    return at
+
+
 async def _chat_origin(runtime: McpRuntime, auth: AuthIdentity) -> TurnOriginRow | None:
     """The chat turn whose thread takes this call's cards, or None outside one."""
     if auth.platform not in CARD_PLATFORMS:
@@ -150,7 +161,7 @@ async def _post_draft(
     runtime: McpRuntime, env: Env, auth: AuthIdentity, origin: TurnOriginRow, workflow_id: uuid.UUID
 ) -> None:
     draft = await service.get_draft(env, workflow_id)
-    web = chat_cards.web_links(runtime.settings, auth.tenant_id)
+    web = await tenant_links(runtime, auth)
     await _post(runtime, auth, origin, chat_cards.draft_card(workflow_id, draft, web))
 
 
@@ -254,7 +265,7 @@ async def _run_workflow_impl(
         if origin is not None and not test:
             # A live run from chat starts on the person's press, with the inputs shown.
             workflow = await service.get(env, workflow_id)
-            web = chat_cards.web_links(runtime.settings, auth.tenant_id)
+            web = await tenant_links(runtime, auth)
             card = chat_cards.confirm_card(
                 workflow_id, workflow.name, workflow.live_version, inputs, web
             )
@@ -264,7 +275,9 @@ async def _run_workflow_impl(
     shown = (
         None
         if origin is None
-        else await chat_cards.run_card_of(env.sm, env.settings, uuid.UUID(run.id))
+        else await chat_cards.run_card_of(
+            env.sm, uuid.UUID(run.id), _links_of(runtime, auth), origin.parent_channel_id, None
+        )
     )
     if origin is not None and shown is not None:
         place = await _post(runtime, auth, origin, shown)
