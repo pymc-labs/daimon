@@ -8,8 +8,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from daimon.core._models import PlatformPrincipal
+from daimon.core.config import WebSettings
 from daimon.core.posted_controls import PostedCard, card_text
 from daimon.core.stores import workflow_runs
+from daimon.core.web_links import WebAt, WebLinks
 from daimon.core.workflows import chat_cards, gate, service
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.chat_cards import ChatPlace, Presser
@@ -27,7 +29,11 @@ NODES: dict[str, Any] = {
     },
     "done": {"kind": "finish"},
 }
-PLACE = ChatPlace("discord", "100", "200")
+PLACE = ChatPlace("discord", "100", "200", "300")
+
+
+async def NO_LINKS(*_: object) -> None:  # web_awareness Off everywhere
+    return None
 
 
 async def _world(db_session: AsyncSession) -> tuple[World, Presser]:
@@ -58,17 +64,17 @@ async def test_the_draft_card_publishes_its_own_revision_only(db_session: AsyncS
     assert card.facts == ("Starts by hand", "1. Read the deals", "2. Done"), card.facts
     old = chat_cards._id(world.workflow_id, "publish", f"{draft.revision:x}")  # pyright: ignore[reportPrivateUsage]
     stale = await chat_cards.press(
-        world.sm, world.settings, presser=presser, custom_id=old, place=PLACE
+        world.sm, world.settings, presser=presser, custom_id=old, place=PLACE, links=NO_LINKS
     )
     assert stale.say == chat_cards.STALE, "an older card cannot publish a newer draft"
     publish = _ids(card)[-1]
     done = await chat_cards.press(
-        world.sm, world.settings, presser=presser, custom_id=publish, place=PLACE
+        world.sm, world.settings, presser=presser, custom_id=publish, place=PLACE, links=NO_LINKS
     )
     assert done.card is not None and done.card.headline == "✅ Deals: version 2 is live"
     stranger = Presser(world.tenant_id, "discord", "u2")
     refused = await chat_cards.press(
-        world.sm, world.settings, presser=stranger, custom_id=publish, place=PLACE
+        world.sm, world.settings, presser=stranger, custom_id=publish, place=PLACE, links=NO_LINKS
     )
     assert refused.say and refused.card is None, "a stranger's press is the service's refusal"
 
@@ -86,6 +92,7 @@ async def test_a_confirmed_run_starts_on_its_card_and_the_card_follows_it(
         presser=presser,
         custom_id=go,
         place=PLACE,
+        links=NO_LINKS,
         card_text=card_text(card),
     )
     assert pressed.card is not None and pressed.card.headline == "🔄 T: Run 1 running", pressed
@@ -104,12 +111,12 @@ async def test_a_confirmed_run_starts_on_its_card_and_the_card_follows_it(
 
     async def follow(at: datetime) -> int:
         return await chat_cards.follow_cards(
-            world.sm, world.settings, platform="discord", edit=edit, seen=seen, now=at
+            world.sm, platform="discord", edit=edit, links=NO_LINKS, seen=seen, now=at
         )
 
     assert await follow(now) == 1
     stopped = await chat_cards.press(
-        world.sm, world.settings, presser=presser, custom_id=cancel, place=PLACE
+        world.sm, world.settings, presser=presser, custom_id=cancel, place=PLACE, links=NO_LINKS
     )
     assert stopped.card is not None and "stopped" in stopped.card.headline
     soon = now + timedelta(seconds=1)
@@ -131,6 +138,7 @@ async def test_a_confirmation_card_starts_only_the_inputs_it_shows(
         presser=presser,
         custom_id=_ids(card)[0],
         place=PLACE,
+        links=NO_LINKS,
         card_text=tampered,
     )
     assert pressed.say == chat_cards.CHANGED, "inputs that read back otherwise start nothing"
@@ -174,15 +182,47 @@ async def test_every_chat_entry_refuses_while_workflows_are_off(db_session: Asyn
         raise AssertionError("nothing is posted while workflows are off")
 
     run = chat_cards._id(wid, "run")  # pyright: ignore[reportPrivateUsage]
-    pressed = await chat_cards.press(world.sm, off, presser=presser, custom_id=run, place=PLACE)
+    pressed = await chat_cards.press(
+        world.sm, off, presser=presser, custom_id=run, place=PLACE, links=NO_LINKS
+    )
     form = f"wff:{wid}:l"
     said = [
         pressed.say,
         await chat_cards.submit_form(world.sm, off, presser=presser, form_id=form, raw={}),
         await chat_cards.open_pressed(
-            world.sm, off, presser, wid, test=False, post=never, edit=never
+            world.sm, off, presser, wid, test=False, links=NO_LINKS, post=never, edit=never
         ),
         await chat_cards.list_for(world.sm, off, presser),
-        card_text(await chat_cards.pick(world.sm, off, presser, str(wid))),
+        card_text(await chat_cards.pick(world.sm, off, presser, str(wid), NO_LINKS)),
     ]
     assert all(gate.OFF in str(s) for s in said), said
+
+
+async def test_a_card_links_the_web_only_where_web_awareness_is_on_at_its_place(
+    db_session: AsyncSession,
+) -> None:
+    world, presser = await _world(db_session)
+    presser = Presser(world.tenant_id, "discord", "u1", channel_id="100", thread_id="300")
+    asked: list[tuple[str | None, str | None]] = []
+    on = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
+    assert on is not None
+
+    def at(links: bool) -> WebAt:
+        async def gate(tenant: uuid.UUID, channel: str | None, thread: str | None) -> Any:
+            asked.append((channel, thread))
+            return on.for_tenant(tenant, admin=False) if links else None
+
+        return gate
+
+    pause = chat_cards._id(world.workflow_id, "pause")  # pyright: ignore[reportPrivateUsage]
+    for links, shown in ((True, True), (False, False)):
+        pressed = await chat_cards.press(
+            world.sm, world.settings, presser=presser, custom_id=pause, place=PLACE, links=at(links)
+        )
+        assert pressed.card is not None, pressed
+        assert ("Open in web" in _ids(pressed.card)) is shown, (links, _ids(pressed.card))
+    assert asked == [("100", "300")] * 2, "the press asks at the channel and thread it came from"
+    picked = await chat_cards.pick(
+        world.sm, world.settings, presser, str(world.workflow_id), at(False)
+    )
+    assert "Open in web" not in _ids(picked), "the panel's card follows the same gate"

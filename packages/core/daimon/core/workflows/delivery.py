@@ -23,7 +23,7 @@ from typing import Any, Final
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
-from daimon.core.config import Settings, WebSettings
+from daimon.core.config import Settings
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import Platform, RenderedPost, attribution_line, render_post
@@ -41,7 +41,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.workflow_deliveries import DeliveryRow
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflows import WorkflowRow
-from daimon.core.web_links import WebLinks
+from daimon.core.web_links import WebAt
 from daimon.core.workflows.engine import Event, RunEnd, RunFacts, StepView, expression_context
 from daimon.core.workflows.expressions import ExpressionError, render
 from daimon.core.workflows.spec import FinishNode, Spec
@@ -242,13 +242,17 @@ def reach_limits(settings: Settings) -> ReachPlan:
     return ReachPlan(threads=o.max_threads, places=o.max_places, people=o.max_people)
 
 
-def run_link(web: WebSettings | None, row: DeliveryRow) -> str | None:
-    links = WebLinks.from_settings(web)
+async def run_link(
+    links: WebAt | None, row: DeliveryRow, channel_id: str, thread_id: str | None
+) -> str | None:
+    """The run's web page, or None where the web app is off or `web_awareness` is Off at the
+    channel and thread the post goes to."""
     number = row.payload.get("run_number")
-    if links is None or "workflows" not in links.modules or row.run_id is None or number is None:
+    if links is None or row.run_id is None or number is None:
         return None
-    root = links.for_tenant(row.tenant_id, admin=False).root()
-    return f"{root}/workflows/{row.workflow_id}/runs/{number}"
+    web = await links(row.tenant_id, channel_id, thread_id)
+    page = None if web is None else web.workflow(row.workflow_id)
+    return None if page is None else f"{page}/runs/{number}"
 
 
 async def clear_post(
@@ -256,7 +260,7 @@ async def clear_post(
     row: DeliveryRow,
     *,
     platform: str,
-    web: WebSettings | None = None,
+    links: WebAt | None = None,
     membership_resolver: MembershipResolver | None = None,
 ) -> WorkflowPost | str:
     """The post with its policy if it may go at all, else the skip note.
@@ -354,14 +358,15 @@ async def clear_post(
             )
         except Exception:  # named boundary: an unreadable audience mode refuses the post
             return "audience_unreadable"
+    thread_id = thread if isinstance(thread, str) else None
     return WorkflowPost(
         row=row,
         policy=policy,
         speaker=speaker,
         channel_id=channel_id,
-        thread_id=thread if isinstance(thread, str) else None,
+        thread_id=thread_id,
         gate=gate,
-        link=run_link(web, row),
+        link=await run_link(links, row, channel_id, thread_id),
         dm_to=dm_to,
         message_id=message if isinstance(message, str) else None,
     )

@@ -25,7 +25,7 @@ from daimon.core.posted_controls import CardButton, PostedCard
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.web_links import TenantLinks, WebLinks
+from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import run_views, service, views
 from daimon.core.workflows.access import who_of
 from daimon.core.workflows.runs import Sessions
@@ -120,9 +120,13 @@ class ChatPlace:
 
 @dataclass(frozen=True)
 class Presser:
+    """Who pressed and where: the channel and thread decide whether a card may link the web."""
+
     tenant_id: uuid.UUID
     platform: str
     user_id: str
+    channel_id: str | None = None
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,11 +195,6 @@ def _card(
 def notice(text: str) -> PostedCard:
     """A refusal shown in place of a card."""
     return _card(f"🛡️ {text}", bad=True)
-
-
-def web_links(settings: Settings, tenant_id: uuid.UUID) -> TenantLinks | None:
-    links = WebLinks.from_settings(settings.web)
-    return None if links is None else links.for_tenant(tenant_id, admin=False)
 
 
 def _page(web: TenantLinks | None, workflow_id: uuid.UUID | str, tail: str = "") -> str | None:
@@ -478,7 +477,10 @@ async def env_of(
     return Env(sm=sm, settings=settings, who=who, now=now or datetime.now(UTC))
 
 
-async def run_card_of(sm: Sessions, settings: Settings, run_id: uuid.UUID) -> PostedCard | None:
+async def run_card_of(
+    sm: Sessions, run_id: uuid.UUID, links: WebAt, channel_id: str | None, thread_id: str | None
+) -> PostedCard | None:
+    """The run's card as shown at that channel and thread."""
     async with sm() as session:
         run = await runs_store.get_run(session, run_id)
         if run is None:
@@ -487,7 +489,7 @@ async def run_card_of(sm: Sessions, settings: Settings, run_id: uuid.UUID) -> Po
             session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
         )
         detail = await run_views.detail(session, run, workflow.name if workflow else "")
-    return run_card(detail, web_links(settings, run.tenant_id))
+    return run_card(detail, await links(run.tenant_id, channel_id, thread_id))
 
 
 async def show_on_card(sm: Sessions, run_id: uuid.UUID, place: ChatPlace) -> None:
@@ -503,6 +505,7 @@ async def start_on_card(
     *,
     test: bool,
     place: ChatPlace,
+    links: WebAt,
 ) -> PostedCard:
     """Start a run that shows itself on the card at `place`; the card to show now."""
     try:
@@ -510,7 +513,8 @@ async def start_on_card(
     except WorkflowError as err:
         return notice(str(err))
     await show_on_card(env.sm, uuid.UUID(run.id), place)
-    return await run_card_of(env.sm, env.settings, uuid.UUID(run.id)) or notice(UNAVAILABLE)
+    card = await run_card_of(env.sm, uuid.UUID(run.id), links, place.channel_id, place.thread_id)
+    return card or notice(UNAVAILABLE)
 
 
 async def press(
@@ -520,6 +524,7 @@ async def press(
     presser: Presser,
     custom_id: str,
     place: ChatPlace,
+    links: WebAt,
     card_text: str = "",
     form_limit: int = 5,
 ) -> Pressed:
@@ -533,9 +538,11 @@ async def press(
         await service.ensure_on(env)
         if action == "cancel":
             await service.cancel(env, target)
-            return Pressed(card=await run_card_of(sm, settings, target))
+            return Pressed(
+                card=await run_card_of(sm, target, links, presser.channel_id, presser.thread_id)
+            )
         workflow = await service.get(env, target)
-        web = web_links(settings, env.who.tenant_id)
+        web = await links(presser.tenant_id, presser.channel_id, presser.thread_id)
         if action in ("pause", "resume"):
             changed = await service.patch(env, target, Patch(paused=action == "pause"))
             return Pressed(card=workflow_card(changed, web))
@@ -546,7 +553,9 @@ async def press(
             inputs = confirmed_inputs(card_text, keys)
             if arg != inputs_digest(target, workflow.live_version, inputs):
                 return Pressed(say=CHANGED)
-            return Pressed(card=await start_on_card(env, target, inputs, test=False, place=place))
+            return Pressed(
+                card=await start_on_card(env, target, inputs, test=False, place=place, links=links)
+            )
         draft = await service.get_draft(env, target)
         if arg != f"{draft.revision:x}":
             return Pressed(say=STALE)
@@ -637,12 +646,14 @@ async def open_run(
     *,
     test: bool,
     name: str,
+    links: WebAt,
     post: Callable[[PostedCard], Awaitable[ChatPlace]],
     edit: Callable[[ChatPlace, PostedCard], Awaitable[None]],
 ) -> None:
     """Post a run card, start the run on it, and show what happened."""
     place = await post(starting_card(name))
-    await edit(place, await start_on_card(env, workflow_id, inputs, test=test, place=place))
+    shown = await start_on_card(env, workflow_id, inputs, test=test, place=place, links=links)
+    await edit(place, shown)
 
 
 async def open_pressed(
@@ -652,6 +663,7 @@ async def open_pressed(
     workflow_id: uuid.UUID,
     *,
     test: bool,
+    links: WebAt,
     post: Callable[[PostedCard], Awaitable[ChatPlace]],
     edit: Callable[[ChatPlace, PostedCard], Awaitable[None]],
 ) -> str | None:
@@ -664,7 +676,9 @@ async def open_pressed(
         workflow = await service.get(env, workflow_id)
     except WorkflowError as err:
         return str(err)
-    await open_run(env, workflow_id, {}, test=test, name=workflow.name, post=post, edit=edit)
+    await open_run(
+        env, workflow_id, {}, test=test, name=workflow.name, links=links, post=post, edit=edit
+    )
     return None
 
 
@@ -682,7 +696,9 @@ async def list_for(
         return str(err)
 
 
-async def pick(sm: Sessions, settings: Settings, presser: Presser, workflow_id: str) -> PostedCard:
+async def pick(
+    sm: Sessions, settings: Settings, presser: Presser, workflow_id: str, links: WebAt
+) -> PostedCard:
     env = await env_of(sm, settings, presser)
     if env is None:
         return notice(UNAVAILABLE)
@@ -691,7 +707,8 @@ async def pick(sm: Sessions, settings: Settings, presser: Presser, workflow_id: 
         workflow = await service.get(env, uuid.UUID(workflow_id))
     except (WorkflowError, ValueError) as err:
         return notice(str(err) if isinstance(err, WorkflowError) else UNAVAILABLE)
-    return workflow_card(workflow, web_links(settings, env.who.tenant_id))
+    web = await links(presser.tenant_id, presser.channel_id, presser.thread_id)
+    return workflow_card(workflow, web)
 
 
 # ---------- following run cards ----------
@@ -703,10 +720,10 @@ CardEditor = Callable[[uuid.UUID, ChatPlace, PostedCard], Awaitable[None]]
 
 async def follow_cards(
     sm: Sessions,
-    settings: Settings,
     *,
     platform: str,
     edit: CardEditor,
+    links: WebAt,
     seen: dict[uuid.UUID, tuple[str, datetime]],
     now: datetime,
 ) -> int:
@@ -725,14 +742,15 @@ async def follow_cards(
         last = seen.get(row.id)
         if last is not None and now - last[1] < EDIT_EVERY:
             continue
-        card = await run_card_of(sm, settings, row.id)
+        place = ChatPlace.of(row.triggered_by["card"])
+        card = await run_card_of(sm, row.id, links, place.channel_id, place.thread_id)
         if card is None:
             continue
         key = hashlib.sha256(card.model_dump_json().encode()).hexdigest()
         if last is not None and last[0] == key:
             continue
         try:
-            await edit(row.tenant_id, ChatPlace.of(row.triggered_by["card"]), card)
+            await edit(row.tenant_id, place, card)
         except Exception as err:
             # Boundary: a chat API call; the next round tries again.
             log.warning(
@@ -747,14 +765,19 @@ async def follow_cards(
 
 
 def follower(
-    sm: Sessions, settings: Settings, *, platform: str, edit: CardEditor
+    sm: Sessions, *, platform: str, edit: CardEditor, links: WebAt
 ) -> Callable[[], Awaitable[int]]:
     """One round of `follow_cards` with its own memory, for the delivery poller."""
     seen: dict[uuid.UUID, tuple[str, datetime]] = {}
 
     async def once() -> int:
         return await follow_cards(
-            sm, settings, platform=platform, edit=edit, seen=seen, now=datetime.now(UTC)
+            sm,
+            platform=platform,
+            edit=edit,
+            links=links,
+            seen=seen,
+            now=datetime.now(UTC),
         )
 
     return once

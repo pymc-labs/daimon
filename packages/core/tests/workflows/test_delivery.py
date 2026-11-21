@@ -6,12 +6,14 @@ from dataclasses import replace
 from typing import Any
 
 from daimon.core._models import WorkflowDelivery
+from daimon.core.config import WebSettings
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.outbound.reach import ReachPlan
 from daimon.core.stores import accounts, tenants
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflow_deliveries import DeliveryRow
+from daimon.core.web_links import WebLinks
 from daimon.core.workflows.delivery import (
     DM_OFF,
     WorkflowPost,
@@ -118,6 +120,23 @@ async def test_post_time_rules_and_dms(db_session: AsyncSession) -> None:
     assert await post_refusal(to_owner, place_id="", limits=ReachPlan(places=0, people=0)) is None
     post = await clear_post(world.sm, home, platform="slack")
     assert isinstance(post, WorkflowPost) and post.speaker == "U1", post
+    asked: list[tuple[str | None, str | None]] = []
+    on = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
+    assert on is not None
+
+    async def links_on(tenant: Any, channel: str | None, thread: str | None) -> Any:
+        asked.append((channel, thread))
+        return on.for_tenant(tenant, admin=False)
+
+    async def links_off(*_: Any) -> None:
+        return None
+
+    linked = await clear_post(world.sm, home, platform="slack", links=links_on)
+    assert isinstance(linked, WorkflowPost) and linked.link is not None, linked
+    assert linked.link.endswith(f"/workflows/{home.workflow_id}/runs/1"), linked.link
+    assert asked == [("C0HOME", None)], "the link is asked at the channel the post goes to"
+    muted = await clear_post(world.sm, home, platform="slack", links=links_off)
+    assert isinstance(muted, WorkflowPost) and muted.link is None, "Off at the place: no link"
     tight = ReachPlan(places=0, people=1)
     assert await post_refusal(post, place_id="C0HOME", limits=tight) is None, "home is no reach"
     away = replace(post, row=dm.model_copy(update={"target": {}}))
