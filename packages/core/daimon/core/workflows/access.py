@@ -12,6 +12,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal
 
+from daimon.core.stores import web_identities
 from daimon.core.stores import workflows as store
 from daimon.core.stores.workflows import AccessRole, WorkflowAccessRow, WorkflowRow
 from daimon.core.web_roles_rules import is_admin, role_of_account
@@ -96,7 +97,12 @@ async def who_of(session: AsyncSession, tenant_id: uuid.UUID, account_id: uuid.U
     role = await role_of_account(
         session, tenant_id=tenant_id, account_id=account_id, chat_admin=False
     )
-    return None if role is None else Who(tenant_id, account_id, admin=is_admin(role))
+    if role is None:
+        return None
+    groups = await web_identities.groups_of_account(
+        session, tenant_id=tenant_id, account_id=account_id
+    )
+    return Who(tenant_id, account_id, admin=is_admin(role), groups=groups)
 
 
 async def may_run(session: AsyncSession, workflow: WorkflowRow, account_id: uuid.UUID) -> bool:

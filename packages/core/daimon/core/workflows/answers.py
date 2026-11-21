@@ -24,7 +24,13 @@ from daimon.core.config import Settings
 from daimon.core.mux_backend import managed_agents
 from daimon.core.mux_compat import legacy_call
 from daimon.core.routine_files import MAX_FILES, RoutineFile
-from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits, workflows
+from daimon.core.stores import (
+    web_identities,
+    workflow_deliveries,
+    workflow_runs,
+    workflow_waits,
+    workflows,
+)
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.file_uploads import MAX_UPLOAD_BYTES
@@ -177,7 +183,10 @@ async def _who(
     account = await get_account(session, principal.account_id)
     if account is None:
         return None
-    return Who(tenant_id, account.id, admin=account.role is Role.ADMIN)
+    groups = await web_identities.groups_of_account(
+        session, tenant_id=tenant_id, account_id=account.id
+    )
+    return Who(tenant_id, account.id, admin=account.role is Role.ADMIN, groups=groups)
 
 
 async def _ask(session: AsyncSession, wait: Wait) -> dict[str, Any]:

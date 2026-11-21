@@ -20,7 +20,7 @@ import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import is_admin
-from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.caller import WebCaller, groups_of, requires
 from daimon.adapters.web.chat import chattable_agents
 from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.directory import chattable
@@ -137,7 +137,8 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
 
     async def env_of(caller: WebCaller, *, with_catalog: bool = False) -> Env:
         person = caller.person
-        who = Who(person.tenant_id, person.account_id, admin=is_admin(caller.role))
+        admin = is_admin(caller.role)
+        who = Who(person.tenant_id, person.account_id, admin=admin, groups=groups_of(caller))
         env = Env(sm=runtime.sessionmaker, settings=runtime.settings, who=who, now=runtime.now())
         try:
             await service.ensure_on(env)
