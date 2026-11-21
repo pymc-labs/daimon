@@ -47,6 +47,9 @@ nodes:
   done:
     kind: finish
     title: Onboarded
+    deliver:
+      to: run_as
+      message: Welcomed ${{ inputs.name }}; a day has passed.
   stopped:
     kind: finish
     title: Not sent

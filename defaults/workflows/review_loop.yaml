@@ -41,3 +41,6 @@ nodes:
     kind: finish
     title: Final draft
     output: ${{ steps.write.output.text }}
+    deliver:
+      to: run_as
+      message: ${{ steps.write.output.text }}

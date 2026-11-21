@@ -43,6 +43,9 @@ nodes:
   done:
     kind: finish
     title: Sent
+    deliver:
+      to: run_as
+      message: 'Sent: ${{ steps.draft.output.subject }}'
   stopped:
     kind: finish
     title: Not sent

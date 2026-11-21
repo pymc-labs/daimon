@@ -30,6 +30,9 @@ nodes:
     kind: finish
     title: Digest
     output: ${{ steps.collect.output.digest }}
+    deliver:
+      to: run_as
+      message: ${{ steps.collect.output.digest }}
   quiet:
     kind: finish
     title: Nothing to report

@@ -30,3 +30,6 @@ nodes:
     kind: finish
     title: Summary
     output: ${{ steps.triage.output.summary }}
+    deliver:
+      to: run_as
+      message: ${{ steps.triage.output.summary }}

@@ -31,3 +31,6 @@ nodes:
     kind: finish
     title: Findings
     output: ${{ steps.each.output }}
+    deliver:
+      to: run_as
+      message: Research done for ${{ size(inputs.items) }} items.
