@@ -16,7 +16,8 @@ import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.workflows import answers
-from daimon.core.workflows.answers import Claimed
+from daimon.core.workflows.answers import Attachment, Claimed
+from pydantic import JsonValue
 
 import discord
 
@@ -145,6 +146,29 @@ def ask_view(ask: dict[str, Any]) -> discord.ui.View:
     return view
 
 
+def _files(runtime: DiscordRuntime, message: discord.Message) -> answers.Ingest | None:
+    """The message's attachments as Files API refs, read when it answers an ask."""
+    attached = [a for a in message.attachments if 0 < a.size <= answers.MAX_FILE_BYTES][
+        : answers.MAX_FILES
+    ]
+    if not attached:
+        return None
+
+    async def ingest() -> list[dict[str, JsonValue]]:
+        read: list[Attachment] = []
+        for attachment in attached:
+            try:
+                content = await attachment.read()
+            except discord.HTTPException as err:
+                log.warning("workflow_ask.file_read_failed", err_type=type(err).__name__)
+                continue
+            mime = attachment.content_type or "application/octet-stream"
+            read.append(Attachment(attachment.filename, mime.split(";")[0], content))
+        return await answers.ingest_files(runtime.anthropic, read)
+
+    return ingest
+
+
 async def claim_message(
     runtime: DiscordRuntime, message: discord.Message, tenant_ids: tuple[Any, ...]
 ) -> bool:
@@ -167,6 +191,7 @@ async def claim_message(
             text=strip_mentions(message.content),
             thread_id=str(message.channel.id) if in_thread else None,
             reply_to=None if reply_to is None else str(reply_to),
+            files=_files(runtime, message),
         ),
     )
     if claimed is None:
