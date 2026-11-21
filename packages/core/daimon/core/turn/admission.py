@@ -1717,7 +1717,7 @@ async def _admit_gates(
             grant=grant,
             memory_read_only=memory_read_only,
             asks_before_publishing=_asks_before_publishing(policy, grant),
-            approval_gate=_approval_gate_for(deps, policy, grant),
+            approval_gate=_approval_gate_for(deps, policy, grant, agent.id),
             daimon_rule_tools=daimon_rules.tools,
             daimon_rules_need_driver=daimon_rules.needs_driver,
             source_sealed=source_sealed,
@@ -2086,7 +2086,7 @@ async def _admit_gates(
         backend=backend,
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
-        approval_gate=_approval_gate_for(deps, policy, grant),
+        approval_gate=_approval_gate_for(deps, policy, grant, agent.id),
         daimon_rule_tools=daimon_rules.tools,
         daimon_rules_need_driver=daimon_rules.needs_driver,
         source_sealed=source_sealed,
@@ -2327,10 +2327,15 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 
 
 def _approval_gate_for(
-    deps: TurnDeps, policy: TenantAccessPolicy, grant: AdmissionGrant, *, dm_follows: bool = False
+    deps: TurnDeps,
+    policy: TenantAccessPolicy,
+    grant: AdmissionGrant,
+    agent_id: str,
+    *,
+    dm_follows: bool = False,
 ) -> ApprovalGate | None:
-    """None for a DM unless `dm_approvals` is on; a DM then reads the workspace value, as
-    it has no channel or thread rule of its own."""
+    """None for a DM unless `dm_approvals` is on; a DM then reads the agent's or the
+    workspace value, as it has no channel or thread rule of its own."""
     if (grant.is_dm and not dm_follows) or grant.platform is None or not deps.tool_safety.enabled:
         return None
     gate = resolve_approval_gate(
@@ -2338,6 +2343,7 @@ def _approval_gate_for(
         platform=grant.platform,
         channel_id=None if grant.is_dm else grant.channel_id,
         thread_id=None if grant.is_dm else grant.thread_id,
+        agent_id=agent_id,
     )
     return replace(gate, tenant_id=grant.tenant_id)
 
@@ -2355,7 +2361,7 @@ async def refresh_approval_gate(deps: TurnDeps, admission: Admission) -> Approva
         return None
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
-    return _approval_gate_for(deps, policy, grant, dm_follows=dm_follows)
+    return _approval_gate_for(deps, policy, grant, admission.agent.id, dm_follows=dm_follows)
 
 
 def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
@@ -2543,7 +2549,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         policy, grant, bool(seal_ids), await _dm_memory_read_only(deps, grant)
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
-    approval_gate = _approval_gate_for(deps, policy, grant)
+    approval_gate = _approval_gate_for(deps, policy, grant, admission.agent.id)
     rules = await daimon_rule_set_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
     )
@@ -2995,7 +3001,7 @@ async def _capture_backend_source(
                     policy, grant, bool(seals), await _dm_memory_read_only(deps, grant)
                 ),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
-                approval_gate=_approval_gate_for(deps, policy, grant),
+                approval_gate=_approval_gate_for(deps, policy, grant, actual.id),
                 daimon_rule_tools=rule_set.tools,
                 daimon_rules_need_driver=rule_set.needs_driver,
                 source_sealed=bool(seals),

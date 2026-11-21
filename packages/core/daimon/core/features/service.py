@@ -212,11 +212,20 @@ def _approvals_view(policy: TenantAccessPolicy, place: FeaturePlace) -> FeatureV
     rules = policy.channel_rules
     found = {
         "workspace": own(policy.approvals),
+        "agent": own(
+            policy.agent_approvals[place.agent_id].approvals
+            if place.agent_id in policy.agent_approvals
+            else None
+        ),
         "channel": own(rules[place.channel_id].approvals if place.channel_id in rules else None),
         "thread": own(rules[place.thread_key].approvals if place.thread_key in rules else None),
     }
     gate = resolve_approval_gate(
-        policy, platform=place.platform, channel_id=place.channel_id, thread_id=place.thread_id
+        policy,
+        platform=place.platform,
+        channel_id=place.channel_id,
+        thread_id=place.thread_id,
+        agent_id=place.agent_id,
     )
     tiers = tuple(TierSetting(tier, found[tier]) for tier in place_tiers(spec, place))
     return FeatureView(spec, tiers, approvals_from_gate(gate.value, gate.scope))
@@ -594,18 +603,20 @@ async def _change_approvals(
         sessions,
         tenant_id=actor.tenant_id,
         platform=place.platform,
-        target={"workspace": None, "channel": place.channel_id, "thread": place.thread_key}[tier],
+        target={"channel": place.channel_id, "thread": place.thread_key}.get(tier),
         value=raw(value),
         subject=subject,
         record=ApprovalChange(
-            place.channel_id if tier != "workspace" else None,
+            place.channel_id if tier in ("channel", "thread") else None,
             place.thread_key if tier == "thread" else None,
             actor.account_id,
             actor.surface,
             actor.on_write,
+            place.agent_id if tier == "agent" else None,
         ),
         expected=raw(expected.value) if expected is not None else None,
         note=actor.reason if isinstance(actor, OperatorActor) else None,
+        agent_id=place.agent_id if tier == "agent" else None,
     )
     before = gate.before or "inherit"
     return TierSetting(tier, DEFAULT if before == "inherit" else before)

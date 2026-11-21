@@ -397,11 +397,11 @@ async def _place_rows(
 
 def approvals_from_gate(value: str, scope: str) -> ResolvedFeature:
     """The approval gate's answer as a resolved feature (its scope is ``server`` or
-    ``<channel|thread>:<id>``; ``inherit`` everywhere is the registry default)."""
+    ``<agent|channel|thread>:<id>``; ``inherit`` everywhere is the registry default)."""
     if value == "inherit":
         return ResolvedFeature("approvals", FEATURES["approvals"].default, "default")
     kind = scope.split(":", 1)[0]
-    tier: Tier = "workspace" if kind == "server" else "thread" if kind == "thread" else "channel"
+    tier = cast(Tier, "workspace" if kind == "server" else kind)
     return ResolvedFeature("approvals", value, tier)
 
 
@@ -440,6 +440,7 @@ async def resolve_features(
                 platform=place.platform,
                 channel_id=place.channel_id,
                 thread_id=place.thread_id,
+                agent_id=place.agent_id,
             )
             resolved["approvals"] = approvals_from_gate(gate.value, gate.scope)
     # A feature's dependencies resolve first, even ones the caller did not ask for.

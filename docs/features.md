@@ -96,7 +96,7 @@ Where each feature can be set, and its default.
 | People tagged per reply | `outbound_people` | Limit | 5 people | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Post length elsewhere | `outbound_length` | Limit | 1500 characters | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |  |
-| Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |  |
+| Approvals | `approvals` | Guardrail | Ask |  | ✓ | ✓ | ✓ | ✓ |  |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
 | Approvals in direct messages | `dm_approvals` | Guardrail | Off | ✓ | ✓ |  |  |  |  |  |
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
@@ -120,7 +120,7 @@ Ask before an agent writes to an outside service in a chat reply. Allow writes c
 | Key | `approvals` |
 | Values | `on` (Ask), `off` (Allow writes) |
 | Default | `on` |
-| Levels | Workspace, Channel, Thread |
+| Levels | Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 
 ## Thread participation
@@ -661,7 +661,7 @@ A reply in a direct message can read the agent's memory but not change it.
 
 ## Approvals in direct messages
 
-Direct messages follow Approvals as set for everyone.
+Direct messages follow Approvals as set for the agent, or for everyone.
 
 | | |
 | --- | --- |

@@ -1018,8 +1018,10 @@ async def tenants_access_policy_set(
         if clear:
             try:
                 current = await load_access_policy(session, tenant_id=tenant_id)
-                if current.approvals != "inherit" or any(
-                    rule.approvals != "inherit" for rule in current.channel_rules.values()
+                if (
+                    current.approvals != "inherit"
+                    or current.agent_approvals
+                    or any(rule.approvals != "inherit" for rule in current.channel_rules.values())
                 ):
                     raise typer.BadParameter(
                         "clear approval overrides from the native /here admin control "

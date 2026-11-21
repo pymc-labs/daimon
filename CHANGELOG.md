@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Approvals can be set for one agent.** An agent's own Approvals sits between
+  the workspace and the channel, so one agent can Allow writes while the rest
+  Ask; a channel or thread setting still wins. Set it from the CLI
+  (`daimon features set approvals off --tier agent --agent NAME --reason ...`),
+  the web app or an agent, by a chat admin or the operator, audited as before.
+  With "Approvals in direct messages" on, a DM follows its agent's value.
+
 - **"Approvals in direct messages" no longer changes Approvals for everyone.**
   Setting it, from the CLI, the web app or an agent, wrote the server-wide
   Approvals value instead of its own, so Off turned Allow writes on everywhere.

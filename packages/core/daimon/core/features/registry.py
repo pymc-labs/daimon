@@ -662,7 +662,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc="Direct messages follow Approvals as set for everyone.",
+        doc="Direct messages follow Approvals as set for the agent, or for everyone.",
         platforms=_DM_PLATFORMS | {"teams"},
         authority=Authority(native=True),
     ),
@@ -1239,7 +1239,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         effect="guardrail",
         values={"on": "Ask", "off": "Allow writes"},
         default="on",
-        tiers=("workspace", "channel", "thread"),
+        tiers=("workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
             "Ask before an agent writes to an outside service in a chat reply. Allow writes "

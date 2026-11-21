@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import structlog.testing
-from daimon.core.access_policy import Approvals, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentApprovals, Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate, set_approval_gate
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.confirmation import ServerSkillUpdateCard
@@ -264,6 +264,27 @@ def test_most_specific_wins_in_both_directions(
         resolve_approval_gate(policy, platform=platform, channel_id="other", thread_id=None).value
         == parent
     )
+
+
+def test_agent_sits_between_workspace_and_channel() -> None:
+    policy = TenantAccessPolicy(
+        approvals="on",
+        approvals_set_by="server-admin",
+        agent_approvals={"a1": AgentApprovals(approvals="off", approvals_set_by="agent-admin")},
+    )
+
+    def gate(agent_id: str, channel_id: str = "C1") -> ApprovalGate:
+        return resolve_approval_gate(
+            policy, platform="discord", channel_id=channel_id, thread_id=None, agent_id=agent_id
+        )
+
+    assert gate("a1") == ApprovalGate("off", "agent:a1", "agent-admin")
+    assert gate("a2") == ApprovalGate("on", "server", "server-admin")
+    policy = policy.model_copy(
+        update={"channel_rules": {"C1": ChannelRule(approvals="on", approvals_set_by="ch")}}
+    )
+    assert gate("a1") == ApprovalGate("on", "channel:C1", "ch")
+    assert gate("a1", "C2").value == "off"
 
 
 @pytest.mark.parametrize(
@@ -607,3 +628,33 @@ async def test_recorded_change_lands_in_channel_changes_with_the_thread_key(
         "approvals": "off",
         "thread_approvals": {"thread": "T1", "mode": "off"},
     }
+
+
+async def test_agent_setting_is_audited_and_cleared(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    admin = Subject(is_admin=True, platform_user_id="admin")
+    for value in ("off", "inherit"):
+        gate = await set_approval_gate(
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            target=None,
+            value=value,
+            subject=admin,
+            note="why",
+            agent_id="a1",
+        )
+        async with db_session_factory() as session:
+            policy = await load_access_policy(session, tenant_id=tenant.id)
+        assert gate.scope == "agent:a1"
+        assert policy.approvals == "inherit" and not policy.channel_rules
+        assert ("a1" in policy.agent_approvals) == (value == "off")
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant.id)
+    assert sorted(event.reason for event in events) == [
+        "agent:a1:inherit->off (why)",
+        "agent:a1:off->inherit (why)",
+    ]
