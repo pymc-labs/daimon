@@ -4449,6 +4449,8 @@ class DaimonBot(commands.Bot):
                         is_dm=True,
                         resolver=self.membership_resolver,
                     )
+                # A watch made in a DM has no source channel, as a DM timer has none.
+                in_dm = current.thread_id.startswith(DM_SCOPE_PREFIX)
                 try:
                     reply = await run_dm_watch(
                         self.runtime.turn_deps,
@@ -4456,10 +4458,12 @@ class DaimonBot(commands.Bot):
                         requester_org=standing,
                         owner_user_id=current.owner_external_id,
                         prompt=seed,
-                        source=DmSource(
+                        source=None
+                        if in_dm
+                        else DmSource(
                             channel_id=current.parent_channel_id, thread_id=current.thread_id
                         ),
-                        budget_channel_id=current.parent_channel_id,
+                        budget_channel_id=None if in_dm else current.parent_channel_id,
                     )
                 except DirectMessageAccessRevoked as error:
                     log.info("watch_report.dm_refused", reason=error.reason)
