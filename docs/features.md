@@ -957,7 +957,7 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Workflows
 
-People can build and run workflows. Off stops their runs here.
+Lets people run workflows. Off stops runs here.
 
 | | |
 | --- | --- |
@@ -993,7 +993,7 @@ Workflows can run code steps. Off fails them.
 
 ## Workflow run budget
 
-The most one workflow run may spend. The smallest setting wins.
+The most one workflow run may spend.
 
 | | |
 | --- | --- |
@@ -1005,7 +1005,7 @@ The most one workflow run may spend. The smallest setting wins.
 
 ## Workflow run history
 
-How long finished workflow runs keep their steps. The smallest setting wins.
+How long finished workflow runs keep their steps.
 
 | | |
 | --- | --- |

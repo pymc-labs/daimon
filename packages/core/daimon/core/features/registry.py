@@ -1108,7 +1108,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflows",
         "Workflows",
-        "People can build and run workflows. Off stops their runs here.",
+        "Lets people run workflows. Off stops runs here.",
         tiers=_WORKFLOW_TIERS,
         default="off",
         authority=_ADMIN,
@@ -1134,7 +1134,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "workflow_run_budget",
         "Workflow run budget",
-        "The most one workflow run may spend. The smallest setting wins.",
+        "The most one workflow run may spend.",
         {"50": "$50", "20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
         default="5",
         tiers=("deployment", "workspace"),
@@ -1144,7 +1144,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "workflow_retention_days",
         "Workflow run history",
-        "How long finished workflow runs keep their steps. The smallest setting wins.",
+        "How long finished workflow runs keep their steps.",
         {"400": "400 days", "180": "180 days", "90": "90 days", "30": "30 days"},
         default="90",
         tiers=("deployment", "workspace"),
