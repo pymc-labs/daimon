@@ -26,7 +26,7 @@ def _ci() -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
-        ("README.md", "docs"),
+        ("README.md", "prose"),
         ("docs/quickstart.md", "docs"),
         ("docs/mcp-tools.md", "mcp-catalogue"),
         ("defaults/skills/x/SKILL.md", "core"),
@@ -53,7 +53,7 @@ def _ci() -> dict[str, Any]:
         (".github/PULL_REQUEST_TEMPLATE.md", "tooling"),
         ("apps/harness/README.md", "tooling"),
         (".gitignore", "tooling"),
-        ("LICENSE", "docs"),
+        ("LICENSE", "prose"),
         ("apps/report-host/src/report_host/app.py", "report-host"),
         ("pyproject.toml", "all"),
         ("uv.lock", "all"),
@@ -78,7 +78,12 @@ def test_unknown_base_or_root_file_runs_everything() -> None:
 
 
 def test_prose_runs_nothing() -> None:
-    assert _tests(["README.md", "docs/self-hosting.md", "CHANGELOG.md"]) == (set(), set())
+    assert _tests(["README.md", "CHANGELOG.md"]) == (set(), set())
+
+
+def test_a_docs_page_runs_the_docs_knowledge_tests() -> None:
+    suites, jobs = _tests(["docs/self-hosting.md"])
+    assert suites == {"core"} and jobs == {"pytest-db"}, "tests/test_docs_knowledge.py reads docs/"
 
 
 def test_web_adapter_change_runs_only_its_suites() -> None:
