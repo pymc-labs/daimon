@@ -67,6 +67,7 @@ function TriggerBlock({ t, c }: { t: Trigger; c: Ctx }) {
       {t.kind === "webhook" && <Webhook t={t} c={c} />}
       {t.kind === "manual" && <Manual c={c} />}
       {t.kind === "event" && <Event t={t} />}
+      {t.kind === "poll" && <Poll t={t} c={c} />}
       {t.kind === "call" && <Part><Facts rows={[["Called by", "Other workflows"]]} /></Part>}
     </section>
   )
@@ -358,3 +359,44 @@ function Event({ t }: { t: Trigger }) {
   return <Part><Facts rows={[["Source", t.source ? <Mono key="s">{t.source}</Mono> : "–"], ["Filter", t.match ? <Mono key="m" className="text-xs">{t.match}</Mono> : "–"], ["Last match", <span key="l" className="text-faint">None</span>]]} /></Part>
 }
 
+
+// ---------- poll ----------
+
+function Poll({ t, c }: { t: Trigger; c: Ctx }) {
+  const text = (label: string, key: "agent" | "tool" | "every" | "items" | "key" | "start_when", opts?: { mono?: boolean; placeholder?: string }) => (
+    <SettingRow label={label}>
+      <Input aria-label={label} className={cn("h-8 text-xs", opts?.mono && "font-mono")} disabled={c.ro} placeholder={opts?.placeholder} value={t[key] ?? ""}
+        onChange={(e) => c.set(t.id, (x) => { if (e.target.value) x[key] = e.target.value; else delete x[key] }, 400)} />
+    </SettingRow>
+  )
+  return (
+    <>
+      <Part title="Source">
+        <div className="space-y-2.5">
+          {text("Agent", "agent")}
+          {text("Tool", "tool", { mono: true, placeholder: "server/tool" })}
+          {text("Every", "every", { placeholder: "5m" })}
+        </div>
+      </Part>
+      <Part title="Rows">
+        <div className="space-y-2.5">
+          {text("Rows at", "items", { mono: true, placeholder: ".results" })}
+          {text("Row key", "key", { mono: true, placeholder: ".id" })}
+        </div>
+        <div className="mt-4">
+          <ChoiceCards label="Runs for" disabled={c.ro} value={t.rule ?? "added"} onChange={(v) => c.set(t.id, (x) => { x.rule = v })}
+            options={[{ value: "added", label: "New rows", fact: "Once per row" }, { value: "updated", label: "Changed rows", fact: "When a watched field changes" }]} />
+        </div>
+      </Part>
+      <Part title="Start">
+        <div className="space-y-2.5">
+          {text("Only when", "start_when", { mono: true, placeholder: "item.status == 'Todo'" })}
+          <SettingRow label="Inputs">
+            <Input aria-label="Inputs expression" className="h-8 font-mono text-xs" disabled={c.ro} placeholder="${{ item }}" value={mappingText(t.inputs)}
+              onChange={(e) => c.set(t.id, (x) => { if (e.target.value) x.inputs = parseMapping(e.target.value); else delete x.inputs }, 400)} />
+          </SettingRow>
+        </div>
+      </Part>
+    </>
+  )
+}

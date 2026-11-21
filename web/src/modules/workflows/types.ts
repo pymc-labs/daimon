@@ -140,7 +140,7 @@ export type DraftPut = { base_revision: number; spec: Spec }
 
 export type Version = { number: number; published_by: Person; published_at: string; note: string; grants: GrantKind[]; runs: number; live: boolean }
 
-export type WaitingReason = "approval" | "question" | "timer" | "event" | "blocked" | "unknown"
+export type WaitingReason = "approval" | "question" | "timer" | "event" | "poll" | "blocked" | "unknown"
 export type RunSummary = {
   id: string; number: number; status: RunStatus; label: string | null; trigger: { kind: TriggerKind; id: string }
   started_at: string; duration_ms: number | null; current_step: string | null; cost_usd: number; version: number; test: boolean
@@ -159,7 +159,7 @@ export type Attempt = {
   n: number; status: AttemptStatus; started_at: string; duration_ms: number | null; cost_usd: number
   session: string | null; error: { class: ErrorClass; message: string } | null
 }
-export type WaitKind = "approval" | "question" | "timer" | "event"
+export type WaitKind = "approval" | "question" | "timer" | "event" | "poll"
 /** A file a run holds: attached to an ask, or sent back with an answer. `url` is `/api/workflows/runs/:run/files/:fid`. */
 export type FileRef = { name: string; size: number; url: string }
 /** Where an ask was posted: a direct message or a thread, with a link when the platform gives one. */

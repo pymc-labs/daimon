@@ -255,17 +255,22 @@ export function ActionEditor(p: EditorProps) {
 
 export function WaitEditor(p: EditorProps) {
   const { n, set, ro, spec } = p
-  const mode = n.event ? "event" : n.until ? "until" : "for"
+  const mode = n.poll ? "poll" : n.event ? "event" : n.until ? "until" : "for"
   return (
     <Section>
       <div className="space-y-3">
-        <Field label="Wait"><Segmented value={mode} ro={ro} options={[["for", "For"], ["until", "Until"], ["event", "Event"]]}
-          onChange={(m) => set((x) => { delete x.for; delete x.until; delete x.event; if (m === "for") x.for = "1h"; else if (m === "until") x.until = ""; else x.event = { source: "" } })} /></Field>
+        <Field label="Wait"><Segmented value={mode} ro={ro} options={[["for", "For"], ["until", "Until"], ["event", "Event"], ["poll", "Poll"]]}
+          onChange={(m) => set((x) => { delete x.for; delete x.until; delete x.event; delete x.poll; if (m === "for") x.for = "1h"; else if (m === "until") x.until = ""; else if (m === "event") x.event = { source: "" }; else x.poll = { tool: "", every: "5m", until: "" } })} /></Field>
         {mode === "for" && <Field label="Duration"><Text value={n.for ?? ""} ro={ro} onChange={(v) => set((x) => { x.for = v }, 400)} /></Field>}
         {mode === "until" && <Field label="Until"><RefPicker value={n.until ?? ""} groups={upstreamRefs(spec, p.id)} ro={ro} onChange={(v) => set((x) => { x.until = v })} /></Field>}
         {mode === "event" && <>
           <Field label="Source"><Text value={n.event?.source ?? ""} mono ro={ro} onChange={(v) => set((x) => { x.event = { ...x.event, source: v } }, 400)} /></Field>
           <Field label="Match"><Text value={n.event?.match ?? ""} mono ro={ro} onChange={(v) => set((x) => { x.event = { source: x.event?.source ?? "", match: v } }, 400)} /></Field>
+        </>}
+        {mode === "poll" && <>
+          <Field label="Tool"><Text value={n.poll?.tool ?? ""} mono ro={ro} onChange={(v) => set((x) => { x.poll = { ...x.poll!, tool: v } }, 400)} /></Field>
+          <Field label="Every"><Text value={n.poll?.every ?? ""} ro={ro} onChange={(v) => set((x) => { x.poll = { ...x.poll!, every: v } }, 400)} /></Field>
+          <Field label="Until"><Text value={n.poll?.until ?? ""} mono ro={ro} placeholder="result.status == 'done'" onChange={(v) => set((x) => { x.poll = { ...x.poll!, until: v } }, 400)} /></Field>
         </>}
         <Field label="Timeout"><Text value={typeof n.timeout === "object" ? n.timeout.after : n.timeout ?? ""} placeholder="None" ro={ro} onChange={(v) => set((x) => { x.timeout = v || undefined }, 400)} /></Field>
         {n.routes ? <RouteRows rows={routeRows(n)} spec={spec} self={p.id} ro={ro} onTo={(name, to) => set((x) => setRoute(x, name, to))} />
