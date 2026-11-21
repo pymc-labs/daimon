@@ -28,6 +28,7 @@ from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
 from daimon.core.workflows import asks, callbacks, delivery, engine
 from daimon.core.workflows.asks import Ask
+from daimon.core.workflows.clock import add_duration
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
@@ -42,7 +43,6 @@ from daimon.core.workflows.spec import (
     FinishNode,
     ForEachNode,
     Spec,
-    parse_duration,
     parse_spec,
 )
 from daimon.core.workflows.taint import Catalog, catalog_of
@@ -745,10 +745,9 @@ async def _notify(session: AsyncSession, channel: str, payload: str) -> None:
 
 
 def _deadline(spec: Spec, settings: Settings, now: datetime) -> datetime:
-    asked = parse_duration(spec.limits.deadline) if spec.limits and spec.limits.deadline else None
-    return now + min(
-        asked or DEFAULT_DEADLINE, timedelta(days=settings.workflows.max_deadline_days)
-    )
+    deadline = spec.limits.deadline if spec.limits else None
+    asked = add_duration(now, deadline, spec.timezone) if deadline else now + DEFAULT_DEADLINE
+    return min(asked, now + timedelta(days=settings.workflows.max_deadline_days))
 
 
 def _budget(spec: Spec, settings: Settings, start: Start, cleared: Cleared) -> Decimal:

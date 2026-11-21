@@ -26,6 +26,7 @@ from daimon.core.stores.workflow_waits import Wait
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows import asks, callbacks, engine, runs
 from daimon.core.workflows.access import Who, holders, rights_of
+from daimon.core.workflows.clock import add_duration
 from daimon.core.workflows.engine import Event, Outcome
 from daimon.core.workflows.expressions import ExpressionError, render
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, account_actor
@@ -35,7 +36,6 @@ from daimon.core.workflows.spec import (
     ApprovalNode,
     Spec,
     WaitNode,
-    parse_duration,
 )
 from daimon.core.workflows.step_tools import BRIEF_SENT, Grant, StepRefused
 from daimon.core.workflows.triggers import MappingError, passes
@@ -304,8 +304,10 @@ class ApprovalExecutor:
                 "title": title,
                 "attachments": list(files),
             },
-            expires_at=now + parse_duration(node.timeout.after) if node.timeout else None,
-            remind_at=now + parse_duration(node.remind_every) if node.remind_every else None,
+            expires_at=add_duration(now, node.timeout.after, work.spec.timezone)
+            if node.timeout
+            else None,
+            remind_at=_next_remind(node, now, work.spec),
         )
 
 
@@ -412,7 +414,7 @@ class WaitExecutor:
         try:
             if node.event is None:
                 if node.for_ is not None:
-                    at = now + parse_duration(node.for_)
+                    at = add_duration(now, node.for_, work.spec.timezone)
                 else:
                     raw = render(node.until, work.context, now=now)
                     at = datetime.fromisoformat(str(raw))
@@ -427,7 +429,9 @@ class WaitExecutor:
             "event",
             event_source=event_source(work, node.event.source),
             event_key=None if key is None else str(key)[:200],
-            expires_at=now + parse_duration(node.timeout) if node.timeout else None,
+            expires_at=add_duration(now, node.timeout, work.spec.timezone)
+            if node.timeout
+            else None,
         )
 
 
@@ -817,11 +821,13 @@ async def _held(
     return run, wait, step
 
 
-def _remind_every(node: AnyNode | None, wait: Wait) -> timedelta | None:
-    if kind_of(wait) == PROPOSALS:
-        return REVIEW_REMIND
+def _next_remind(
+    node: AnyNode | None, now: datetime, spec: Spec, wait: Wait | None = None
+) -> datetime | None:
+    if wait is not None and kind_of(wait) == PROPOSALS:
+        return now + REVIEW_REMIND
     if isinstance(node, ApprovalNode) and node.remind_every:
-        return parse_duration(node.remind_every)
+        return add_duration(now, node.remind_every, spec.timezone)
     return None
 
 
@@ -835,11 +841,12 @@ async def on_due(
         if held is None:
             return
         run, wait_, step = held
-        node = (await runs.spec_of(session, run)).nodes.get(step.node_id)
+        spec = await runs.spec_of(session, run)
+        node = spec.nodes.get(step.node_id)
         key = runs.key_of(step)
         if wait_.expires_at is None or wait_.expires_at > now:
-            if every := _remind_every(node, wait_):
-                await workflow_waits.set_remind_at(session, wait_.id, now + every)
+            if remind_at := _next_remind(node, now, spec, wait_):
+                await workflow_waits.set_remind_at(session, wait_.id, remind_at)
                 posts = await asks.queue_reminders(session, wait_)
                 events = [NewEvent("wait.reminded", key, {"id": str(wait_.id), "posts": posts})]
                 await append_events(session, run_id=run.id, events=events, actor=ENGINE, at=now)
