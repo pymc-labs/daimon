@@ -45,6 +45,7 @@ dependencies = [
 evals = [
     "faker>=30",
     "graphql-core>=3.2,<4",
+    "phonenumbers>=8.13",
     "presidio-analyzer>=2.2,<3",
     "pdfplumber>=0.11,<1",
 ]
