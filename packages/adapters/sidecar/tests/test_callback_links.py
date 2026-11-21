@@ -679,7 +679,7 @@ async def test_oversize_instructions_are_clipped_and_counted(db_session_factory,
     full = "y" * INSTRUCTIONS_LIMIT
     kept = await _import(db_session_factory, moved, legacy_id=str(uuid.uuid4()), instructions=full)
     assert not kept.truncated and kept.watch is not None, "a full-length instruction is kept"
-    assert kept.watch.instructions == full, "the store accepts what the import keeps"
+    assert kept.watch.instructions == full, "a full-length instruction is stored whole"
 
 
 async def test_rerun_updates_an_unconfirmed_watch_and_leaves_a_confirmed_one(

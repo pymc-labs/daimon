@@ -204,7 +204,7 @@ async def register_page_watch(
     if binding.platform != "discord":
         raise ValueError("Page-event enrollment currently requires a Discord thread")
     if not 0 < len(instructions) <= INSTRUCTIONS_LIMIT:
-        raise ValueError("Instructions or watch lifetime out of bounds")
+        raise ValueError(f"Instructions must be 1 to {INSTRUCTIONS_LIMIT} characters")
     if expires_at is not None and not now < expires_at <= now + max_lifetime:
         raise ValueError("Instructions or watch lifetime out of bounds")
     if not 1 <= max_turns_per_day <= HARD_WATCH_CAP:
