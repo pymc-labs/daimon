@@ -252,13 +252,13 @@ class ApprovalExecutor:
                     session, work, node.approvers or [], now
                 )
             show = render(node.show, work.context, now=now) if node.show else None
-            binds = bound_preview(work.spec, node, work.context, now)
             attach = render(node.attach, work.context, now=now) if node.attach else None
             values = {
                 k: render(f.default, work.context, now=now)
                 for k, f in (node.form or {}).items()
                 if f.default is not None
             }
+            binds = bound_preview(work.spec, node, work.context, now, values, work.step.node_id)
         except ExpressionError as err:
             return engine.Failed("fatal", str(err))
         if not addressees and not tokens:
@@ -303,10 +303,17 @@ def _binds(node: ApprovalNode) -> list[str]:
 
 
 def bound_preview(
-    spec: Spec, node: ApprovalNode, context: dict[str, JsonValue], now: datetime
+    spec: Spec,
+    node: ApprovalNode,
+    context: dict[str, JsonValue],
+    now: datetime,
+    values: dict[str, JsonValue] | None = None,
+    key: str = "",
 ) -> list[dict[str, JsonValue]]:
-    """The bound Actions as the approver sees them; arguments that read the answer show as
-    null until it is given."""
+    """The bound Actions as the approver sees them: arguments that read the answer show the
+    form's defaults, or null until it is given."""
+    if values and isinstance(steps := context.get("steps"), dict):
+        context = {**context, "steps": {**steps, key: {"output": {**values, "values": values}}}}
     preview: list[dict[str, JsonValue]] = []
     for bound in _binds(node):
         action = spec.nodes.get(bound)
@@ -531,9 +538,9 @@ def _form_values(node: ApprovalNode | None, kind: str, answer: Answer) -> dict[s
         if isinstance(note, str) and note.strip():
             return {"text": f"{text.strip()}\n\nNote: {note.strip()}"}
         return {"text": text.strip()}
-    if node.answer != "form":
+    if not node.form:
         return {}
-    fields = node.form or {}
+    fields = node.form
     values: dict[str, JsonValue] = {}
     for name, field in fields.items():
         value = answer.values.get(name, field.default)
@@ -631,7 +638,10 @@ async def decide_wait(
             and _triggered_by(run) == who.account_id
         ):
             raise NotYours("You started this run, so someone else must approve it.")
-        values = _form_values(approval, wait.kind, answer) if answer.route == ANSWER else {}
+        edits = answer.route == ANSWER or (
+            answer.route == APPROVE and approval is not None and bool(approval.form)
+        )
+        values = _form_values(approval, wait.kind, answer) if edits else {}
         selected = _selected(wait, answer) if kind == PROPOSALS else None
         comment = (answer.comment or "").strip()[:2000] or None
         if comment is None and needs_comment(node, kind, answer.route):

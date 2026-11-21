@@ -132,6 +132,17 @@ async def test_text_answers_become_the_output(db_session: AsyncSession) -> None:
     assert wait is not None and wait.answer_text == output["text"], "the text stays on the wait"
 
 
+async def test_an_approval_form_edits_the_draft_before_approving(db_session: AsyncSession) -> None:
+    form = {"body": {"type": "string", "default": "Draft"}}
+    nodes = {"ok": {"kind": "approval", "form": form, "next": "f"}, **FINISH}
+    world = await make_world(db_session, nodes, "ok")
+    run = await world.run()
+    wait_id = await _park(world, run.id, "ok")
+    await _decide(world, world.owner, wait_id, "approve", values={"body": "Edited"})
+    output = (await world.steps(run.id))["f"].output
+    assert isinstance(output, dict) and output["body"] == "Edited", output
+
+
 async def test_timers_arrive_and_approvals_time_out_to_their_route(
     db_session: AsyncSession,
 ) -> None:
@@ -303,3 +314,5 @@ def test_the_approval_preview_shows_each_argument_it_can_render_now() -> None:
     assert preview == [
         {"node": "send", "tool": "gmail/send_message", "args": {"to": "a@b.co", "body": None}}
     ], "the answer's own fields wait for the answer"
+    drafted = waits.bound_preview(spec, node, {"steps": {}}, NOW, {"body": "Hi"}, "review")
+    assert drafted[0]["args"] == {"to": None, "body": "Hi"}, "the form's draft fills them"

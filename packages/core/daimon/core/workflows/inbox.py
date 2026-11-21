@@ -123,7 +123,7 @@ def _question(node: AnyNode | None, wait: Wait, key: str) -> str:
 
 
 def _form(node: AnyNode | None, wait: Wait) -> dict[str, Any] | None:
-    if isinstance(node, ApprovalNode) and node.answer == "form":
+    if isinstance(node, ApprovalNode) and node.form and node.answer not in ("text", "choice"):
         fields = {
             k: f.model_dump(by_alias=True, exclude_none=True) for k, f in (node.form or {}).items()
         }
@@ -255,7 +255,8 @@ async def _wait_detail(
         proposals=await _proposals(seen.session, step.id) if kind == waits.PROPOSALS else [],
         question=_question(node, wait, key) if typed else None,
         form=_form(node, wait),
-        values=dict(shown.get("values") or {}),
+        values=dict(shown.get("values") or {})
+        or ({"text": shown["options"][0]} if typed and shown.get("options") else {}),
         routes=routes(node, kind),
         attachments=[
             run_views.file_view(run.id, f)
