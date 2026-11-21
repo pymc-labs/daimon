@@ -1321,8 +1321,8 @@ async def run_dm_watch(
     *,
     owner_user_id: str,
     prompt: str,
-    source: DmSource,
-    budget_channel_id: str,
+    source: DmSource | None,
+    budget_channel_id: str | None,
     requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DmRoutineReply:
     """Run a DM watch's fire as a fresh private DM turn of its owner, under watch posture.
@@ -1331,7 +1331,8 @@ async def run_dm_watch(
     routine, serialised per owner the same way. The turn reads and reports only
     (`watch_turn.watch_posture`), never routine posture. The fresh session is
     recorded on the firing before anything is sent, and each send checks it.
-    `source` is the place the watch was made; nothing is posted here. While the
+    `source` is the place the watch was made, None for a DM (no source, as for a DM
+    timer); nothing is posted here. While the
     owner has a DM turn running, which may be waiting on an approval card, it
     raises `SessionBusyError` so the report is offered again later.
     """

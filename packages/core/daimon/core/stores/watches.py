@@ -617,6 +617,21 @@ def callback_end(now: datetime, lifetime: timedelta | None) -> datetime | None:
     return None if lifetime is None else now + lifetime
 
 
+def callback_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> WatchDelivery:
+    """Where a callback watch reports. One made in a DM reports in that DM, each post as a
+    fresh private turn of its owner, as DM timers run (`direct_messages.run_dm_watch`)."""
+    require_delivery(binding, delivery)
+    if not (
+        binding.thread_id.startswith(DM_SCOPE_PREFIX)
+        or binding.parent_channel_id.startswith(DM_SCOPE_PREFIX)
+    ):
+        return delivery
+    if binding.platform != "discord":
+        # Only Discord runs a fire in a DM; elsewhere its posts would be dropped, yet counted.
+        raise ValueError("A callback watch can't be made in a DM here. Make it in a channel.")
+    return "dm"
+
+
 async def register_callback_watch(
     session: AsyncSession,
     binding: ContinuationRequest,
@@ -632,12 +647,7 @@ async def register_callback_watch(
     Only the token's sha256 is stored. It lasts `lifetime`, the `callback_watch_lifetime`
     feature; None makes the watch and its link permanent.
     """
-    require_delivery(binding, delivery)
-    if binding.thread_id.startswith(DM_SCOPE_PREFIX) or binding.parent_channel_id.startswith(
-        DM_SCOPE_PREFIX
-    ):
-        # Its posts would be dropped, yet counted: nothing reports from a DM scope.
-        raise ValueError("A callback watch cannot be made in a DM. Make it in a channel or thread.")
+    delivery = callback_delivery(binding, delivery)
     expires_at = callback_end(now, lifetime)
     watch = await register_page_watch(
         session,
@@ -687,9 +697,11 @@ async def wake_link(
     """A new link to the conversation's one wake watch for `server`, made on first use.
 
     Each call adds its own token (only its hash is stored), moves the watch onto the
-    conversation's newest session and gives it `lifetime` from now, so every job
-    started gets a link that lasts. Returns the watch id and the token.
+    conversation's newest session (a DM's watch has none: `callback_delivery`) and gives
+    it `lifetime` from now, so every job started gets a link that lasts. Returns the watch
+    id and the token.
     """
+    delivery = callback_delivery(binding, "thread")
     await _lock_owner(session, binding.requester_account_id)
     row = await session.scalar(
         select(Watch)
@@ -701,7 +713,7 @@ async def wake_link(
             Watch.parent_channel_id == binding.parent_channel_id,
             Watch.agent_id == binding.target_ma_agent_id,
             Watch.source == "callback",
-            Watch.delivery == "thread",
+            Watch.delivery == delivery,
             Watch.status == "active",
             Watch.source_state[WAKE_STATE_KEY].astext == server,
             _live_at(now),
@@ -725,7 +737,8 @@ async def wake_link(
         )
         return watch.id, token
     live = await _exact_live_binding(session, binding)
-    row.session_id = live.ma_session_id
+    if delivery == "thread":
+        row.session_id = live.ma_session_id
     await _set_callback_expiry(session, row, callback_end(now, lifetime), now)
     top = (
         await session.scalar(
