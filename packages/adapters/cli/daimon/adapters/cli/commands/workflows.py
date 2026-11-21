@@ -69,7 +69,7 @@ async def operator_env(
             who = await who_of(session, tenant_id, owner) if on_tenant else None
     if who is None:
         raise UserFacingError(f"Account {owner} is not an active member of this tenant.")
-    agents = tenant_agents(rt.anthropic, tenant_id)
+    agents = tenant_agents(rt.anthropic, tenant_id, rt.sessionmaker)
     env = Env(
         sm=rt.sessionmaker, settings=rt.settings, who=who, now=datetime.now(UTC), agents=agents
     )

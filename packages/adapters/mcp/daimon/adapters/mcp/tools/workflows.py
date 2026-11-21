@@ -58,7 +58,7 @@ def _env(runtime: McpRuntime, auth: AuthIdentity) -> Env:
         settings=runtime.settings,
         who=who,
         now=datetime.now(UTC),
-        agents=tenant_agents(runtime.client, auth.tenant_id),
+        agents=tenant_agents(runtime.client, auth.tenant_id, runtime.session_factory),
     )
 
 

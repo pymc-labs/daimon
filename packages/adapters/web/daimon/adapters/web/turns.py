@@ -555,7 +555,7 @@ class WebTurns:
             settings=self.deps.settings,
             who=Who(thread.tenant_id, account_id, admin=admin),
             now=datetime.now(UTC),
-            agents=tenant_agents(self.deps.anthropic, thread.tenant_id),
+            agents=tenant_agents(self.deps.anthropic, thread.tenant_id, self.deps.sessionmaker),
         )
         return await service.context(env, workflow_id, selected_node)
 

@@ -222,7 +222,7 @@ class WorkflowCardControl(
                 links=web_at(runtime, bot._channel_by_id),  # pyright: ignore[reportPrivateUsage]
                 card_text=card_text(message.components),
                 form_limit=FORM_LIMIT,
-                agents=tenant_agents(runtime.anthropic, presser.tenant_id),
+                agents=tenant_agents(runtime.anthropic, presser.tenant_id, runtime.sessionmaker),
             )
         except Exception:
             # Boundary: a failed press must answer the presser, not leave the click hanging.

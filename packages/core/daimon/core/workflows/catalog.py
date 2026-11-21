@@ -21,7 +21,7 @@ from daimon.core.workflows.spec import AgentNode, ForEachNode, Spec, slug
 from daimon.core.workflows.taint import Catalog, catalog_of
 from daimon.core.workflows.views import Person
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: The agents a caller may build with; every validation reads them through `tool_catalog`.
 AgentLister = Callable[[], Awaitable[Sequence[BetaManagedAgentsAgent]]]
@@ -89,13 +89,18 @@ async def tool_catalog(policy: ToolSafetyPolicy, agents: AgentLister | None) -> 
     return catalog_of(policy, {agent_key(a): agent_tool_ids(a) for a in listed})
 
 
-def tenant_agents(client: AsyncAnthropic | None, tenant_id: uuid.UUID) -> AgentLister | None:
-    """The workspace's agents, for a path with no narrower list (chat, MCP, CLI)."""
+def tenant_agents(
+    client: AsyncAnthropic | None,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> AgentLister | None:
+    """The workspace's agents, for a path with no narrower list (chat, MCP, CLI); `records`
+    adds the Daimon-owned ones."""
     if client is None:
         return None
 
     async def listed() -> Sequence[BetaManagedAgentsAgent]:
-        return await list_agents_by_tenant(client, tenant_id=tenant_id)
+        return await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
 
     return listed
 

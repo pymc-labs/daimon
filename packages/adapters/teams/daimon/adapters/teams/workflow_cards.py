@@ -152,7 +152,7 @@ async def answer(
             place=place,
             links=links,
             form_limit=FORM_LIMIT,
-            agents=tenant_agents(runtime.anthropic, presser.tenant_id),
+            agents=tenant_agents(runtime.anthropic, presser.tenant_id, runtime.sessionmaker),
         )
         if pressed.form is not None:
             return replace_card(form_card(pressed.form))

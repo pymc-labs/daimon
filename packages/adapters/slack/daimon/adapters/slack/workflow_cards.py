@@ -206,7 +206,7 @@ async def handle_workflow_click(runtime: SlackRuntime, payload: dict[str, Any]) 
             links=web_at(runtime),
             card_text=card_text(obj(payload.get("message")).get("blocks")),
             form_limit=FORM_LIMIT,
-            agents=tenant_agents(runtime.anthropic, presser.tenant_id),
+            agents=tenant_agents(runtime.anthropic, presser.tenant_id, runtime.sessionmaker),
         )
         if pressed.form is not None:
             await client.views_open(  # pyright: ignore[reportUnknownMemberType]
