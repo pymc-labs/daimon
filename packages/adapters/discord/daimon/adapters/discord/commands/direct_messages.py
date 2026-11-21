@@ -953,7 +953,7 @@ class DirectMessageCog(commands.Cog):
                 if current is not None
                 else None
             )
-            if agent:
+            if agent and current is not None:
                 agent = await dm_agent_display_name(
                     session,
                     tenant_id=current.tenant_id,
