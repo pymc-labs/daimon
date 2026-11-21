@@ -3,6 +3,7 @@ a text box for the rest, optional where the agent left them optional."""
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import discord
@@ -27,7 +28,8 @@ async def test_a_choice_field_is_a_pick_and_a_note_a_text_box_everywhere() -> No
     form = answers.form_of(ASK, waits.ANSWER)
     assert form is not None, "a form ask opens its fields"
 
-    modal = AskModal(form, route=waits.ANSWER, message_id="1")
+    at = answers.Pressed("discord", None, "c1", "1", uuid.UUID(int=1))
+    modal = AskModal(form, route=waits.ANSWER, at=at)
     [label, note] = modal.children
     assert isinstance(label, discord.ui.Label) and isinstance(label.component, discord.ui.Select)
     picks = [o.label for o in label.component.options]

@@ -31,13 +31,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 NOW = datetime(2026, 11, 20, 12, tzinfo=UTC)
 
 
-def agents_with(tools: dict[str, list[str]]) -> AgentLister:
-    """An `Env.agents` listing one agent per key, each with these `server/tool` MCP tools."""
+def ma_agents_with(
+    tools: dict[str, list[str]], tenant_id: uuid.UUID | str | None = None
+) -> list[BetaManagedAgentsAgent]:
+    """One agent per key, each with these `server/tool` MCP tools; `tenant_id` tags them for
+    a platform listing."""
     allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
-    listed = [
+    return [
         ma_agent(
             id=f"agent_{key}",
             name=key,
+            tenant_id=tenant_id,
             tools=[
                 {
                     "type": "mcp_toolset",
@@ -54,6 +58,11 @@ def agents_with(tools: dict[str, list[str]]) -> AgentLister:
         )
         for key, ids in tools.items()
     ]
+
+
+def agents_with(tools: dict[str, list[str]]) -> AgentLister:
+    """An `Env.agents` listing one agent per key, each with these `server/tool` MCP tools."""
+    listed = ma_agents_with(tools)
 
     async def agents() -> Sequence[BetaManagedAgentsAgent]:
         return listed

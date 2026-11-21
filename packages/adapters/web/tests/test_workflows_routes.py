@@ -20,7 +20,10 @@ from daimon.core.features.service import set_workspace_feature
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import workflow_runs
 from daimon.core.stores.domain import WebPersonRow
+from daimon.testing import ma_agent
+from daimon.testing.ma import MARouter
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
+from daimon.testing.workflows import ma_agents_with
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -68,7 +71,12 @@ class Rig:
 
     @asynccontextmanager
     async def open(
-        self, *, engine: bool = True, page: bool = True, **settings: Any
+        self,
+        *,
+        engine: bool = True,
+        page: bool = True,
+        agents: dict[str, list[str]] | None = None,
+        **settings: Any,
     ) -> AsyncIterator[Rig]:
         self.ws = await funded_workspace(self.factory)
         self.member = await _member(self.factory, self.ws.tenant_id, "Mia", discord_id="m-1")
@@ -90,7 +98,14 @@ class Rig:
                 account_id=self.ws.person.account_id,
                 surface="web",
             )
-        router = build_turn_router(str(self.ws.tenant_id), sent_event_bodies=self.sent)
+        tenant = str(self.ws.tenant_id)
+        listed = MARouter()
+        if agents:
+            # The turn router's own agent stays listed beside the workflows' named ones.
+            listed.add_agent_list(
+                ma_agent(id=AGENT_ID, tenant_id=tenant), *ma_agents_with(agents, tenant)
+            )
+        router = build_turn_router(tenant, sent_event_bodies=self.sent, router=listed)
         self.router = router
         built = build_turns(self.factory, router, self.tmp_path)
         features = {"workflows": "on" if engine else "off", **settings.pop("features", {})}
@@ -207,7 +222,7 @@ async def test_a_run_file_downloads_for_a_viewer_and_no_other_file_does(rig: Rig
 
 
 async def test_each_starter_template_creates_a_draft_that_validates(rig: Rig) -> None:
-    async with rig.open() as r:
+    async with rig.open(agents={"default": ["gmail/send_message"]}) as r:
         starters = (await r.client.get("/api/workflows/templates")).json()
         assert len(starters) == 6, f"the six starters are listed: {starters}"
         for starter in starters:

@@ -14,7 +14,9 @@ from daimon.core.config import Settings
 from daimon.core.errors import UserFacingError
 from daimon.core.workflows import engine, service
 from daimon.core.workflows.access import Who
+from daimon.testing import ma_agent, tenant_metadata
 from daimon.testing.builders import new_routine
+from daimon.testing.ma import MARouter
 from daimon.testing.workflows import NOW, World, make_settings, make_world
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,9 +29,11 @@ AGENT: dict[str, Any] = {
 }
 
 
-def _rig(world: World, settings: Settings | None = None) -> tuple[Any, StringIO, Console]:
+def _rig(
+    world: World, settings: Settings | None = None, router: MARouter | None = None
+) -> tuple[Any, StringIO, Console]:
     out = StringIO()
-    rt = build_cli_runtime(world.sm, settings=settings or world.settings)
+    rt = build_cli_runtime(world.sm, settings=settings or world.settings, router=router)
     return rt, out, Console(file=out, width=300)
 
 
@@ -109,7 +113,11 @@ async def test_from_routine_previews_without_moving_then_moves_and_moves_back(
         channel_id="c1",
     )
     await db_session.commit()
-    rt, out, console = _rig(world)
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(name="daimon", metadata=tenant_metadata(world.tenant_id, "daimon"))
+    )
+    rt, out, console = _rig(world, router=router)
 
     assert await cli.from_routine(rt, console, world.tenant_id, [], apply=False) == []
     assert f"Routine {routine.id} would move" in out.getvalue(), out.getvalue()
