@@ -3,6 +3,7 @@
 A JSON or YAML file with a list per kind. Person entries are a name or an object with
 `aliases`, `emails`, `handles` and `ids`; companies, projects and channels may be a name or
 `{name, aliases}`. Every other kind (groups and roles among them) is a list of strings.
+`keep` lists public names (platforms, products, the suite's own ids) that are never replaced.
 """
 
 from __future__ import annotations
@@ -70,6 +71,9 @@ class KnownEntities(_Model):
     """Roles, user groups and teams."""
     ids: list[str] = Field(default_factory=list[str])
     phrases: list[str] = Field(default_factory=list[str])
+    keep: list[str] = Field(default_factory=list[str])
+    """Public names: never faked, learned or reported, even where a name of another kind holds
+    one ("acme" stays private in `acme_search`)."""
 
 
 @dataclass(frozen=True)

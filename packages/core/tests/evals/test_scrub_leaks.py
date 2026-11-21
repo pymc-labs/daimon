@@ -18,9 +18,9 @@ from daimon.core.evals.bundle import BundleHeader, DirSource, build_files, write
 from daimon.core.evals.format import BlobEntry, SourceInfo, case_hash, sha256_hex
 from daimon.core.evals.from_thread import ThreadRecord, build_cases
 from daimon.core.evals.scrub import detect, offline
-from daimon.core.evals.scrub.detect import Detector, Hit, Ner
+from daimon.core.evals.scrub.detect import PUBLIC_NAMES, Detector, Hit, Ner
 from daimon.core.evals.scrub.engine import Scrubber
-from daimon.core.evals.scrub.entities import KnownEntities, load_entities, terms_of
+from daimon.core.evals.scrub.entities import KnownEntities, Term, load_entities, terms_of
 from daimon.core.evals.scrub.fakes import adapt
 from daimon.core.evals.scrub.files import rebuild
 from daimon.core.evals.scrub.offline import (
@@ -472,8 +472,8 @@ def test_bundle_when_ids_and_enums_hold_names_then_ids_faked_alike_enums_kept_an
 
 
 def test_ner_when_many_texts_then_cache_stays_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The per-text cache is cleared at its limit, so a long scrub never grows without bound."""
-    monkeypatch.setattr(detect, "_NER_CACHE", 5)
+    """The per-line cache is cleared at its limit, so a long scrub never grows without bound."""
+    monkeypatch.setattr(detect, "_NER_PIECES", 5)
 
     class _Fixed(Ner):
         @property
@@ -685,3 +685,89 @@ def test_text_when_host_id_or_ip_is_glued_to_other_characters_then_replaced(
     out = scrubber.text(text)
     assert real not in out, out
     assert scrubber.residue(out) == {}, "the sweep is clean too"
+
+
+def test_value_when_names_are_kept_then_unchanged_and_private_parts_still_faked() -> None:
+    keep = {"phrases": ["Core", "Linear", "Merge"], "keep": ["core", "Linear"]}
+    scrubber = _scrubber(ENTITIES.model_copy(update=keep))
+    case = {
+        "schema": "daimon.eval.case/1",
+        "id": "core",
+        "world": {
+            "exchanges": [
+                {
+                    "tool": "linear_get",
+                    "effects": [{"verb": "daimon.acme_sync.call"}, {"verb": "github.pull.merge"}],
+                }
+            ]
+        },
+        "ext": {"note": "Core and Linear for Acme"},
+    }
+    out = scrubber.value(case)
+    assert out["id"] == "core", "a kept id stays"
+    exchange = out["world"]["exchanges"][0]
+    assert exchange["tool"] == "linear_get", "a public name in a tool name stays"
+    verb = exchange["effects"][0]["verb"]
+    assert verb.startswith("daimon.") and "acme" not in verb, verb
+    assert exchange["effects"][1]["verb"] == "github.pull.merge", "a known verb stays"
+    assert out["ext"]["note"].startswith("Core and Linear for "), out["ext"]
+    assert "Acme" not in out["ext"]["note"], "a private name beside kept ones is faked"
+    assert scrubber.residue_of(out) == {}, "kept names are no leftovers"
+    scrubber.learn({"owner": "Linear", "user": "core"})
+    assert scrubber.learned == [], "kept names are never learned"
+
+
+def test_learn_when_names_found_are_code_common_words_or_kept_then_only_names_learned() -> None:
+    scrubber = _scrubber(ENTITIES.model_copy(update={"keep": ["Notion"]}))
+    found = ('"Okafor"', "x && Okafor", "Budget", "Notion Page", "DataPage", "QXT Page", "b85 Data",
+             "Okafor")  # fmt: skip
+    scrubber.detector = Detector(terms_of(ENTITIES), _Names(*found), [*PUBLIC_NAMES, "Notion"])
+    scrubber.learn({"text": " ; ".join(found), "login": "deploy={x}"})
+    assert [t.text for t in scrubber.learned] == ["Okafor"], scrubber.learned
+
+
+def test_text_when_known_name_inside_a_hash_then_hash_unchanged() -> None:
+    scrubber = _scrubber(ENTITIES.model_copy(update={"phrases": ["Bead"]}))
+    out = scrubber.text("commit 3bead0f5a9c4e1d27b7c by Bead")
+    assert out.startswith("commit 3bead0f5a9c4e1d27b7c by ") and "Bead" not in out, out
+
+
+KEEPS = ENTITIES.model_copy(
+    update={"companies": ["Drive Capital", "CoreAcme"], "keep": ["core", "zorvex_eval_suite"]}
+)
+
+
+def test_text_when_ner_name_is_beside_or_holds_a_kept_word_then_only_kept_word_stays() -> None:
+    scrubber = _scrubber(KEEPS)
+    keep = [*PUBLIC_NAMES, *KEEPS.keep]
+    scrubber.detector = Detector(terms_of(KEEPS), _Names("Hope Price", "Slack Okafor"), keep)
+    out = scrubber.text("Hope Price asked in Slack. Slack Okafor, Drive Capital and CoreAcme too.")
+    assert "Hope Price" not in out and "Okafor" not in out, out
+    assert out.count("Slack") == 2 and "Drive" not in out and "Core" not in out, out
+
+
+def test_learn_when_identity_values_are_dictionary_words_or_slugs_then_learned() -> None:
+    scrubber = _scrubber(KEEPS)
+    keyed = {"company": "Blue Harbor", "project": "zorvex_search", "user": "staff", "owner": "core"}
+    scrubber.learn(keyed)
+    scrubber.add_terms([Term("company", "Zorvex Industries")])
+    learned = sorted(t.text for t in scrubber.learned)
+    assert learned == ["Blue Harbor", "Zorvex Industries", "zorvex_search"], learned
+    again = Scrubber(KEEPS, KEY, salt="t1", ner_model=None, learned=scrubber.learned)
+    assert "Harbor" not in again.text("Blue Harbor shipped"), "a learned file is trusted"
+
+
+@pytest.mark.parametrize("name", ["José Muñoz García", "Иван Петров", "Łukasz Żółkiewski"])
+def test_text_when_base64_holds_a_non_ascii_name_then_decoded_and_replaced(name: str) -> None:
+    scrubber = _scrubber(KnownEntities.model_validate({"people": [{"name": name}]}))
+    word = base64.b64encode(name.encode()).decode()
+    out = scrubber.text(f"From: =?UTF-8?B?{word}?= <x>, id dc-3dc21cc202a4")
+    assert word not in out and out.endswith("id dc-3dc21cc202a4"), out
+
+
+def test_text_when_phone_numbers_in_other_formats_then_replaced_not_decimals_or_dates() -> None:
+    phones = ("07911 123456", "06 12 34 56 78", "+91 98765 43210")
+    text = f"call {', '.join(phones)}; pi 3.14159265, ratios 0.5 1.25 3.75 22 on 2024-01-15 10:30"
+    out = _scrubber().text(text)
+    assert not any(p in out for p in phones), out
+    assert out.endswith("pi 3.14159265, ratios 0.5 1.25 3.75 22 on 2024-01-15 10:30"), out

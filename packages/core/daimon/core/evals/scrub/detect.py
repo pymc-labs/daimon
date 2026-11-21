@@ -17,11 +17,14 @@ import html
 import multiprocessing
 import re
 from array import array
+from bisect import insort
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, replace
-from typing import Final
+from dataclasses import dataclass, field, replace
+from typing import Final, get_args
 
+from daimon.core.evals.effects import KNOWN_VERBS
+from daimon.core.evals.format import Platform
 from daimon.core.evals.scrub.entities import Term, fold_char, normalize
 
 SECRET: Final = "secret"
@@ -85,6 +88,9 @@ class View:
         return self.starts[start], self.ends[end - 1]
 
 
+_ASCII: Final = re.compile(r"[\x00-\x7f]+")
+
+
 def fold(text: str) -> View:
     if text.isascii() and "\\" not in text and "%" not in text and "&" not in text:
         return View(text)
@@ -93,18 +99,29 @@ def fold(text: str) -> View:
     ends = array("i")
 
     def emit(out: str, start: int, end: int) -> None:
-        chars.extend(out)
+        chars.append(out)
         starts.extend([start] * len(out))
         ends.extend([end] * len(out))
 
+    def plain(start: int, end: int) -> None:
+        """`text[start:end]`, which holds no escape: runs of ASCII are copied as they are."""
+        pos = start
+        for m in _ASCII.finditer(text, start, end):
+            for i in range(pos, m.start()):
+                emit(fold_char(text[i]), i, i + 1)
+            chars.append(m.group())
+            starts.extend(range(m.start(), m.end()))
+            ends.extend(range(m.start() + 1, m.end() + 1))
+            pos = m.end()
+        for i in range(pos, end):
+            emit(fold_char(text[i]), i, i + 1)
+
     pos = 0
     for m in _ESCAPES.finditer(text):
-        for i in range(pos, m.start()):
-            emit(fold_char(text[i]), i, i + 1)
+        plain(pos, m.start())
         emit(_decode(m.group()), m.start(), m.end())
         pos = m.end()
-    for i in range(pos, len(text)):
-        emit(fold_char(text[i]), i, i + 1)
+    plain(pos, len(text))
     return View("".join(chars), starts, ends)
 
 
@@ -123,8 +140,10 @@ def _same_gap(found: str, wanted: str) -> bool:
     return found.casefold() == wanted.casefold() or (_joins(found) and _joins(wanted))
 
 
-def _words(view: str) -> list[tuple[int, int, str]]:
-    return [(m.start(), m.end(), m.group().casefold()) for m in _TOKEN.finditer(view)]
+@functools.lru_cache(maxsize=16)
+def _words(view: str) -> tuple[tuple[int, int, str], ...]:
+    """The words of `view`: the same text is matched against several indexes in a row."""
+    return tuple((m.start(), m.end(), m.group().casefold()) for m in _TOKEN.finditer(view))
 
 
 # Function words, never a name on their own; with `common_words` they guard one-word terms.
@@ -155,6 +174,43 @@ def common_words() -> frozenset[str]:
     return frozenset(words)
 
 
+@functools.cache
+def english_words() -> frozenset[str]:
+    """`common_words` and the words an installed English spaCy pipeline lemmatizes, with their
+    regular forms, less Faker's person names: no learned name is only these."""
+    try:
+        from faker.providers.person.en_US import Provider
+
+        names = {w.casefold() for w in [*Provider.first_names, *Provider.last_names]}
+        return common_words() | (_dictionary() - names)
+    except (ImportError, OSError, KeyError, ValueError):  # no or another kind of model
+        return common_words()
+
+
+def _dictionary() -> set[str]:
+    """The words an installed English spaCy pipeline lemmatizes, with their regular forms."""
+    import spacy.util
+    from spacy.lookups import Lookups
+
+    for model in sorted(m for m in spacy.util.get_installed_models() if m.startswith("en_")):
+        version = spacy.util.get_package_version(model)
+        path = spacy.util.get_package_path(model) / f"{model}-{version}" / "lemmatizer" / "lookups"
+        if path.is_dir():
+            break
+    else:
+        return set()
+    tables = Lookups().from_disk(path)  # pyright: ignore[reportUnknownMemberType]
+    index, irregular = tables.get_table("lemma_index"), tables.get_table("lemma_exc")
+    words: set[str] = set()
+    for pos, endings in (("noun", ("s", "es")), ("verb", ("s", "es", "d", "ed", "ing")),
+                         ("adj", ()), ("adv", ())):  # fmt: skip
+        for word in filter(str.isalpha, index[pos]):
+            words.update((word, word[:-1] + ("ies" if pos == "noun" else "ing")))
+            words.update(word + end for end in endings)
+        words.update(filter(str.isalpha, irregular[pos]))
+    return words
+
+
 @dataclass(frozen=True)
 class _Entry:
     words: tuple[str, ...]
@@ -173,12 +229,23 @@ def _whole(view: str, start: int, end: int) -> bool:
     return not before.isalpha() and not after.isalpha()
 
 
+@dataclass
+class _Bucket:
+    """The entries that start with one word, by all their words; `sizes` longest first."""
+
+    sizes: list[int] = field(default_factory=list[int])
+    entries: dict[tuple[str, ...], list[_Entry]] = field(
+        default_factory=dict[tuple[str, ...], list[_Entry]]
+    )
+
+
 class TermIndex:
     """Terms matched by word. `strict` guards one-word terms: whole words only, and a common word
-    only when capitalized and written as in the dictionary."""
+    only when capitalized and written as in the dictionary. A match costs one lookup per term
+    length, however many terms there are."""
 
     def __init__(self, *, strict: bool = False) -> None:
-        self._first: dict[str, list[_Entry]] = {}
+        self._first: dict[str, _Bucket] = {}
         self._strict = strict
 
     def add(self, term: Term) -> None:
@@ -199,31 +266,35 @@ class TermIndex:
         if len(words) > 1 and all(_joins(g) for g in gaps) and len(joined) >= _MIN_JOINED:
             entries.append(_Entry((joined,), (), term))  # ALICESMITH, alicesmith
         for entry in entries:
-            bucket = self._first.setdefault(entry.words[0], [])
-            bucket.append(entry)
-            bucket.sort(key=lambda e: len(e.words), reverse=True)
+            bucket = self._first.setdefault(entry.words[0], _Bucket())
+            if len(entry.words) not in bucket.sizes:
+                insort(bucket.sizes, len(entry.words), key=lambda n: -n)
+            bucket.entries.setdefault(entry.words, []).append(entry)
 
     def find(self, view: str, *, alone: bool = True) -> Iterator[tuple[int, int, Term]]:
         """Matches in `view`; without `alone`, one-word terms are left out."""
         found = _words(view)
+        words = [w for _, _, w in found]
         for i, (start, _, word) in enumerate(found):
-            for entry in self._first.get(word, ()):
-                n = len(entry.words)
-                end = found[i + n - 1][1] if i + n <= len(found) else 0
-                if (
-                    i + n <= len(found)
-                    and all(
-                        found[i + j][2] == entry.words[j]
-                        and _same_gap(
-                            view[found[i + j - 1][1] : found[i + j][0]], entry.gaps[j - 1]
-                        )
-                        for j in range(1, n)
-                    )
-                    and not (entry.alone and not alone)
-                    and (entry.exact is None or view[start:end] == entry.exact)
-                    and not (entry.alone and not _whole(view, start, end))
-                ):
-                    yield start, end, entry.term
+            if (bucket := self._first.get(word)) is None:
+                continue
+            for n in (n for n in bucket.sizes if i + n <= len(found)):
+                if not (entries := bucket.entries.get(tuple(words[i : i + n]))):
+                    continue
+                end = found[i + n - 1][1]
+                gaps = [view[found[i + j - 1][1] : found[i + j][0]] for j in range(1, n)]
+                match = next(
+                    (
+                        e for e in entries
+                        if all(map(_same_gap, gaps, e.gaps))
+                        and not (e.alone and not alone)
+                        and (e.exact is None or view[start:end] == e.exact)
+                        and not (e.alone and not _whole(view, start, end))
+                    ),
+                    None,
+                )  # fmt: skip
+                if match is not None:
+                    yield start, end, match.term
                     break
 
 
@@ -319,8 +390,16 @@ _DOC_IDS: Final = re.compile(
     r"(?:docs|drive|sheets|slides)\.google\.com/(?:[\w-]+/)*?(?:d/|folders/|open\?id=)([\w-]{20,})"
 )
 _PHONE: Final = re.compile(
-    r"(?<![\w+])(?:\+\d{1,3}[-. ]?)?(?:\(\d{2,4}\)|\d{2,4})[-. ]\d{3,4}[-. ]\d{3,5}(?![\w-])"
+    r"(?<![\w+])(?:\+\d{8,14}"
+    r"|(?:\+\d{1,3}[-. ]?)?(?:\(\d{2,4}\)[-. ]?|\d{2,4}[-. ])\d{3,4}[-. ]\d{3,5})(?![\w-])"
 )
+# What may be a phone number in another country's format ("06 12 34 56 78"), for `phonenumbers`
+# to check; not a decimal, a list of them, a date, an IP or bare digits.
+_PHONE_LIKE: Final = re.compile(r"(?<![\w.+])(?:\+|\(\d)?\d[\d ().-]{5,18}\d(?!\w)")
+_PHONE_DOTS: Final = re.compile(r"\d{2,}(?:\.\d{2,}){2,}")
+_PHONE_JOIN: Final = re.compile(r"[ ()+-]")
+_ISO_DATE: Final = re.compile(r"\d{4}-\d\d-\d\d")
+_PHONE_REGIONS: Final = ("US", "GB", "DE", "FR", "IL", "IN", "CA", "BR")
 _HOST: Final = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:internal|local|corp|lan|intranet|home\.arpa)\b", re.IGNORECASE
 )
@@ -340,6 +419,22 @@ _PUBLIC_SERVICES: Final = frozenset(
      "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
      "pypi.org", "npmjs.com", "cloudflare.com"}
 )  # fmt: skip
+# Daimon, its chat platforms, its effect verbs, the services they name (and Google's products:
+# tool names start with them) and public hosts, less hosts that are everyday words.
+_EVERYDAY: Final = frozenset({"office", "python"})
+PUBLIC_NAMES: Final = frozenset(
+    name
+    for name in (
+        "daimon", *get_args(Platform), *KNOWN_VERBS,
+        *(p for v in KNOWN_VERBS for p in v.split(".")[: 2 if v.startswith("google.") else 1]),
+        *(h.split(".")[0] for h in _PUBLIC_SERVICES),
+    )
+    if len(name) >= 3 and name not in _EVERYDAY
+)  # fmt: skip
+# A hash: hex with a letter, not starting or ending in an id ("123…789abc" is an id and "abc").
+_DIGEST: Final = re.compile(
+    r"(?<![^\W_])(?=[0-9]*[a-fA-F])(?![0-9]{17})[0-9a-fA-F]{16,}(?<![0-9]{17})(?![^\W_])"
+)
 # Only a standard scheme is no name; a custom one ("acme-app://") may hold one.
 _SCHEME: Final = re.compile(
     r"\b(?:https?|ftps?|sftp|ssh|git|file|wss?|s3|gs|jdbc|postgres(?:ql)?|mysql|redis|mongodb"
@@ -386,11 +481,12 @@ _PROFILES: Final = [
         r"\byoutube\.com/(?:@|(?:c|user|channel)/)(?P<v>[\w%.-]+)",
     )
 ]
-_NER_KINDS: Final = {
-    "PERSON": "person", "ORGANIZATION": "company", "LOCATION": "place", "PHONE_NUMBER": "phone",
-}  # fmt: skip
+# Phone numbers are `_phones`': Presidio's phone recognizer took half of a scrub's time.
+_NER_KINDS: Final = {"PERSON": "person", "ORGANIZATION": "company", "LOCATION": "place"}
 _NER_CHUNK: Final = 50_000
 _NER_CACHE: Final = 100_000
+_NER_PIECES: Final = 250_000
+_LINE: Final = re.compile(r"[^\n]+")
 _NER_BATCH: Final = 64
 # spaCy holds a whole batch at once (25 chunks of 50k characters took 1.4 GB): one chunk each.
 _NER_BATCH_CHARS: Final = 50_000
@@ -504,7 +600,8 @@ def _worker_analyze(texts: list[str]) -> list[list[tuple[int, int, str]]]:
 class Ner:
     """Presidio over a spaCy model, built on first use. `available` tells whether it loaded.
 
-    Results are cached per text, so a scrub, its sweep and the learning pass run the model once.
+    Results are cached per line, so a scrub, its sweep and the learning pass run the model once
+    on each line.
     `prefetch` runs many texts in batches. With `jobs` above 1 the model runs only in that many
     worker processes.
     """
@@ -514,7 +611,7 @@ class Ner:
         self._jobs = jobs
         self._engine: object | None = None
         self._ready: bool | None = None
-        self._cache: dict[bytes, tuple[Hit, ...]] = {}
+        self._cache: dict[bytes, tuple[tuple[int, int, str], ...]] = {}
         self._pool: ProcessPoolExecutor | None = None
 
     @property
@@ -540,40 +637,101 @@ class Ner:
         return [r for part in self._pool.map(_worker_analyze, _groups(texts, count)) for r in part]
 
     def prefetch(self, texts: Iterable[str]) -> None:
-        """Run the model over the `texts` not seen yet, in batches."""
-        todo = [t for t in dict.fromkeys(texts) if _digest(t) not in self._cache]
-        short = [t for t in todo if len(t) <= _NER_CHUNK]
-        for text, found in zip(short, self._run(short) if short else [], strict=True):
-            self._store(text, [Hit(a, b, k, _P_NER) for a, b, k in found])
+        """Run the model over the lines of `texts` not seen yet, in batches."""
+        self._found([p for t in texts for _, p in _pieces(t)])
 
     def find(self, text: str) -> list[Hit]:
         """Names in `text`."""
-        if (cached := self._cache.get(_digest(text))) is not None:
-            return list(cached)
-        chunks = [text[base : base + _NER_CHUNK] for base in range(0, len(text), _NER_CHUNK)]
-        hits = [
-            Hit(n * _NER_CHUNK + a, n * _NER_CHUNK + b, k, _P_NER)
-            for n, found in enumerate(self._run(chunks) if chunks else [])
-            for a, b, k in found
-        ]
-        self._store(text, hits)
-        return hits
+        pieces = _pieces(text)
+        found = self._found([p for _, p in pieces])
+        return [Hit(base + a, base + b, k, _P_NER) for base, p in pieces for a, b, k in found[p]]
 
-    def _store(self, text: str, hits: list[Hit]) -> None:
-        if len(self._cache) >= _NER_CACHE:
-            self._cache.clear()
-        self._cache[_digest(text)] = tuple(hits)
+    def _found(self, pieces: list[str]) -> dict[str, tuple[tuple[int, int, str], ...]]:
+        """Names in each piece: cached, or run now in batches."""
+        out: dict[str, tuple[tuple[int, int, str], ...]] = {}
+        todo: list[str] = []
+        for piece in dict.fromkeys(pieces):
+            if (cached := self._cache.get(_digest(piece))) is None:
+                todo.append(piece)
+            else:
+                out[piece] = cached
+        for piece, names in zip(todo, self._run(todo) if todo else [], strict=True):
+            if len(self._cache) >= _NER_PIECES:
+                self._cache.clear()
+            out[piece] = self._cache[_digest(piece)] = tuple(names)
+        return out
+
+
+def _pieces(text: str) -> list[tuple[int, str]]:
+    """`text` cut at line ends (and at a space within every `_NER_CHUNK` characters) into what
+    the model reads, with offsets: after a replacement, only the lines it changed are read
+    again."""
+    pieces: list[tuple[int, str]] = []
+    for m in _LINE.finditer(text):
+        start, end = m.span()
+        while start < end:
+            cut = min(end, start + _NER_CHUNK)
+            if cut < end and (space := text.rfind(" ", start + 1, cut)) > 0:
+                cut = space
+            if namey(piece := text[start:cut]):
+                pieces.append((start, piece))
+            start = cut
+    return pieces
 
 
 def _digest(text: str) -> bytes:
     return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
+def _outside(digests: bytearray, hit: Hit) -> bool:
+    """Whether `hit` neither starts nor ends inside a hash ("ace" in "3ace…", an id in one)."""
+    starts_in = hit.start > 0 and digests[hit.start - 1] and digests[hit.start]
+    return not (starts_in or (digests[hit.end] and digests[hit.end - 1]))
+
+
+def _past(view: str, mask: bytearray, start: int, stop: int, step: int) -> int:
+    """The first index from `start` toward `stop` past kept text and the signs after it: a hit
+    that begins or ends in a kept name keeps it ("daimon" in "daimon.acme")."""
+    i = start
+    while i != stop and mask[i]:
+        i += step
+    while i != start and i != stop and not view[i].isalnum():
+        i += step
+    return i
+
+
+def _phones(text: str) -> Iterator[tuple[int, int]]:
+    import phonenumbers
+
+    for m in _PHONE_LIKE.finditer(text):
+        s = m.group()
+        if "." in s and not _PHONE_DOTS.fullmatch(s) or "." not in s and not _PHONE_JOIN.search(s):
+            continue
+        if _ISO_DATE.search(s):
+            continue
+        for region in _PHONE_REGIONS:
+            found = list(phonenumbers.PhoneNumberMatcher(s, region))  # valid numbers only
+            yield from ((m.start() + f.start, m.start() + f.end) for f in found)
+            if found:
+                break
+
+
 class Detector:
-    def __init__(self, terms: Iterable[Term], ner: Ner | None = None) -> None:
+    """`keep` names are no hit: a hit made only of them and joiners is dropped. A name the
+    model finds is cut to what it adds to them, or dropped if that is only everyday words."""
+
+    def __init__(
+        self, terms: Iterable[Term], ner: Ner | None = None, keep: Iterable[str] = ()
+    ) -> None:
         self._terms: dict[str, Term] = {}
         self._index = TermIndex(strict=True)
         self._ner = ner
+        self._kept = TermIndex()
+        self.kept: set[str] = set()
+        """The kept names, normalized."""
+        for name in keep:
+            self._kept.add(Term("phrase", name))
+            self.kept.add(normalize(name))
         self._found: dict[tuple[bytes, bool, bool], tuple[Hit, ...]] = {}
         self.add(terms)
 
@@ -612,7 +770,10 @@ class Detector:
 
     def _find(self, text: str, *, names: bool, words: bool) -> list[Hit]:
         view = fold(text)
-        hits = list(self._patterns(view.text))
+        digests = bytearray(len(view.text) + 1)
+        for m in _DIGEST.finditer(view.text):  # no name or number starts or ends in a hash
+            digests[m.start() : m.end()] = b"\1" * (m.end() - m.start())
+        hits = [h for h in self._patterns(view.text) if h.kind == SECRET or _outside(digests, h)]
         found = [
             Hit(start, end, term.kind, _P_KNOWN, term.of, canon=term.text)
             for start, end, term in self._index.find(view.text, alone=words)
@@ -620,12 +781,39 @@ class Detector:
         if names and self._ner is not None and namey(view.text):
             found += self._ner.find(view.text)
         # A scheme or a public service's address is never a name ("github" in github.com).
-        fixed = [m.span() for m in _SCHEME.finditer(view.text)] + _public_suffixes(view.text)
-        hits += [h for h in found if not any(a < h.end and h.start < b for a, b in fixed)]
+        fixed = bytearray(len(view.text))
+        for a, b in [m.span() for m in _SCHEME.finditer(view.text)] + _public_suffixes(view.text):
+            fixed[a:b] = b"\1" * (b - a)
+        hits += [h for h in found if fixed.find(1, h.start, h.end) < 0 and _outside(digests, h)]
+        if self.kept:
+            hits = self._unkept(view.text, hits)
         out: list[Hit] = []
         for hit in _resolve(hits):
             start, end = view.span(hit.start, hit.end)
             out.append(replace(hit, start=start, end=end, text=view.text[hit.start : hit.end]))
+        return out
+
+    def _unkept(self, view: str, hits: list[Hit]) -> list[Hit]:
+        mask = bytearray(len(view))
+        for a, b, _ in self._kept.find(view):
+            mask[a:b] = b"\1" * (b - a)
+        if not any(mask):
+            return hits
+        out: list[Hit] = []
+        everyday = english_words()
+        for hit in hits:
+            if hit.kind == SECRET or mask.find(1, hit.start, hit.end) < 0:
+                out.append(hit)
+                continue
+            rest = "".join(" " if mask[i] else view[i] for i in range(hit.start, hit.end))
+            words = [w for _, _, w in _words(rest)]
+            if not words or hit.priority == _P_NER and all(w in everyday for w in words):
+                continue
+            start, end = hit.start, hit.end
+            if hit.priority == _P_NER:
+                start = _past(view, mask, hit.start, hit.end, 1)
+                end = _past(view, mask, hit.end - 1, hit.start - 1, -1) + 1
+            out.append(replace(hit, start=start, end=end))
         return out
 
     def term_for(self, text: str) -> Term | None:
@@ -652,6 +840,7 @@ class Detector:
         yield from (Hit(m.start(), m.end(), "id", _P_ID) for m in _IDS.finditer(text))
         yield from (_group(m, "id", _P_ID) for m in _DOC_IDS.finditer(text))
         yield from (Hit(m.start(), m.end(), "phone", _P_ID) for m in _PHONE.finditer(text))
+        yield from (Hit(a, b, "phone", _P_ID) for a, b in _phones(text))
         for p in _REPOS:
             yield from (_group(m, "repo", _P_HOST) for m in p.finditer(text))
         for p in _PROFILES:

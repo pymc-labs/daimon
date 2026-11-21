@@ -12,12 +12,15 @@ import base64
 import binascii
 import json
 import re
+import unicodedata
 import urllib.parse
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Final
 
 from daimon.core.evals.scrub.detect import (
+    PUBLIC_NAMES,
     SECRET,
     SECRET_NAME,
     Detector,
@@ -25,6 +28,7 @@ from daimon.core.evals.scrub.detect import (
     Ner,
     TermIndex,
     common_words,
+    english_words,
     fold,
     namey,
 )
@@ -71,6 +75,8 @@ _BESIDE_FAKE: Final = frozenset(
      "mr", "mrs", "ms", "dr", "prof", "sir", "jr", "sr"}
 )  # fmt: skip
 _WORD: Final = re.compile(r"[^\W\d_]{2,}")
+_ASCII_SHARE: Final = 0.9
+_LETTER_SHARE: Final = 0.8
 _INLINE_B64: Final = re.compile(r"(?<![\w+/-])[A-Za-z0-9+/_-]{12,}={0,2}(?![\w+/=-])")
 # Keys whose short values name a person, an account, a company or a project.
 _IDENTITY: Final = {
@@ -100,6 +106,21 @@ _IDENTITY: Final = {
     **dict.fromkeys(("channel_name", "group", "group_name", "team_name"), "channel"),
 }
 _LEARNED: Final = frozenset({"person", "company"})
+# What a learned term may look like: words joined by single marks ("O'Neil", "AT&T", "St. Ives"),
+# an account, or an owner/name slug. Code, JSON and shell fragments are never a name.
+_NAME_TEXT: Final = re.compile(r"[^\W\d_](?:[^\W_]|\. |[ .'’&-](?![ .'’&-]))*(?<![ '’&-])")
+# A name under an identity key: plain signs only (`deploy={x}` is code).
+_KEY_NAME: Final = re.compile(r"[#@]?\w[\w .,'’&/@-]*")
+_LEARNED_TEXT: Final = {
+    "handle": re.compile(r"(?=[\w.-]*[^\W\d_])[\w][\w.-]{1,38}"),
+    "repo": re.compile(r"[\w.-]+/[\w.-]+"),
+}
+_PASSES: Final = 3
+"""Most passes after the first; the names model reads only the lines the last one changed."""
+_MAX_NAME: Final = (64, 5)
+"""Most characters and words in a learned name."""
+_NAME_PART: Final = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+|[^\W\d_]+")
+_ACRONYM: Final = 4
 _ROLE_MAIL: Final = frozenset(
     {"admin", "info", "support", "noreply", "no-reply", "hello", "team", "sales", "contact",
      "help", "billing", "security", "dev", "ops", "mail", "office", "jobs", "careers",
@@ -233,7 +254,24 @@ def _inline_b64(word: str) -> tuple[str, bool] | None:
     except (binascii.Error, ValueError):
         return None
     text = _as_text(data)
-    return (text, urlsafe) if text and len(text.strip()) >= 4 else None
+    if not text or len(text.strip()) < 4 or not _language(text):
+        return None
+    return text, urlsafe
+
+
+def _language(text: str) -> bool:
+    """Whether decoded `text` reads as language. Random bytes can be valid text
+    ("dc-3dc21cc202a4" holds "uϷu͵q…"): mostly not ASCII, nor letters of one script."""
+    if sum(map(str.isascii, text)) >= _ASCII_SHARE * len(text):
+        return True
+    other = [c for c in text if not c.isascii()]
+    scripts = {unicodedata.name(c, "?").split()[0] for c in other if c.isalpha()}
+    body = text.replace(" ", "")
+    return (
+        len(scripts) <= 1
+        and all(unicodedata.category(c)[0] in "LMPZ" for c in other)
+        and sum(map(str.isalpha, body)) >= _LETTER_SHARE * len(body)
+    )
 
 
 def _in_marker(text: str, hit: Hit) -> bool:
@@ -267,9 +305,12 @@ class Scrubber:
         learned: Iterable[Term] = (),
         jobs: int = 1,
     ) -> None:
-        terms = [*terms_of(entities), *learned]
+        self.detector = Detector(
+            [], Ner(ner_model, jobs=jobs) if ner_model else None, [*PUBLIC_NAMES, *entities.keep]
+        )
+        terms = [*terms_of(entities), *learned]  # learned ones were checked when found
+        self.detector.add(terms)
         self.key = scrub_key(key, salt)
-        self.detector = Detector(terms, Ner(ner_model, jobs=jobs) if ner_model else None)
         self.fakes = FakeMap(self.key, known=known, forbidden=[t.text for t in terms])
         self.counts: Counter[str] = Counter()
         self._fake_cache: tuple[int, set[str]] = (0, set())
@@ -291,8 +332,37 @@ class Scrubber:
 
     # ---------- learning ----------
 
-    def add_terms(self, terms: Iterable[Term]) -> None:
-        added = self.detector.add(t for t in terms if len(t.text.strip()) >= MIN_PART)
+    def _name_like(self, term: Term) -> bool:
+        """Whether a found term looks like a name: no code, and a word that is no common word,
+        kept name, acronym or number ("WebFetch" and "EAP Review" are none)."""
+        text = term.text.strip()
+        pattern = _LEARNED_TEXT.get(term.kind, _NAME_TEXT)
+        if len(text) < MIN_PART or len(text) > _MAX_NAME[0] or not pattern.fullmatch(text):
+            return False
+        kept, common = self.detector.kept, english_words()
+        named = (
+            p for p in _NAME_PART.findall(fold(text).text)
+            if len(p) > 1 and not p.isdigit() and not (p.isupper() and len(p) <= _ACRONYM)
+            and p.casefold() not in common and normalize(p) not in kept
+        )  # fmt: skip
+        return len(text.split()) <= _MAX_NAME[1] and next(named, None) is not None
+
+    def _key_name(self, term: Term) -> bool:
+        """Whether a value under an identity key may be a name: plain signs, not kept, and not
+        one lowercase everyday word ("staff"). Others are names here ("Blue Harbor")."""
+        text = term.text.strip()
+        return (
+            MIN_PART <= len(text) <= _MAX_NAME[0]
+            and _KEY_NAME.fullmatch(text) is not None
+            and normalize(text) not in self.detector.kept
+            and not (text.islower() and text in english_words())
+        )
+
+    def add_terms(self, terms: Iterable[Term], *, keyed: Iterable[Term] = ()) -> None:
+        """Learn the `terms` found that look like names and the `keyed` ones (identity values)
+        that may be."""
+        new = [*filter(self._key_name, keyed), *filter(self._name_like, terms)]
+        added = self.detector.add(new)
         self.fakes.forbid(t.text for t in added)
         self.learned += added
 
@@ -304,26 +374,31 @@ class Scrubber:
         """Add what `node` names to the dictionary: replaced everywhere from now on."""
         self.prefetch(node)
         terms: list[Term] = []
-        self._learn(node, key, terms, shape_of(node))
-        self.add_terms(terms)
+        keyed: list[Term] = []
+        self._learn(node, key, (terms, keyed), shape_of(node))
+        self.add_terms(terms, keyed=keyed)
 
-    def _learn(self, node: JsonValue, key: str, terms: list[Term], shape: Shape = None) -> None:
+    def _learn(
+        self, node: JsonValue, key: str, out: tuple[list[Term], list[Term]], shape: Shape = None
+    ) -> None:
+        """Terms found in `node` into `out[0]`, values under identity keys into `out[1]`."""
         if shape in (KEEP, NAME):
             return
         if isinstance(node, list):
             for item in node:
-                self._learn(item, key, terms, shape)
+                self._learn(item, key, out, shape)
         elif isinstance(node, dict):
             for k, v in node.items():
-                self._learn(v, k, terms, field_shape(shape, k))
+                self._learn(v, k, out, field_shape(shape, k))
         elif isinstance(node, str) and node != REDACTED:
             if (inner := _json_in(node)) is not None:
-                self._learn(inner, "", terms)
+                self._learn(inner, "", out)
                 return
+            terms, keyed = out
             kind = _IDENTITY.get(_snake(key))
             short = len(node) <= 80 and len(node.split()) <= 4 and "://" not in node
             if kind and short and not node.isdigit():
-                terms.append(Term("repo" if "/" in node else kind, node))  # type: ignore[arg-type]
+                keyed.append(Term("repo" if "/" in node else kind, node))  # type: ignore[arg-type]
             for hit in self.detector.find(node, names=namey(node)):
                 terms += self._from_hit(hit)
 
@@ -365,14 +440,20 @@ class Scrubber:
         return _in_marker(text, hit) or self._stable_fake(hit)
 
     def _fake_spans(self, text: str) -> list[tuple[int, int]]:
-        """Where `text` holds our fakes, written any way (`CruzPartners`, `cruz-partners`)."""
+        """Where `text` holds our fakes, written any way (`CruzPartners`, `cruz-partners`):
+        sorted spans, overlapping ones merged."""
         values = self.fakes.values()
         for value in values[self._indexed :]:
             self._fake_index.add(Term("phrase", value))
             self._fake_words.update(w.casefold() for w in _WORD.findall(value))
         self._indexed = len(values)
         view = fold(text)
-        return [view.span(s, e) for s, e, _ in self._fake_index.find(view.text)]
+        spans: list[tuple[int, int]] = []
+        for start, end in sorted(view.span(s, e) for s, e, _ in self._fake_index.find(view.text)):
+            if spans and start <= spans[-1][1]:
+                start, end = spans[-1][0], max(end, spans.pop()[1])
+            spans.append((start, end))
+        return spans
 
     def _own(self, text: str, hit: Hit, fakes: list[tuple[int, int]]) -> bool:
         """Whether a hit in scrubbed text is ours: a fake, or a name the NER widened from one by
@@ -384,11 +465,13 @@ class Scrubber:
             return False
         rest = list(matched)
         overlap = False
-        for start, end in fakes:
+        for i in range(bisect_right(fakes, hit.start, key=lambda s: s[1]), len(fakes)):
+            start, end = fakes[i]
+            if start >= hit.end:
+                break
             lo, hi = max(start, hit.start), min(end, hit.end)
-            if lo < hi:
-                overlap = True
-                rest[lo - hit.start : hi - hit.start] = " " * (hi - lo)
+            overlap = True
+            rest[lo - hit.start : hi - hit.start] = " " * (hi - lo)
         if not overlap:
             return False
         left = "".join(rest)
@@ -427,9 +510,13 @@ class Scrubber:
 
     def text(self, text: str, *, names: bool = True, words: bool = True) -> str:
         text = _INLINE_B64.sub(self._b64_word, text)
-        done = self._replace(text, names=names, words=words, own=None)
-        if names and done != text:
-            # A fake changes the context NER reads: a name it finds next to one is replaced too.
+        before, done = text, self._replace(text, names=names, words=words, own=None)
+        # A fake changes the context NER reads: a name it then finds next to one is replaced
+        # too, until nothing changes, so the sweep (reading the same text) finds nothing left.
+        for _ in range(_PASSES):
+            if not names or done == before:
+                break
+            before = done
             done = self._replace(done, names=names, words=words, own=self._fake_spans(done))
         return done
 
@@ -596,7 +683,8 @@ class Scrubber:
             if (done := self._int(node, key, secret)) is not None:
                 found[done[0]] += 1
         elif isinstance(node, str) and shape == NAME:
-            found.update(h.kind for h in self._known_names(node))
+            fakes = self._fake_spans(node)
+            found.update(h.kind for h in self._known_names(node) if not self._own(node, h, fakes))
         elif isinstance(node, str):
             found += self._string_residue(node, key, secret)
         elif isinstance(node, list):

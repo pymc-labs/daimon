@@ -84,6 +84,31 @@ is fully scrubbed. Reuse the same key, `--salt` and `--map` for every bundle of 
 so fakes stay the same. Scrub each raw bundle once: a second scrub fakes its names again.
 Add `--jobs 2` or more to run the names model in that many processes; each loads it.
 The map holds only hashes and fakes, but keep it private.
+
+To scrub many bundles one after another, pass the same `--learned names-found.json` to each
+`scrub` (and to `leftovers`). It is read first, as extra dictionary entries, and the names the
+model finds in a run are added to it at the end, so a name found in one bundle is replaced in
+every later one. It holds real names in plain text (created mode 600): keep it private and
+delete it with the raw bundles. The map and that file are saved before the bundle is
+written, under a lock; run batches one at a time, not side by side.
+
+Only what looks like a name is learned: no code or JSON fragments, and at most 5 words. One
+word must not be an everyday word (the spaCy model's dictionary, when installed), an acronym of
+up to 4 letters, a number or a kept name. Values under identity keys (`company`,
+`owner`, `user`...) are learned unless they are code, kept or one lowercase everyday word. Put
+acronym-only clients in the dictionary. The model reads one line at a time, so a name split
+across lines is missed.
+
+A `keep` list in the dictionary holds public names (the platforms and products you use, your
+suites' own ids). They are never faked, learned or reported as leftovers, in any field, ids,
+tool names and effect verbs included; a private name next to one is still faked
+(`acme` in `notion_acme_sync`). Daimon's own name, its effect verbs and the services they
+name are always kept.
+
+A one-word name that is also an everyday word ("Will", "Hope", "Young") is replaced only when
+it is written as in the dictionary, capitalized; the sweep cannot see the lowercase form. Add
+such handles to the dictionary as they appear.
+
 ## The world a case runs in
 
 A running case never reaches real services. Each call it makes, over HTTP, git
@@ -97,17 +122,6 @@ When nothing can answer, or the case's call limits run out, the call is refused.
 Every call is logged with the effects it would have had, such as a created issue.
 Pushes go to a private copy of the repository for that item only. Set the
 simulator with [`DAIMON_EVALS__SIMULATOR_MODEL`](configuration.md#daimon_evals__simulator_model).
-
-To scrub many bundles one after another, pass the same `--learned names-found.json` to each
-`scrub` (and to `leftovers`). It is read first, as extra dictionary entries, and the names the
-model finds in a run are added to it at the end, so a name found in one bundle is replaced in
-every later one. It holds real names in plain text (created mode 600): keep it private and
-delete it with the raw bundles. The map and that file are saved before the bundle is
-written, under a lock; run batches one at a time, not side by side.
-
-A one-word name that is also an everyday word ("Will", "Hope", "Young") is replaced only when
-it is written as in the dictionary, capitalized; the sweep cannot see the lowercase form. Add
-such handles to the dictionary as they appear.
 
 ## Who can do what
 
