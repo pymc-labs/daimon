@@ -21,7 +21,7 @@ from daimon.core.stores.workflow_deliveries import DeliveryKind, DeliveryRow
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_waits import Wait, WaitPost
-from daimon.core.workflows.delivery import dm_target, target_for
+from daimon.core.workflows.delivery import ASK_CLOSED, dm_target, target_for
 from daimon.core.workflows.engine import Event
 from daimon.core.workflows.views import people_of
 from pydantic import JsonValue
@@ -254,7 +254,7 @@ async def answered_status(session: AsyncSession, wait: Wait, *, by: uuid.UUID, l
 
 async def tell_owner_undelivered(session: AsyncSession, row: DeliveryRow, note: str | None) -> None:
     """An ask that did not go: tell the owner once per wait; the inbox still lists it."""
-    if row.kind != "ask" or row.wait_id is None or row.run_id is None:
+    if row.kind != "ask" or row.wait_id is None or row.run_id is None or note == ASK_CLOSED:
         return
     if any(
         d.kind == "notice"

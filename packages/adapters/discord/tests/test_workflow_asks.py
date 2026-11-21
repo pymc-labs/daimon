@@ -14,6 +14,7 @@ from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores import accounts, tenants, workflow_waits
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.workflows import runs
 from daimon.testing.discord_surface import DiscordSurfaceHarness
 from daimon.testing.factories import make_account, make_platform_principal
 from daimon.testing.workflows import NOW, World, make_world
@@ -161,3 +162,24 @@ async def test_ask_reviewer_in_a_thread_refuses_strangers_and_leaves_chat_alone(
     assert await _claims(world, harness, DERICK, "Ship it", ask.message_id)
     output = (await world.steps(run.id))["f"].output
     assert isinstance(output, dict) and output["text"] == "Ship it", output
+
+
+async def test_cancelling_the_run_closes_its_posted_ask(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = DiscordSurfaceHarness(evidence_id="wf", session_id="s", root_turn_id="r")
+    world, derick = await _world(db_session, harness, {"approvers": ["${{ inputs.who }}"]})
+    run = await world.run(inputs={"who": str(derick)})
+    await world.park(run.id, "ok")
+    await _deliver(world, harness, monkeypatch)
+    [ask] = harness.gateway.surviving_messages()
+    assert await runs.cancel_run(
+        world.sm, world.settings, run_id=run.id, account_id=world.owner, now=NOW
+    ), "the run stops"
+    await _deliver(world, harness, monkeypatch)
+    [closed] = harness.gateway.surviving_messages()
+    assert closed.message_id == ask.message_id, "no new post, the ask is edited"
+    assert "Cancelled" in closed.content and closed.component_labels == (), closed
+    assert not await _claims(world, harness, DERICK, "approve", ask.message_id), (
+        "a reply to a closed ask is ordinary chat"
+    )

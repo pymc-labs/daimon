@@ -61,6 +61,13 @@ BLOCKED_RECHECK: Final = timedelta(minutes=15)
 BLOCKED_FOR: Final = timedelta(days=1)
 _TERMINAL: Final = frozenset({"succeeded", "failed", "skipped", "cancelled"})
 _MESSAGE_LIMIT: Final = 500
+#: What an ask still open when its run ends says, by how the run ended.
+_ASK_CLOSED: Final = {
+    "cancelled": "Cancelled: the run was stopped.",
+    "failed": "Closed: the run failed.",
+    "timed_out": "Expired: the run ran out of time.",
+}
+_ASK_ENDED: Final = "Closed: the run ended."
 #: Runs a key may queue behind its active ones.
 QUEUE_LIMIT: Final = 100
 #: How many runs deep a chain of event or call starts may go.
@@ -334,7 +341,12 @@ async def _apply(
             failure_step=end.step if end.status != "succeeded" else None,
             ended_at=now,
         )
-        await workflow_runs.close_waits(session, status="cancelled", now=now, run_id=run.id)
+        closed = await workflow_runs.close_waits(
+            session, status="cancelled", now=now, run_id=run.id
+        )
+        for wait in (await workflow_waits.waits_by_id(session, closed)).values():
+            # Each open ask's posts say it is over, so no one answers a closed question.
+            await asks.queue_updates(session, wait, _ASK_CLOSED.get(end.status, _ASK_ENDED))
         events += await _queue_posts(session, loaded, end, [_view(r) for r in rows])
         if run.mode == "live":
             await _offer_finished(session, loaded, rows, end, now)

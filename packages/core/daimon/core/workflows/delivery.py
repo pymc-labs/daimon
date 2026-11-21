@@ -31,7 +31,7 @@ from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.outbound.reach import ReachPlan, ReachTally, check_reach
 from daimon.core.routine_delivery import creator_refusal_for
 from daimon.core.routine_hold import DeliveryGate, workflow_delivery_gate
-from daimon.core.stores import workflow_deliveries, workflow_runs
+from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
@@ -49,6 +49,7 @@ from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "ASK_CLOSED",
     "DM_OFF",
     "WorkflowPost",
     "clear_post",
@@ -61,6 +62,8 @@ __all__ = [
 ]
 
 DM_OFF: Final[str] = "dm_disabled"
+#: An ask or reminder whose wait closed before it went: nothing to post, no one to tell.
+ASK_CLOSED: Final[str] = "ask_closed"
 NOTICE_TITLE: Final[str] = "Workflow run failed"
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"([CG][A-Z0-9]{2,}):([0-9]+\.[0-9]+)")
 _TEAMS_THREAD: Final[str] = ";messageid="
@@ -266,6 +269,10 @@ async def clear_post(
         tenant = await get_tenant(session, row.tenant_id)
         if tenant is None or tenant.archived_at is not None:
             return "tenant_archived"
+        if row.kind in ("ask", "reminder") and row.wait_id is not None:
+            wait = await workflow_waits.get_wait(session, row.wait_id, tenant_id=row.tenant_id)
+            if wait is None or wait.status != "waiting":
+                return ASK_CLOSED
         dm_to: str | None = None
         if kind == "dm":
             recipient = _uuid(target.get("account_id"))
