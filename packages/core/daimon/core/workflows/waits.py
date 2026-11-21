@@ -48,6 +48,8 @@ REJECT: Final = "reject"
 ANSWER: Final = "answer"
 PROPOSALS: Final = "proposals"
 MAX_QUESTIONS: Final = 3
+#: A bound call's arguments in a chat ask; the inbox shows them in full.
+_ARGS_LIMIT: Final = 1500
 #: Approver tokens checked against the person answering, not resolved to accounts.
 _LIVE_TOKENS: Final = ("admins", "thread")
 Via = Literal["web", "discord", "slack", "teams"]
@@ -254,11 +256,12 @@ class ApprovalExecutor:
         shown_text = show if isinstance(show, str) or show is None else json.dumps(show)
         title = node.title or work.step.node_id
         files = _attachments(attach)
+        body = "\n\n".join(p for p in (title, shown_text, bound_text(binds)) if p)
         ask = asks.Ask(
             deliver=node.deliver or "dm",
             workflow=workflow.name,
             title=title,
-            text=f"{title}\n\n{shown_text}" if shown_text else title,
+            text=body,
             shape=_shape(node),
             routes=_labels(routes_of(node, "approval")),
             home=home_of(work.spec, workflow),
@@ -308,6 +311,15 @@ def _rendered(value: JsonValue, context: dict[str, JsonValue], now: datetime) ->
         return render(value, context, now=now)
     except ExpressionError:
         return None
+
+
+def bound_text(preview: Sequence[dict[str, JsonValue]]) -> str:
+    """The bound calls for a chat ask, as the web inbox shows them: tool and arguments."""
+    calls: list[str] = []
+    for p in preview:
+        args = json.dumps(p["args"], indent=2)[:_ARGS_LIMIT]
+        calls.append(f"{str(p['tool']).replace('/', ' ')}\n```\n{args}\n```")
+    return "\n".join(["Exactly what runs on approval:", *calls]) if calls else ""
 
 
 async def _bound_calls(

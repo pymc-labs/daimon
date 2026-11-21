@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from daimon.core._models import Account
-from daimon.core.stores import workflow_proposals, workflow_waits
+from daimon.core.stores import workflow_deliveries, workflow_proposals, workflow_waits
 from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.workflows import engine, inbox, runs, service, views, waits
@@ -144,6 +144,12 @@ async def test_3_inbound_lead_sends_exactly_the_approved_email(db_session: Async
     async with world.sm() as s:
         wait = await workflow_waits.get_wait(s, approved[0], tenant_id=world.tenant_id)
     assert wait is not None and wait.shown_hash, "the approval records what it covers"
+    async with world.sm() as s:
+        [ask] = await workflow_deliveries.deliveries_of_wait(s, approved[0])
+    text = str(ask.payload["text"])
+    assert "Exactly what runs on approval" in text and "lead@example.com" in text, (
+        f"the chat ask shows the call as the inbox does: {text}"
+    )
 
     tampered = await world.run(inputs={"email": "lead@example.com"}, untrusted_inputs=True)
     await drive(world, tampered.id, {"research": [DRAFT]}, FakeTools(), tamper=True)
