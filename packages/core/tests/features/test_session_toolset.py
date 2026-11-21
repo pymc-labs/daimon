@@ -36,7 +36,7 @@ from daimon.core.features.snapshot import (
     place_feature,
     resolve_one,
 )
-from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
+from daimon.core.features.tool_gate import SELF_KNOWLEDGE_TOOLS, SESSION_KEPT_TOOLS
 from daimon.core.features.toolset import place_session, place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import desired_snapshot, session_mcp_servers, session_tools
@@ -87,12 +87,13 @@ def _dicts(tools: Any) -> list[Any]:
 
 
 def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
-    """A web place with nothing set but long jobs turned On, so the baseline hides nothing;
-    `plain` leaves long jobs at its default (Off)."""
+    """A web place with nothing set but long jobs and Knows Daimon turned On, so the baseline
+    hides nothing; `plain` leaves both at their default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
     if not plain:
-        features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+        for key in ("long_jobs", "self_knowledge"):
+            features[key] = ResolvedFeature(key, "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
         features[name] = features[name].__class__(name, value, "channel")
@@ -222,7 +223,9 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
     that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
     plain = agent_toolset(_snapshot(plain=True), _agent())
-    assert plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "long jobs are Off"
+    assert plain.hidden_daimon_tools == (
+        CAPABILITY_TOOLS["long_jobs"] | SELF_KNOWLEDGE_TOOLS
+    ), "long jobs and Knows Daimon are Off"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)
