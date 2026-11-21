@@ -1,0 +1,63 @@
+# Daimon
+
+> The open source data science agent for Discord and Slack
+
+## Docs
+
+- [Home](README.md): Daimon is an open source data science agent for Discord, Slack and Microsoft Teams.
+
+## Get started
+
+- [Quickstart](quickstart.md): Run Daimon on your own machine with Docker Compose and talk to it in Discord.
+
+## Self-host
+
+- [Self-hosting](self-hosting.md): Run Daimon in production with Docker Compose.
+- [Model providers](providers.md): Choose which model backend answers in your agents and threads: the default Anthropic backend, OpenAI, Gemini or a self-hosted harness.
+- [Self-hosted harness](self-hosted-harness.md): Run turns through a `daimon-harness/0` service that you operate, instead of Anthropic, OpenAI or Gemini.
+- [Operations](operations.md): Run a Daimon deployment day to day: upgrade it, back it up, deploy without dropping turns, and read its logs, audit trail and operator tokens.
+- [Fly compute](compute.md): A person can launch a temporary Fly machine from a chat conversation and run commands on it.
+
+## Connect
+
+- [Slack](slack.md): Connect Daimon to Slack workspaces, then learn how it behaves there: who it can read, how files move and what shared channels allow.
+- [Microsoft Teams](teams.md): Connect Daimon to Microsoft Teams, then learn how it behaves in 1:1 chats, channels and group chats.
+- [Web app](web.md): The web app lets people chat with Daimon's agents in a browser.
+- [GitHub](github.md): Connect a GitHub App so agents can read and write repositories, and keep their repo skills in sync when you push.
+- [MCP servers](mcp-servers.md): Connect Notion, Linear and other MCP servers to an agent, and set up sign-in for servers that need extra configuration.
+- [Claude Code plugin](plugin.md): Let people ask the daimons in your Slack workspaces and Discord servers a question from inside Claude Code.
+
+## Customise
+
+- [Defaults](defaults.md): How to change the agents, environment and skills every Daimon install is seeded with, and what happens when you apply the change.
+- [Routines](routines.md): How to create a routine, how the scheduler runs it, where its result goes and what happens when a run fails.
+- [Move routines in](routine-migration.md): How an operator moves scheduled routines from another system into Daimon without running a slot twice or skipping one, and how to hand them back.
+- [Move people in](people-migration.md): Two operator commands bring people's choices and earlier conversations from another bot into one Discord server.
+- [Watches](watches.md): A watch reads a source on a schedule and wakes an agent only when the result changes.
+- [Direct messages](direct-messages.md): How people talk to Daimon in direct messages, and what an operator turns on for it.
+- [Repository memory](repo-memory.md): Repository memory keeps notes and rules about a GitHub repository that every agent working on it shares.
+- [Context providers](context-providers.md): A context provider is an MCP server Daimon asks for short context cards before each turn.
+- [Lead intake](lead-intake.md): Daimon can durably register consulting and project enquiries from Gmail or an explicit Discord “register this lead” request.
+- [Ask a person](support.md): Admins set everything with `daimon support` and in chat.
+
+## Concepts
+
+- [How Daimon works](how-daimon-works.md): The concepts behind Daimon, in the order a new reader needs them.
+- [Architecture](architecture.md): How Daimon is put together: the packages, the path a chat message takes to become an agent turn, and the trust and tenancy rules that path enforces.
+- [Isolation](isolation.md): Which scope owns each thing Daimon keeps, and what is shared across it.
+- [Permissions](permissions.md): What each channel rule, agent rule and tool rule limits, who can change them, and which turns are held to one channel.
+- [Approvals](approvals.md): An approval is a card that asks the requester to say yes before an agent does something that changes the outside world.
+- [Helpers and handoffs](helpers.md): How agents work together: an agent asks helpers inside one turn, a program asks an agent from outside chat, and a person hands a thread to another agent.
+- [Admins](admins.md): Who counts as a Daimon admin, what a granted admin may do, and how roles limit who can start a turn or use an agent.
+- [Unattended turns](unattended.md): Some turns run with nobody there to press Approve.
+- [Billing](billing.md): How Daimon meters model use, prices it and stops a turn when credit runs out, for deployments that serve several servers or workspaces on one provider key.
+- [Allowances](allowances.md): An allowance limits what a person may spend, in billed dollars: the cost of their turns with the markup applied.
+- [Long jobs](long-jobs.md): Long jobs run a human-approved shell command in a separate Managed Agents worker session.
+- [Agent identity](agent-identity.md): How Daimon shows each agent's own name and avatar on its messages, what each platform allows, and what an operator must set up first.
+- [Managed agents (mux)](mux.md): The import name is the top-level `mux`, not `daimon.mux`, and `mux` never imports `daimon`.
+
+## Reference
+
+- [Configuration](configuration.md): Every environment variable Daimon reads.
+- [Features](features.md): Every feature is set at one or more levels: Deployment, Workspace, Agent, Channel and Thread.
+- [MCP tools](mcp-tools.md): The 234 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.

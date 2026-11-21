@@ -10,6 +10,7 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "scripts/check_docs.py"
+      - "scripts/generate_llms_txt.py"
       - ".github/workflows/docs.yml"
   # Repeated rather than shared: GitHub Actions does not support YAML anchors.
   pull_request:
@@ -17,6 +18,7 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "scripts/check_docs.py"
+      - "scripts/generate_llms_txt.py"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -46,6 +48,10 @@ jobs:
       - name: readability
         run: uv run --no-project python scripts/check_docs.py
 
+      # The index for language models, generated from the nav.
+      - name: llms.txt check
+        run: uv run --no-project python scripts/generate_llms_txt.py --check
+
       # Deliberately not a dependency group: the site needs none of the
       # project's own packages, and keeping it out of the lockfile means a
       # docs-theme bump never touches what the application resolves. mkdocs
@@ -53,6 +59,11 @@ jobs:
       # this build depends on.
       - name: build
         run: uv run --no-project --with "mkdocs-material>=9,<10" --with "mkdocs<2" mkdocs build --strict
+
+      # Every page in one file, built here and never committed.
+      - name: llms-full.txt
+        if: github.event_name == 'push'
+        run: uv run --no-project python scripts/generate_llms_txt.py --full site/llms-full.txt
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         if: github.event_name == 'push'
