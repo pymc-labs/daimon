@@ -14,7 +14,6 @@ title this workflow made before (by record only), else under a new one.
 
 from __future__ import annotations
 
-from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -25,7 +24,7 @@ from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, buil
 from daimon.adapters.slack.routine_delivery import destination_refusal
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.workflow_asks import ask_blocks
-from daimon.adapters.slack.workflow_cards import web_at
+from daimon.adapters.slack.workflow_cards import permalink, web_at
 from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope, job_payload
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import DeliveryTarget
@@ -42,7 +41,6 @@ from daimon.core.workflows.delivery import (
     reach_limits,
     titled_thread,
 )
-from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = ["make_slack_workflow_poster"]
@@ -50,14 +48,6 @@ __all__ = ["make_slack_workflow_poster"]
 
 def _skipped(note: str) -> DeliveryOutcome:
     return DeliveryOutcome(status="skipped", note=note)
-
-
-async def _permalink(client: AsyncWebClient, channel: str, ts: str) -> str | None:
-    """A missing link only hides "open in Slack" on the run page; the post stands."""
-    with suppress(SlackApiError):
-        found = await client.chat_getPermalink(channel=channel, message_ts=ts)  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-        return str(found.get("permalink") or "") or None  # pyright: ignore[reportUnknownMemberType]
-    return None
 
 
 def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
@@ -153,7 +143,7 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
                     # A reply in the ask's thread, or under the ask, answers it.
                     thread_id=f"{channel}:{thread or ts}",
                     message_id=ts,
-                    link=await _permalink(client, channel, ts),
+                    link=await permalink(client, channel, ts),
                     at=datetime.now(UTC),
                 )
         done = DeliveryOutcome(status="delivered")
@@ -164,7 +154,7 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
                     "channel": channel,
                     "thread": None if thread is None else f"{channel}:{thread}",
                     "message": first,
-                    "link": await _permalink(client, channel, first),
+                    "link": await permalink(client, channel, first),
                     "opened": titled,
                 },
             )

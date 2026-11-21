@@ -30,7 +30,7 @@ import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.teams import workflow_asks
+from daimon.adapters.teams import workflow_asks, workflow_cards
 from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.admissions import (
     HOLDING,
@@ -1041,6 +1041,11 @@ class TeamsApp:
                     ):
                         await self._handled(parsed)
                         continue  # a workflow ask's answer, not a turn
+                    if not self._ignored_unprompted(parsed) and await workflow_cards.claim_mention(
+                        self.runtime, parsed, self._tenant_id, self._sender
+                    ):
+                        await self._handled(parsed)
+                        continue  # a workflow's mention trigger started a run, not a turn
                     if not self._ignored_unprompted(parsed) and await self._claim(parsed):
                         fresh.append(parsed)
                 except Exception:
@@ -1128,8 +1133,12 @@ class TeamsApp:
         ):
             await self._handled(parsed)
             return  # a workflow ask's answer, not a turn
-        if not self._ignored_unprompted(parsed):
-            await self._admit(parsed)
+        if self._ignored_unprompted(parsed):
+            return
+        if await workflow_cards.claim_mention(self.runtime, parsed, self._tenant_id, self._sender):
+            await self._handled(parsed)
+            return  # a workflow's mention trigger started a run, not a turn
+        await self._admit(parsed)
 
     async def _handled(self, parsed: TeamsInbound) -> None:
         """Record an ask's answer as handled, so a restart's catch-up never runs it as a turn."""

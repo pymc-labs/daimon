@@ -20,7 +20,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 import structlog.contextvars
-from daimon.adapters.discord import theme, workflow_asks
+from daimon.adapters.discord import theme, workflow_asks, workflow_cards
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.audience_sync import AudienceSync
@@ -3158,6 +3158,14 @@ class DaimonBot(commands.Bot):
             # From here on it is a mention: the same gates, the same turn, and
             # no participation screening or unmentioned-reply hint for it.
             bot_mentioned = await self._plain_text_mentions_on(message)
+        if (
+            bot_mentioned
+            and not startup_replay
+            and not resume_admitted
+            and not isinstance(message, ButtonMessage)
+            and await workflow_cards.claim_mention(self.runtime, message, self._channel_by_id)
+        ):
+            return  # a workflow's mention trigger started a run, not a turn
         reply_to_recorded_post = False
         reference = message.reference
         resolved = reference.resolved if isinstance(reference, discord.MessageReference) else None

@@ -95,6 +95,11 @@ def _files(runtime: SlackRuntime, event: dict[str, Any], team_id: str) -> answer
     return ingest
 
 
+def message_text(event: dict[str, Any]) -> str:
+    """The message's words without its tags."""
+    return " ".join(_MENTION.sub(" ", str(event.get("text") or "")).split())
+
+
 async def claim_event(runtime: SlackRuntime, event: dict[str, Any], *, team_id: str) -> bool:
     """Answer an ask with a message in a thread under it. True when no turn should follow."""
     thread_ts, channel = event.get("thread_ts"), str(event.get("channel") or "")
@@ -108,7 +113,7 @@ async def claim_event(runtime: SlackRuntime, event: dict[str, Any], *, team_id: 
             tenant_ids=(derive_tenant_uuid(platform="slack", workspace_id=team_id),),
             author=str(event.get("user") or ""),
             message_id=str(event.get("ts") or ""),
-            text=" ".join(_MENTION.sub(" ", str(event.get("text") or "")).split()),
+            text=message_text(event),
             thread_id=f"{channel}:{thread_ts}",
             files=_files(runtime, event, team_id),
         ),

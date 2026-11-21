@@ -1,15 +1,19 @@
-"""Every chat message handler checks a workflow ask's answer before it admits a turn.
+"""Every chat message handler checks a workflow ask's answer, then a mention trigger, before it
+admits a turn.
 
 `daimon.core.workflows.answers.claim_reply` decides; each adapter's `workflow_asks`
 claim runs it. In every listed handler the claim is an `if` that only returns (or, in a
 restart's catch-up loop, moves on to the next message), ahead of
 the call that starts admission, so a message answering no ask goes on as ordinary chat
 (each adapter's `test_workflow_asks` shows chat in another thread is not claimed).
+`daimon.core.workflows.mentions.claim_mention` comes next, the same way, in every handler but
+the DM ones (`DMS`): a direct message tags no one in a channel a trigger listens to.
 """
 
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -25,6 +29,8 @@ HANDLERS = [
     ("teams/daimon/adapters/teams/app.py", "_answer_or_admit", "_admit"),
     ("teams/daimon/adapters/teams/app.py", "catch_up_graph_messages", "_claim"),
 ]
+#: Direct-message handlers: no mention trigger listens to a DM.
+DMS = {"bursts.join"}
 
 
 def _origins(tree: ast.Module) -> dict[str, str]:
@@ -50,6 +56,24 @@ def _is_claim(name: str) -> bool:
     return any(name.endswith(f"workflow_asks.{c}") for c in _CLAIMS)
 
 
+def _is_mention(name: str) -> bool:
+    return name.endswith("workflow_cards.claim_mention")
+
+
+def _gate(func: ast.AST, origins: dict[str, str], is_claim: Callable[[str], bool]) -> ast.If:
+    """The one `if` that claims the message and only returns or moves on."""
+    claims = [
+        n
+        for n in ast.walk(func)
+        if isinstance(n, ast.If) and any(is_claim(c) for c in _called(n.test, origins))
+    ]
+    assert len(claims) == 1, f"{len(claims)} claims"
+    [claim] = claims
+    ends = isinstance(claim.body[-1], ast.Return | ast.Continue)
+    assert ends and not claim.orelse, ast.unparse(claim)
+    return claim
+
+
 @pytest.mark.parametrize(("path", "handler", "admits"), HANDLERS)
 def test_the_ask_claim_returns_before_admission(path: str, handler: str, admits: str) -> None:
     tree = ast.parse((_ADAPTERS / path).read_text())
@@ -59,18 +83,14 @@ def test_the_ask_claim_returns_before_admission(path: str, handler: str, admits:
         for n in ast.walk(tree)
         if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef) and n.name == handler
     ]
-    claims = [
-        n
-        for n in ast.walk(func)
-        if isinstance(n, ast.If) and any(_is_claim(c) for c in _called(n.test, origins))
-    ]
-    assert claims, f"{path}:{handler} never checks a workflow ask's answer"
-    [claim] = claims
-    ends = isinstance(claim.body[-1], ast.Return | ast.Continue)
-    assert ends and not claim.orelse, ast.unparse(claim)
+    claim = _gate(func, origins, _is_claim)
     later = [
         call.lineno
         for call in ast.walk(func)
         if isinstance(call, ast.Call) and admits in _name(call, origins)
     ]
     assert later and claim.lineno < min(later), f"{path}:{handler} admits before the claim"
+    if admits in DMS:
+        return
+    mention = _gate(func, origins, _is_mention)
+    assert claim.lineno < mention.lineno < min(later), f"{path}:{handler} misorders the mention"

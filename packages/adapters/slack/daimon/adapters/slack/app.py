@@ -25,7 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack import workflow_asks
+from daimon.adapters.slack import workflow_asks, workflow_cards
 from daimon.adapters.slack.admin import WorkspaceWebClient, resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
@@ -1829,6 +1829,8 @@ class SlackApp:
             tenant_id, str(event.get("channel") or "")
         ):
             return
+        if await workflow_cards.claim_mention(self.runtime, event, team_id=team_id):
+            return  # a workflow's mention trigger started a run, not a turn
 
         await self._wait_for_orphan_recovery()
 

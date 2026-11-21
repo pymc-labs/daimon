@@ -7,10 +7,14 @@ replaces it, and the run card follower edits it while the run goes.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from daimon.adapters.teams.answer_access import AnswerPlace
 from daimon.adapters.teams.card import notice_adaptive_card
 from daimon.adapters.teams.card_actions import (
     card_actor,
@@ -19,12 +23,13 @@ from daimon.adapters.teams.card_actions import (
     toast,
     web_links,
 )
-from daimon.adapters.teams.lifecycle import TeamsSender
+from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.posted_controls import PostedCard
 from daimon.core.posted_controls.teams_card import CONTROL_VERB, build_adaptive_card
 from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.core.web_links import TenantLinks, WebAt
-from daimon.core.workflows import chat_cards
+from daimon.core.workflows import chat_cards, mentions
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from daimon.core.workflows.views import seq
 from microsoft_teams.api import MessageActivityInput
@@ -42,6 +47,7 @@ PREFIXES = ("wfc:", "wfl:", "wff:")
 #: Fields a run form shows before the web app runs it instead.
 FORM_LIMIT = 10
 PICK_FIELD = "workflow"
+THREAD = ";messageid="
 
 
 def web_at(runtime: TeamsRuntime, *, foreign: bool = False) -> WebAt:
@@ -54,6 +60,8 @@ def web_at(runtime: TeamsRuntime, *, foreign: bool = False) -> WebAt:
     ) -> TenantLinks | None:
         if channel_id is not None and ";" in channel_id:
             channel_id, thread_id = channel_id.split(";", 1)[0], thread_id or channel_id
+        elif channel_id and thread_id and ";" not in thread_id:  # a mention's root post id
+            thread_id = f"{channel_id}{THREAD}{thread_id}"
         return await web_links(
             runtime,
             tenant_id,
@@ -190,6 +198,54 @@ async def command(runtime: TeamsRuntime, context: CommandContext) -> None:
     await context.send_card(panel_card(listed))
 
 
+async def claim_mention(
+    runtime: TeamsRuntime, parsed: TeamsInbound, tenant_id: uuid.UUID, sender: TeamsSender
+) -> bool:
+    """Start the workflow a tag of Daimon triggers in a channel; True when it did (no turn
+    follows). The run's card is posted in the message's thread. Only a real @mention counts:
+    a typed name (`by_name`) waits for its plain-text switch on the turn path."""
+    if (
+        parsed.kind != "channel"
+        or parsed.unprompted
+        or parsed.by_name
+        or THREAD not in parsed.conversation_id
+    ):
+        return False
+    root = parsed.conversation_id.partition(THREAD)[2]
+    place = AnswerPlace(parsed.conversation_id, parsed.activity_id, is_channel=True)
+    claimed = await mentions.claim_mention(
+        runtime.sessionmaker,
+        runtime.settings,
+        mentions.Mention(
+            tenant_id=tenant_id,
+            platform="teams",
+            author=parsed.user_id,
+            message_id=parsed.activity_id,
+            text=parsed.text.strip(),
+            channel_id=parsed.channel_id,
+            thread_id=root,
+            files=tuple(f.name for f in parsed.files),
+            link=place.link(parsed.entra_tenant_id),
+            thread_link=AnswerPlace(place.conversation_id, root, True).link(parsed.entra_tenant_id),
+        ),
+        web_at(runtime, foreign=parsed.is_foreign),
+        datetime.now(UTC),
+    )
+    if claimed is None:
+        return False
+    if claimed.card is not None:
+        update = MessageActivityInput().add_card(_adaptive(claimed.card))
+        with contextlib.suppress(*TEAMS_SEND_ERRORS):
+            sent = await asyncio.wait_for(
+                sender.send(parsed.conversation_id, update, service_url=parsed.service_url),
+                SEND_TIMEOUT_S,
+            )
+            if claimed.run_id is not None and sent.id:
+                shown = ChatPlace("teams", parsed.conversation_id, sent.id)
+                await chat_cards.show_on_card(runtime.sessionmaker, claimed.run_id, shown)
+    return True
+
+
 def card_editor(sender: TeamsSender) -> chat_cards.CardEditor:
     """The run card follower's editor: the card's conversation, sent again with its id."""
 
@@ -200,4 +256,12 @@ def card_editor(sender: TeamsSender) -> chat_cards.CardEditor:
     return edit
 
 
-__all__ = ["answer", "card_editor", "command", "form_card", "is_workflow_press", "panel_card"]
+__all__ = [
+    "answer",
+    "card_editor",
+    "claim_mention",
+    "command",
+    "form_card",
+    "is_workflow_press",
+    "panel_card",
+]

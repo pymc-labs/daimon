@@ -1,4 +1,5 @@
-"""Workflow cards on Discord: presses, the run form, `/workflows` and the run card editor.
+"""Workflow cards on Discord: presses, the run form, `/workflows`, the run card editor and
+mention starts.
 
 Every decision is `daimon.core.workflows.chat_cards`, as the person who pressed; this module
 only reads the press, shows the answer and posts or edits the cards.
@@ -9,6 +10,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import structlog
@@ -19,9 +21,11 @@ from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls import PostedCard
+from daimon.core.thread_naming import strip_mentions
 from daimon.core.web_links import Assignment, TenantLinks, WebAt, links_at, panel_links
-from daimon.core.workflows import chat_cards
+from daimon.core.workflows import chat_cards, mentions
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
+from daimon.core.workflows.mentions import Mention
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -310,3 +314,40 @@ __all__ = [
     "web_at",
     "workflows_panel",
 ]
+
+
+async def claim_mention(
+    runtime: DiscordRuntime, message: discord.Message, fetch_channel: ChannelFetcher
+) -> bool:
+    """Start the workflow a tag of Daimon triggers here; True when it did (no turn follows)."""
+    channel = message.channel
+    guild = message.guild
+    if guild is None or message.author.bot:
+        return False
+    thread = channel if isinstance(channel, discord.Thread) else None
+    claimed = await mentions.claim_mention(
+        runtime.sessionmaker,
+        runtime.settings,
+        Mention(
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild.id)),
+            platform="discord",
+            author=str(message.author.id),
+            message_id=str(message.id),
+            text=strip_mentions(message.content),
+            channel_id=str(thread.parent_id if thread else channel.id),
+            thread_id=str(thread.id) if thread else None,
+            files=tuple(a.filename for a in message.attachments),
+            link=message.jump_url,
+            thread_link=thread.jump_url if thread else None,
+        ),
+        web_at(runtime, fetch_channel),
+        datetime.now(UTC),
+    )
+    if claimed is None:
+        return False
+    if claimed.card is not None:
+        sent = await message.reply(view=build_card_view(claimed.card), allowed_mentions=_NONE)
+        if claimed.run_id is not None:
+            place = ChatPlace("discord", str(sent.channel.id), str(sent.id))
+            await chat_cards.show_on_card(runtime.sessionmaker, claimed.run_id, place)
+    return True

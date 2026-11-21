@@ -10,19 +10,23 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any
+from contextlib import suppress
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.web_button import web_links_at
+from daimon.adapters.slack.workflow_asks import message_text
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls import PostedCard
 from daimon.core.posted_controls.slack_blocks import build_card_blocks, card_notification_text
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.web_links import TenantLinks, WebAt
-from daimon.core.workflows import chat_cards
+from daimon.core.workflows import chat_cards, mentions
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
+from daimon.core.workflows.mentions import Mention
 from daimon.core.workflows.views import obj, seq
 from slack_sdk.errors import SlackApiError
 from slack_sdk.webhook.async_client import AsyncWebhookClient
@@ -51,6 +55,14 @@ def web_at(runtime: SlackRuntime) -> WebAt:
         )
 
     return at
+
+
+async def permalink(client: AsyncWebClient, channel: str, ts: str) -> str | None:
+    """A missing link only hides "open in Slack" on the run page; the post stands."""
+    with suppress(SlackApiError):
+        found = await client.chat_getPermalink(channel=channel, message_ts=ts)  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
+        return str(found.get("permalink") or "") or None  # pyright: ignore[reportUnknownMemberType]
+    return None
 
 
 def is_workflow_action(action_id: str) -> bool:
@@ -335,3 +347,48 @@ __all__ = [
     "is_workflow_action",
     "submit_job",
 ]
+
+
+async def claim_mention(runtime: SlackRuntime, event: dict[str, Any], *, team_id: str) -> bool:
+    """Start the workflow a tag of Daimon triggers here; True when it did (no turn follows)."""
+    channel, ts = str(event.get("channel") or ""), str(event.get("ts") or "")
+    thread = str(event["thread_ts"]) if event.get("thread_ts") else None
+    if not channel or not ts or event.get("bot_id") or not team_id:
+        return False
+    client = await resolve_web_client(runtime, team_id=team_id)
+
+    async def read_links() -> tuple[str | None, str | None]:
+        if client is None:
+            return None, None
+        link = await permalink(client, channel, ts)
+        return link, (await permalink(client, channel, thread) if thread else link)
+
+    files = cast("list[dict[str, Any]]", event.get("files") or [])
+    claimed = await mentions.claim_mention(
+        runtime.sessionmaker,
+        runtime.settings,
+        Mention(
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+            platform="slack",
+            author=str(event.get("user") or ""),
+            message_id=ts,
+            text=message_text(event),
+            channel_id=channel,
+            thread_id=thread,
+            files=tuple(str(f.get("name") or "") for f in files),
+            read_links=read_links,
+        ),
+        web_at(runtime),
+        datetime.now(UTC),
+    )
+    if claimed is None:
+        return False
+    if claimed.card is not None and client is not None:
+        sent = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel, thread_ts=thread or ts, **_card_fields(claimed.card)
+        )
+        posted = str(sent.get("ts") or "")  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        if claimed.run_id is not None and posted:
+            place = ChatPlace("slack", channel, posted, thread or ts)
+            await chat_cards.show_on_card(runtime.sessionmaker, claimed.run_id, place)
+    return True
