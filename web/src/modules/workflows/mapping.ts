@@ -21,6 +21,18 @@ export function checkInputs(schema: ObjectSchema | undefined, value: unknown): C
 }
 
 /** An expression that fills `inputs` from a captured payload: each declared input found by name at the top of `payload`, else under `payload.data`. */
+/** A trigger's input mapping as one line: an expression, or a field map as JSON. */
+export const mappingText = (m: string | Record<string, string> | undefined) => typeof m === "string" ? m : m ? JSON.stringify(m) : ""
+
+/** The mapping a typed line means: a JSON object is a field map, anything else an expression. */
+export function parseMapping(text: string): string | Record<string, string> {
+  if (!text.trimStart().startsWith("{")) return text
+  try {
+    const v: unknown = JSON.parse(text)
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, string>) : text
+  } catch { return text }
+}
+
 export function suggestMapping(schema: ObjectSchema | undefined, payload: unknown): string {
   const keys = Object.keys(schema?.properties ?? {})
   const has = (o: unknown) => !!o && typeof o === "object" && keys.some((k) => k in (o as object))

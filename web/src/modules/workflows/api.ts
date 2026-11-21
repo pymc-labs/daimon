@@ -281,7 +281,7 @@ export const useDeliveries = (id: string, tid: string, enabled: boolean, poll: b
   useQuery({ queryKey: ["workflows", id, "deliveries", tid], queryFn: () => api.get<DeliveryRow[]>(`${hookBase(id, tid)}/deliveries`), enabled, refetchInterval: poll ? 1200 : false })
 
 /** The trigger's mapping evaluated by the server against one delivery; a change of either runs it again. */
-export const usePreviewMapping = (id: string, tid: string, inputs: string, delivery: string | undefined) =>
+export const usePreviewMapping = (id: string, tid: string, inputs: string | Record<string, string>, delivery: string | undefined) =>
   useQuery({
     queryKey: ["workflows", id, "preview", tid, inputs, delivery], enabled: !!inputs && !!delivery, placeholderData: (p) => p, retry: false,
     queryFn: () => api.post<MappingPreview>(`${hookBase(id, tid)}/preview`, { inputs, delivery }, true),

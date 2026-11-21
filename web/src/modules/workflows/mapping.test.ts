@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { checkInputs, suggestMapping } from "./mapping"
+import { checkInputs, mappingText, parseMapping, suggestMapping } from "./mapping"
 import type { ObjectSchema } from "./types"
 
 const payload = { event: "lead", data: { email: "a@b.co", items: [{ id: 7 }] } }
@@ -20,5 +20,14 @@ describe("suggestMapping", () => {
   it("picks the level that holds the inputs", () => {
     expect(suggestMapping(schema, { email: "a" })).toBe("${{ payload }}")
     expect(suggestMapping(schema, payload)).toBe("${{ payload.data }}")
+  })
+})
+
+describe("field map mappings", () => {
+  it("round-trip through the one-line field", () => {
+    const m = { meeting_id: "${{ payload.meeting.external }}" }
+    expect(parseMapping(mappingText(m))).toEqual(m)
+    expect(parseMapping("${{ payload.data }}")).toBe("${{ payload.data }}")
+    expect(parseMapping("{ not json")).toBe("{ not json")
   })
 })

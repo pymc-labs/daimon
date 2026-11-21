@@ -1,5 +1,6 @@
 // What a publish changes: per-node diffs, triggers, access and the grants a version needs.
 import { titleOf } from "./spec"
+import { mappingText } from "./mapping"
 import type { Kind, Node, Spec, Trigger, TriggerKind } from "./types"
 
 export type Effect = "added" | "changed" | "removed"
@@ -65,7 +66,7 @@ export function fieldChanges(a: Record<string, string>, b: Record<string, string
 }
 
 const triggerFlat = (t: Trigger | undefined): Record<string, string> => !t ? {} : Object.fromEntries(([
-  ["Cron", t.cron], ["Time zone", t.timezone], ["Missed runs", t.catch_up], ["Verification", t.verify], ["Inputs", t.inputs], ["Response", t.respond], ["Source", t.source], ["Match", t.match],
+  ["Cron", t.cron], ["Time zone", t.timezone], ["Missed runs", t.catch_up], ["Verification", t.verify], ["Inputs", t.inputs && mappingText(t.inputs)], ["Response", t.respond], ["Source", t.source], ["Match", t.match],
 ] as const).filter(([, v]) => v != null) as [string, string][])
 
 const effectOf = (a: unknown, b: unknown): Effect => (!a ? "added" : !b ? "removed" : "changed")

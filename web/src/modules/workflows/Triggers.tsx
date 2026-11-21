@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils"
 import { useDebounced, useDeliveries, useDraft, useDraftEditor, useListen, usePatch, usePreviewMapping, useReplay, useWebhook } from "./api"
 import { cronWords, fromCron, KINDS, nextFires, toCron, WEEKDAYS, type Kind, type Spec as Sched } from "./cron"
 import { TRIGGER } from "./kinds"
-import { checkInputs, suggestMapping, type Row } from "./mapping"
+import { checkInputs, mappingText, parseMapping, suggestMapping, type Row } from "./mapping"
 import { RotateDialog } from "./RotateDialog"
 import { JsonTree } from "./run/parts"
 import { until } from "./run/lib"
@@ -256,7 +256,7 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
           options={[{ value: "accepted", label: "Accepted", fact: "202 right away" }, { value: "result", label: "With the result", fact: "Waits for the run" }]} />
       </Part>
       <Part title="Input mapping">
-        <Input aria-label="Inputs expression" className="h-8 font-mono text-xs" disabled={c.ro} placeholder="${{ payload.data }}" value={t.inputs ?? ""} onChange={(e) => c.set(t.id, (x) => { if (e.target.value) x.inputs = e.target.value; else delete x.inputs }, 400)} />
+        <Input aria-label="Inputs expression" className="h-8 font-mono text-xs" disabled={c.ro} placeholder="${{ payload.data }}" value={mappingText(t.inputs)} onChange={(e) => c.set(t.id, (x) => { if (e.target.value) x.inputs = parseMapping(e.target.value); else delete x.inputs }, 400)} />
         <div className="mt-4">
           {!last && <p className="text-sm text-muted-foreground">No delivery to preview</p>}
           {last && (
