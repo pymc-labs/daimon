@@ -27,6 +27,7 @@ from daimon.core._models import (
 from daimon.core.config import Settings, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
+from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT
 from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.features.registry import limit_int
 from daimon.core.features.snapshot import FeaturePlace, feature_in, feature_in_or_none
@@ -202,7 +203,7 @@ async def register_page_watch(
     """
     if binding.platform != "discord":
         raise ValueError("Page-event enrollment currently requires a Discord thread")
-    if not 0 < len(instructions) <= 2000:
+    if not 0 < len(instructions) <= INSTRUCTIONS_LIMIT:
         raise ValueError("Instructions or watch lifetime out of bounds")
     if expires_at is not None and not now < expires_at <= now + max_lifetime:
         raise ValueError("Instructions or watch lifetime out of bounds")
@@ -1323,8 +1324,8 @@ async def update_watch(
     old_evidence = cast(list[str], current.rule.get("evidence") or [])
     evidence = list(edit.evidence if edit.evidence is not None else old_evidence)
     instructions = edit.instructions if edit.instructions is not None else current.instructions
-    if not 0 < len(instructions) <= 2000:
-        raise ValueError("Instructions must be 1 to 2000 characters")
+    if not 0 < len(instructions) <= INSTRUCTIONS_LIMIT:
+        raise ValueError(f"Instructions must be 1 to {INSTRUCTIONS_LIMIT} characters")
     listed = require_listed(watch_server(current.source, state), tool)
     if interval < listed.max_interval_floor_s:
         raise ValueError(
@@ -1786,7 +1787,7 @@ async def import_callback_watch(
     `MAX_LIFETIME` after import. A rerun refreshes a watch nobody has confirmed yet and
     leaves a confirmed one alone.
     """
-    from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT, clip
+    from daimon.core.continuity.watch_imports import clip
 
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     instructions, truncated = clip(definition.instructions, INSTRUCTIONS_LIMIT)
