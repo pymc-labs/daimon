@@ -382,8 +382,14 @@ def feature_refusal(
         reason = None
     for failed, message, code in (
         (
-            value != DEFAULT and value not in spec.values,
+            value != DEFAULT and value not in spec.values and not spec.max_length,
             f"{spec.name} can be {_joined([*(spec.label(v) for v in spec.values), 'Default'])}.",
+            "bad_value",
+        ),
+        (
+            value != DEFAULT and not spec.accepts(value, "agent"),
+            f"{spec.name} can be {spec.label(spec.default)}, Default, or one line of up to "
+            f"{spec.max_length} characters with no colon.",
             "bad_value",
         ),
         (

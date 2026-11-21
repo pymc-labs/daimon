@@ -579,6 +579,13 @@ class Admission:
             return found.on
         return FEATURES[key].default_for(platform) not in ("off", "hidden")
 
+    def display_name(self, fallback: str) -> str:
+        """The agent's name as people see it: its `display_name` setting, else `fallback`."""
+        found = self.resolved("display_name")
+        if found is None or found.value in FEATURES["display_name"].values:
+            return fallback
+        return found.value
+
     @property
     def is_admin(self) -> bool:
         """The effective authority admitted for this turn; absent evidence denies."""

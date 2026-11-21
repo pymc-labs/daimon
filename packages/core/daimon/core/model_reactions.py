@@ -10,13 +10,20 @@ _MODELS: Final[tuple[tuple[str, str], ...]] = (
     ("opus", "🎼"),
     ("fable", "🦊"),
 )
+# A waxing moon: the fuller it is, the harder the model thinks.
 _EFFORTS: Final[dict[str, str]] = {
     "low": "🌑",
-    "medium": "🌘",
+    "medium": "🌒",
     "high": "🌓",
-    "xhigh": "🌖",
+    "xhigh": "🌔",
     "max": "🌕",
 }
+
+
+MODEL_MARKS: Final[frozenset[str]] = frozenset(
+    {mark for _, mark in _MODELS} | set(_EFFORTS.values())
+)
+"""Every model and effort emoji, so a rearrangement can tell them from other reactions."""
 
 
 def model_marks(model_id: str | None, effort: str | None) -> tuple[str, ...]:

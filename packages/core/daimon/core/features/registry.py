@@ -99,6 +99,18 @@ class Authority:
     agent_owner: bool = True
 
 
+def is_feature_text(value: str, max_length: int) -> bool:
+    """A free-text value: one trimmed printable line, never `default` or a `:` (the tier text
+    and choice formats use it)."""
+    return (
+        0 < len(value) <= max_length
+        and value == value.strip()
+        and value.isprintable()
+        and ":" not in value
+        and value != DEFAULT
+    )
+
+
 @dataclass(frozen=True)
 class FeatureSpec:
     """One feature. `values` maps each stored value to its label, the permissive or
@@ -138,6 +150,9 @@ class FeatureSpec:
     pinned: bool = False
     """An On at the agent or routine tier holds only for the agent and environment in the
     `pin` kept with it; a write without one is refused, and no other tier takes On."""
+    max_length: int = 0
+    """Above 0, the feature also takes any one-line text up to this many characters (a name),
+    besides its listed values."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""
@@ -163,6 +178,8 @@ class FeatureSpec:
         choose from the listed steps."""
         if value in self.values:
             return True
+        if self.max_length:
+            return is_feature_text(value, self.max_length)
         if self.effect == "limit" and tier == "deployment":
             try:
                 number = float(value)
@@ -518,6 +535,76 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         platforms=_DISCORD,
         authority=_ADMIN,
         legacy_env=("DAIMON_THREAD_NAMING__ENABLED",),
+    ),
+    FeatureSpec(
+        key="display_name",
+        name="Display name",
+        category="chat",
+        effect="display",
+        values={"id": "The agent's id"},
+        default="id",
+        tiers=("agent",),
+        binds="turn",
+        doc="The name people see for an agent on its answers, cards and private "
+        "conversations, up to 40 characters. The agent's id stays its identifier everywhere "
+        "else.",
+        max_length=40,
+    ),
+    FeatureSpec(
+        key="thread_title_style",
+        name="Thread title style",
+        category="chat",
+        effect="display",
+        values={"sentence": "Sentence case", "title": "Title Case"},
+        default="sentence",
+        tiers=_CHANNELS,
+        binds="turn",
+        doc="How a thread Daimon opens to answer a mention is titled: sentence case up to 50 "
+        "characters, or Title Case up to 100.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="thread_auto_archive",
+        name="Thread archive time",
+        category="chat",
+        effect="display",
+        values={"10080": "1 week", "1440": "1 day"},
+        default="10080",
+        tiers=_CHANNELS,
+        binds="turn",
+        doc="How long a thread Daimon opens to answer a mention stays open with no messages "
+        "before Discord archives it.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "status_reactions",
+        "Status reactions",
+        "The message being answered shows ⏳ while the turn runs and ✅ first once it ends, "
+        "however it ended. A message waiting behind a running turn shows 📨 and gets no notice. "
+        "Off shows 👀 while it runs and ✅ only with Completion pings.",
+        tiers=_CHANNELS,
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "protected_notice_reaction",
+        "Lock reaction",
+        "A mention where the agent may not answer gets a 🔒 reaction as well as the direct "
+        "message that says why. Off sends only the direct message.",
+        tiers=_CHANNELS,
+        default="on",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "pre_tool_messages",
+        "Text before tool calls",
+        "A long text the agent writes before it calls a tool is posted as its own message. Off "
+        "keeps it on the working card, and only the final answer is posted.",
+        default="on",
+        platforms=_DISCORD,
     ),
     _shown(
         "plain_text_mentions",

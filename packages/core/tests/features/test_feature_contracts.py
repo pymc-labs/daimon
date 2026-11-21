@@ -83,6 +83,11 @@ _NARROWED: dict[str, str] = {
     "participation": _PRE_AGENT,
     "thread_naming": "read when a thread opens, before an agent or thread exists",
     "plain_text_mentions": _PRE_AGENT,
+    "display_name": "a name belongs to one agent, so only the agent tier sets it",
+    "thread_title_style": "read when a thread opens, before an agent or thread exists",
+    "thread_auto_archive": "read when a thread opens, before an agent or thread exists",
+    "status_reactions": _PRE_AGENT,
+    "protected_notice_reaction": "read when a mention is refused, before an agent is chosen",
     "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
     "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
     "support_escalation": "set where credits apply: the workspace, an agent or a channel",
@@ -516,6 +521,7 @@ def test_every_feature_key_read_is_registered_and_every_registered_key_is_read()
         | set(CAPABILITY_KEYS)
         | {f"web.{module}" for module in WEB_MODULES}
         | {"daily_model_cap"}  # request.admission.resolved("daily_model_cap")
+        | {"display_name"}  # Admission.display_name resolves it
     )
     for path in _PRODUCT:
         constants: set[str] = set()
