@@ -135,7 +135,7 @@ function Timeline({ run, rows, now, selected, select }: { run: RunDetail; rows: 
     <div className="grid grid-cols-[136px_1fr] pr-4">
       <span />
       <div className="relative mb-1 h-6 border-b text-[11px] text-faint tabular">
-        {ticks.map((t) => <span key={t} style={{ left: pct(t) }} className="absolute top-1 -translate-x-1/2 whitespace-nowrap first:translate-x-0">{duration(t - from).replace(/\.0 s$/, "s")}</span>)}
+        {ticks.map((t) => <span key={t} style={{ left: pct(t) }} className={cn("absolute top-1 -translate-x-1/2 whitespace-nowrap", (t - from) / Math.max(to - from, 1) < 0.1 && "translate-x-0")}>{duration(t - from).replace(/\.0 s$/, "s")}</span>)}
       </div>
       {steps.map((s) => (
         <button key={s.key} data-key={s.key} onClick={() => select(s.key)}

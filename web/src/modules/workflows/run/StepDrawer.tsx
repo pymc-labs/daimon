@@ -5,7 +5,8 @@ import { DrawerTabs, Facts, PanelHead, PanelSection, Tag } from "@/components/pa
 import { QueryState } from "@/components/QueryState"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useParam } from "@/lib/filters"
-import { duration } from "@/lib/format"
+import { useChatAgents } from "@/lib/hooks"
+import { duration, modelLabel } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { useCatalog, useStep } from "../api"
 import { KIND, STEP } from "../kinds"
@@ -24,7 +25,9 @@ export function StepView({ run, events, stepKey, now }: { run: RunDetail; events
   const live = s?.status === "running" || s?.status === "waiting"
   const q = useStep(run.id, s ? stepKey : null, n, live)
   const { data: catalog } = useCatalog()
+  const { data: chatAgents } = useChatAgents()
   const agent = q.data?.agent
+  const model = q.data?.model ?? chatAgents?.find((x) => x.id === catalog?.agents.find((c) => c.key === agent)?.id)?.model
   if (!s) return <PanelSection>Not reached</PanelSection>
   const node = run.spec.nodes[s.node]
   const K = node ? KIND[node.kind] : null
@@ -60,7 +63,7 @@ export function StepView({ run, events, stepKey, now }: { run: RunDetail; events
       <PanelSection>
         <Facts rows={[
           ["Agent", agent && (catalog?.agents.find((x) => x.key === agent)?.name ?? agent)],
-          ["Model", q.data?.model],
+          ["Model", model && modelLabel(model)],
           ["Started", s.started_at && <Ago key="a" iso={s.started_at} />],
           ["Duration", took != null && <span key="d" className="tabular">{duration(took)}</span>],
           ["Cost", (a?.cost_usd ?? s.cost_usd) > 0 && <Money key="c" usd={a?.cost_usd ?? s.cost_usd} />],

@@ -4,7 +4,6 @@ import { allEdges, ancestors, edgeKey, edgesOf, finishDeliver, outputFields, tit
 import type {
   ActivityLine, EventType, Field, Node, Person, Proposal, RunDetail, RunEvent, RunSummary, RunTest, Spec, StepDetail, TriggerKind, WaitKind,
 } from "@/modules/workflows/types"
-import { AGENTS } from "./world"
 import { CATALOG } from "./workflows"
 
 const S = 1000, M = 60 * S, H = 60 * M
@@ -496,7 +495,7 @@ export function stepDetail(run: Run, key: string, attempt: number | null, now = 
     text, status: prog >= (i + 1) / 4 ? "done" as const : prog >= i / 4 ? "active" as const : "todo" as const,
   })) : []
   return {
-    key, attempt: a?.n ?? 0, agent: agent ? agentName(agent) : null, model: agent ? n.model ?? AGENTS.find((a) => a.id === CATALOG.agents.find((x) => x.key === agent)?.id)?.model ?? null : null,
+    key, attempt: a?.n ?? 0, agent: agent ?? null, model: agent ? n.model ?? null : null,
     summary: agent && done ? summaryText(st.node, output) : null, route: st.route ? { name: st.route, reason } : null,
     files: st.node === "synthesise" && done ? [{ name: "comparison.md", size: 4812, url: fileUrl(run, "comparison.md") }] : [],
     input, output, untrusted,
