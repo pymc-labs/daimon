@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import structlog
-from daimon.adapters.teams import restart_catch_up
+from daimon.adapters.teams import restart_catch_up, workflow_asks
 from daimon.adapters.teams.admissions import TeamsAdmissions
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.identity import DENIED, GraphSource, TeamsInbound
@@ -336,6 +336,37 @@ async def test_a_message_handled_before_the_restart_is_not_run_again(
     boot = Boot(db_session_factory, graph)
     await boot.boot()
     assert boot.paths == [] and graph.read(CHANNEL_ID), "read, found admitted, and run nothing"
+
+
+async def test_an_ask_answer_is_never_run_as_a_turn(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One answered live before the restart and one sent in the gap: neither is a turn."""
+    graph = FakeGraph()
+    root, live_answer, gap_answer = "1700000000010", "1700000000011", "1700000000012"
+    graph.channels[CHANNEL_ID] = [_graph(root, 3, "<p>Approve?</p>", sender=BOT)]
+    graph.channels[CHANNEL_ID][0]["replies"] = [
+        _mention(live_answer, 2, "approve", reply_to=root),
+        _mention(gap_answer, 1, "approve", reply_to=root),
+    ]
+    open_answers = {live_answer, gap_answer}
+    claimed: list[str] = []
+
+    async def claim_inbound(_runtime: object, parsed: TeamsInbound, *_: object) -> bool:
+        claimed.append(parsed.activity_id)
+        return parsed.activity_id in open_answers
+
+    monkeypatch.setattr(workflow_asks, "claim_inbound", claim_inbound)
+    await _admitted_before(db_session_factory, CHANNEL_ID)
+    live = Boot(db_session_factory, graph)
+    thread = f"{CHANNEL_ID};messageid={root}"
+    await live.bot_framework(make_channel_activity(conversation_id=thread, activity_id=live_answer))
+    open_answers.discard(live_answer)  # its ask is decided: no open ask knows it now
+
+    boot = Boot(db_session_factory, graph)
+    await boot.boot()
+    assert live.paths == [] and boot.paths == [], "answers are never turns"
+    assert claimed == [live_answer, live_answer, gap_answer], "the gap's reply is claimed"
 
 
 async def test_only_the_window_and_people_count(

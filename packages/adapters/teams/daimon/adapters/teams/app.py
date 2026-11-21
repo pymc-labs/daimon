@@ -1035,7 +1035,13 @@ class TeamsApp:
                     parsed = self._parse_graph(message, source, mentions=True)
                     if isinstance(parsed, Refusal):
                         await self._refuse_graph(parsed, message, source)
-                    elif not self._ignored_unprompted(parsed) and await self._claim(parsed):
+                        continue
+                    if await workflow_asks.claim_inbound(
+                        self.runtime, parsed, self._tenant_id, self._sender, self._reader
+                    ):
+                        await self._handled(parsed)
+                        continue  # a workflow ask's answer, not a turn
+                    if not self._ignored_unprompted(parsed) and await self._claim(parsed):
                         fresh.append(parsed)
                 except Exception:
                     # One message must not strand the rows already claimed for replay.
@@ -1120,9 +1126,17 @@ class TeamsApp:
         if await workflow_asks.claim_inbound(
             self.runtime, parsed, self._tenant_id, self._sender, self._reader
         ):
+            await self._handled(parsed)
             return  # a workflow ask's answer, not a turn
         if not self._ignored_unprompted(parsed):
             await self._admit(parsed)
+
+    async def _handled(self, parsed: TeamsInbound) -> None:
+        """Record an ask's answer as handled, so a restart's catch-up never runs it as a turn."""
+        with contextlib.suppress(*_DB_ERRORS):
+            await self._admissions.claim_receipt(
+                parsed.conversation_id, parsed.activity_id, now=datetime.now(UTC)
+            )
 
     def _ignored_unprompted(self, parsed: TeamsInbound) -> bool:
         """An unaddressed thread reply with participation off asks nothing: drop it."""
