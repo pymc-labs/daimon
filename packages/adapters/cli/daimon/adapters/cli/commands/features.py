@@ -222,7 +222,7 @@ async def features_set(
     if spec.authority.native and not rt.settings.cli.local_user.strip():
         raise StoreError(f"{spec.name} needs cli.local_user, the operator's name, to be set.")
     target = await _target(rt, selector)
-    agent_id = await _agent_id(rt, target, agent, stale_ok=key == "approvals") if agent else None
+    agent_id = await _agent_id(rt, target, agent, stale_ok=spec.authority.native) if agent else None
     if thread and not channel:
         raise StoreError("--thread needs --channel")
     place = FeaturePlace.of(target.tenant_id, target.platform, channel, thread, agent_id=agent_id)

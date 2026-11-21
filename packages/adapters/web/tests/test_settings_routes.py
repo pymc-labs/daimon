@@ -16,6 +16,7 @@ from daimon.core.access_policy import AgentApprovals, TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.features import service as feature_service
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_changes import write_workspace_default
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import WebClientFactory
@@ -83,7 +84,7 @@ async def test_a_channel_reads_the_approvals_of_the_agent_answering_there(
     """An agent's own Approvals applies in the channel it answers in: the page shows that
     value and where it came from, not the workspace's."""
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
-        answering = (await admin.client.get("/api/channels/c1")).json()["agent"]["value"]
+        answering = "helper"
         agent = SimpleNamespace(id="ag_answering", name=answering, metadata={})
 
         async def listed(*_: object) -> list[SimpleNamespace]:
@@ -91,6 +92,14 @@ async def test_a_channel_reads_the_approvals_of_the_agent_answering_there(
 
         monkeypatch.setattr(channel_settings, "listed_agents", listed)
         async with db_session_factory.begin() as db:
+            await write_workspace_default(
+                db,
+                tenant_id=admin.ws.tenant_id,
+                platform="discord",
+                agent_name=answering,
+                actor_account_id=None,
+                surface="web",
+            )
             await set_access_policy(
                 db,
                 tenant_id=admin.ws.tenant_id,
@@ -102,6 +111,5 @@ async def test_a_channel_reads_the_approvals_of_the_agent_answering_there(
             )
         read = (await admin.client.get("/api/channels/c1/settings")).json()["approvals"]
 
-    assert answering, "the channel has an answering agent"
     assert (read["value"], read["source"]) == ("off", "agent"), read
     assert read["own"] is None, "the channel itself sets nothing"
