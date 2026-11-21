@@ -15,7 +15,7 @@ import json
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
 from daimon.core.config import Settings
@@ -47,6 +47,9 @@ APPROVE: Final = "approve"
 REJECT: Final = "reject"
 ANSWER: Final = "answer"
 PROPOSALS: Final = "proposals"
+#: A proposals review has no spec fields of its own: it reminds daily and expires in a week.
+REVIEW_REMIND: Final = timedelta(days=1)
+REVIEW_EXPIRES: Final = timedelta(days=7)
 MAX_QUESTIONS: Final = 3
 #: A bound call's arguments in a chat ask; the inbox shows them in full.
 _ARGS_LIMIT: Final = 1500
@@ -203,7 +206,7 @@ def _shape(node: ApprovalNode) -> asks.AskShape:
     return node.answer or "approve"
 
 
-def _labels(names: Sequence[str]) -> tuple[tuple[str, str], ...]:
+def route_labels(names: Sequence[str]) -> tuple[tuple[str, str], ...]:
     return tuple((n, "Answer" if n == ANSWER else n[:1].upper() + n[1:]) for n in names)
 
 
@@ -263,7 +266,7 @@ class ApprovalExecutor:
             title=title,
             text=body,
             shape=_shape(node),
-            routes=_labels(routes_of(node, "approval")),
+            routes=route_labels(routes_of(node, "approval")),
             home=home_of(work.spec, workflow),
             channel=node.channel,
             files=files,
@@ -318,7 +321,8 @@ def bound_text(preview: Sequence[dict[str, JsonValue]]) -> str:
     calls: list[str] = []
     for p in preview:
         args = json.dumps(p["args"], indent=2)[:_ARGS_LIMIT]
-        calls.append(f"{str(p['tool']).replace('/', ' ')}\n```\n{args}\n```")
+        why = f"\n{p['reason']}" if p.get("reason") else ""
+        calls.append(f"{str(p['tool']).replace('/', ' ')}{why}\n```\n{args}\n```")
     return "\n".join(["Exactly what runs on approval:", *calls]) if calls else ""
 
 
@@ -457,7 +461,7 @@ async def ask(
         title=title,
         text=f"{question}{choices}",
         shape="question",
-        routes=_labels([ANSWER]),
+        routes=route_labels([ANSWER]),
         home=home_of(await runs.spec_of(session, g.run), workflow) if workflow else None,
     )
     queued = await asks.queue(session, run=g.run, wait_id=wait.id, addressees=addressees, ask=ask)
@@ -736,6 +740,14 @@ async def _held(
     return run, wait, step
 
 
+def _remind_every(node: AnyNode | None, wait: Wait) -> timedelta | None:
+    if kind_of(wait) == PROPOSALS:
+        return REVIEW_REMIND
+    if isinstance(node, ApprovalNode) and node.remind_every:
+        return parse_duration(node.remind_every)
+    return None
+
+
 async def on_due(
     sm: Sessions, settings: Settings, wait: workflow_runs.WaitRow, *, now: datetime
 ) -> None:
@@ -749,9 +761,8 @@ async def on_due(
         node = (await runs.spec_of(session, run)).nodes.get(step.node_id)
         key = runs.key_of(step)
         if wait_.expires_at is None or wait_.expires_at > now:
-            if isinstance(node, ApprovalNode) and node.remind_every:
-                nxt = now + parse_duration(node.remind_every)
-                await workflow_waits.set_remind_at(session, wait_.id, nxt)
+            if every := _remind_every(node, wait_):
+                await workflow_waits.set_remind_at(session, wait_.id, now + every)
                 posts = await asks.queue_reminders(session, wait_)
                 events = [NewEvent("wait.reminded", key, {"id": str(wait_.id), "posts": posts})]
                 await append_events(session, run_id=run.id, events=events, actor=ENGINE, at=now)
@@ -782,6 +793,10 @@ async def on_due(
         await workflow_waits.decide(
             session, wait_.id, status=status, decision=route, by=None, via=None, now=now
         )
+        if kind_of(wait_) == PROPOSALS:
+            await workflow_proposals.decide_proposals(
+                session, step.id, approved=[], by=None, now=now
+            )
         if wait_.kind in ("approval", "question"):
             await asks.queue_updates(session, wait_, "Expired: no one answered in time.")
         data: dict[str, JsonValue] = {

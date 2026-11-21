@@ -11,7 +11,12 @@ from typing import Any
 
 import pytest
 from daimon.core._models import Account
-from daimon.core.stores import workflow_deliveries, workflow_proposals, workflow_waits
+from daimon.core.stores import (
+    workflow_deliveries,
+    workflow_proposals,
+    workflow_runs,
+    workflow_waits,
+)
 from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.workflows import engine, inbox, runs, service, views, waits
@@ -280,15 +285,29 @@ async def test_approved_proposals_are_sent_and_the_rest_are_not(db_session: Asyn
     async with world.sm() as s:
         wait = (await workflow_waits.waits_of_step(s, step.id))[-1]
     assert waits.kind_of(wait) == waits.PROPOSALS and len((wait.shown or {})["proposals"]) == 2
+    async with world.sm() as s:
+        [ask] = await workflow_deliveries.deliveries_of_wait(s, wait.id)
+    text = str(ask.payload["text"])
+    assert "linear create_issue" in text and '"title": "B"' in text, f"posted to chat: {text}"
+    assert (wait.expires_at, wait.remind_at) == (
+        NOW + waits.REVIEW_EXPIRES,
+        NOW + waits.REVIEW_REMIND,
+    ), "a review expires and reminds like an approval"
+    due = NOW + waits.REVIEW_REMIND
+    async with world.sm() as s:
+        [row] = await workflow_runs.due_waits(s, kind="approval", now=due, limit=5)
+    await waits.on_due(world.sm, world.settings, row, now=due)
+    async with world.sm() as s:
+        reminded = await workflow_waits.get_wait(s, wait.id, tenant_id=world.tenant_id)
+    assert reminded is not None and reminded.remind_at == NOW + 2 * waits.REVIEW_REMIND
     answer = waits.Answer(route=waits.APPROVE, selected=[str(picked[0])])
     who = Who(world.tenant_id, world.owner)
     await waits.decide_wait(world.sm, world.settings, who, wait.id, answer, via="web", now=NOW)
     await runs.execute(world.sm, world.settings, executors, await world.claim(run.id, "file"))
     assert tools.calls == [("https://linear.example.com/mcp", "create_issue", {"title": "A"})]
     async with world.sm() as s:
-        statuses = {p.id: p.status for p in await workflow_proposals.proposals_of(s, step.id)}
-    # Keyed by id: proposals added in one transaction share `created_at`, so order is by uuid.
-    assert statuses == {picked[0]: "sent", picked[1]: "rejected"}, "only the chosen one goes"
+        statuses = [(p.id, p.status) for p in await workflow_proposals.proposals_of(s, step.id)]
+    assert statuses == [(picked[0], "sent"), (picked[1], "rejected")], "in order, the chosen sent"
     assert (await world.steps(run.id))["file"].output == {"filed": 2}, "the turn's output holds"
 
 

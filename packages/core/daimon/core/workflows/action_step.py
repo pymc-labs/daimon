@@ -13,7 +13,7 @@ from typing import Any, Final, Protocol
 
 from daimon.core.config import Settings
 from daimon.core.stores import workflow_proposals, workflow_runs, workflow_waits
-from daimon.core.workflows import engine
+from daimon.core.workflows import asks, engine
 from daimon.core.workflows.expressions import ExpressionError, render
 from daimon.core.workflows.runs import Park, Sessions, StepWork
 from daimon.core.workflows.spec import ActionNode, AgentNode, parse_duration
@@ -24,7 +24,16 @@ from daimon.core.workflows.unattended import (
     decide_unattended_call,
     exposed_at_run,
 )
-from daimon.core.workflows.waits import PROPOSALS, approvers_of
+from daimon.core.workflows.waits import (
+    PROPOSALS,
+    REVIEW_EXPIRES,
+    REVIEW_REMIND,
+    approvers_of,
+    bound_text,
+    home_of,
+    route_labels,
+    routes_of,
+)
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -173,13 +182,31 @@ async def review_proposals(
         return await send_proposals(sm, settings, tools, work, _held(outcome), now)
     approvers = node.review if isinstance(node.review, list) else []
     async with sm() as s:
-        addressees, tokens, _ = await approvers_of(s, work, approvers, now)
+        addressees, tokens, workflow = await approvers_of(s, work, approvers, now)
+    title = node.title or work.step.node_id
+    calls: list[dict[str, JsonValue]] = [
+        {"tool": p.tool, "args": p.arguments, "reason": p.reason} for p in pending
+    ]
+    ask = asks.Ask(
+        deliver="dm",
+        workflow=workflow.name,
+        title=title,
+        text="\n\n".join(
+            (title, bound_text(calls), "To send only some, pick them in the web inbox.")
+        ),
+        shape="approve",
+        routes=route_labels(routes_of(node, PROPOSALS)),
+        home=home_of(work.spec, workflow),
+    )
     return Park(
         "approval",
         addressees=tuple(addressees),
-        deliver="inbox",
+        deliver=ask.deliver,
+        ask=ask,
         shown={"kind": PROPOSALS, "approvers": tokens, "proposals": [str(p.id) for p in pending]}
         | _held(outcome),
+        expires_at=now + REVIEW_EXPIRES,
+        remind_at=now + REVIEW_REMIND,
     )
 
 

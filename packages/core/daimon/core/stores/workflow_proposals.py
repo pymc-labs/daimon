@@ -7,7 +7,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Collection
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal
 
 from daimon.core._models import WorkflowProposal
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 #: Proposals one step may record; more are refused to the agent.
 MAX_PER_STEP: Final = 20
+_TICK: Final = timedelta(microseconds=1)
 
 Status = Literal["proposed", "approved", "rejected", "sent", "failed", "unknown"]
 
@@ -71,6 +72,7 @@ async def add_proposal(
             return n, p
     if len(existing) >= MAX_PER_STEP:
         return None
+    now = datetime.now(UTC)
     row = WorkflowProposal(
         tenant_id=tenant_id,
         step_id=step_id,
@@ -79,6 +81,8 @@ async def add_proposal(
         arguments=arguments,
         arguments_hash=digest,
         reason=reason,
+        # Proposals made in one transaction would share `now()`; keep them in order.
+        created_at=max(now, existing[-1].created_at + _TICK) if existing else now,
     )
     session.add(row)
     await session.flush()
