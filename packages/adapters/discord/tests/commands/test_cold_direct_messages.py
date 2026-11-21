@@ -918,8 +918,8 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
 async def test_dm_answer_pings_only_where_dm_completion_pings_and_completion_pings_are_on(
     db_session_factory, monkeypatch, dm_pings, pings, expected
 ):
-    """On, the answer is a new message that pings the asker and the card is deleted; off,
-    the answer edits the card in place and nobody is pinged."""
+    """On, the answer is a new message, which notifies by itself, and the card is deleted;
+    off, the answer edits the card in place. A DM answer never mentions the asker."""
     from daimon.core.turn.state import TextBlock, TurnState
 
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
@@ -949,8 +949,9 @@ async def test_dm_answer_pings_only_where_dm_completion_pings_and_completion_pin
     await card.post_initial()
     card_message = posted[-1]
     await card.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="The answer")]))
-    pinged = [m for m in posted if "<@999>" in str(m.kwargs.get("content", ""))]
-    assert bool(pinged) is expected, "a ping is a new message naming the asker, only when on"
+    fresh = posted[posted.index(card_message) + 1 :]
+    assert bool(fresh) is expected, "a ping is a new answer message, only when on"
+    assert not any("<@999>" in str(m.kwargs.get("content", "")) for m in posted)
     assert (card_message.delete.await_count == 1) is expected, (
         "the card is deleted behind a pinged answer and kept otherwise"
     )
@@ -1135,6 +1136,7 @@ class _AnsweredCard:
     def __init__(self, *, answered: bool, ended: bool) -> None:
         self.was_answered = answered
         self.ended = ended
+        self.model_marked = False
 
     def set_output_authorization(self, authorization) -> None:
         self.authorization = authorization

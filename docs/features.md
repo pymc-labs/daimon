@@ -555,7 +555,7 @@ How long an idle thread opened to answer a mention stays open.
 
 ## Status reactions
 
-⏳ while a turn runs, then ✅ first however it ended, and 📨 instead of a notice on a queued message. Off shows 👀, and ✅ only with Completion pings.
+⏳ while the agent works, then ✅ first however it ended, and 📨 instead of a notice on a queued message. Off shows 👀, and ✅ only with Completion pings.
 
 | | |
 | --- | --- |

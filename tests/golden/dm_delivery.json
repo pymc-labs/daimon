@@ -808,7 +808,7 @@
               "description": "> Hello from the agent!",
               "flags": 0,
               "footer": {
-                "text": "0s"
+                "text": "0s\u2003\u2003Sonnet 4.6"
               },
               "title": "Working on it\u2026",
               "type": "rich"
@@ -1091,7 +1091,7 @@
               "description": "> Hello from the agent!",
               "flags": 0,
               "footer": {
-                "text": "0s"
+                "text": "0s\u2003\u2003Sonnet 4.6"
               },
               "title": "Working on it\u2026",
               "type": "rich"

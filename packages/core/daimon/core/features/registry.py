@@ -578,7 +578,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     _shown(
         "status_reactions",
         "Status reactions",
-        "⏳ while a turn runs, then ✅ first however it ended, and 📨 instead of a notice on a "
+        "⏳ while the agent works, then ✅ first however it ended, and 📨 instead of a notice on a "
         "queued message. Off shows 👀, and ✅ only with Completion pings.",
         tiers=_CHANNELS,
         platforms=_DISCORD,

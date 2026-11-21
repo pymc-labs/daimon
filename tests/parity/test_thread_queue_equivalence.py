@@ -110,6 +110,7 @@ class Replay:
         self.obj._run_thread_turn = self.slack_turn
         self.obj._run_turn_guarded = self.teams_turn
         self.obj._turn_cap = self.turn_cap
+        self.obj._message_feature_on = self.feature_off
         self.obj._supersede_batch = lambda item: self.effects.append(
             ("supersede", item.activity_id)
         )
@@ -161,6 +162,9 @@ class Replay:
     async def turn_cap(self, tenant):
         self.effects.append(("cap", self.cap))
         return self.cap
+
+    async def feature_off(self, *args):
+        return False
 
     async def post(self, **kwargs):
         # The apology is a card now, in other words; the flow is what is compared.
@@ -240,7 +244,7 @@ class Replay:
                 attachments=[number],
                 add_reaction=react,
                 remove_reaction=unreact,
-                guild=SimpleNamespace(me=self.obj.user),
+                guild=SimpleNamespace(id=1, me=self.obj.user),
                 channel=SimpleNamespace(id=self.key),
             )
         if self.platform == "slack":
