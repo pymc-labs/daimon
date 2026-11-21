@@ -14201,6 +14201,21 @@
         'type': 'object',
       }),
     }),
+    'web_search': dict({
+      'description': 'Search the public web and return the top results: title, link and a short extract.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'query': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'query',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'where_am_i': dict({
       'description': '''
         Return the short who-answers-here text and the full structured facts.

@@ -67,6 +67,7 @@ _MUST_CONTAIN = {
 _WEB_WORDS = {
     "set_agent_builtin_tool": "the agent's web search built-in",
     "web_fetch": "a public web page",
+    "web_search": "the public web, for eval runs only",
     "replace_channel_file": "Microsoft's Office for the web",
     "list_audit_log": "the stored `web` source value",
     "list_monitored_activity": "web chat, one of the places admins monitor",

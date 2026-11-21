@@ -185,6 +185,7 @@ TAIL = (
     "0221_routine_delivery_hold",
     "0222_evals_foundation",
     "0223_eval_scrub_entities",
+    "0224_eval_world",
 )
 HEAD = TAIL[-1]
 
@@ -235,6 +236,7 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "helper_of"),
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
+    ("mcp_tokens", "eval_item_id"),
     ("thread_model_settings", "provider"),
     ("thread_model_settings", "effort"),
     ("thread_model_settings", "model"),

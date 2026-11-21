@@ -10,12 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 JsonObject = dict[str, JsonValue]
 _OBJECT: Final = TypeAdapter(dict[str, JsonValue])
@@ -557,8 +558,20 @@ class WorldFile(FormatModel):
     state: Literal["present", "rebuilt", "redacted"] = "present"
 
 
+#: https, a plain host and plain path segments: a repo's id names its folder and its route.
+REPO_URL: Final = re.compile(
+    r"https://[a-z0-9-]+(\.[a-z0-9-]+)*(/(?!\.\.?(/|$))[\w.-]+)+/?", re.ASCII
+)
+
+
+def _repo_url(url: str) -> str:
+    if not REPO_URL.fullmatch(url):
+        raise ValueError("a repo url is https://host/owner/name with plain path segments")
+    return url
+
+
 class Repo(FormatModel):
-    url: str
+    url: Annotated[str, AfterValidator(_repo_url)]
     default_branch: str
     bundle: BlobRef
     refs: dict[str, str] | None = None
@@ -589,6 +602,7 @@ class SearchSet(FormatModel):
 
 class McpTool(FormatModel):
     name: str
+    description: str | None = None
     input_schema: JsonObject
     output_schema: JsonObject | None = None
     annotations: JsonObject | None = None

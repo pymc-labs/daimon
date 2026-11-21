@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.adapters.mcp.tools._gemini_resources import GeminiSkillCapability
+    from daimon.core.evals.world.dispatch import FakeWorld
     from daimon.core.neutral_resources import NeutralResourceHost
 
 
@@ -86,6 +87,8 @@ class McpRuntime:
     # Signs who a chat account is for a connection node's token exchange; None: no node.
     identity_key: Ed25519PrivateKey | None = None
     node_held: NodeHolds = field(default_factory=_no_holds)
+    # Answers eval callers' tool calls (`middleware/eval_world.py`); None answers none.
+    eval_world: FakeWorld | None = None
 
     def __post_init__(self) -> None:
         if self.membership_resolver is None and isinstance(self.settings.discord, DiscordSettings):

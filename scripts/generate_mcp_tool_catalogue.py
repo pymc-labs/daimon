@@ -90,6 +90,7 @@ TAG_LABELS: dict[str, str] = {
     "admin": "admin only",
     "agent-chat": "agent tokens only",
     "discord": "Discord callers",
+    "eval-world": "eval runs only",
     "host-memory": "OpenAI and Gemini agents",
     "host-web-fetch": "OpenAI, Gemini and self-hosted agents",
     "scope:agents:archive": "operator tokens with agents:archive",

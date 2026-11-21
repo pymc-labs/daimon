@@ -1,0 +1,293 @@
+"""The fake world against Postgres: dispatch order, checked simulator answers, per-item git."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import subprocess
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import pytest
+import uvicorn
+from daimon.core.evals.format import Case, WorldCall
+from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
+from daimon.core.evals.world.http_app import create_world_app
+from daimon.core.evals.world.model import HttpCall, ItemRef
+from daimon.core.evals.world.services.git import GitReply
+from daimon.core.evals.world.simulator import SimAnswer, SimContext, parse_answer
+from daimon.core.stores import eval_world, evals
+from daimon.core.stores.evals import BlobRow
+from daimon.testing.eval_world import eval_case, make_running_item
+from daimon.testing.factories import make_tenant
+from pydantic import JsonValue, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+class ScriptedSimulator:
+    """Answers with `reply` every time and keeps what it was asked."""
+
+    def __init__(self, reply: JsonValue) -> None:
+        self.reply, self.asked = reply, list[SimContext]()
+
+    async def answer(self, context: SimContext) -> SimAnswer:
+        self.asked.append(context)
+        return SimAnswer(parse_answer(context.request, json.dumps(self.reply)), "scripted")
+
+    async def same(
+        self, item_id: uuid.UUID, service: str, recorded: JsonValue, live: JsonValue
+    ) -> bool:
+        return False
+
+
+async def _item(
+    db_session: AsyncSession,
+    factory: async_sessionmaker[AsyncSession],
+    world: FakeWorld,
+    case: Case,
+) -> ItemRef:
+    tenant = await make_tenant(db_session, platform="web")
+    item_id = await make_running_item(db_session, tenant.id, case)
+    item = await world.item(item_id)
+    assert item is not None, "a running item is found"
+    return item
+
+
+def _get(url: str) -> HttpCall:
+    return HttpCall("GET", url, {})
+
+
+async def test_world_when_called_then_answers_recorded_overlay_cached_simulated_then_denied(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    simulator = ScriptedSimulator({"status": 200, "body": {"plan": "team"}})
+    world = FakeWorld(db_session_factory, simulator, tmp_path)
+    ping = {"http": {"method": "GET", "url": "https://api.example.com/v1/ping"}}
+    case = eval_case(
+        {"exchanges": [{"id": "x1", "surface": "http", "request": ping,
+                        "response": {"http": {"status": 200, "body": {"json": {"ok": True}}}}}],
+         "simulator": {"max_calls": 1}},
+        limits={"max_world_calls": 6},
+    )  # fmt: skip
+    item = await _item(db_session, db_session_factory, world, case)
+    issues = "https://api.github.com/repos/acme/app/issues"
+    created = await world.http(item, HttpCall("POST", issues, {}, b'{"title": "Export fails"}'))
+    number = json.loads(created.raw_body)["number"]
+    answers = [
+        await world.http(item, _get("https://api.example.com/v1/ping")),
+        created,
+        await world.http(item, _get(f"{issues}/{number}")),
+        await world.http(item, _get("https://api.example.com/v1/plan")),
+        await world.http(item, _get("https://api.example.com/v1/plan")),
+        await world.http(item, _get("https://api.example.com/v1/other")),
+        await world.http(item, _get("https://api.example.com/v1/ping")),
+    ]
+    assert [(a.origin, a.reason) for a in answers] == [
+        ("recorded", None), ("overlay", None), ("overlay", None), ("simulated", "written"),
+        ("simulated", "cached"), ("denied", "simulator_max_calls"), ("denied", "max_world_calls"),
+    ], "each call is answered by the first source that can"  # fmt: skip
+    assert json.loads(answers[2].raw_body)["title"] == "Export fails", "a read sees the write"
+    assert [e.verb for e in created.effects] == ["github.issue.create"], "the write's effect"
+    assert len(simulator.asked) == 1, "the cached answer did not call the simulator again"
+    async with db_session_factory() as session:
+        logged = await eval_world.list_calls(session, item_id=item.id)
+    assert len(logged) == 7, "every call is logged, denied ones too"
+
+
+async def test_simulated_github_answer_when_invalid_twice_then_denied(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    simulator = ScriptedSimulator({"status": 200, "body": {"number": "five", "title": 3}})
+    world = FakeWorld(db_session_factory, simulator, tmp_path)
+    item = await _item(db_session, db_session_factory, world, eval_case({}))
+    answer = await world.http(item, _get("https://api.github.com/repos/acme/app/issues/5"))
+    assert (answer.origin, len(simulator.asked)) == ("denied", 2), "one retry, then denied"
+    assert answer.reason and answer.reason.startswith("invalid"), "denied as invalid"
+    problem = simulator.asked[1].problem or ""
+    assert "number" in problem, f"the retry is told what was wrong: {problem}"
+
+
+async def test_simulator_when_the_model_api_fails_then_the_call_is_denied_and_counted_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    class Failing(ScriptedSimulator):
+        async def answer(self, context: SimContext) -> SimAnswer:
+            self.asked.append(context)
+            raise ConnectionError("model API down")
+
+    simulator = Failing({})
+    world = FakeWorld(db_session_factory, simulator, tmp_path)
+    item = await _item(db_session, db_session_factory, world, eval_case({}))
+    answer = await world.http(item, _get("https://api.example.com/v1/plan"))
+    assert (answer.origin, answer.reason) == ("denied", "simulator_error"), "denied, not raised"
+    assert len(simulator.asked) == 1, "one attempt, no retry"
+    async with db_session_factory() as session:
+        stats = await eval_world.call_stats(session, item_id=item.id)
+    assert stats.model_calls == 1, "the failed attempt counts against the budget"
+
+
+async def test_simulator_when_calls_overlap_then_max_calls_holds(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class Slow(ScriptedSimulator):
+        async def answer(self, context: SimContext) -> SimAnswer:
+            started.set()
+            await release.wait()
+            return await super().answer(context)
+
+    simulator = Slow({"status": 200, "body": {"ok": True}})
+    world = FakeWorld(db_session_factory, simulator, tmp_path)
+    case = eval_case({"simulator": {"max_calls": 1}})
+    item = await _item(db_session, db_session_factory, world, case)
+    first = asyncio.create_task(world.http(item, _get("https://api.example.com/v1/a")))
+    await started.wait()
+    second = await world.http(item, _get("https://api.example.com/v1/b"))
+    release.set()
+    assert (second.origin, second.reason) == ("denied", "simulator_max_calls"), (
+        "the call in flight holds the only model call"
+    )
+    assert (await first).origin == "simulated", "the call that reserved it is answered"
+    assert len(simulator.asked) == 1, "the cap was not overspent"
+
+
+async def test_git_when_calls_overlap_then_one_runs_at_a_time_per_item(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    active, peak = 0, 0
+
+    class Slow:
+        async def serve(self, *_args: object) -> GitReply:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.05)
+            active -= 1
+            return GitReply(200, {}, b"", ())
+
+    world = FakeWorld(db_session_factory, None, tmp_path)
+    world.git = Slow()  # pyright: ignore[reportAttributeAccessIssue]
+    repo = {"url": "https://github.com/acme/app", "default_branch": "main",
+            "bundle": {"sha256": "0" * 64, "size": 1, "media_type": "application/x-git-bundle"}}  # fmt: skip
+    item = await _item(db_session, db_session_factory, world, eval_case({"repos": [repo]}))
+    url = "https://github.com/acme/app.git/info/refs?service=git-upload-pack"
+    await asyncio.gather(*(world.http(item, _get(url)) for _ in range(3)))
+    assert peak == 1, "reading the bundle, serving and recording are one step per item"
+
+
+def _bundle(tmp_path: Path) -> bytes:
+    repo = tmp_path / "source"
+    git = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "README.md").write_text("hello\n")
+    subprocess.run([*git, "-C", str(repo), "add", "."], check=True)
+    subprocess.run([*git, "-C", str(repo), "commit", "-qm", "first"], check=True)
+    subprocess.run(["git", "-C", str(repo), "bundle", "create", "-q", "../repo.bundle", "--all"],
+                   check=True)  # fmt: skip
+    return (tmp_path / "repo.bundle").read_bytes()
+
+
+@asynccontextmanager
+async def _serve(world: FakeWorld) -> AsyncIterator[str]:
+    config = uvicorn.Config(
+        create_world_app(world), host="127.0.0.1", port=0, log_level="error", ws="none"
+    )
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.02)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await task
+
+
+async def _git(*args: str, cwd: Path | None = None) -> str:
+    process = await asyncio.create_subprocess_exec(
+        "git", "-c", "user.name=Test", "-c", "user.email=test@example.com", *args, cwd=cwd,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )  # fmt: skip
+    out, err = await process.communicate()
+    assert process.returncode == 0, f"git {args[0]} failed: {err.decode()}"
+    return out.decode()
+
+
+class _Objects:
+    def __init__(self) -> None:
+        self.kept: dict[str, bytes] = {}
+
+    async def put(self, *, key: str, content: bytes, content_type: str) -> None:
+        self.kept[key] = content
+
+    async def read(self, *, key: str) -> bytes | None:
+        return self.kept.get(key)
+
+
+async def test_a_request_blob_when_the_deployment_has_an_object_store_then_it_is_kept_there(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    objects = _Objects()
+    world = FakeWorld(db_session_factory, None, tmp_path, objects=objects)
+    item = await _item(db_session, db_session_factory, world, eval_case({}))
+    await world.http(item, HttpCall("POST", "https://api.example.com/upload", {}, b"\xff\xfe"))
+    sha = hashlib.sha256(b"\xff\xfe").hexdigest()
+    assert list(objects.kept.values()) == [b"\xff\xfe"], "the bytes go to the object store"
+    async with db_session_factory() as session:
+        kept = await evals.blob_content(session, tenant_id=item.tenant_id, sha256=sha)
+    assert kept is None, "the database keeps only the blob's row"
+    assert await world._read_blob(item.tenant_id, sha) == b"\xff\xfe"  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    "url", ["https://github.com/../../x/github.com/acme/app", "https://../../../../home/app/repo"]
+)
+def test_a_repo_url_with_dot_segments_is_refused(url: str) -> None:
+    repo = {"url": url, "default_branch": "main",
+            "bundle": {"sha256": "0" * 64, "size": 1, "media_type": "application/x-git-bundle"}}  # fmt: skip
+    with pytest.raises(ValidationError, match="plain path segments"):
+        eval_case({"repos": [repo]})
+
+
+async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    content = _bundle(tmp_path)
+    world = FakeWorld(db_session_factory, None, tmp_path / "world")
+    tenant = await make_tenant(db_session, platform="web")
+    sha = hashlib.sha256(content).hexdigest()
+    blob = BlobRow(sha256=sha, size=len(content), media_type="application/x-git-bundle",
+                   scrub="clean", needs_human_check=False)  # fmt: skip
+    await evals.put_blob(db_session, tenant_id=tenant.id, blob=blob, content=content)
+    repo = {"url": "https://github.com/acme/app", "default_branch": "main",
+            "bundle": {"sha256": sha, "size": len(content), "media_type": blob.media_type}}  # fmt: skip
+    case = eval_case({"repos": [repo]})
+    ids = [await make_running_item(db_session, tenant.id, case) for _ in range(2)]
+    tokens = [await issue_world_token(db_session, i) for i in ids]
+    async with _serve(world) as base:
+
+        def url(n: int) -> list[str]:
+            header = f"http.extraHeader=Authorization: Bearer {tokens[n]}"
+            return ["-c", header, f"{base}/world/{ids[n]}/git/github.com/acme/app.git"]
+
+        first, second = tmp_path / "first", tmp_path / "second"
+        await _git(*url(0)[:2], "clone", "-q", url(0)[2], str(first))
+        (first / "fix.txt").write_text("fixed\n")
+        await _git("add", ".", cwd=first)
+        await _git("commit", "-qm", "fix", cwd=first)
+        await _git(*url(0)[:2], "push", "-q", url(0)[2], "main", cwd=first)
+        await _git(*url(1)[:2], "clone", "-q", url(1)[2], str(second))
+    assert (await _git("log", "-1", "--format=%s", cwd=first)).strip() == "fix", "pushed"
+    assert (await _git("log", "-1", "--format=%s", cwd=second)).strip() == "first", (
+        "the other item's copy is untouched"
+    )
+    async with db_session_factory() as session:
+        logged = await eval_world.list_calls(session, item_id=ids[0])
+    verbs = [e.verb for c in logged for e in WorldCall.model_validate(c).effects or ()]
+    assert verbs == ["git.repo.clone", "git.repo.push"], f"clone and push are effects: {verbs}"
+    assert all(c["surface"] == "git" for c in logged), "logged as git calls"

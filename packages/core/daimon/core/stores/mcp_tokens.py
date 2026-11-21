@@ -51,6 +51,7 @@ async def create_mcp_token_row(
     surface: McpTokenSurface | None = None,
     purpose: McpTokenPurpose | None = None,
     client: str | None = None,
+    eval_item_id: uuid.UUID | None = None,
 ) -> None:
     """Insert a new mcp_tokens row.
 
@@ -76,6 +77,7 @@ async def create_mcp_token_row(
         surface=surface,
         purpose=purpose,
         client=client,
+        eval_item_id=eval_item_id,
     )
     session.add(orm)
     await session.flush()

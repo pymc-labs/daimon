@@ -38,6 +38,7 @@ from daimon.adapters.mcp.identity_relay import (
     read_capped_body,
 )
 from daimon.core import github_router_tokens as router_tokens
+from daimon.core.evals.eval_tenant import is_eval_tenant
 from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, GITHUB_ROUTER_PATH
 from daimon.core.stores import github_router_sessions as router_sessions
 from daimon.core.stores.security_audit import append_event
@@ -464,6 +465,8 @@ def build_github_router_route(
         caller = await backend.authenticate(bearer) if bearer is not None else None
         if caller is None:
             return Response(status_code=401)
+        if is_eval_tenant(caller.tenant_id):
+            return Response(status_code=403)  # an eval session never reaches GitHub
         body = await read_capped_body(request)
         if body is None:
             return Response(status_code=413)

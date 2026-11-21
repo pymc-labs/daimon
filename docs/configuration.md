@@ -273,6 +273,26 @@ JSON or YAML file of known private names added to every scrub.
 
 Model that drafts case expectations. Unset: the side-call model.
 
+### `DAIMON_EVALS__SIMULATOR_MODEL`
+
+`str | None` · optional · default unset
+
+Anthropic model that answers eval world calls nobody recorded. Unset: the side-call
+model.
+
+### `DAIMON_EVALS__SIMULATOR_EFFORT`
+
+`'none' | 'low' | 'medium' | 'high'` · optional · default `low`
+
+Effort the eval world simulator runs at.
+
+### `DAIMON_EVALS__WORLD_URL`
+
+`str | None` · optional · default unset
+
+Base URL where eval sandbox gateways reach the eval worker's fake world, e.g.
+http://eval-worker:8090. Unset: no sandbox can be enclosed.
+
 ## Long Jobs
 
 Read from `daimon.core.config.LongJobsSettings`. Prefix `DAIMON_LONG_JOBS__`.
