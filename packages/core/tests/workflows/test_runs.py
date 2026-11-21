@@ -19,6 +19,7 @@ from daimon.core._models import (
     WorkflowStep,
 )
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, workflow_runs
 from daimon.core.stores import workflows as workflows_store
@@ -27,6 +28,7 @@ from daimon.core.workflows import engine, preflight, runs
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.spec import parse_spec
 from daimon.testing.workflows import NOW, make_settings, make_world
+from mux.contracts.config import BackendConfig
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import DBAPIError
@@ -79,6 +81,17 @@ async def test_preflight_refuses_before_anything_is_created(db_session: AsyncSes
         now=NOW,
     )
     assert isinstance(bad, Refusal) and bad.reason == "run_as_not_allowed", f"unknown run-as: {bad}"
+
+
+async def test_a_home_channel_on_another_backend_refuses_the_run(db_session: AsyncSession) -> None:
+    world = await make_world(db_session, INLINE, "b", home="c1")
+    openai = BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-5")
+    await set_channel_backend(db_session, channel_ref(world.tenant_id, "discord", "c1"), openai)
+    await db_session.commit()
+    refused = await runs.start_run(
+        world.sm, world.settings, tenant_id=world.tenant_id, start=world.start(), now=NOW
+    )
+    assert isinstance(refused, Refusal) and refused.reason == "backend_unsupported", refused
 
 
 async def test_executor_seam_retries_then_succeeds(db_session: AsyncSession) -> None:

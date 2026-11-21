@@ -12,8 +12,8 @@ live until someone publishes it.
 
 1. Read it with `get_workflow`. Note `revision`.
 2. Change it with `edit_workflow_draft`, passing that revision as `base_revision`.
-   Edits apply in order: `add_node`, `update_node` (a null field removes it),
-   `remove_node`, `connect`, `set_trigger`, `set_inputs`, `set_start`.
+   Edits apply in order: `add_node`, `update_node`, `remove_node`, `connect`,
+   `set_trigger`, `set_inputs`, `set_start`.
 3. If the draft moved on, you are told its new revision. Read it again and redo the edit.
 4. Fix the problems that come back. `validate_workflow` lists errors, warnings and grants.
 5. Try it with `run_workflow` and `test: true`. A test run uses the draft and cannot write
@@ -42,8 +42,12 @@ Every path ends at a `finish`. A loop needs `max_visits`.
 
 Values use `${{ }}` expressions: `${{ inputs.topic }}`, `${{ steps.draft.output.text }}`.
 A step reads only inputs and steps before it. A step that may have been skipped needs a
-`has()` guard: `${{ has(steps.t) ? steps.t.output : {} }}`. A branch condition is one
-whole expression. Agent `instructions` take no expressions: pass data in `inputs`.
+`has()` guard, as below. A branch condition is one whole expression. Agent
+`instructions` take no expressions: pass data in `inputs`.
+
+```yaml
+output: ${{ has(steps.t) ? steps.t.output : {} }}
+```
 
 ## Asks, writes and grants
 

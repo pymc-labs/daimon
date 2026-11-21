@@ -22,6 +22,9 @@ For a one-off "remind me in two hours", use a timer (`create_timer`,
 [mcp-tools.md](mcp-tools.md#timers)). It fires once, runs in the conversation it
 was set in and needs no cleanup.
 
+An admin can move a routine to a [workflow](workflows.md#routines-and-workflows)
+and back.
+
 ## Create a routine
 
 Five MCP tools manage routines: `create_routine`, `list_routines`,
