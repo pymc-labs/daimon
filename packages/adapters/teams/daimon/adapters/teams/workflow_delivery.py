@@ -9,7 +9,8 @@ opens the person's 1:1 chat, found through the roster of the target's home chann
 ask is a card with its buttons and records where it landed (a reply in the thread it
 opens answers it); a reminder goes to the same place and an update rewrites the card
 without its buttons. Bots upload no files to channel threads, so files are pointed to
-on the run's page, or named as not supported without one.
+on the run's page, or named as not supported without one. A titled post goes in the thread
+of the top-level post of that title this workflow made before (by record only), else a new one.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from daimon.core.workflows.delivery import (
     post_refusal,
     post_text,
     reach_limits,
+    titled_thread,
 )
 from microsoft_teams.api import MessageActivityInput
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -119,20 +121,48 @@ def make_teams_workflow_poster(
             chunks = split_fenced(
                 rendered.text + _files_note(cleared), TEAMS_LIMIT, word_boundary=True
             )
-            for chunk in chunks[:-1] if ask else chunks:
-                await teams.post(conversation, chunk)
+            titled = (
+                cleared.title is not None
+                and cleared.dm_to is None
+                and ";messageid=" not in conversation
+            )
+            if titled:
+                channel = conversation
+
+                async def create(title: str) -> str:
+                    return f"{channel};messageid={await teams.post(channel, title)}"
+
+                conversation = await titled_thread(
+                    sessionmaker, cleared, platform="teams", create=create
+                )
+            posted = [
+                await teams.post(conversation, chunk) for chunk in (chunks[:-1] if ask else chunks)
+            ]
+            if ask is None and posted:
+                channel, _, thread = conversation.partition(";messageid=")
+                return DeliveryOutcome(
+                    status="delivered",
+                    placed={
+                        "channel": channel,
+                        "thread": conversation if thread else None,
+                        "message": posted[0],
+                        "link": None,
+                        "opened": titled,
+                    },
+                )
             if ask is not None:
                 card = MessageActivityInput().add_card(ask_card(chunks[-1], ask))
                 sent = await teams.post_card(conversation, card)
-                root = cleared.thread_id is None and cleared.dm_to is None
+                root = ";messageid=" not in conversation and cleared.dm_to is None
+                thread = f"{conversation};messageid={sent}" if root else None
                 async with sessionmaker.begin() as session:
                     await asks.record_post(
                         session,
                         row,
                         platform="teams",
                         channel_id=conversation,
-                        # A reply in the thread a channel ask opens answers it.
-                        thread_id=f"{conversation};messageid={sent}" if root else None,
+                        # A reply in the ask's thread, or the one it opens, answers it.
+                        thread_id=conversation if ";messageid=" in conversation else thread,
                         message_id=sent,
                         at=datetime.now(UTC),
                     )
