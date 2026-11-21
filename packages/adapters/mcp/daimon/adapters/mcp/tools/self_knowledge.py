@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Final
 
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
@@ -18,8 +19,18 @@ from daimon.core.self_knowledge import Library, SelfKnowledgeError
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+MAX_PARALLEL: Final = 2
+"""Reads in flight at once: each may walk and read thousands of files on a small host."""
 
-async def _read(ctx: Context, runtime: McpRuntime, read: Callable[[Library], str]) -> str:
+
+async def bounded[T](slots: asyncio.Semaphore, call: Callable[[], Awaitable[T]]) -> T:
+    async with slots:
+        return await call()
+
+
+async def _read(
+    ctx: Context, runtime: McpRuntime, read: Callable[[Library], str], slots: asyncio.Semaphore
+) -> str:
     settings = runtime.settings.self_knowledge
     library = Library(
         docs=settings.docs_root,
@@ -30,12 +41,14 @@ async def _read(ctx: Context, runtime: McpRuntime, read: Callable[[Library], str
         web=await web_aware(runtime, await _auth(ctx)),
     )
     try:
-        return await asyncio.to_thread(read, library)
+        return await bounded(slots, lambda: asyncio.to_thread(read, library))
     except SelfKnowledgeError as exc:
         raise ToolError(str(exc)) from exc
 
 
 def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
+    slots = asyncio.Semaphore(MAX_PARALLEL)
+
     @mcp.tool
     async def read_daimon_docs(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, page: str = "", start_line: int = 1
@@ -47,7 +60,7 @@ def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         only that section. Use it to answer how Daimon works, how to set it up or why it
         behaves as it does.
         """
-        return await _read(ctx, runtime, lambda library: library.read_docs(page, start_line))
+        return await _read(ctx, runtime, lambda library: library.read_docs(page, start_line), slots)
 
     @mcp.tool
     async def search_daimon_docs(  # pyright: ignore[reportUnusedFunction]
@@ -57,7 +70,7 @@ def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Returns each matching line as `page:line: text`; read the page with read_daimon_docs.
         """
-        return await _read(ctx, runtime, lambda library: library.search_docs(query))
+        return await _read(ctx, runtime, lambda library: library.search_docs(query), slots)
 
     @mcp.tool
     async def read_daimon_source(  # pyright: ignore[reportUnusedFunction]
@@ -69,7 +82,9 @@ def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         A file comes back with line numbers from `start_line`; a folder, or no path, lists
         what is in it.
         """
-        return await _read(ctx, runtime, lambda library: library.read_source(path, start_line))
+        return await _read(
+            ctx, runtime, lambda library: library.read_source(path, start_line), slots
+        )
 
     @mcp.tool
     async def search_daimon_source(  # pyright: ignore[reportUnusedFunction]
@@ -80,4 +95,4 @@ def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Searches `packages/`, or only the file or folder `path` names.
         Returns each matching line as `path:line: text`.
         """
-        return await _read(ctx, runtime, lambda library: library.search_source(query, path))
+        return await _read(ctx, runtime, lambda library: library.search_source(query, path), slots)

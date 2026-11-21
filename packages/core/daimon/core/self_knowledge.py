@@ -282,10 +282,8 @@ class Library:
 
     def _pages(self) -> Iterator[tuple[str, str]]:
         """Every visible page under the docs root, as (relative path, text)."""
-        base = self.docs.resolve()
-        for path in sorted(base.rglob("*.md")):
-            relative = path.relative_to(base).as_posix()
-            if (text := self._visible(relative)) is not None:
+        for relative, raw in _docs_pages(self.docs.resolve()):
+            if (text := visible_text(raw, web=self.web)) is not None:
                 yield relative, text
 
     @_refusing
@@ -396,40 +394,23 @@ class Library:
         self._need_source()
         target, parts = self._source_path(path)
         base = self.source.resolve()
-        files = [target] if target.is_file() else self._files(target, parts)
+        if target.is_file():
+            files = [target.relative_to(base).as_posix()]
+        else:
+            top = "/".join(parts) + "/" if parts else ""
+            files = [
+                file
+                for file in _source_files(base)
+                if file.startswith(top) and self._shown(PurePosixPath(file))
+            ]
         hits = (
-            f"{file.relative_to(base).as_posix()}:{number}: {_clip(line)}"
+            f"{file}:{number}: {_clip(line)}"
             for file in files
-            for number, line in _lines(file)
+            if (text := _read_quietly(base / file)) is not None and needle in text.casefold()
+            for number, line in enumerate(text.splitlines(), 1)
             if needle in line.casefold()
         )
         return self._results(hits, query)
-
-    def _files(self, top: Path, parts: tuple[str, ...]) -> Iterator[Path]:
-        base = self.source.resolve()
-        roots = [top / SOURCE_DIR] if not parts else [top]
-        for root in roots:
-            for folder, dirs, names in os.walk(root):
-                here = Path(folder)
-                dirs[:] = sorted(
-                    name
-                    for name in dirs
-                    if self._listed(here / name, PurePosixPath((here / name).relative_to(base)))
-                )
-                for name in sorted(names):
-                    file = here / name
-                    relative = PurePosixPath(file.relative_to(base).as_posix())
-                    if self._listed(file, relative) and self._confined(relative):
-                        yield file
-
-    def _confined(self, relative: PurePosixPath) -> bool:
-        """Whether a found file, its symlinks resolved, stays readable under the source root."""
-        try:
-            target = _inside(self.source, relative.parts)
-        except SelfKnowledgeError:
-            return False
-        real = PurePosixPath(target.relative_to(self.source.resolve()).as_posix())
-        return real.parts[0] == SOURCE_DIR and self._shown(real)
 
     def _results(self, hits: Iterator[str], query: str) -> str:
         found: list[str] = []
@@ -458,9 +439,46 @@ def _source_text(path: Path) -> str:
     return text
 
 
-def _lines(path: Path) -> Iterator[tuple[int, str]]:
-    """A file's numbered lines, nothing for a large or undecodable one."""
+def _read_quietly(path: Path) -> str | None:
+    """A file's text; None when it is gone, unreadable or not UTF-8."""
     try:
-        yield from enumerate(_source_text(path).splitlines(), 1)
-    except SelfKnowledgeError:
-        return
+        return path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+
+
+def _walk(folder: Path, suffixes: frozenset[str]) -> Iterator[Path]:
+    """Files under `folder` with a suffix in `suffixes` and at most `MAX_FILE_BYTES`, in name
+    order. Symlinks, dot-named entries and `_SKIPPED_DIRS` are skipped as they are met, so
+    nothing found leads out of the tree."""
+    with os.scandir(folder) as entries:
+        for entry in sorted(entries, key=lambda found: found.name):
+            if entry.name.startswith(".") or entry.name in _SKIPPED_DIRS or entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                yield from _walk(Path(entry.path), suffixes)
+            elif (
+                entry.is_file(follow_symlinks=False)
+                and Path(entry.name).suffix in suffixes
+                and entry.stat(follow_symlinks=False).st_size <= MAX_FILE_BYTES
+            ):
+                yield Path(entry.path)
+
+
+@functools.cache
+def _source_files(base: Path) -> tuple[str, ...]:
+    """The text files under `base/packages`, relative to `base`. Walked once per process: the
+    image is immutable, and a search would otherwise walk some 4,000 files every call."""
+    return tuple(
+        file.relative_to(base).as_posix() for file in _walk(base / SOURCE_DIR, TEXT_SUFFIXES)
+    )
+
+
+@functools.cache
+def _docs_pages(base: Path) -> tuple[tuple[str, str], ...]:
+    """Every readable `.md` page under `base` with its raw text, read once per process."""
+    pages = (
+        (file.relative_to(base).as_posix(), _read_quietly(file))
+        for file in _walk(base, frozenset({".md"}))
+    )
+    return tuple((relative, text) for relative, text in pages if text is not None)

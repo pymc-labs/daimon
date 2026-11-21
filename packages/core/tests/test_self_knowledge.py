@@ -144,7 +144,9 @@ def test_source_lists_reads_and_searches_text_literally(tmp_path: Path) -> None:
     assert "    2  needle = '[a-z]+'" in library.read_source("packages/core/config.py", 2)
     found = library.search_source("[a-z]+")
     assert "packages/core/config.py:2" in found, "a query is plain text, not a pattern"
-    assert "secret" not in library.search_source("needle"), "no symlink out of the root"
+    found_all = library.search_source("needle")
+    assert "link.py" not in found_all and "dotlink.py" not in found_all, "no symlink is searched"
+    assert "config.py:2" in found_all, "the plain files are"
     assert "defaults" not in library.search_source("needle"), "defaults/ is never searched"
     with pytest.raises(SelfKnowledgeError):
         library.search_source("x")
@@ -248,3 +250,17 @@ def test_anchors_follow_the_sites_slugs_and_a_page_reads_by_anchor(tmp_path: Pat
     assert "Again." in library.read_docs("anchored.md#set-up_it-now_1"), "a repeat is _1"
     with pytest.raises(SelfKnowledgeError, match="no section"):
         library.read_docs("anchored.md#missing")
+
+
+def test_search_walks_the_tree_once_per_root_and_skips_links_as_it_walks(tmp_path: Path) -> None:
+    from daimon.core import self_knowledge
+
+    library = _library(tmp_path, web=True)
+    library.search_source("needle")
+    walked = self_knowledge._source_files(library.source.resolve())  # pyright: ignore[reportPrivateUsage]
+    assert "packages/core/config.py" in walked, "a plain file is listed"
+    assert not [name for name in walked if name.endswith(("link.py", "dotlink.py", ".env"))], (
+        "links and dotfiles never enter the list"
+    )
+    (library.source / "packages/core/later.py").write_text("needle\n")
+    assert "later.py" not in library.search_source("needle"), "the image is immutable: no rewalk"
