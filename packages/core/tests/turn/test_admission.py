@@ -2601,7 +2601,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
 
 
 @pytest.mark.parametrize("follows", [False, True], ids=["off", "on"])
-async def test_a_dm_follows_the_workspace_approvals_only_with_dm_approvals_on(
+async def test_a_dm_follows_approvals_only_with_dm_approvals_on(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2609,7 +2609,7 @@ async def test_a_dm_follows_the_workspace_approvals_only_with_dm_approvals_on(
 ) -> None:
     """`dm_approvals` on: a DM reads the workspace's Allow writes, as a channel does, so a
     third-party write runs without a card. Off (the default): every DM write asks."""
-    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.access_policy import AgentApprovals, ChannelRule, TenantAccessPolicy
     from daimon.core.approval_gate import ApprovalGate
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
     from daimon.core.turn.admission import refresh_approval_gate
@@ -2664,6 +2664,18 @@ async def test_a_dm_follows_the_workspace_approvals_only_with_dm_approvals_on(
         ToolCall(tool_use_id="dm-write", server_name="third", tool_name="create_issue")
     )
     assert decided.allow is follows, "Allow writes reaches a DM only with dm_approvals on"
+    if follows:
+        agent_id = admission.agent.id
+        own = {agent_id: AgentApprovals(approvals="on", approvals_set_by="agent-admin")}
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=policy.model_copy(update={"agent_approvals": own}),
+        )
+        await db_session.commit()
+        assert await refresh_approval_gate(deps, admission) == ApprovalGate(
+            "on", f"agent:{agent_id}", "agent-admin", tenant.id
+        ), "a DM follows its agent's own value over the workspace's"
 
 
 @pytest.mark.parametrize("scope", ["server", "channel", "thread"])

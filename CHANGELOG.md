@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Approvals can be set for one agent.** An agent's own Approvals sits between
+  the workspace and the channel, so one agent can Allow writes while the rest
+  Ask; a channel or thread setting still wins. Set it from the CLI
+  (`daimon features set approvals off --tier agent --agent NAME --reason ...`),
+  the web app or an agent, by a chat admin or the operator, audited as before.
+  With "Approvals in direct messages" on, a DM follows its agent's value.
+  An agent that calls other agents decides their writes with its own value.
+  A deleted agent's value is cleared with `--agent ID`.
+
 - **A relay server's long jobs can wake the conversation when they end.** List the
   tools that start them in `"wake_tools"` on a `requester_meta` entry of
   `DAIMON_MCP_IDENTITY__SERVERS`: a person's call then carries a private callback

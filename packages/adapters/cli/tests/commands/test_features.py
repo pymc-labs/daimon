@@ -20,11 +20,13 @@ from daimon.adapters.cli.commands.features import (
 )
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.adapters.cli.tenant import TenantSelector
+from daimon.core.access_policy import AgentApprovals, TenantAccessPolicy
 from daimon.core.config import Settings
 from daimon.core.errors import StoreError
 from daimon.core.features.registry import FEATURES
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
@@ -270,6 +272,41 @@ async def test_the_operator_sets_approvals_and_the_change_is_audited(
     assert event.platform_user_id == f"operator:{rt.settings.cli.local_user}", "operator named"
     assert event.reason == "server:inherit->off (integration writes run unattended)", event.reason
     assert event.outcome == "allowed", "the change is recorded as allowed"
+
+
+async def test_a_deleted_agents_approvals_value_is_cleared_by_its_id(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No live agent answers to the id, yet its stored value stays clearable: an id that
+    holds no value is still refused as an unknown agent."""
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    tenant_id = uuid.UUID(cast(str, selector.tenant_id))
+    gone = AgentApprovals(approvals="off", approvals_set_by="admin-1")
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_approvals={"ag_gone": gone}),
+        )
+    console, _ = _console()
+    kw: dict[str, Any] = {
+        "rt": rt,
+        "console": console,
+        "selector": selector,
+        "key": "approvals",
+        "value": "default",
+        "reason": "agent deleted",
+        "tier": None,
+        "channel": None,
+        "thread": None,
+    }
+    with pytest.raises(StoreError, match="no agent named"):
+        await features_set(**kw, agent="ag_never_set")
+    await features_set(**kw, agent="ag_gone")
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    assert policy.agent_approvals == {}, "the deleted agent's value is gone"
 
 
 async def test_set_refuses_a_stale_expected_value(

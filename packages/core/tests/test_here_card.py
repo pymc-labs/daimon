@@ -10,7 +10,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import daimon.core.here_card as here_card_module
 import pytest
-from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentApprovals, AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, KeyEntry, McpServerEntry
 from daimon.core.here_card import (
     CredentialStatus,
@@ -423,6 +423,7 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
             "daimon": AgentRule(runs_in=("private",)),
             "target": AgentRule(runs_in=("private",)),
         },
+        agent_approvals={"agent-id": AgentApprovals(approvals="off", approvals_set_by="admin-1")},
     )
     viewer = RuleViewer(policy, inside_channel_id="private")
     responder = RosterAgent(
@@ -511,6 +512,9 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         records=MagicMock(),
     )
     assert card.agent_name == "daimon"
+    assert card.approval_gate_note == "Approvals: Allow writes (set by the agent).", (
+        "the card shows the answering agent's own value, not the workspace's"
+    )
     assert links_at.await_args.args[2].agent_id == "agent-id", "web follows the answering agent"
     setup_agent.assert_awaited_once()
     assert (
@@ -541,7 +545,9 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         resolve_setter_display=resolve_display,
     )
     assert unknown.set_by_label == "unknown"
-    assert "set by" not in unknown.text
+    assert "set by" not in unknown.text.replace(unknown.approval_gate_note or "", ""), (
+        "the setter is never named"
+    )
     assert "<@123>" not in unknown.text
 
 
