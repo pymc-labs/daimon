@@ -39,6 +39,8 @@ ANSWER_MESSAGES: Final = 5
 """Messages one answer may post before it becomes a file, until a setting says otherwise."""
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
+    "dm_completion_pings",
+    "dm_approvals",
     "table_rendering",
     "model_reactions",
     "tool_server_names",

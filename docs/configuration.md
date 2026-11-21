@@ -577,8 +577,10 @@ Default: [] (off).
 Keys for the servers whose auth is "bearer", by server name: a JSON object such as
 {"tools": "&lt;key&gt;"}. Kept apart from DAIMON_MCP_IDENTITY__SERVERS so the key is set
 as a secret. Daimon sends the key as the server's bearer in place of the caller's own
-credential, which never reaches the server. Only the MCP service needs them, and there
-every bearer server needs one; no other server may have one. Default: {} (none).
+credential, which never reaches the server. The MCP service needs them, and there every
+bearer server needs one; no other server may have one. A chat worker given one reads
+that server's tool hints when DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS names it. Default:
+{} (none).
 
 ## Hub
 

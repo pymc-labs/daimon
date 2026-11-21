@@ -535,6 +535,14 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="completion_pings",
     ),
     _shown(
+        "dm_completion_pings",
+        "Completion pings in direct messages",
+        "Direct messages follow Completion pings.",
+        tiers=("deployment", "workspace"),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
         "model_reactions",
         "Model reactions",
         "The first message in a thread, and the first after the model or effort changes, gets "
@@ -643,6 +651,32 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc="A reply in a direct message can read the agent's memory but not change it.",
         platforms=_DM_PLATFORMS | {"teams"},
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="dm_approvals",
+        name="Approvals in direct messages",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc="Direct messages follow Approvals as set for everyone.",
+        platforms=_DM_PLATFORMS | {"teams"},
+        authority=Authority(native=True),
+    ),
+    FeatureSpec(
+        key="thread_new",
+        name="/new in threads",
+        category="chat",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc="/new works in threads Daimon started.",
+        platforms=_DISCORD,
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -1209,9 +1243,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=(
             "Ask before an agent writes to an outside service in a chat reply. Allow writes "
-            "covers chat replies only: routines and watches follow the unattended rule whoever "
-            "runs Daimon set. Only an admin of the chat app can change it, or the operator at the "
-            "command line, who gives a reason that is audited."
+            "covers chat replies only, not routines or watches. Only a chat app admin, or the "
+            "operator with an audited reason, can change it."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",

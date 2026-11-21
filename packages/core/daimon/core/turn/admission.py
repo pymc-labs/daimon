@@ -2327,12 +2327,17 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 
 
 def _approval_gate_for(
-    deps: TurnDeps, policy: TenantAccessPolicy, grant: AdmissionGrant
+    deps: TurnDeps, policy: TenantAccessPolicy, grant: AdmissionGrant, *, dm_follows: bool = False
 ) -> ApprovalGate | None:
-    if grant.is_dm or grant.platform is None or not deps.tool_safety.enabled:
+    """None for a DM unless `dm_approvals` is on; a DM then reads the workspace value, as
+    it has no channel or thread rule of its own."""
+    if (grant.is_dm and not dm_follows) or grant.platform is None or not deps.tool_safety.enabled:
         return None
     gate = resolve_approval_gate(
-        policy, platform=grant.platform, channel_id=grant.channel_id, thread_id=grant.thread_id
+        policy,
+        platform=grant.platform,
+        channel_id=None if grant.is_dm else grant.channel_id,
+        thread_id=None if grant.is_dm else grant.thread_id,
     )
     return replace(gate, tenant_id=grant.tenant_id)
 
@@ -2340,11 +2345,17 @@ def _approval_gate_for(
 async def refresh_approval_gate(deps: TurnDeps, admission: Admission) -> ApprovalGate | None:
     """Read the effective gate for this admitted tenant and actual origin, uncached."""
     grant = admission.grant
-    if grant is None or grant.platform is None or grant.is_dm or not deps.tool_safety.enabled:
+    dm_follows = admission.shown("dm_approvals")
+    if (
+        grant is None
+        or grant.platform is None
+        or (grant.is_dm and not dm_follows)
+        or not deps.tool_safety.enabled
+    ):
         return None
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
-    return _approval_gate_for(deps, policy, grant)
+    return _approval_gate_for(deps, policy, grant, dm_follows=dm_follows)
 
 
 def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
