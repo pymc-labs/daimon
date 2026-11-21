@@ -36,6 +36,7 @@ Where each feature can be set, and its default.
 | Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
 | Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
 | Web app | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Knows Daimon | `self_knowledge` | Model input | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
@@ -368,6 +369,18 @@ The agent knows about the web app: messages, routine runs and tool results carry
 | Key | `web_awareness` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
+## Knows Daimon
+
+The agent can read the docs and source code of the Daimon release it runs on, to answer how Daimon works, how to set it up and why it behaves as it does. Pages about the web app are left out where Web app is Off.
+
+| | |
+| --- | --- |
+| Key | `self_knowledge` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 

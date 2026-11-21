@@ -42,6 +42,7 @@ typo is silent — check the spelling here.
 - [GitHub](#github)
 - [GitHub App](#github-app)
 - [Repo Memory](#repo-memory)
+- [Self Knowledge](#self-knowledge)
 - [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
@@ -1313,6 +1314,38 @@ verified import. Once set up, the `repo_memory` feature turns it on or off
 Legacy MCP server names whose repo_memory_list and repo_memory_view tools are disabled
 in sessions when native repository memory is enabled. Set these before cutover so the
 agent sees one memory source.
+
+## Self Knowledge
+
+Read from `daimon.core.config.SelfKnowledgeSettings`. Prefix `DAIMON_SELF_KNOWLEDGE__`.
+
+Where the `self_knowledge` tools read this release's docs and source, and the public
+addresses their results name.
+
+### `DAIMON_SELF_KNOWLEDGE__DOCS_URL`
+
+`str` · optional · default `https://pymc-labs.github.io/daimon/`
+
+The public docs site that results name as the place to read more.
+
+### `DAIMON_SELF_KNOWLEDGE__REPO_URL`
+
+`str` · optional · default `https://github.com/pymc-labs/daimon`
+
+The source repository that results name, to clone for tests and history.
+
+### `DAIMON_SELF_KNOWLEDGE__DOCS_ROOT`
+
+`Path` · optional · default `docs`
+
+The docs/ directory in the image, relative to the working directory.
+
+### `DAIMON_SELF_KNOWLEDGE__SOURCE_ROOT`
+
+`Path` · optional · default `.`
+
+The directory holding packages/ and defaults/, relative to the working directory. Only
+those two are read.
 
 ## Microsoft Accounts
 

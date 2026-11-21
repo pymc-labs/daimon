@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 234 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 238 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -554,6 +554,17 @@ MCP tools for an agent to edit its own ``agent_files`` from inside an MA turn.
 | `self_list_files` | agent tokens only | List all keys + metadata (no values) in your private agent_files namespace. |
 | `self_read_file` | agent tokens only | Check a per-agent file by `key`. |
 | `self_write_file` | agent tokens only | Add a per-agent key under `key`. |
+
+## `self_knowledge`
+
+Read-only tools over this release's docs and source (`daimon.core.self_knowledge`).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `read_daimon_docs` | all callers | Read Daimon's own documentation, for the release that is running. |
+| `read_daimon_source` | all callers | Read Daimon's own source code, for the release that is running. |
+| `search_daimon_docs` | all callers | Search Daimon's own documentation for some plain text, ignoring case. |
+| `search_daimon_source` | all callers | Search Daimon's own source code for some plain text, ignoring case. |
 
 ## `server_skills`
 

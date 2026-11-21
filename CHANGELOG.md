@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents can read Daimon's own docs and source.** Turn on "Knows Daimon"
+  (`self_knowledge`, Off by default) for a workspace, agent, channel or thread,
+  and the agent answers how Daimon works from the docs and source code of the
+  release it runs on, on every model backend and every path. Four read-only
+  tools list, read and search the pages and the `packages/` and `defaults/`
+  code in the image, and each result names the source repository and commit.
+  Where Web app is Off, pages and code about the web app are left out. The
+  image ships `docs/`; `DAIMON_SELF_KNOWLEDGE__*` sets where they are read.
+
 - **Watches can poll a signed-identity relay server.** List a tool in
   `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its
   `<root>/mcp-identity/<name>` URL. Each poll mints the watch owner a
