@@ -430,6 +430,7 @@ EXEMPT: dict[str, str] = {
     "set_never_tag": _OWN,
     "set_routine_sandbox_tools": _SCHEDULED,
     "set_web_invite_files": _TENANT,
+    "share_secret_with": _LIVE,
     "show_watch": _READS,
     "start_fresh_task": _TURN,
     "start_long_job": _SCHEDULED,

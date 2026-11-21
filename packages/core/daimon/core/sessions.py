@@ -1066,6 +1066,7 @@ async def create_session(
                     session_key=relay_session_key,
                     routine_id=relay_routine_id,
                     owner=relay_owner,
+                    grant=chat_session_id if relay_session_key is not None else None,
                 ),
                 now=dt.datetime.now(dt.UTC),
                 scope=scope,

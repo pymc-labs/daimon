@@ -38,6 +38,7 @@ from daimon.core.mcp_identity import (
 from daimon.core.stores import watches
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.core.turn_hold import TurnHold
@@ -115,6 +116,16 @@ async def _person(factory: async_sessionmaker[AsyncSession]) -> _Person:
     return _Person(tenant.id, principal.account_id, agent_id)
 
 
+async def _colleague(factory: async_sessionmaker[AsyncSession], person: _Person) -> _Person:
+    """user-2, in the same guild and talking to the same agent as `person`."""
+    async with factory() as db, db.begin():
+        tenant = await get_tenant(db, person.tenant_id)
+        principal = await make_platform_principal(
+            db, platform="discord", external_id="user-2", tenant=tenant
+        )
+    return _Person(person.tenant_id, principal.account_id, person.agent_id)
+
+
 async def _token(
     factory: async_sessionmaker[AsyncSession],
     person: _Person,
@@ -139,9 +150,12 @@ async def _chat_session(
     human: bool | None = True,
     dm: bool = False,
     channel: str | None = None,
+    grant: str | None = None,
+    message: str | None = None,
 ) -> tuple[str, uuid.UUID]:
     """A person's chat session in `thread`, optionally running their turn there.
 
+    With a `grant` the session has an execution grant, which its turn holds.
     Returns the session's relay credential and its mapping row id.
     """
     now = dt.datetime.now(dt.UTC)
@@ -149,7 +163,8 @@ async def _chat_session(
     async with factory() as db, db.begin():
         await create_thread_session(
             db, id=mapping_id, tenant_id=person.tenant_id, platform="discord",
-            thread_id=thread, account_id=person.account_id, ma_session_id=f"sess_{thread}",
+            thread_id=thread, account_id=person.account_id,
+            ma_session_id=f"sess_{grant or thread}",
             ma_agent_id="agent_a", channel_id=channel,
         )  # fmt: skip
         if turn:
@@ -161,12 +176,12 @@ async def _chat_session(
                 role=Role.USER, expires_at=now + dt.timedelta(hours=1), now=now,
                 sender_foreign=foreign, shared_channel=False,
                 platform_channel_id=None if dm else thread,
-                platform_message_id=f"msg-{thread}",
+                platform_message_id=message or f"msg-{thread}",
             )  # fmt: skip
             await bind_origin_session(
-                db, origin_id=origin.id, chat_session_id=None, human_invocation=human
+                db, origin_id=origin.id, chat_session_id=grant, human_invocation=human
             )
-    token = await _token(factory, person, RelayBinding("Agent A", mapping_id))
+    token = await _token(factory, person, RelayBinding("Agent A", mapping_id, grant=grant))
     return token, mapping_id
 
 
@@ -784,6 +799,66 @@ async def test_two_live_turns_and_a_replaced_session_stamp_no_requester(
     assert [_sent_meta(r) for r in upstream.requests] == [{}, {}], (
         "ambiguous or stale turns name nobody"
     )
+
+
+async def test_concurrent_turns_by_two_people_in_one_thread_each_name_their_asker(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each call is stamped from the turn that holds its session's grant: a queued
+    turn of the same person beside it does not make the call anonymous."""
+    first = await _person(db_session_factory)
+    second = await _colleague(db_session_factory, first)
+    token_1, _ = await _chat_session(
+        db_session_factory, first, "thread-1", grant="grant-1", message="msg-1"
+    )
+    token_2, _ = await _chat_session(
+        db_session_factory, second, "thread-1", grant="grant-2", message="msg-2"
+    )
+    await _chat_session(db_session_factory, first, "thread-1", message="msg-queued")
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        await _post(client, token_2, _tool_call(requester_platform_user_id="user-1"))
+        await _post(client, token_1, _tool_call(requester_platform_user_id="user-2"))
+    stamped = [_sent_meta(r).get("requester_platform_user_id") for r in upstream.requests]
+    assert stamped == ["user-2", "user-1"], "each call names the person whose turn made it"
+    signer, key = _Upstream(), generate_signing_key()
+    async with _relay(db_session_factory, signer, key) as client:
+        await _call(client, token_1)
+    assert _identity(signer.requests[0], key)["msg"] == "msg-1", "the running turn, not the queued"
+
+
+async def test_the_turn_holding_the_grant_is_named_until_it_lets_go(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session row replaced under a running turn still names that turn; once the
+    turn releases the grant, nobody is named, and a grant never names another account."""
+    person = await _person(db_session_factory)
+    token, mapping_id = await _chat_session(db_session_factory, person, "thread-1", grant="g-1")
+    other = await _colleague(db_session_factory, person)
+    # A credential of another account naming the first person's grant.
+    borrowed = await _token(
+        db_session_factory, other, RelayBinding("Agent A", mapping_id, grant="g-1")
+    )
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        async with db_session_factory() as db, db.begin():
+            await mark_dead(db, id=mapping_id)
+        await _post(client, token, _tool_call())
+        await _post(client, borrowed, _tool_call())
+        async with db_session_factory() as db, db.begin():
+            origin_id = (
+                await db.execute(text("SELECT id FROM turn_origins WHERE chat_session_id = 'g-1'"))
+            ).scalar_one()
+            await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
+        await _post(client, token, _tool_call(requester_platform_user_id="user-1"))
+    held, borrowed_meta, released = (_sent_meta(r) for r in upstream.requests)
+    assert held["requester_platform_user_id"] == "user-1", "the turn holding the grant is named"
+    assert borrowed_meta == {}, "a grant names only its own account's turn"
+    assert released == {}, "a released grant names nobody, and a forged field is dropped"
 
 
 async def test_a_platform_the_server_does_not_understand_is_never_stamped(
