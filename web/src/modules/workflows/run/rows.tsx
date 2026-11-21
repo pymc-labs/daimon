@@ -14,5 +14,6 @@ export const sentRows = (sent: Sent[]): Row[] => sent.map((x, i) => [
 export const answerRows = (a: Answer | null): Row[] => !a ? [] : [
   ["Answered by", `${a.by.name} via ${a.via === "web" ? "the web" : PLATFORM[a.via]}`],
   ["Answer", a.text && <span key="t" className="whitespace-pre-wrap">{a.text}</span>],
+  ...Object.entries(a.labels ?? {}).map(([k, label]): Row => [label, a.values[k] != null && <span key={k} className="whitespace-pre-wrap">{String(a.values[k])}</span>]),
   ["Files", a.files.length > 0 && <div key="f" className="-my-1"><FileList files={a.files} /></div>],
 ]

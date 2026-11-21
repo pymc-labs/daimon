@@ -241,7 +241,7 @@ function decide(c: Ctx, id: string, key: string, n: Node, v: number, at: number,
   const edges = choose(c, id, n, v, route)
   const name = edges[0]?.kind === "next" ? null : edges[0]?.label ?? null
   const detail = by ? `${name === "approve" ? "Approved" : name === "reject" ? "Rejected" : cap(name ?? "Done")} by ${by.name}` : n.event ? "Event arrived" : "Time reached"
-  const answer = by && text != null ? { by, via: "web", text, values: { text }, files: [], at: iso(at) } : null
+  const answer = by && text != null ? { by, via: "web", text, values: {}, files: [], at: iso(at) } : null
   emit(c, at, "wait.decided", key, by?.name ?? "Engine", answer ? `Answered by ${by?.name}` : detail, { decision: name, by, answer })
   emit(c, at, "run.resumed", null, "Engine", "Resumed")
   if (name) emit(c, at, "step.route_chosen", key, by?.name ?? "Engine", `Chose ${name}`, { route: name, slot: edges[0]!.slot })

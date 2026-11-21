@@ -77,7 +77,7 @@ const RECS: Rec[] = [
     question: "Which channel should the Fernhill kickoff notes go to, and who joins?",
     decision: { route: "answer", label: "Answered", by: P.jonas!, at: ago(50), comment: null, selected: null },
     sent: [{ platform: "discord", where: "Thread in #delivery", link: "https://discord.com/channels/000000000000000000/1/3", at: ago(52) }],
-    answer: { by: P.jonas!, via: "discord", text: "#delivery, please. Maya and Priya join; I will send the agenda the day before.", values: { text: "#delivery, please. Maya and Priya join; I will send the agenda the day before." }, files: [], at: ago(50) } },
+    answer: { by: P.jonas!, via: "discord", text: "#delivery, please. Maya and Priya join; I will send the agenda the day before.", values: {}, files: [], at: ago(50) } },
 ]
 const VERB: Record<string, string> = { approve: "Approved", reject: "Rejected", answer: "Answered" }
 const live = new Map<string, Rec>(RECS.map((r) => [r.id, r]))
@@ -222,6 +222,13 @@ export const workflowsInboxHandlers: HttpHandler[] = [
     }
     const live_ = live.get(r.id)!
     live_.decision = { route: b.route, label: VERB[b.route] ?? route.label, by, at: new Date().toISOString(), comment: b.comment ?? null, selected: b.selected ?? null }
+    if (r.kind === "question") {
+      // As `waits.decide_wait` and `run_views.answer_view`: text apart, fields under their titles.
+      const { text, ...values } = b.values ?? {}
+      const fields = Object.entries(r.form?.properties ?? {}).filter(([k]) => k !== "text")
+      const labels = fields.length ? { labels: Object.fromEntries(fields.map(([k, f]) => [k, f.title ?? k])) } : {}
+      live_.answer = { by, via: "web", text: typeof text === "string" ? text : null, values, files: [], at: live_.decision.at, ...labels }
+    }
     const run_ = r.run && findRun(r.run.id)
     if (run_ && r.step && r.kind === "approval") decideWait(run_, r.step, b.route, by)
     return HttpResponse.json(item(live_))

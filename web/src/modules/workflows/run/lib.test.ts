@@ -5,6 +5,7 @@ import { SPECS } from "@/mock/workflows-specs"
 import { edgeStates, nodeRuns, project } from "../runs"
 import type { RunDetail } from "../types"
 import { listeningAt, nodeOf, pendingNodes, until } from "./lib"
+import { answerRows } from "./rows"
 
 const T = Date.parse("2026-11-13T09:00:00Z")
 const maya = { id: "p_maya", name: "Maya Lindqvist" }
@@ -56,5 +57,15 @@ describe("pendingNodes", () => {
     const d = detail(T + 365 * 86_400_000)
     expect(d.status).toBe("succeeded")
     expect(pendingNodes(d.spec, d, overlay(d))).toEqual([])
+  })
+})
+
+describe("answerRows", () => {
+  it("shows a question's fields under their titles, in the order asked", () => {
+    const rows = answerRows({
+      by: maya, via: "web", text: null, values: { note: "Monday", channel: "#leads" }, files: [], at: "2026-11-13T09:00:00Z",
+      labels: { channel: "Channel", note: "Note" },
+    })
+    expect(rows.filter(([, v]) => v).map(([k]) => k)).toEqual(["Answered by", "Channel", "Note"])
   })
 })

@@ -144,7 +144,11 @@ export type WaitKind = "approval" | "question" | "timer" | "event"
 export type FileRef = { name: string; size: number; url: string }
 /** Where an ask was posted: a direct message or a thread, with a link when the platform gives one. */
 export type Sent = { platform: Platform; where: string; link: string | null; at: string }
-export type Answer = { by: Person; via: "web" | Platform; text: string | null; values: Record<string, unknown>; files: FileRef[]; at: string }
+export type Answer = {
+  by: Person; via: "web" | Platform; text: string | null; values: Record<string, unknown>; files: FileRef[]; at: string
+  /** A question's fields by name, in the order asked: their values show under these labels. */
+  labels?: Record<string, string>
+}
 export type RunWait = {
   /** The wait's id: the inbox item to decide it by. */
   id: string

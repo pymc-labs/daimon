@@ -190,7 +190,7 @@ function Detail({ d }: { d: InboxDetail }) {
           ["Expires", d.expires_at && !done && `In ${until(d.expires_at)}`],
           ...sentRows(d.sent),
           ["Attached", d.attachments.length > 0 && <div key="a" className="-my-1"><FileList files={d.attachments} /></div>],
-          ...(d.answer?.text || d.answer?.files.length ? answerRows(d.answer) : []),
+          ...(d.answer?.text || d.answer?.files.length || d.answer?.labels ? answerRows(d.answer) : []),
         ]} />
       </PanelSection>
       {d.question && <PanelSection title="Question"><p className="text-sm">{d.question}</p></PanelSection>}

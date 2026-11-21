@@ -31,12 +31,13 @@ describe("project", () => {
     const s = project(run(SPECS.lead).events)
     expect(s.lanes.map((l) => l.id)).toEqual(["main:sales"])
     expect(s.steps.filter((x) => x.lane).map((x) => x.key)).toEqual(["research", "draft_reply"])
-    const at = "2026-11-13T09:00:00Z"
+    const ev = (seq: number, type: RunEvent["type"], data: RunEvent["data"]): RunEvent =>
+      ({ seq, at: "2026-11-13T09:00:00Z", type, step: "a", actor: "Engine", detail: "", data, hash: "" })
     const brief = project([
-      { seq: 1, at, type: "step.ready", step: "a", actor: "Engine", detail: "", data: { node: "a", visit: 1 } },
-      { seq: 2, at, type: "step.started", step: "a", actor: "Engine", detail: "", data: { attempt: 1, lane: "main:x", agent: "x", session: null } },
-      { seq: 3, at, type: "step.brief_sent", step: "a", actor: "Engine", detail: "", data: { session: "ses_1" } },
-    ] as RunEvent[])
+      ev(1, "step.ready", { node: "a", visit: 1 }),
+      ev(2, "step.started", { attempt: 1, lane: "main:x", agent: "x", session: null }),
+      ev(3, "step.brief_sent", { session: "ses_1" }),
+    ])
     expect(brief.lanes).toEqual([{ id: "main:x", agent: "x", session: "ses_1" }])
   })
 
