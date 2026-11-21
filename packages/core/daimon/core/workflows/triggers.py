@@ -177,6 +177,10 @@ async def _over_cap(
     return True
 
 
+#: Trigger kinds behind their own feature flag (`WorkflowFeatures` field).
+_FEATURE_OF: Final = {"poll": "polls", "mention": "mentions"}
+
+
 async def _start_one(
     sm: Sessions,
     settings: Settings,
@@ -190,18 +194,37 @@ async def _start_one(
     if found is None:
         return Refusal("not_published", "No live version")
     spec, run_as = found
-    if trigger.kind == "poll" and not event.test:
+    if (flag := _FEATURE_OF.get(trigger.kind)) and not event.test:
         features = await gate.features_at(sm, settings, trigger.tenant_id)
-        if features is None or not (features.enabled and features.polls):
-            return "polls_off"
+        if features is None or not (features.enabled and getattr(features, flag)):
+            return f"{flag}_off"
     config = _trigger_spec(spec, trigger.trigger_key)
     if not config or config.get("kind") != trigger.kind:
         return Refusal("not_found", "This trigger is not in the version")
     inputs = event.inputs or {}
     depth = 0
+    payload: dict[str, JsonValue] = event.payload or {}
+    if trigger.kind == "mention":
+        # The author, who `claim_mention` checked may run it; the chat message it came from.
+        run_as = uuid.UUID(str(payload["run_as"])) if payload.get("run_as") else run_as
+        context: dict[str, JsonValue] = {
+            "message": payload.get("message"),
+            "thread": payload.get("thread"),
+            "trigger": {"id": trigger.trigger_key},
+        }
+        try:
+            if not passes(config.get("match"), context, now=now):
+                return "no_match"
+            mapping = config.get("inputs")
+            inputs = (
+                {"message": context["message"], "thread": context["thread"]}
+                if mapping is None
+                else map_inputs(mapping, context, now=now)
+            )
+        except MappingError as err:
+            return Refusal("invalid_inputs", str(err))
     if trigger.kind == "event":
-        payload: dict[str, JsonValue] = event.payload or {}
-        context: dict[str, JsonValue] = {"event": payload, "trigger": {"id": trigger.trigger_key}}
+        context = {"event": payload, "trigger": {"id": trigger.trigger_key}}
         try:
             if not passes(config.get("match"), context, now=now):
                 return "no_match"
@@ -214,8 +237,10 @@ async def _start_one(
         held = await _hold(session, spec, event, inputs, now)
     except ExpressionError as err:
         return Refusal("invalid_inputs", f"The concurrency key failed: {err}")
-    if held is not None:
-        return None if held == "later" else held
+    if held == "later" and trigger.kind != "mention":
+        return None
+    if held is not None:  # a mention answers now: one that must wait stays chat
+        return "held" if held == "later" else held
     if (
         not event.test
         and trigger.kind in UNTRUSTED_TRIGGERS
@@ -242,27 +267,33 @@ async def _start_one(
             inputs=inputs,
             mode="test" if event.test else "live",
             untrusted_inputs=trigger.kind in UNTRUSTED_TRIGGERS,
+            origin=_origin(payload) if trigger.kind == "mention" else None,
         ),
         now=now,
     )
 
 
-async def _settle_event(
+def _origin(payload: Mapping[str, JsonValue]) -> dict[str, Any] | None:
+    origin = payload.get("origin")
+    return dict(origin) if isinstance(origin, dict) else None
+
+
+async def settle_event(
     sm: Sessions,
     settings: Settings,
     session: AsyncSession,
     event: EventRow,
     trigger: TriggerRow,
     now: datetime,
-) -> bool:
-    """Start one event's run and mark the event; True when a run started. A run already
+) -> RunRow | None:
+    """Start one event's run and mark the event; the run when one started. A run already
     started for it (the mark was lost to a crash) is marked, not started again."""
     if (run_id := await workflow_runs.run_of_event(session, event.id)) is not None:
         await store.mark_event(session, event.id, status="started", run_id=run_id)
-        return False
+        return None
     result = await _start_one(sm, settings, session, event, trigger, now)
     if result is None:
-        return False
+        return None
     if isinstance(result, str):
         await store.mark_event(session, event.id, status="skipped", reason=result)
     elif isinstance(result, Refusal):
@@ -270,8 +301,8 @@ async def _settle_event(
         await store.mark_event(session, event.id, status=status, reason=result.reason)
     else:
         await store.mark_event(session, event.id, status="started", run_id=result.id)
-        return True
-    return False
+        return result
+    return None
 
 
 async def start_from_events(sm: Sessions, settings: Settings, *, now: datetime) -> int:
@@ -285,7 +316,8 @@ async def start_from_events(sm: Sessions, settings: Settings, *, now: datetime) 
         for event, trigger in await store.claim_accepted_events(session, limit=_BATCH):
             try:
                 async with session.begin_nested():
-                    started += await _settle_event(sm, settings, session, event, trigger, now)
+                    run = await settle_event(sm, settings, session, event, trigger, now)
+                    started += run is not None
             except Exception as err:  # named boundary: one event never stops the shared loop
                 log.exception(
                     "workflow_event.start_failed", event_id=str(event.id), error=type(err).__name__

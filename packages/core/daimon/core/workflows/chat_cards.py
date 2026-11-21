@@ -89,7 +89,7 @@ _TRIGGER_WORDS: Final[dict[str, str]] = {
     "webhook": "from a webhook",
     "event": "when another workflow finishes",
     "call": "from another workflow",
-    "mention": "when someone posts in a channel",
+    "mention": "when someone tags Daimon",
     "poll": "when something changes in a tool",
 }
 _GRANT_WORDS: Final[dict[str, str]] = {

@@ -61,7 +61,7 @@ def test_every_trigger_path_starts_runs_through_start_run_and_ingress_starts_non
     assert callers == {
         "service.py:start",  # manual and test runs, from the web, MCP and chat cards
         "service.py:rerun",
-        "triggers.py:_start_one",  # schedule slots, webhook deliveries, finished runs
+        "triggers.py:_start_one",  # schedule slots, webhook deliveries, finished runs, mentions
         "triggers.py:start_called",  # call triggers
         "webhooks.py:replay",
         "workflows.py:run",  # the test helper in daimon.testing

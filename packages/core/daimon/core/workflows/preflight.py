@@ -104,6 +104,10 @@ def uses_polls(spec: Spec) -> bool:
     )
 
 
+def uses_mentions(spec: Spec) -> bool:
+    return any(t.kind == "mention" for t in spec.triggers or [])
+
+
 def spend_user_id(person: SpendPerson, account_id: uuid.UUID) -> str:
     """The id the run-as person's step spend is gated and recorded under. An allowance
     counts what they spent under any of their ids, so any one of them serves."""
@@ -137,6 +141,10 @@ async def check(
             return Refusal("code_off", "Code steps are off here. Ask an admin to turn them on.")
         if not features.polls and uses_polls(place.spec):
             return Refusal("polls_off", "Polls are off here. Ask an admin to turn them on.")
+        if not features.mentions and uses_mentions(place.spec):
+            return Refusal(
+                "mentions_off", "Mention triggers are off here. Ask an admin to turn them on."
+            )
         if channel is not None:
             provider = await channel_provider(
                 session, tenant_id=tenant.id, platform=tenant.platform, channel_id=channel

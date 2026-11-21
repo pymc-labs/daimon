@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from daimon.core._models import (
     Tenant,
@@ -162,6 +162,9 @@ async def sync_live(
                 values |= {"state": kept, "enabled": True, "next_fire_at": now}
         else:
             values["next_fire_at"] = None
+        if kind == "mention":
+            channels = cast("list[object] | None", spec.get("channels"))
+            values["places"] = [str(c) for c in channels] if channels else None
         if old is None:
             await session.execute(
                 insert(WorkflowTrigger).values(
@@ -547,13 +550,15 @@ async def get_event(
 
 
 async def claim_accepted_events(
-    session: AsyncSession, *, limit: int
+    session: AsyncSession, *, limit: int, event_id: uuid.UUID | None = None
 ) -> list[tuple[EventRow, TriggerRow]]:
-    """Accepted events with their triggers, locked SKIP LOCKED, oldest first."""
+    """Accepted events (or just `event_id`) with their triggers, locked SKIP LOCKED, oldest
+    first."""
+    one = () if event_id is None else (WorkflowTriggerEvent.id == event_id,)
     rows = await session.execute(
         select(WorkflowTriggerEvent, WorkflowTrigger)
         .join(WorkflowTrigger, WorkflowTrigger.id == WorkflowTriggerEvent.trigger_id)
-        .where(WorkflowTriggerEvent.status == "accepted")
+        .where(WorkflowTriggerEvent.status == "accepted", *one)
         .order_by(WorkflowTriggerEvent.received_at)
         .limit(limit)
         .with_for_update(of=WorkflowTriggerEvent, skip_locked=True)
@@ -624,6 +629,30 @@ async def event_triggers_for(
             WorkflowTrigger.config["spec"]["source"].astext == source,
             Workflow.status == "active",
         )
+    )
+    return [TriggerRow.model_validate(r) for r in rows]
+
+
+async def mention_triggers_at(
+    session: AsyncSession, *, tenant_id: uuid.UUID, places: Sequence[str]
+) -> list[TriggerRow]:
+    """Live mention triggers of the workspace's active workflows that listen at one of
+    `places` (or anywhere), the oldest published first."""
+    rows = await session.scalars(
+        select(WorkflowTrigger)
+        .join(Workflow, Workflow.id == WorkflowTrigger.workflow_id)
+        .where(
+            WorkflowTrigger.tenant_id == tenant_id,
+            WorkflowTrigger.kind == "mention",
+            WorkflowTrigger.enabled.is_(True),
+            WorkflowTrigger.config.has_key("spec"),
+            Workflow.status == "active",
+            or_(
+                WorkflowTrigger.places.is_(None),
+                WorkflowTrigger.places.overlap(list(places)),
+            ),
+        )
+        .order_by(WorkflowTrigger.created_at, WorkflowTrigger.id)
     )
     return [TriggerRow.model_validate(r) for r in rows]
 

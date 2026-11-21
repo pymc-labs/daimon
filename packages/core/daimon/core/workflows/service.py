@@ -34,6 +34,7 @@ from daimon.core.workflows.preflight import (
     Refusal,
     member_reads,
     private_reach,
+    uses_mentions,
     uses_polls,
 )
 from daimon.core.workflows.runs import Sessions
@@ -514,10 +515,14 @@ async def publish(
             first = validation.errors[0].message
             raise Invalid(f"Fix {len(validation.errors)} problem(s) before publishing: {first}")
         parsed = parse_spec(workflow.draft_spec)
-        if uses_polls(parsed):
+        if uses_polls(parsed) or uses_mentions(parsed):
             features = await gate.features_at(env.sm, env.settings, workflow.tenant_id)
-            if features is None or not features.polls:
+            if uses_polls(parsed) and (features is None or not features.polls):
                 raise Off("Polls are off in this workspace. Ask an admin to turn them on.")
+            if uses_mentions(parsed) and (features is None or not features.mentions):
+                raise Off(
+                    "Mention triggers are off in this workspace. Ask an admin to turn them on."
+                )
         carried, new = await _held_grants(session, workflow, parsed, validation.grants)
         if new and not env.who.admin:
             raise Refused(
