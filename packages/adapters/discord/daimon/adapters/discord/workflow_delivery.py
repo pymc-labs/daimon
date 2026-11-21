@@ -32,6 +32,7 @@ from daimon.core.output_delivery import DeliverableFile
 from daimon.core.routine_files import deliver_routine_files
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.workflow_deliveries import DeliveryRow
+from daimon.core.web_links import WebAt
 from daimon.core.workflows import asks
 from daimon.core.workflows.delivery import (
     NOTICE_TITLE,
@@ -59,6 +60,7 @@ def make_discord_workflow_poster(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     settings: Settings,
+    links: WebAt,
     fetch_channel: ChannelFetcher,
     open_dm: DmOpener,
     membership_resolver: MembershipResolver | None = None,
@@ -94,7 +96,7 @@ def make_discord_workflow_poster(
             sessionmaker,
             row,
             platform="discord",
-            web=settings.web,
+            links=links,
             membership_resolver=membership_resolver,
         )
 

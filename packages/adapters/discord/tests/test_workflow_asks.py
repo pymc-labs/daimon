@@ -66,10 +66,14 @@ async def _deliver(world: World, harness: DiscordSurfaceHarness, monkeypatch: An
     async def no_routine(row: RoutineRow) -> DeliveryOutcome:
         raise AssertionError("no routine is due")
 
+    async def no_links(*_: object) -> None:
+        return None
+
     monkeypatch.setattr(workflow_delivery, "creator_may_post", may_post)
     poster = workflow_delivery.make_discord_workflow_poster(
         world.sm,
         settings=world.settings,
+        links=no_links,
         fetch_channel=fetch,
         open_dm=open_dm,
         membership_resolver=CachedMembershipResolver(membership),

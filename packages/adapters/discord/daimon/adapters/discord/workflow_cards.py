@@ -7,15 +7,19 @@ only reads the press, shows the answer and posts or edits the cards.
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls.view import build_card_view
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import Settings
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls import PostedCard
+from daimon.core.web_links import Assignment, TenantLinks, WebAt, links_at, panel_links
 from daimon.core.workflows import chat_cards
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,7 +42,40 @@ def _presser(interaction: discord.Interaction) -> Presser | None:
     if interaction.guild_id is None:
         return None
     tenant = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
-    return Presser(tenant, "discord", str(interaction.user.id))
+    channel = interaction.channel
+    in_thread = isinstance(channel, discord.Thread)
+    return Presser(
+        tenant,
+        "discord",
+        str(interaction.user.id),
+        channel_id=str(channel.parent_id) if in_thread else str(interaction.channel_id),
+        thread_id=str(channel.id) if in_thread else None,
+    )
+
+
+def web_at(runtime: DiscordRuntime, fetch_channel: ChannelFetcher) -> WebAt:
+    """The web links a workflow card may offer at a channel or thread, where `web_awareness`
+    is On there. A channel id that is a thread resolves to its parent channel."""
+
+    async def at(
+        tenant_id: uuid.UUID, channel_id: str | None, thread_id: str | None
+    ) -> TenantLinks | None:
+        if thread_id is None and channel_id is not None and channel_id.isdigit():
+            try:
+                found = await fetch_channel(int(channel_id))
+            except discord.HTTPException:
+                found = None  # Unknown: treated as a plain channel.
+            if isinstance(found, discord.Thread):
+                channel_id, thread_id = str(found.parent_id), channel_id
+        return await links_at(
+            runtime.sessionmaker,
+            runtime.settings,
+            FeaturePlace.of(tenant_id, "discord", channel_id, thread_id),
+            panel_links(runtime.settings.web, tenant_id, admin=False),
+            Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
+        )
+
+    return at
 
 
 def card_text(components: Sequence[Any]) -> str:
@@ -134,7 +171,13 @@ class RunFormModal(discord.ui.Modal):
 
         async def run(**io: Any) -> None:  # noqa: ANN401 - post and edit
             await chat_cards.open_run(
-                env, form.workflow_id, inputs, test=form.test, name=form.title, **io
+                env,
+                form.workflow_id,
+                inputs,
+                test=form.test,
+                name=form.title,
+                links=web_at(runtime, bot._channel_by_id),  # pyright: ignore[reportPrivateUsage]
+                **io,
             )
 
         await _open(interaction, run)
@@ -175,6 +218,7 @@ class WorkflowCardControl(
                 presser=presser,
                 custom_id=self.item.custom_id or "",
                 place=ChatPlace("discord", str(message.channel.id), str(message.id)),
+                links=web_at(runtime, bot._channel_by_id),  # pyright: ignore[reportPrivateUsage]
                 card_text=card_text(message.components),
                 form_limit=FORM_LIMIT,
             )
@@ -195,7 +239,13 @@ class WorkflowCardControl(
 
             async def run(**io: Any) -> str | None:  # noqa: ANN401 - post and edit
                 return await chat_cards.open_pressed(
-                    runtime.sessionmaker, runtime.settings, presser, workflow_id, test=test, **io
+                    runtime.sessionmaker,
+                    runtime.settings,
+                    presser,
+                    workflow_id,
+                    test=test,
+                    links=web_at(runtime, bot._channel_by_id),  # pyright: ignore[reportPrivateUsage]
+                    **io,
                 )
 
             await _open(interaction, run)
@@ -220,7 +270,11 @@ class WorkflowPicker(discord.ui.Select[discord.ui.LayoutView]):
             return
         runtime = bot.runtime
         card = await chat_cards.pick(
-            runtime.sessionmaker, runtime.settings, presser, self.values[0]
+            runtime.sessionmaker,
+            runtime.settings,
+            presser,
+            self.values[0],
+            web_at(runtime, bot._channel_by_id),  # pyright: ignore[reportPrivateUsage]
         )
         await interaction.response.edit_message(view=build_card_view(card), allowed_mentions=_NONE)
 
@@ -250,5 +304,6 @@ __all__ = [
     "WorkflowCardControl",
     "card_editor",
     "card_text",
+    "web_at",
     "workflows_panel",
 ]

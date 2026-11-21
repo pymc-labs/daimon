@@ -101,7 +101,7 @@ from daimon.adapters.discord.typed_stop import (
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.adapters.discord.workflow_asks import AskButton
-from daimon.adapters.discord.workflow_cards import card_editor
+from daimon.adapters.discord.workflow_cards import card_editor, web_at
 from daimon.adapters.discord.workflow_delivery import make_discord_workflow_poster
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
@@ -1292,6 +1292,7 @@ class DaimonBot(commands.Bot):
                     workflow=make_discord_workflow_poster(
                         self.runtime.sessionmaker,
                         settings=self.runtime.settings,
+                        links=web_at(self.runtime, self._channel_by_id),
                         fetch_channel=self._channel_by_id,
                         open_dm=self.open_member_dm,
                         membership_resolver=self.membership_resolver,
@@ -1299,8 +1300,8 @@ class DaimonBot(commands.Bot):
                     ),
                     run_cards=chat_cards.follower(
                         self.runtime.sessionmaker,
-                        self.runtime.settings,
                         platform="discord",
+                        links=web_at(self.runtime, self._channel_by_id),
                         edit=lambda _, place, card: card_editor(self._channel_by_id, place, card),
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
