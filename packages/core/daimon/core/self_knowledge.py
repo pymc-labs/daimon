@@ -9,13 +9,14 @@ served: an operator may mount their own, holding other agents' prompts.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-from typing import Final
+from typing import Concatenate, Final
 
 SELF_KNOWLEDGE_HINT: Final = (
     "This release's docs and source can be read: search_tools finds read_daimon_docs, "
@@ -71,6 +72,28 @@ class SelfKnowledgeError(ValueError):
     """A request refused; its text is for the agent."""
 
 
+_UNREADABLE: Final = "That can't be read here."
+
+
+def _refusing[**P, T](
+    method: Callable[Concatenate[Library, P], T],
+) -> Callable[Concatenate[Library, P], T]:
+    """A `Library` call that turns what a bad path or an odd file raises (a NUL byte, a name
+    too long, a file that is gone, unreadable or not UTF-8) into `SelfKnowledgeError`, so no
+    server path or raw error reaches the agent."""
+
+    @functools.wraps(method)
+    def call(self: Library, *args: P.args, **kwargs: P.kwargs) -> T:
+        try:
+            return method(self, *args, **kwargs)
+        except SelfKnowledgeError:
+            raise
+        except (OSError, ValueError) as exc:  # UnicodeDecodeError is a ValueError
+            raise SelfKnowledgeError(_UNREADABLE) from exc
+
+    return call
+
+
 def visible_text(text: str, *, web: bool) -> str | None:
     """`text` as a reader here sees it: None for a web page (front matter `knowledge: web`)
     while `web` is False, else without its marker lines and, while False, the web blocks
@@ -117,11 +140,16 @@ def parse_page_index(text: str) -> tuple[str, tuple[IndexEntry, ...]]:
     return summary, tuple(entries)
 
 
+def _named(text: str) -> str:
+    """`text` as a short quoted name for a refusal."""
+    return repr(text if len(text) <= 60 else text[:60] + "...")
+
+
 def _parts(relative: str) -> tuple[str, ...]:
     """`relative`'s parts; refuses an absolute path, `..` and any dot-named part."""
     path = PurePosixPath(relative.strip().replace("\\", "/"))
     if path.is_absolute() or any(part.startswith(".") for part in path.parts):
-        raise SelfKnowledgeError(f"{relative!r} is outside what can be read.")
+        raise SelfKnowledgeError(f"{_named(relative)} is outside what can be read.")
     return tuple(part for part in path.parts if part)
 
 
@@ -132,7 +160,7 @@ def _inside(root: Path, parts: tuple[str, ...]) -> Path:
     if not target.is_relative_to(base) or any(
         part.startswith(".") for part in target.relative_to(base).parts
     ):
-        raise SelfKnowledgeError(f"{'/'.join(parts)!r} is outside what can be read.")
+        raise SelfKnowledgeError(f"{_named('/'.join(parts))} is outside what can be read.")
     return target
 
 
@@ -194,7 +222,10 @@ class Library:
         path = _inside(self.docs, parts)
         if path.suffix != ".md" or not path.is_file():
             return None
-        return visible_text(path.read_text(encoding="utf-8"), web=self.web)
+        try:
+            return visible_text(path.read_text(encoding="utf-8"), web=self.web)
+        except (OSError, ValueError):  # unreadable or not UTF-8: as if the page were not there
+            return None
 
     def _visible(self, page: str) -> str | None:
         """`_page`, None too for a page outside what can be read (an index entry's)."""
@@ -211,13 +242,14 @@ class Library:
             if (text := self._visible(relative)) is not None:
                 yield relative, text
 
+    @_refusing
     def read_docs(self, page: str = "", start_line: int = 1) -> str:
         """A page from `start_line`; with no page, how Daimon works and every page."""
         if page.strip():
             text = self._page(page)
             if text is None:
                 raise SelfKnowledgeError(
-                    f"There is no page {page!r}. Read with no page for the list."
+                    f"There is no page {_named(page)}. Read with no page for the list."
                 )
             return f"{self.provenance}\n\n{page}\n\n{_window(text, start_line, numbered=False)}"
         index = self.docs / PAGE_INDEX
@@ -245,6 +277,7 @@ class Library:
             listed.append(f"- {entry.page} ({entry.title}){about}")
         return "\n\n".join([*head, "\n".join(listed)])
 
+    @_refusing
     def search_docs(self, query: str) -> str:
         needle = _query(query)
         hits = (
@@ -264,9 +297,9 @@ class Library:
         if (relative.parts and relative.parts[0] != SOURCE_DIR) or not self._shown(
             PurePosixPath(relative.as_posix())
         ):
-            raise SelfKnowledgeError(f"There is no {path!r} here.")
+            raise SelfKnowledgeError(f"There is no {_named(path)} here.")
         if not target.exists():
-            raise SelfKnowledgeError(f"There is no {path!r} here.")
+            raise SelfKnowledgeError(f"There is no {_named(path)} here.")
         return target, relative.parts
 
     def _shown(self, relative: PurePosixPath) -> bool:
@@ -277,6 +310,7 @@ class Library:
             or not any(fnmatchcase(path, pattern) for pattern in WEB_SOURCE)
         )
 
+    @_refusing
     def read_source(self, path: str = "", start_line: int = 1) -> str:
         """A text file from `start_line`, or a directory's entries."""
         target, parts = self._source_path(path)
@@ -300,6 +334,7 @@ class Library:
             return False
         return child.is_dir() or child.suffix in TEXT_SUFFIXES
 
+    @_refusing
     def search_source(self, query: str, path: str = "") -> str:
         needle = _query(query)
         target, parts = self._source_path(path)
@@ -355,12 +390,15 @@ def _title(text: str) -> str | None:
 
 
 def _source_text(path: Path) -> str:
-    if path.suffix not in TEXT_SUFFIXES or path.stat().st_size > MAX_FILE_BYTES:
-        raise SelfKnowledgeError(f"{path.name} is not a text file that can be read here.")
+    refusal = SelfKnowledgeError(f"{_named(path.name)} is not a text file that can be read here.")
     try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise SelfKnowledgeError(f"{path.name} is not a text file that can be read here.") from exc
+        fits = path.suffix in TEXT_SUFFIXES and path.stat().st_size <= MAX_FILE_BYTES
+        text = path.read_text(encoding="utf-8") if fits else None
+    except (OSError, ValueError) as exc:  # gone, unreadable or not UTF-8
+        raise refusal from exc
+    if text is None:
+        raise refusal
+    return text
 
 
 def _lines(path: Path) -> Iterator[tuple[int, str]]:

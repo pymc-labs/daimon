@@ -173,3 +173,25 @@ def test_self_knowledge_off_hides_and_refuses_its_read_only_tools() -> None:
     }
     assert effects == {"read"}, "every tool reads"
     assert all(tool in SELF_KNOWLEDGE_HINT for tool in SELF_KNOWLEDGE_TOOLS), "the hint names them"
+
+
+def test_bad_input_is_refused_in_plain_words_without_server_paths(tmp_path: Path) -> None:
+    library = _library(tmp_path, web=True)
+    (library.source / "packages/core/binary.py").write_bytes(b"\xff\xfe needle\n")
+    (library.docs / "binary.md").write_bytes(b"\xff\xfe")
+    calls = [
+        lambda: library.read_docs("a\x00b.md"),
+        lambda: library.read_source("packages/core/a\x00b.py"),
+        lambda: library.read_source("packages/" + "x" * 5000),
+        lambda: library.read_docs("x" * 5000 + ".md"),
+        lambda: library.read_source("packages/core/binary.py"),
+        lambda: library.search_source("needle", "packages/core/a\x00b"),
+        lambda: library.search_source("needle", "packages/" + "x" * 5000),
+    ]
+    for call in calls:
+        with pytest.raises(SelfKnowledgeError) as refused:
+            call()
+        assert str(tmp_path) not in str(refused.value), "no server path"
+        assert len(str(refused.value)) < 200, "no echoed input"
+    assert "binary.py" not in library.search_source("needle"), "an undecodable file is skipped"
+    assert "binary.md" not in library.search_docs("Install"), "and so is an undecodable page"
