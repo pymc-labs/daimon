@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Discord answers read the same in DMs and threads, and agents can have a
+  display name.** DM turns now get the working, done and model reactions, 👍/👎
+  feedback, voice messages and the card's model footer. Pings are joined with a
+  space and never repeat a mention the model wrote; stop and error cards say
+  what happened and for how long. Tables drop their placeholder and size columns
+  to their content. New settings, each defaulting to today's behaviour: Status
+  reactions, Lock reaction, Text before tool calls, Thread title style, Thread
+  archive time, and an agent's Display name, shown wherever people see its name.
+
 - **Watches can poll a signed-identity relay server.** List a tool in
   `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its
   `<root>/mcp-identity/<name>` URL. Each poll mints the watch owner a

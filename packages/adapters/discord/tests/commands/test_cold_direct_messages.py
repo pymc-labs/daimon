@@ -1389,11 +1389,19 @@ async def test_a_reply_to_an_earlier_message_carries_that_message(db_session_fac
     await cog.cog_unload()
 
 
-@pytest.mark.parametrize("kind", ["nothing", "voice"])
-async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch, kind):
+async def test_a_dm_voice_message_reaches_the_turn_as_an_attachment(
+    db_session_factory, monkeypatch
+):
     cog, _, _, reply = await setup(db_session_factory, monkeypatch)
-    files = [attachment("voice.ogg", voice=True)] if kind == "voice" else []
-    msg = dm_message(content="", attachments=files)
+    monkeypatch.setattr(module, "prepare_attachments", AsyncMock(return_value=("voice", None)))
+    await cog.on_message(dm_message(content="", attachments=[attachment("voice.ogg", voice=True)]))
+    assert reply.await_args.kwargs["history_notes"] == ["[attachment: voice.ogg]"]
+    await cog.cog_unload()
+
+
+async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    msg = dm_message(content="", attachments=[])
     await cog.on_message(msg)
     assert [sent_text(call) for call in msg.channel.send.await_args_list][
         -1

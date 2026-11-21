@@ -17,10 +17,22 @@ async def test_wide_table_is_a_readable_bounded_png():
     assert len(files) == 1
     image = Image.open(io.BytesIO(files[0].fp.read()))
     assert image.format == "PNG"
-    assert image.width == 2400
+    assert image.width <= 2400
     assert image.height >= 98
     assert image.getpixel((0, 0)) == (12, 31, 64)
-    assert "table-1.png" in text
+    assert "table-1.png" not in text and "Table attached" not in text
+
+
+async def test_small_table_is_sized_to_its_content():
+    _, files = await render_discord_tables("| a | b |\n| --- | --- |\n| 1 | 2 |", enabled=True)
+    assert Image.open(io.BytesIO(files[0].fp.read())).width < 400
+
+
+def test_numeric_cells_align_right_in_left_columns():
+    assert tables._aligned("left", "$1,234.50", header=False) == "right"
+    assert tables._aligned("left", "12%", header=False) == "right"
+    assert tables._aligned("left", "Total", header=False) == "left"
+    assert tables._aligned("left", "123", header=True) == "left"
 
 
 async def test_non_table_text_is_unchanged():
