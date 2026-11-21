@@ -141,8 +141,10 @@ async def _view(
     session: AsyncSession,
     workflow: WorkflowRow,
     access: Sequence[WorkflowAccessRow] | None = None,
+    *,
+    budget: float,
 ) -> views.Workflow:
-    budget = await _budget(env)
+    """`budget` is read before the transaction opens: its read takes a connection of its own."""
     return await views.workflow_view(
         session, workflow, env.who, now=env.now, default_budget_usd=budget, access=access
     )
@@ -179,9 +181,10 @@ async def list_workflows(env: Env) -> list[views.WorkflowSummary]:
 
 
 async def get(env: Env, workflow_id: uuid.UUID) -> views.Workflow:
+    budget = await _budget(env)
     async with env.sm() as session:
         workflow, access, _ = await _load(session, env, workflow_id)
-        return await _view(env, session, workflow, access=access)
+        return await _view(env, session, workflow, access=access, budget=budget)
 
 
 BLANK: dict[str, Any] = {
@@ -209,6 +212,7 @@ async def create(env: Env, body: NewWorkflow, defaults_root: Path) -> views.Work
             except exchange.NotAWorkflow as err:
                 raise Invalid(str(err)) from err
     columns = _sync(spec)
+    budget = await _budget(env)
     async with env.sm.begin() as session:
         workflow = await store.create_workflow(
             session,
@@ -219,10 +223,11 @@ async def create(env: Env, body: NewWorkflow, defaults_root: Path) -> views.Work
             home_channel_id=columns.get("home_channel_id"),
             visibility=columns.get("visibility", "private"),
         )
-        return await _view(env, session, workflow)
+        return await _view(env, session, workflow, budget=budget)
 
 
 async def patch(env: Env, workflow_id: uuid.UUID, body: Patch) -> views.Workflow:
+    budget = await _budget(env)
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
         given = body.model_fields_set
@@ -263,7 +268,7 @@ async def patch(env: Env, workflow_id: uuid.UUID, body: Patch) -> views.Workflow
         if body.runners is not None:
             await _set_role(session, workflow, "runner", body.runners, env.who.account_id)
         fresh, access, _ = await _load(session, env, workflow_id)
-        return await _view(env, session, fresh, access=access)
+        return await _view(env, session, fresh, access=access, budget=budget)
 
 
 async def _set_role(
@@ -470,6 +475,7 @@ async def restore(env: Env, workflow_id: uuid.UUID, number: int) -> views.Draft:
 async def publish(
     env: Env, workflow_id: uuid.UUID, note: str, *, source: Literal["web", "chat"] = "web"
 ) -> views.Workflow:
+    budget = await _budget(env)
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
         await _need(session, workflow, rights.edit, "the owner or an editor")
@@ -527,7 +533,7 @@ async def publish(
             session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, **changes
         )
         fresh, access, _ = await _load(session, env, workflow_id)
-        view = await _view(env, session, fresh, access=access)
+        view = await _view(env, session, fresh, access=access, budget=budget)
         return view
 
 
@@ -595,6 +601,7 @@ async def _held_grants(
 
 
 async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.Workflow:
+    budget = await _budget(env)
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
         await _need(session, workflow, rights.edit, "the owner or an editor")
@@ -619,7 +626,7 @@ async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.
             requested_by=env.who.account_id,
         )
         fresh, access, _ = await _load(session, env, workflow_id)
-        return await _view(env, session, fresh, access=access)
+        return await _view(env, session, fresh, access=access, budget=budget)
 
 
 async def decide_publish_request(
