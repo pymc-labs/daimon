@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from daimon.adapters.scheduler.workflows import WorkflowEngine, run_once
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.stores import tenants, workflow_runs, workflows
 from daimon.core.stores.workflow_run_events import list_events
-from daimon.core.workflows import engine, gate, runs
+from daimon.core.workflows import engine, gate, polls, runs
 from daimon.core.workflows.ledger import verify
 from daimon.core.workflows.preflight import Refusal
 from daimon.testing.factories import make_account, make_tenant
-from pydantic import PostgresDsn, SecretStr
+from pydantic import JsonValue, PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 11, 20, 12, tzinfo=UTC)
@@ -100,3 +101,87 @@ async def test_the_loops_stop_runs_without_spending_while_workflows_are_off(
     assert not called, "no step spends while workflows are off"
     assert held is not None and held.status == "failed", held
     assert held.failure_message == gate.OFF, "the run says why it stopped"
+
+
+class _Rows:
+    """A poll client answering one row, then two; or crashing."""
+
+    def __init__(self, *, crash: bool = False) -> None:
+        self.crash, self.calls = crash, 0
+
+    async def read(
+        self, tenant_id: uuid.UUID, agent: str, tool: str, args: dict[str, JsonValue], /
+    ) -> polls.Polled:
+        self.calls += 1
+        if self.crash:
+            raise RuntimeError("boom")
+        rows: list[JsonValue] = [{"id": "a"}]
+        if self.calls > 1:
+            rows.append({"id": "b"})
+        return polls.Polled({"results": rows}, "d1")
+
+
+async def _polling(
+    db_session: AsyncSession,
+) -> tuple[async_sessionmaker[AsyncSession], Settings, uuid.UUID]:
+    sm, settings, run_id = await _started(db_session)  # a manual run to finish beside the polls
+    tenant = await make_tenant(db_session)
+    owner = await make_account(db_session, tenant=tenant)
+    await tenants.set_funding_mode(db_session, tenant_id=tenant.id, funding_mode="operator_funded")
+    poll = {
+        "id": "rows", "kind": "poll", "agent": "marketing", "tool": "notes/list_rows",
+        "every": "5m", "items": ".results", "key": ".id", "inputs": {"n": 3},
+    }  # fmt: skip
+    nodes = {"f": {"kind": "finish", "output": "${{ inputs.n }}"}}
+    spec = {
+        "schema": "daimon.workflow/v1",
+        "name": "P",
+        "start": "f",
+        "nodes": nodes,
+        "triggers": [poll],
+    }
+    flow = await workflows.create_workflow(
+        db_session, tenant_id=tenant.id, owner_account_id=owner.id, name="P", spec=spec
+    )
+    await workflows.publish_version(
+        db_session, tenant_id=tenant.id, workflow_id=flow.id, spec=spec, spec_hash="h",
+        source="web", published_by=owner.id, now=NOW,
+    )  # fmt: skip
+    await db_session.commit()
+    on = settings.model_copy(update={"features": {"workflows": "on", "workflow_polls": "on"}})
+    return sm, on, run_id
+
+
+async def test_the_polls_loop_starts_a_run_for_a_new_row(db_session: AsyncSession) -> None:
+    sm, settings, _ = await _polling(db_session)
+    client, now = _Rows(), [NOW]
+    engine_ = WorkflowEngine(sm, settings, {}, owner="w1", clock=lambda: now[0], poll_client=client)
+    await run_once(engine_)  # the baseline
+    now[0] = NOW + timedelta(minutes=6)
+    await run_once(engine_)
+    await run_once(engine_)  # the starts loop takes the recorded event
+    async with sm() as session:
+        found = (
+            await session.execute(
+                text("SELECT count(*) FROM workflow_runs WHERE trigger_kind = 'poll'")
+            )
+        ).scalar_one()
+    assert client.calls == 2 and found == 1, "one new row starts one run, through start_run"
+
+
+async def test_a_crashing_poll_does_not_stop_the_other_loops(db_session: AsyncSession) -> None:
+    sm, settings, run_id = await _polling(db_session)
+
+    async def agent(work: runs.StepWork) -> engine.Outcome:
+        return engine.Succeeded({"n": 3})
+
+    client = _Rows(crash=True)
+    loops = WorkflowEngine(
+        sm, settings, {"agent": agent}, owner="w1", clock=lambda: NOW, poll_client=client
+    )
+    await run_once(loops)
+    await run_once(loops)
+    async with sm() as session:
+        steps = {s.node_id: s.status for s in await workflow_runs.list_steps(session, run_id)}
+    assert client.calls == 1, "the bad poll ran"
+    assert steps["a"] == "succeeded", "the loops went on past it"

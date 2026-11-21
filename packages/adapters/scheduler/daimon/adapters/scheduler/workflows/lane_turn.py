@@ -7,6 +7,7 @@ their allowance counts it, and preflight gates each step on that same allowance.
 from __future__ import annotations
 
 import functools
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -102,6 +103,33 @@ class HeadlessLaneTurn:
             step=step,
         )
 
+    async def agent_id(
+        self,
+        tenant_id: uuid.UUID,
+        agent: str | None,
+        heal: Callable[[], Awaitable[object]] | None = None,
+    ) -> str:
+        """A workspace agent's id by its spec key (the default agent for None)."""
+        public_url = str(self.settings.mcp.public_url) if self.settings.mcp.public_url else None
+
+        def reconcile() -> Awaitable[object]:
+            return reconcile_tenant_defaults(
+                self.client,
+                self.sm,
+                self.settings.defaults_root,
+                tenant_id=tenant_id,
+                public_url=public_url,
+            )
+
+        return await resolve_agent(
+            self.client,
+            tenant_id=tenant_id,
+            daimon_tag=agent or self.deployment_default.agent_name or BUILTIN_AGENT_NAME,
+            cached_id=None,
+            apply_callable=heal or reconcile,
+            cache=self.resolver_cache,
+        )
+
     async def targets(self, work: StepWork) -> tuple[str, str]:
         """The step's agent and environment ids: the node's own, else the workspace's."""
         node, run, settings = work.node, work.run, self.settings
@@ -118,14 +146,7 @@ class HeadlessLaneTurn:
             )
 
         agent = agent_of(work.spec, node) if isinstance(node, AgentNode) else None
-        agent_id = await resolve_agent(
-            self.client,
-            tenant_id=run.tenant_id,
-            daimon_tag=agent or self.deployment_default.agent_name or BUILTIN_AGENT_NAME,
-            cached_id=None,
-            apply_callable=heal,
-            cache=self.resolver_cache,
-        )
+        agent_id = await self.agent_id(run.tenant_id, agent, heal)
         async with self.sm() as s:
             scoped = await resolve(
                 s,

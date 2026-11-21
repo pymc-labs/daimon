@@ -22,7 +22,7 @@ from daimon.adapters.scheduler.boundary import scheduler_step
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores import tenants, workflow_runs
-from daimon.core.workflows import runs, triggers, waits
+from daimon.core.workflows import polls, runs, triggers, waits
 from daimon.core.workflows.engine import RunEnd
 from daimon.core.workflows.features import KEYS, workflow_features
 from sqlalchemy.exc import SQLAlchemyError
@@ -38,6 +38,7 @@ INTERVALS_S: Final = {
     "heartbeat": 60.0,
     "sweep": 86400.0,
     "schedules": 30.0,
+    "polls": 30.0,
 }
 _BATCH: Final = 50
 _LISTEN_RETRY_S: Final = 5.0
@@ -52,12 +53,14 @@ class WorkflowEngine:
         settings: Settings,
         executors: Mapping[str, runs.StepExecutor],
         *,
+        poll_client: polls.PollClient | None = None,
         owner: str | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.sm = sm
         self.settings = settings
         self.executors = executors
+        self.poll_client = poll_client
         self.owner = owner or f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
         self.clock = clock
         self.tasks: dict[uuid.UUID, tuple[asyncio.Task[None], int]] = {}
@@ -135,7 +138,7 @@ async def waits_step(engine: WorkflowEngine) -> None:
         blocked = await workflow_runs.due_waits(session, kind="blocked", now=now, limit=_BATCH)
         due = [
             w
-            for kind in ("approval", "timer", "event")
+            for kind in ("approval", "timer", "event", "poll")
             for w in await workflow_runs.due_waits(session, kind=kind, now=now, limit=_BATCH)
         ]
         overdue = await workflow_runs.overdue_runs(session, now=now, limit=_BATCH)
@@ -194,6 +197,19 @@ async def schedules_step(engine: WorkflowEngine) -> None:
         engine.wake["starts"].set()
 
 
+@scheduler_step
+async def polls_step(engine: WorkflowEngine) -> None:
+    """Poll the due poll triggers and poll waits. Each has its own failure boundary in
+    `polls`, so one bad poll never stops the others; no client (no agent platform) skips."""
+    if engine.poll_client is None:
+        return
+    now = engine.clock()
+    if await polls.poll_triggers(engine.sm, engine.settings, engine.poll_client, now=now):
+        engine.wake["starts"].set()
+    if await polls.poll_waits(engine.sm, engine.settings, engine.poll_client, now=now):
+        engine.wake["waits"].set()
+
+
 STEPS: Final[dict[str, Callable[[WorkflowEngine], Awaitable[None]]]] = {
     "starts": starts_step,
     "steps": steps_step,
@@ -201,6 +217,7 @@ STEPS: Final[dict[str, Callable[[WorkflowEngine], Awaitable[None]]]] = {
     "heartbeat": heartbeat_step,
     "sweep": sweep_step,
     "schedules": schedules_step,
+    "polls": polls_step,
 }
 
 

@@ -199,7 +199,7 @@ from daimon.core.workflows.agent_step import AgentStepExecutor, session_files
 from daimon.core.workflows.call_step import WorkflowStepExecutor
 from daimon.core.workflows.code_step import CodeStepExecutor
 from daimon.core.workflows.code_worker import ManagedCodeWorker
-from daimon.core.workflows.tool_client import McpToolClient
+from daimon.core.workflows.tool_client import McpPollClient, McpToolClient
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 from mux.errors import ScopeViolation
@@ -2184,6 +2184,7 @@ async def run(
             ),
             **workflow_waits.executors(sm),
         },
+        poll_client=McpPollClient(client, sm, settings, lane_turn.agent_id),
     )
     loop = asyncio.get_running_loop()
 

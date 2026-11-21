@@ -130,7 +130,7 @@ def test_every_workflow_loop_step_is_behind_the_shared_boundary() -> None:
         and any(isinstance(d, ast.Name) and d.id == "scheduler_step" for d in n.decorator_list)
     }
     steps = {f.__name__ for f in workflow_loops.STEPS.values()}
-    assert len(steps) == 6 and steps <= guarded, f"unguarded loop steps: {steps - guarded}"
+    assert len(steps) == 7 and steps <= guarded, f"unguarded loop steps: {steps - guarded}"
     assert {"_workflow_loops", "_workflows_once"} <= tick_step_names(_main_source()), "registered"
 
 
