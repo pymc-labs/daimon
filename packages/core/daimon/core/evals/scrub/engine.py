@@ -74,6 +74,7 @@ _BESIDE_FAKE: Final = frozenset(
      "mr", "mrs", "ms", "dr", "prof", "sir", "jr", "sr"}
 )  # fmt: skip
 _WORD: Final = re.compile(r"[^\W\d_]{2,}")
+_ASCII_SHARE: Final = 0.9
 _INLINE_B64: Final = re.compile(r"(?<![\w+/-])[A-Za-z0-9+/_-]{12,}={0,2}(?![\w+/=-])")
 # Keys whose short values name a person, an account, a company or a project.
 _IDENTITY: Final = {
@@ -249,7 +250,10 @@ def _inline_b64(word: str) -> tuple[str, bool] | None:
     except (binascii.Error, ValueError):
         return None
     text = _as_text(data)
-    return (text, urlsafe) if text and len(text.strip()) >= 4 else None
+    # Random bytes can be valid text ("dc-3dc21cc202a4" holds "uϷu͵q…"); real text is ASCII.
+    if not text or len(text.strip()) < 4 or sum(map(str.isascii, text)) < _ASCII_SHARE * len(text):
+        return None
+    return text, urlsafe
 
 
 def _in_marker(text: str, hit: Hit) -> bool:

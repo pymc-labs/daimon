@@ -412,15 +412,21 @@ _PUBLIC_SERVICES: Final = frozenset(
      "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
      "pypi.org", "npmjs.com", "cloudflare.com"}
 )  # fmt: skip
-# Daimon, its chat platforms, its effect verbs and the services they and public hosts name.
+# Daimon, its chat platforms, its effect verbs, the services they name (and Google's products:
+# "slides" in google.slides.*) and public hosts.
 PUBLIC_NAMES: Final = frozenset(
     name
     for name in (
-        "daimon", *get_args(Platform), *KNOWN_VERBS, *(v.split(".")[0] for v in KNOWN_VERBS),
+        "daimon", *get_args(Platform), *KNOWN_VERBS,
+        *(p for v in KNOWN_VERBS for p in v.split(".")[: 2 if v.startswith("google.") else 1]),
         *(h.split(".")[0] for h in _PUBLIC_SERVICES),
     )
     if len(name) >= 3
 )  # fmt: skip
+# A hash: hex with a letter and no id-long digit run (a snowflake glued to "abc" is no hash).
+_DIGEST: Final = re.compile(
+    r"(?<![^\W_])(?=[0-9]*[a-fA-F])(?![0-9a-fA-F]*?[0-9]{17})[0-9a-fA-F]{16,}(?![^\W_])"
+)
 # Only a standard scheme is no name; a custom one ("acme-app://") may hold one.
 _SCHEME: Final = re.compile(
     r"\b(?:https?|ftps?|sftp|ssh|git|file|wss?|s3|gs|jdbc|postgres(?:ql)?|mysql|redis|mongodb"
@@ -663,6 +669,23 @@ def _digest(text: str) -> bytes:
     return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
+def _outside(digests: bytearray, hit: Hit) -> bool:
+    """Whether `hit` neither starts nor ends inside a hash ("ace" in "3ace…", an id in one)."""
+    starts_in = hit.start > 0 and digests[hit.start - 1] and digests[hit.start]
+    return not (starts_in or (digests[hit.end] and digests[hit.end - 1]))
+
+
+def _past(view: str, mask: bytearray, start: int, stop: int, step: int) -> int:
+    """The first index from `start` toward `stop` past kept text and the signs after it: a hit
+    that begins or ends in a kept name keeps it ("daimon" in "daimon.acme")."""
+    i = start
+    while i != stop and mask[i]:
+        i += step
+    while i != start and i != stop and not view[i].isalnum():
+        i += step
+    return i
+
+
 class Detector:
     """`keep` names are no hit, nor part of one: a hit made only of them and joiners is
     dropped, and so is a name the model finds that adds only common words to them."""
@@ -716,7 +739,10 @@ class Detector:
 
     def _find(self, text: str, *, names: bool, words: bool) -> list[Hit]:
         view = fold(text)
-        hits = list(self._patterns(view.text))
+        digests = bytearray(len(view.text) + 1)
+        for m in _DIGEST.finditer(view.text):  # no name or number starts or ends in a hash
+            digests[m.start() : m.end()] = b"\1" * (m.end() - m.start())
+        hits = [h for h in self._patterns(view.text) if h.kind == SECRET or _outside(digests, h)]
         found = [
             Hit(start, end, term.kind, _P_KNOWN, term.of, canon=term.text)
             for start, end, term in self._index.find(view.text, alone=words)
@@ -727,7 +753,7 @@ class Detector:
         fixed = bytearray(len(view.text))
         for a, b in [m.span() for m in _SCHEME.finditer(view.text)] + _public_suffixes(view.text):
             fixed[a:b] = b"\1" * (b - a)
-        hits += [h for h in found if fixed.find(1, h.start, h.end) < 0]
+        hits += [h for h in found if fixed.find(1, h.start, h.end) < 0 and _outside(digests, h)]
         if self.kept_words:
             hits = self._unkept(view.text, hits)
         out: list[Hit] = []
@@ -747,8 +773,12 @@ class Detector:
             rest = "".join(" " if mask[i] else view[i] for i in range(hit.start, hit.end))
             words = [w for _, _, w in _words(rest)]
             common = hit.priority == _P_NER and all(w in common_words() for w in words)
-            if hit.kind == SECRET or (words and not common):
+            if hit.kind == SECRET:
                 out.append(hit)
+            elif words and not common:
+                start = _past(view, mask, hit.start, hit.end, 1)
+                end = _past(view, mask, hit.end - 1, hit.start - 1, -1) + 1
+                out.append(replace(hit, start=start, end=end))
         return out
 
     def term_for(self, text: str) -> Term | None:

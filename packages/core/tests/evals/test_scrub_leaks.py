@@ -688,7 +688,7 @@ def test_text_when_host_id_or_ip_is_glued_to_other_characters_then_replaced(
 
 
 def test_value_when_names_are_kept_then_unchanged_and_private_parts_still_faked() -> None:
-    keep = {"phrases": ["Core", "Linear", "Merge"], "keep": ["core", "Linear"]}
+    keep = {"phrases": ["Core", "Linear", "Merge", "Daimon Acme"], "keep": ["core", "Linear"]}
     scrubber = _scrubber(ENTITIES.model_copy(update=keep))
     case = {
         "schema": "daimon.eval.case/1",
@@ -724,3 +724,9 @@ def test_learn_when_names_found_are_code_common_words_or_kept_then_only_names_le
     scrubber.detector = Detector(terms_of(ENTITIES), _Names(*found), [*PUBLIC_NAMES, "Notion"])
     scrubber.learn({"text": " ; ".join(found), "login": "deploy={x}"})
     assert [t.text for t in scrubber.learned] == ["Okafor"], scrubber.learned
+
+
+def test_text_when_known_name_inside_a_hash_then_hash_unchanged() -> None:
+    scrubber = _scrubber(ENTITIES.model_copy(update={"phrases": ["Bead"]}))
+    out = scrubber.text("commit 3bead0f5a9c4e1d27b7c by Bead")
+    assert out.startswith("commit 3bead0f5a9c4e1d27b7c by ") and "Bead" not in out, out
