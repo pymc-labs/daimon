@@ -21,12 +21,11 @@ import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.media.vision import (
     MAX_DOWNSCALE_SOURCE_BYTES,
-    MAX_VISION_IMAGE_BYTES,
-    MAX_VISION_IMAGE_DIMENSION,
     MAX_VISION_IMAGES,
+    UNFIT_REASON,
     VISION_MEDIA_TYPES,
     build_image_block,
-    downscale_image,
+    fit_vision_image,
 )
 
 log = structlog.get_logger()
@@ -51,22 +50,10 @@ class SlackFile(TypedDict):
     original_h: NotRequired[int]
 
 
-def _exceeds_dimension_cap(file: SlackFile) -> bool:
-    """True when a known image edge is larger than the API's per-image cap."""
-    width = file.get("original_w")
-    height = file.get("original_h")
-    return (width is not None and width > MAX_VISION_IMAGE_DIMENSION) or (
-        height is not None and height > MAX_VISION_IMAGE_DIMENSION
-    )
-
-
 def is_vision_image(file: SlackFile) -> bool:
-    """True when the file can be sent as an API vision content block."""
-    return (
-        file["mimetype"] in VISION_MEDIA_TYPES
-        and file["size"] <= MAX_DOWNSCALE_SOURCE_BYTES
-        and not _exceeds_dimension_cap(file)
-    )
+    """True when the file can be sent as an API vision content block, resized first
+    when it is over the byte or pixel cap (the bytes are checked once fetched)."""
+    return file["mimetype"] in VISION_MEDIA_TYPES and file["size"] <= MAX_DOWNSCALE_SOURCE_BYTES
 
 
 async def download_as_image_blocks(
@@ -127,9 +114,6 @@ def _static_skip_reason(file: SlackFile) -> str | None:
     if file["size"] > MAX_DOWNSCALE_SOURCE_BYTES:
         log.warning("slack.image.skipped.oversize", name=name, size=file["size"])
         return f"exceeds vision size cap ({file['size']} > {MAX_DOWNSCALE_SOURCE_BYTES})"
-    if _exceeds_dimension_cap(file):
-        log.warning("slack.image.skipped.dimensions", name=name)
-        return f"image dimensions exceed {MAX_VISION_IMAGE_DIMENSION}px"
     return None
 
 
@@ -148,14 +132,8 @@ async def _fetch_image_block(
     if not resp.is_success:
         log.warning("slack.image.skipped.fetch_error", name=name, status=resp.status_code)
         return f"private-URL fetch failed: HTTP {resp.status_code}"
-    size = len(resp.content)
-    if size > MAX_VISION_IMAGE_BYTES:
-        smaller = await asyncio.to_thread(downscale_image, resp.content)
-        if smaller is None:
-            log.warning("slack.image.skipped.oversize", name=name, size=size)
-            return f"exceeds vision size cap and could not be downscaled ({size} bytes)"
-        return build_image_block(*smaller)
-    return build_image_block(
-        resp.content,
-        file["mimetype"],  # pyright: ignore[reportArgumentType]  # gated to VISION_MEDIA_TYPES by _static_skip_reason
-    )
+    fitted = await asyncio.to_thread(fit_vision_image, resp.content)
+    if fitted is None:
+        log.warning("slack.image.skipped.unfittable", name=name, size=len(resp.content))
+        return UNFIT_REASON
+    return build_image_block(*fitted)

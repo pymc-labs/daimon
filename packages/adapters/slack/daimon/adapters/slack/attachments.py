@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from daimon.adapters.slack.vision import SlackFile
+from daimon.core.media.vision import resized_for_vision
 from daimon.core.slack_file_token import mint_file_token
 
 
@@ -50,8 +51,14 @@ def build_image_url_prefix(files: list[SlackFile], ctx: ProxyUrlContext) -> str:
     """One line per inlined image exposing a fetchable handle for external use."""
     return "\n".join(
         f"[attachment] image `{f['name']}` ({f['size']} bytes), uploaded by the user with "
-        f"this message and forwarded to you inline as a vision block. Fetchable handle "
-        f"(curl or pass to an external API; expires ~24h): {build_proxy_url(f, ctx)}"
+        f"this message and forwarded to you inline as a vision block"
+        + (
+            ", resized to fit the model's image limits (the handle below serves the original)"
+            if resized_for_vision(f["size"], f.get("original_w"), f.get("original_h"))
+            else ""
+        )
+        + f". Fetchable handle (curl or pass to an external API; expires ~24h): "
+        f"{build_proxy_url(f, ctx)}"
         for f in files
     )
 

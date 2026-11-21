@@ -17,12 +17,13 @@ import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.media.vision import (
     MAX_DOWNSCALE_SOURCE_BYTES,
-    MAX_VISION_IMAGE_BYTES,
     MAX_VISION_IMAGE_DIMENSION,
     MAX_VISION_IMAGES,
+    UNFIT_REASON,
     VISION_MEDIA_TYPES,
     build_image_block,
-    downscale_image,
+    fit_vision_image,
+    resized_for_vision,
     sniff_image_media_type,
 )
 
@@ -63,13 +64,11 @@ def is_oversized_image(attachment: discord.Attachment) -> bool:
 
 
 def is_vision_image_attachment(attachment: discord.Attachment) -> bool:
-    """True when the attachment can be sent as an API vision content block, downscaled
-    first when it is over the byte cap."""
+    """True when the attachment can be sent as an API vision content block, resized
+    first when it is over the byte or pixel cap (the bytes are checked once fetched)."""
     return (
-        (attachment.content_type or "") in VISION_MEDIA_TYPES
-        and attachment.size <= MAX_DOWNSCALE_SOURCE_BYTES
-        and not _exceeds_dimension_cap(attachment)
-    )
+        attachment.content_type or ""
+    ) in VISION_MEDIA_TYPES and attachment.size <= MAX_DOWNSCALE_SOURCE_BYTES
 
 
 def build_image_url_prefix(attachments: list[discord.Attachment]) -> str:
@@ -83,9 +82,14 @@ def build_image_url_prefix(attachments: list[discord.Attachment]) -> str:
     """
     return "\n".join(
         f"[attachment] image `{attachment.filename}` ({attachment.size} bytes), uploaded by "
-        f"the user with this message and forwarded to you inline as a vision block. Signed "
-        f"Discord CDN URL (fetchable with curl or passable to external APIs; expires ~24h): "
-        f"{attachment.url}"
+        f"the user with this message and forwarded to you inline as a vision block"
+        + (
+            ", resized to fit the model's image limits (the URL below serves the original)"
+            if resized_for_vision(attachment.size, attachment.width, attachment.height)
+            else ""
+        )
+        + f". Signed Discord CDN URL (fetchable with curl or passable to external APIs; "
+        f"expires ~24h): {attachment.url}"
         for attachment in attachments
     )
 
@@ -210,14 +214,6 @@ def _static_skip_reason(attachment: discord.Attachment) -> str | None:
     if attachment.size > MAX_DOWNSCALE_SOURCE_BYTES:
         log.warning("image_attachment.skipped.oversize", name=name, size=attachment.size)
         return f"exceeds vision size cap ({attachment.size} > {MAX_DOWNSCALE_SOURCE_BYTES})"
-    if _exceeds_dimension_cap(attachment):
-        log.warning(
-            "image_attachment.skipped.dimensions",
-            name=name,
-            width=attachment.width,
-            height=attachment.height,
-        )
-        return f"image dimensions unknown or exceed {MAX_VISION_IMAGE_DIMENSION}px"
     return None
 
 
@@ -252,10 +248,8 @@ async def _fetch_image_block(
             declared_media_type=media_type,
             sniffed_media_type=sniffed_media_type,
         )
-    if len(data) > MAX_VISION_IMAGE_BYTES:
-        smaller = await asyncio.to_thread(downscale_image, data)
-        if smaller is None:
-            log.warning("image_attachment.skipped.oversize", name=name, size=len(data))
-            return f"exceeds vision size cap and could not be downscaled ({len(data)} bytes)"
-        data, sniffed_media_type = smaller
-    return build_image_block(data, sniffed_media_type)
+    fitted = await asyncio.to_thread(fit_vision_image, data)
+    if fitted is None:
+        log.warning("image_attachment.skipped.unfittable", name=name, size=len(data))
+        return UNFIT_REASON
+    return build_image_block(*fitted)

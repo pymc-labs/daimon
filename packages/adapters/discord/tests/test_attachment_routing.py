@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 from daimon.adapters.discord.attachments import build_attachment_url_prefix, prepare_attachments
-from daimon.adapters.discord.vision import MAX_DOWNSCALE_SOURCE_BYTES
+from daimon.core.media.vision import MAX_DOWNSCALE_SOURCE_BYTES
+from daimon.testing import images
 
 
 @dataclass
@@ -59,7 +60,7 @@ def _attachment(att_id: int, filename: str, content_type: str, size: int) -> dis
     att.size = size
     att.width = att.height = 10
     att.url = f"https://cdn.discord/{filename}?hm=ab"
-    att.read = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+    att.read = AsyncMock(return_value=images.png_bytes())
     return att
 
 

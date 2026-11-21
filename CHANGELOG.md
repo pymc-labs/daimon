@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Images over 5 MiB are downscaled instead of sent as a link.** In Discord,
-  Slack, Teams and the web app, an image of up to 25 MiB is shrunk to fit the
-  model's 5 MiB limit and shown to the agent inline.
+- **Images over 5 MiB, or over 8000 px on an edge, are resized instead of sent
+  as a link.** In Discord, Slack, Teams and the web app, an image of up to 25
+  MiB is shrunk to fit the model's limits and shown to the agent inline, with
+  its orientation applied and its colour profile and transparency kept. An
+  image that cannot be read still falls back to a link rather than ending the
+  turn.
 
 - **"Approvals in direct messages" no longer changes Approvals for everyone.**
   Setting it, from the CLI, the web app or an agent, wrote the server-wide

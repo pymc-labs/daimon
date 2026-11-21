@@ -20,11 +20,9 @@ from daimon.core.media.attachments import AttachedFile, attachment_lines
 from daimon.core.media.filenames import attachment_disposition
 from daimon.core.media.vision import (
     MAX_DOWNSCALE_SOURCE_BYTES,
-    MAX_VISION_IMAGE_BYTES,
     MAX_VISION_IMAGES,
     build_image_block,
-    downscale_image,
-    sniff_image_media_type,
+    fit_vision_image,
 )
 from daimon.core.output_delivery import DeliverableFile
 from daimon.core.stores import file_uploads
@@ -133,13 +131,9 @@ async def attachment_prompt(
     for file in files:
         upload = held.get(file.id)
         data = upload.content if upload is not None else None
-        kind = sniff_image_media_type(data) if data else None
         image = None
-        if data and kind and len(blocks) < MAX_VISION_IMAGES:
-            if len(data) <= MAX_VISION_IMAGE_BYTES:
-                image = (data, kind)
-            elif len(data) <= MAX_DOWNSCALE_SOURCE_BYTES:
-                image = await asyncio.to_thread(downscale_image, data)
+        if data and len(blocks) < MAX_VISION_IMAGES and len(data) <= MAX_DOWNSCALE_SOURCE_BYTES:
+            image = await asyncio.to_thread(fit_vision_image, data)
         if image is not None:
             blocks.append(build_image_block(*image))
             shared.append(AttachedFile(file.name, inlined=True))

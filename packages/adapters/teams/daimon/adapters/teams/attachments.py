@@ -21,7 +21,6 @@ for its answer to explain: nothing is posted on its own.
 from __future__ import annotations
 
 import asyncio
-import io
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -36,11 +35,11 @@ from daimon.core.media.attachments import AttachedFile, attachment_line
 from daimon.core.media.filenames import sanitize_title
 from daimon.core.media.vision import (
     MAX_DOWNSCALE_SOURCE_BYTES,
-    MAX_VISION_IMAGE_BYTES,
     MAX_VISION_IMAGE_DIMENSION,
     MAX_VISION_IMAGES,
+    UNFIT_REASON,
     build_image_block,
-    downscale_image,
+    fit_vision_image,
     sniff_image_media_type,
 )
 from daimon.core.teams_graph import (
@@ -51,7 +50,6 @@ from daimon.core.teams_graph import (
     is_sharepoint_host,
 )
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
-from PIL import Image
 
 log = structlog.get_logger()
 
@@ -230,24 +228,14 @@ async def fetch_bytes(
 
 
 async def image_block(data: bytes) -> BetaManagedAgentsImageBlockParam:
-    """An image block, downscaled when over the byte cap, or `FetchRefused` for bytes
+    """An image block, resized when over the byte or pixel cap, or `FetchRefused` for bytes
     the vision API would reject."""
-    media_type = sniff_image_media_type(data)
-    if media_type is None:
+    if sniff_image_media_type(data) is None:
         raise FetchRefused("not a PNG, JPEG, GIF or WebP image")
-    try:
-        with Image.open(io.BytesIO(data), formats=_PIL_FORMATS) as image:
-            width, height = image.size
-    except (OSError, Image.DecompressionBombError) as err:
-        raise FetchRefused("unreadable image") from err
-    if max(width, height) > MAX_VISION_IMAGE_DIMENSION:
-        raise FetchRefused(f"larger than {MAX_VISION_IMAGE_DIMENSION}px")
-    if len(data) > MAX_VISION_IMAGE_BYTES:
-        smaller = await asyncio.to_thread(downscale_image, data)
-        if smaller is None:
-            raise FetchRefused(f"larger than {MAX_VISION_IMAGE_BYTES // (1024 * 1024)} MiB")
-        return build_image_block(*smaller)
-    return build_image_block(data, media_type)
+    fitted = await asyncio.to_thread(fit_vision_image, data)
+    if fitted is None:
+        raise FetchRefused(UNFIT_REASON)
+    return build_image_block(*fitted)
 
 
 def _link_line(file: InboundFile, reason: str | None) -> str:
