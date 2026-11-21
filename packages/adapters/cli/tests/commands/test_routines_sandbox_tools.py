@@ -14,12 +14,14 @@ from daimon.adapters.cli.commands.routines import (
     run_sandbox_tools,
     sandbox_pin_lines,
 )
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.errors import UserFacingError
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.routine_sandbox import PIN_UNAVAILABLE_REFUSAL, own_opt_in, routine_place
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import AgentSandboxPin, RoutineRow, SandboxPin
 from daimon.core.stores.routines import create_routine
@@ -205,6 +207,29 @@ async def test_agent_opt_in_pins_the_agent_and_environment_then_off_drops_it(
     assert "already on" in await _agent_run(db_session_factory, row.tenant_id), "a repeat"
     await _agent_run(db_session_factory, row.tenant_id, value="off")
     assert await own_opt_in(db_session_factory, place) == ("off", None), "Off, no pin"
+
+
+async def test_agent_opt_in_works_while_a_channel_is_kept_to_its_own_agents(
+    db_session_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's CLI is held to no channel, so a sealed channel elsewhere refuses nothing."""
+    [row] = await _routines(db_session_factory, 1)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(
+                channel_rules={"c-private": ChannelRule(readers="own", writers="own")}
+            ),
+        )
+    pin = AgentSandboxPin("ag", "default")
+    monkeypatch.setattr(routines_cli, "current_agent_pin", AsyncMock(return_value=pin))
+    monkeypatch.setattr(
+        routines_cli, "find_agent_by_daimon_tag", AsyncMock(return_value=ma_agent(id="ag"))
+    )
+    await _agent_run(db_session_factory, row.tenant_id)
+    place = FeaturePlace.of(row.tenant_id, "discord", None, agent_id="ag")
+    assert await own_opt_in(db_session_factory, place) == ("on", pin), "the operator's On lands"
 
 
 async def test_agent_opt_in_refuses_an_unreadable_agent(
