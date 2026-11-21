@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from daimon.core._models import WorkflowDelivery
-from daimon.core.config import WebSettings
+from daimon.core.config import DirectMessagePolicy, WebSettings
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.outbound.reach import ReachPlan
 from daimon.core.stores import accounts, tenants
@@ -100,14 +100,22 @@ async def test_post_time_rules_and_dms(db_session: AsyncSession) -> None:
     await world.run(inputs={"n": 1})
     [dm] = await _rows(world)
     assert dm.target["kind"] == "dm", "owner and run_as deliver by DM"
-    assert await clear_post(world.sm, dm, platform="slack") == DM_OFF, "Slack DMs start off"
+    assert await clear_post(world.sm, dm, platform="slack", dm_policies={}) == DM_OFF, (
+        "Slack DMs start off"
+    )
     await set_dm_enabled(db_session, tenant_id=world.tenant_id, enabled=True)
     await db_session.commit()
-    assert await clear_post(world.sm, dm, platform="slack") == "recipient_not_on_platform"
+    assert (
+        await clear_post(world.sm, dm, platform="slack", dm_policies={})
+        == "recipient_not_on_platform"
+    )
     home = dm.model_copy(
         update={"target": {"kind": "channel", "channel_id": "C0HOME", "home": True}}
     )
-    assert await clear_post(world.sm, home, platform="slack") == "speaker_not_on_platform"
+    assert (
+        await clear_post(world.sm, home, platform="slack", dm_policies={})
+        == "speaker_not_on_platform"
+    )
     tenant = await tenants.get_tenant(db_session, world.tenant_id)
     owner = await accounts.get_account(db_session, world.owner)
     assert tenant is not None and owner is not None
@@ -115,10 +123,14 @@ async def test_post_time_rules_and_dms(db_session: AsyncSession) -> None:
         db_session, platform="slack", external_id="U1", tenant=tenant, account=owner
     )
     await db_session.commit()
-    to_owner = await clear_post(world.sm, dm, platform="slack")
+    to_owner = await clear_post(world.sm, dm, platform="slack", dm_policies={})
     assert isinstance(to_owner, WorkflowPost) and to_owner.dm_to == "U1", to_owner
     assert await post_refusal(to_owner, place_id="", limits=ReachPlan(places=0, people=0)) is None
-    post = await clear_post(world.sm, home, platform="slack")
+    shut = {world.tenant_id: DirectMessagePolicy(mode="disabled")}
+    assert await clear_post(world.sm, dm, platform="slack", dm_policies=shut) == DM_OFF, (
+        "the deprecated env DM policy still decides who may be sent a private message"
+    )
+    post = await clear_post(world.sm, home, platform="slack", dm_policies={})
     assert isinstance(post, WorkflowPost) and post.speaker == "U1", post
     asked: list[tuple[str | None, str | None]] = []
     on = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
@@ -131,11 +143,11 @@ async def test_post_time_rules_and_dms(db_session: AsyncSession) -> None:
     async def links_off(*_: Any) -> None:
         return None
 
-    linked = await clear_post(world.sm, home, platform="slack", links=links_on)
+    linked = await clear_post(world.sm, home, platform="slack", dm_policies={}, links=links_on)
     assert isinstance(linked, WorkflowPost) and linked.link is not None, linked
     assert linked.link.endswith(f"/workflows/{home.workflow_id}/runs/1"), linked.link
     assert asked == [("C0HOME", None)], "the link is asked at the channel the post goes to"
-    muted = await clear_post(world.sm, home, platform="slack", links=links_off)
+    muted = await clear_post(world.sm, home, platform="slack", dm_policies={}, links=links_off)
     assert isinstance(muted, WorkflowPost) and muted.link is None, "Off at the place: no link"
     tight = ReachPlan(places=0, people=1)
     assert await post_refusal(post, place_id="C0HOME", limits=tight) is None, "home is no reach"

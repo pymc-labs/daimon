@@ -67,7 +67,13 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
         )
 
     async def cleared(row: DeliveryRow) -> WorkflowPost | str:
-        return await clear_post(runtime.sessionmaker, row, platform="slack", links=web_at(runtime))
+        return await clear_post(
+            runtime.sessionmaker,
+            row,
+            platform="slack",
+            dm_policies=runtime.settings.direct_message_policies,
+            links=web_at(runtime),
+        )
 
     async def _post(row: DeliveryRow) -> DeliveryOutcome:
         post = await cleared(row)

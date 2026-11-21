@@ -83,7 +83,13 @@ def make_teams_workflow_poster(
     async def post(row: DeliveryRow) -> DeliveryOutcome:
         if row.tenant_id != tenant_id:
             return _skipped("tenant_archived")
-        cleared = await clear_post(sessionmaker, row, platform="teams", links=links)
+        cleared = await clear_post(
+            sessionmaker,
+            row,
+            platform="teams",
+            dm_policies=settings.direct_message_policies,
+            links=links,
+        )
         if isinstance(cleared, str):
             return _skipped(cleared)
         try:

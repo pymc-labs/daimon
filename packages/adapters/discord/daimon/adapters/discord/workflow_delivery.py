@@ -96,6 +96,7 @@ def make_discord_workflow_poster(
             sessionmaker,
             row,
             platform="discord",
+            dm_policies=settings.direct_message_policies,
             links=links,
             membership_resolver=membership_resolver,
         )

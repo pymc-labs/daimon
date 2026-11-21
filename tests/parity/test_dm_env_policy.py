@@ -23,6 +23,12 @@ NO_ENV_CHECK: dict[str, str] = {
     "adapters/teams/daimon/adapters/teams/private_replies.py": (
         "answers the person who asked, in their own chat; the turn's admission applied it"
     ),
+    **{
+        f"adapters/{platform}/daimon/adapters/{platform}/workflow_delivery.py": (
+            "core `clear_post` applies it, given the settings' policies"
+        )
+        for platform in ("discord", "slack", "teams")
+    },
 }
 # Decisions made without settings, and why.
 NO_SETTINGS: dict[str, str] = {

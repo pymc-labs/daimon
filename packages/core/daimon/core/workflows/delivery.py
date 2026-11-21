@@ -18,12 +18,13 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
-from daimon.core.config import Settings
+from daimon.core.config import DirectMessagePolicy, Settings, env_admits
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import Platform, RenderedPost, attribution_line, render_post
@@ -260,10 +261,13 @@ async def clear_post(
     row: DeliveryRow,
     *,
     platform: str,
+    dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
     links: WebAt | None = None,
     membership_resolver: MembershipResolver | None = None,
 ) -> WorkflowPost | str:
     """The post with its policy if it may go at all, else the skip note.
+
+    `dm_policies` is the deprecated env DM policy (`env_admits`): a DM it leaves out is skipped.
 
     Asked before the adapter resolves or sends anything, and again before each file.
     """
@@ -291,6 +295,8 @@ async def clear_post(
             ).get(recipient)
             if dm_to is None:
                 return "recipient_not_on_platform"
+            if not env_admits(dm_policies, row.tenant_id, dm_to):
+                return DM_OFF
             channel_id = str(target.get("via") or "")
         else:
             channel_id = target.get("channel_id")
