@@ -423,9 +423,9 @@ PUBLIC_NAMES: Final = frozenset(
     )
     if len(name) >= 3
 )  # fmt: skip
-# A hash: hex with a letter and no id-long digit run (a snowflake glued to "abc" is no hash).
+# A hash: hex with a letter, not starting or ending in an id ("123…789abc" is an id and "abc").
 _DIGEST: Final = re.compile(
-    r"(?<![^\W_])(?=[0-9]*[a-fA-F])(?![0-9a-fA-F]*?[0-9]{17})[0-9a-fA-F]{16,}(?![^\W_])"
+    r"(?<![^\W_])(?=[0-9]*[a-fA-F])(?![0-9]{17})[0-9a-fA-F]{16,}(?<![0-9]{17})(?![^\W_])"
 )
 # Only a standard scheme is no name; a custom one ("acme-app://") may hold one.
 _SCHEME: Final = re.compile(
@@ -655,14 +655,20 @@ class Ner:
 
 
 def _pieces(text: str) -> list[tuple[int, str]]:
-    """`text` cut at line ends (and every `_NER_CHUNK` characters) into what the model reads,
-    with offsets: after a replacement, only the lines it changed are read again."""
-    return [
-        (m.start() + base, piece)
-        for m in _LINE.finditer(text)
-        for base in range(0, m.end() - m.start(), _NER_CHUNK)
-        if namey(piece := m.group()[base : base + _NER_CHUNK])
-    ]
+    """`text` cut at line ends (and at a space within every `_NER_CHUNK` characters) into what
+    the model reads, with offsets: after a replacement, only the lines it changed are read
+    again."""
+    pieces: list[tuple[int, str]] = []
+    for m in _LINE.finditer(text):
+        start, end = m.span()
+        while start < end:
+            cut = min(end, start + _NER_CHUNK)
+            if cut < end and (space := text.rfind(" ", start + 1, cut)) > 0:
+                cut = space
+            if namey(piece := text[start:cut]):
+                pieces.append((start, piece))
+            start = cut
+    return pieces
 
 
 def _digest(text: str) -> bytes:
