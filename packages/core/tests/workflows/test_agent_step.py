@@ -517,7 +517,7 @@ async def test_a_question_with_fields_asks_a_choice_and_a_note_and_answers_with_
             "note": {"type": "string", "title": "Note"},
         },
     }, f"the web form asks the fields in order: {detail.form}"
-    assert list(detail.form["properties"]) == ["channel", "note"], "author order kept"
+    assert detail.form and list(detail.form["properties"]) == ["channel", "note"], "author order"
     assert detail.values == {"channel": "#delivery"}, "a required choice starts on its first"
     async with world.sm() as s:
         [post] = await workflow_deliveries.deliveries_of_wait(s, wait.id)

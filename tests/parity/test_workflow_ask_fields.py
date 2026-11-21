@@ -40,6 +40,6 @@ async def test_a_choice_field_is_a_pick_and_a_note_a_text_box_everywhere() -> No
         ("plain_text_input", True),
     ], f"Slack: a select, then an optional box: {blocks}"
 
-    body = ask_card("Where?", ASK).body
+    body = ask_card("Where?", ASK).body or []
     kinds = [type(e).__name__ for e in body if type(e).__name__.endswith("Input")]
     assert kinds == ["ChoiceSetInput", "TextInput"], f"Teams: a choice set, then a box: {kinds}"
