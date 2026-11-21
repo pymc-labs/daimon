@@ -7,13 +7,13 @@ import { PANEL } from "../Canvas"
 import { problemsAt, titleOf } from "../spec"
 import type { Validation } from "../types"
 import { KIND, kindLabel } from "../kinds"
-import { ActionEditor, AgentEditor, ApprovalEditor, BasicEditor, BranchEditor, FinishEditor, ForEachEditor, WaitEditor } from "./editors"
+import { ActionEditor, AgentEditor, ApprovalEditor, BasicEditor, BranchEditor, FinishEditor, ForEachEditor, PostEditor, WaitEditor } from "./editors"
 import { type EditorProps } from "./parts"
 import { useLocal } from "./useLocal"
 
 const EDITOR = {
   agent: AgentEditor, approval: ApprovalEditor, branch: BranchEditor, action: ActionEditor, wait: WaitEditor, for_each: ForEachEditor, finish: FinishEditor,
-  transform: BasicEditor, code: BasicEditor, workflow: BasicEditor, post: BasicEditor,
+  transform: BasicEditor, code: BasicEditor, workflow: BasicEditor, post: PostEditor,
 }
 
 export function Inspector({ close, validation, ...p }: EditorProps & { close: () => void; validation?: Validation }) {

@@ -13,6 +13,8 @@ import { StepIcon } from "./parts"
 
 const FAMILIES = ["run", "step", "wait", "proposal", "budget", "delivery"] as const
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+/** Where a sent post landed, when the platform gave a link. */
+const postLink = (e: RunEvent) => e.type === "delivery.sent" && typeof e.data.link === "string" ? e.data.link : undefined
 
 export function Chain({ run }: { run: RunDetail }) {
   const v = useVerify(run)
@@ -83,7 +85,7 @@ function Raw({ run, events, fresh }: { run: RunDetail; events: RunEvent[]; fresh
             <td><Mono>{e.type}</Mono></td>
             <td className="max-w-44 truncate max-lg:hidden">{e.step ? stepTitle(run.spec, steps.get(e.step) ?? { node: nodeOf(e.step), item: null }) : <span className="text-faint">Run</span>}</td>
             <td className="truncate text-muted-foreground max-md:hidden">{e.actor}</td>
-            <td className="max-w-0 truncate pr-4">{e.detail}</td>
+            <td className="max-w-0 truncate pr-4">{e.detail}{postLink(e) && <> <a href={postLink(e)} target="_blank" rel="noreferrer" className="text-link hover:underline">Open post</a></>}</td>
           </tr>
         ))}
       </tbody>

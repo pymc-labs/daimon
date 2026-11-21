@@ -325,6 +325,33 @@ export function FinishEditor(p: EditorProps) {
   )
 }
 
+/** A post step: where it goes, the thread it finds or opens by title, and the words. */
+export function PostEditor(p: EditorProps) {
+  const { n, set, ro, catalog, spec } = p
+  const [msg, setMsg] = useLocal(n.message ?? "", (v) => set((x) => { x.message = v || undefined }, 500))
+  const places = [
+    { value: "home", label: "Home channel" }, { value: "origin", label: "Where the run started" },
+    { value: "owner", label: "Owner" }, { value: "run_as", label: "Person it runs as" },
+    ...(catalog?.channels ?? []).map((c) => ({ value: c.id, label: `#${c.name}` })),
+  ]
+  const known = places.some((o) => o.value === n.to)
+  return (
+    <>
+      <Section>
+        <div className="space-y-3">
+          <Field label="Post to"><Pick value={n.to ?? ""} ro={ro} placeholder="Choose" onChange={(v) => set((x) => { x.to = v })}
+            options={known || !n.to ? places : [...places, { value: n.to, label: n.to }]} /></Field>
+          <Field label="Thread"><Text value={n.thread ?? ""} ro={ro} placeholder="None" onChange={(v) => set((x) => { x.thread = v || undefined }, 400)} /></Field>
+        </div>
+      </Section>
+      <Section title="Message">
+        <textarea value={msg} readOnly={ro} onChange={(e) => setMsg(e.target.value)} spellCheck={false} aria-label="Message" className="min-h-28 w-full resize-y rounded-md border bg-background px-3 py-2 font-mono text-[12.5px] leading-[1.7] outline-none focus-visible:border-ring" />
+      </Section>
+      <Section title="Next"><Field label="Then"><TargetSelect spec={spec} self={p.id} value={typeof n.next === "string" ? n.next : undefined} ro={ro} onChange={(to) => set((x) => { x.next = to })} /></Field></Section>
+    </>
+  )
+}
+
 export function BasicEditor(p: EditorProps) {
   const { n, set, ro, spec } = p
   const [src, setSrc] = useLocal(n.source ?? "", (v) => set((x) => { x.source = v }, 500))

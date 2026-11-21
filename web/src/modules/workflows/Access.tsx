@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useCatalog, useDraft, useDraftEditor, usePatch } from "./api"
 import { clone } from "./spec"
 import { ChoiceCards, EditStrip, Part } from "./tabparts"
-import type { Person, Workflow } from "./types"
+import type { Catalog, Person, Workflow } from "./types"
 
 const usd = (s: string) => { const n = Number(s.replace(/[^\d.]/g, "")); return s.trim() && Number.isFinite(n) ? n : null }
 
@@ -42,6 +42,35 @@ function PeopleList({ title, people, options, editable, onChange }: { title: str
           <Select value="" onValueChange={(id) => onChange([...people.map((x) => x.id), id])}>
             <SelectTrigger aria-label={`Add to ${title}`} className="h-8 w-full max-w-60"><SelectValue placeholder="Add person" /></SelectTrigger>
             <SelectContent>{free.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
+          </Select>
+        )}
+      </div>
+    </SettingRow>
+  )
+}
+
+/** Where templated `to`, `also` and `mention` values may land: channels by id, people as `person:<id>`. */
+function Destinations({ value, catalog, editable, onChange }: { value: string[]; catalog: Catalog | undefined; editable: boolean; onChange: (v: string[]) => void }) {
+  const all = [
+    ...(catalog?.channels ?? []).map((c) => ({ id: c.id, name: `#${c.name}` })),
+    ...(catalog?.people ?? []).map((p) => ({ id: `person:${p.id}`, name: p.name })),
+  ]
+  const name = (id: string) => all.find((d) => d.id === id)?.name ?? id
+  const free = all.filter((d) => !value.includes(d.id))
+  return (
+    <SettingRow label="Can post to" top>
+      <div className="space-y-1">
+        {value.map((id) => (
+          <div key={id} className="flex h-8 items-center gap-2 text-sm">
+            <span className="truncate">{name(id)}</span>
+            {editable && <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label={`Remove ${name(id)}`} onClick={() => onChange(value.filter((x) => x !== id))}><X /></Button>}
+          </div>
+        ))}
+        {!value.length && <div className="flex h-8 items-center text-sm text-faint">None</div>}
+        {editable && free.length > 0 && (
+          <Select value="" onValueChange={(id) => onChange([...value, id])}>
+            <SelectTrigger aria-label="Add a place to post to" className="h-8 w-full max-w-60"><SelectValue placeholder="Add channel or person" /></SelectTrigger>
+            <SelectContent>{free.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</SelectContent>
           </Select>
         )}
       </div>
@@ -92,6 +121,7 @@ export function AccessTab({ wf }: { wf: Workflow }) {
                 <SelectContent>{(catalog?.channels ?? []).map((c) => <SelectItem key={c.id} value={c.id}>#{c.name}</SelectItem>)}</SelectContent>
               </Select>
             </SettingRow>
+            <Destinations value={spec.destinations ?? []} catalog={catalog} editable={edit} onChange={(v) => set((s) => { s.destinations = v.length ? v : undefined })} />
             <SettingRow label="Run budget"><Money key={String(spec.limits?.budget_usd)} label="Run budget" value={spec.limits?.budget_usd ?? null} disabled={!edit} onCommit={(n) => set((s) => { s.limits = { ...s.limits, budget_usd: n ?? undefined } })} /></SettingRow>
             <SettingRow label="Monthly cap"><Money key={String(wf.monthly_cap_usd)} label="Monthly cap" value={wf.monthly_cap_usd} disabled={!manage} onCommit={(n) => patch.mutate({ monthly_cap_usd: n })} /></SettingRow>
           </div>
