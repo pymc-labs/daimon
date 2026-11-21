@@ -218,7 +218,7 @@ function pause(c: Ctx, id: string, key: string, n: Node, v: number, t: number, e
   emit(c, t, "wait.opened", key, "Engine", what, { id: waitId(c.run, key), kind, addressees: to, expires_at: after ? iso(t + after) : null, attachments })
   if (approval && (n.deliver === "dm" || n.deliver === "thread")) {
     const where = n.deliver === "dm" ? `Direct message to ${to[0]?.name ?? "the owner"}` : `Thread in #${n.channel?.replace(/^C0/, "").toLowerCase() ?? "sales"}`
-    emit(c, t, "wait.posted", key, "Engine", `Posted in ${where}`, { sent: { platform: "discord", where, link: "https://discord.com/channels/745261709622771773/1/2", at: iso(t) } })
+    emit(c, t, "wait.posted", key, "Engine", `Posted in ${where}`, { sent: { platform: "discord", where, link: "https://discord.com/channels/000000000000000000/1/2", at: iso(t) } })
   }
   emit(c, t, "run.waiting", null, "Engine", approval ? "Waiting for approval" : what, { reason: kind })
   if (end === "wait") return void (c.stop = t)

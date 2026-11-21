@@ -62,7 +62,7 @@ const RECS: Rec[] = [
     routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }], question: "Where should the Larkspur Retail kickoff notes go?",
     form: { type: "object", required: ["channel"], properties: { channel: { type: "string", title: "Channel", enum: ["#delivery", "#clients", "#leads"] }, note: { type: "string", title: "Note" } } },
     values: { channel: "#delivery" },
-    sent: [{ platform: "discord", where: "Direct message to Maya Lindqvist", link: "https://discord.com/channels/745261709622771773/1/2", at: ago(1.4) }],
+    sent: [{ platform: "discord", where: "Direct message to Maya Lindqvist", link: "https://discord.com/channels/000000000000000000/1/2", at: ago(1.4) }],
     attachments: [{ name: "kickoff-notes.md", size: 2140, url: "/api/workflows/runs/wf_onboard_run124/files/kickoff-notes.md" }] },
   { id: "ib_alert", kind: "approval", title: "Page the on-call", workflow: { id: "wf_alert", name: "Alert triage" }, run: run("wf_alert", 128), step: "page", step_title: "Page on-call", asked_by: "Daimon",
     since: ago(0.4), expires_at: ago(-0.2), to: ["p_jonas"], decision: null, routes: approve,
@@ -76,7 +76,7 @@ const RECS: Rec[] = [
     since: ago(52), expires_at: null, to: ["p_maya", "p_jonas"], routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }],
     question: "Which channel should the Fernhill kickoff notes go to, and who joins?",
     decision: { route: "answer", label: "Answered", by: P.jonas!, at: ago(50), comment: null, selected: null },
-    sent: [{ platform: "discord", where: "Thread in #delivery", link: "https://discord.com/channels/745261709622771773/1/3", at: ago(52) }],
+    sent: [{ platform: "discord", where: "Thread in #delivery", link: "https://discord.com/channels/000000000000000000/1/3", at: ago(52) }],
     answer: { by: P.jonas!, via: "discord", text: "#delivery, please. Maya and Priya join; I will send the agenda the day before.", values: { text: "#delivery, please. Maya and Priya join; I will send the agenda the day before." }, files: [], at: ago(50) } },
 ]
 const VERB: Record<string, string> = { approve: "Approved", reject: "Rejected", answer: "Answered" }
