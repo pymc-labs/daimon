@@ -999,3 +999,35 @@ async def test_search_drops_hits_from_a_channel_the_member_cannot_read_history_i
     assert [row.channel_id for row in result.rows] == ["333"], (
         "a hit from a channel without Read Message History must be withheld"
     )
+
+
+async def test_search_survives_an_unknown_channel_type_and_never_shows_its_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The channel list holds one type discord.py does not know. The search still runs, the
+    known channel's hit is shown, and a hit in the unknown channel is refused as not found."""
+
+    unknown = {**_text_channel_payload(channel_id="555"), "type": 20}
+
+    async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
+        if route.path in _standard_guild_member_routes():
+            return _standard_guild_member_routes()[route.path]
+        if route.path == "/guilds/{guild_id}/channels":
+            return [_text_channel_payload(channel_id="222"), unknown]
+        if route.path == "/guilds/{guild_id}/messages/search":
+            return _search_response(
+                messages=[
+                    [_search_hit_payload(message_id="m1", channel_id="222")],
+                    [_search_hit_payload(message_id="m2", channel_id="555")],
+                ],
+                total_results=2,
+            )
+        if route.path == "/channels/{channel_id}":
+            ch_id = str(kwargs.get("channel_id") or route.channel_id)
+            return unknown if ch_id == "555" else _text_channel_payload(channel_id=ch_id)
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    result = await _search_messages_impl(_runtime_with_discord_token(), _auth(), content="x")
+
+    assert [row.id for row in result.rows] == ["m1"], "the unknown channel's hit is never shown"
