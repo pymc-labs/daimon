@@ -251,7 +251,7 @@ def _detail(e: EventRow, data: Mapping[str, Any], actor: str, run: RunRow | None
             return "Started from an earlier run"
         case "step.ready" if (visit := data.get("visit")) and isinstance(visit, int) and visit > 1:
             return f"Visit {visit}"
-        case "step.started" if (n := data.get("attempt")) and isinstance(n, int) and n > 1:
+        case "step.started" if (n := data.get("attempt")) and isinstance(n, int):
             return f"Attempt {n}"
         case "step.skipped" if data.get("reason") == "max_visits":
             return "Visited too many times"
@@ -403,7 +403,7 @@ def event_view(
     if isinstance(data.get("addressees"), list):
         data["addressees"] = [_hydrate(a, names) for a in data["addressees"]]
     account = _account_of(e.actor)
-    actor = person(names, account).name if account is not None else e.actor
+    actor = person(names, account).name if account is not None else e.actor.capitalize()
     return RunEvent(
         seq=e.seq,
         at=iso(e.at) or "",
