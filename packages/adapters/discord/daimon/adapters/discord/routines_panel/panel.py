@@ -26,12 +26,12 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.errors import DaimonError, RoutineMoved, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import RoutineAction, apply_routine_action
 from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
-from daimon.core.routines import can_read_routine_output
+from daimon.core.routines import MOVED_TO_WORKFLOWS, can_read_routine_output
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, update_routine
@@ -54,9 +54,13 @@ async def _send_callback_error(interaction: discord.Interaction, exc: Exception)
     best-effort (its own try/except that only logs) -- a failure here must
     never re-raise out of the caller's boundary.
     """
-    log.exception("routines_panel_callback_failed", error=str(exc))
-    sentry_sdk.capture_exception(exc)
-    error_embed = build_notice_embed("Something went wrong.\n\nTry again.")
+    moved = isinstance(exc, RoutineMoved) or isinstance(exc.__cause__, RoutineMoved)
+    if not moved:  # a card shown before the move is not a failure
+        log.exception("routines_panel_callback_failed", error=str(exc))
+        sentry_sdk.capture_exception(exc)
+    error_embed = build_notice_embed(
+        MOVED_TO_WORKFLOWS if moved else "Something went wrong.\n\nTry again."
+    )
     try:
         if interaction.response.is_done():
             await interaction.followup.send(embed=error_embed, ephemeral=True)
@@ -282,6 +286,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     "gone": "This routine no longer exists.",
                     "wrong_tenant": "This routine is from another server.",
                     "not_owner": ("Only its creator or a server admin can pause it."),
+                    "moved": MOVED_TO_WORKFLOWS,
                 }
                 if result != "changed":
                     notice = build_notice_embed(refusals[result])
