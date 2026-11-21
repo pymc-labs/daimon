@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Images over 5 MiB, or over 8000 px on an edge, are resized instead of sent
+  as a link.** In Discord, Slack, Teams and the web app, an image of up to 25
+  MiB is shrunk to fit the model's limits and shown to the agent inline, with
+  its orientation applied and its colour profile and transparency kept. An
+  image that cannot be read still falls back to a link rather than ending the
+  turn.
+
 - **Approvals can be set for one agent.** An agent's own Approvals sits between
   the workspace and the channel, so one agent can Allow writes while the rest
   Ask; a channel or thread setting still wins. Set it from the CLI
