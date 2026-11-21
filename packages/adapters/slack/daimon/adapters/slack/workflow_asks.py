@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any, Final, cast
 
 import httpx
@@ -169,21 +170,36 @@ def _element(box: Box) -> dict[str, Any]:
     }
 
 
+def _pressed(team_id: str, channel: str, message_id: str, wait_id: uuid.UUID) -> answers.Pressed:
+    """A Slack `ts` is unique only within its channel, so the press names both."""
+    return answers.Pressed(
+        platform="slack",
+        tenant_ids=(derive_tenant_uuid(platform="slack", workspace_id=team_id),),
+        channel_id=channel,
+        message_id=message_id,
+        wait_id=wait_id,
+    )
+
+
 async def handle_ask_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
     """A press of an ask's button: its form opens, or it answers at once."""
     action = cast("list[dict[str, Any]]", payload.get("actions") or [{}])[0]
     parsed = answers.parse_action(str(action.get("action_id") or ""))
     message_id = _field(payload, "container", "message_ts")
-    if parsed is None or not message_id:
+    team_id, channel = _field(payload, "team", "id"), _field(payload, "channel", "id")
+    if parsed is None or not message_id or not team_id:
         return
-    route = parsed[1]
-    form = await answers.ask_form(
-        runtime.sessionmaker, platform="slack", message_id=message_id, route=route
-    )
+    wait_id, route = parsed
+    at = _pressed(team_id, channel, message_id, wait_id)
+    form = await answers.ask_form(runtime.sessionmaker, at=at, route=route)
     if form is not None and form.fields:
-        team_id = _field(payload, "team", "id")
-        channel = _field(payload, "channel", "id")
-        meta = {"message_id": message_id, "route": route, "team_id": team_id, "channel": channel}
+        meta = {
+            "message_id": message_id,
+            "route": route,
+            "team_id": team_id,
+            "channel": channel,
+            "wait_id": str(wait_id),
+        }
         if client := await resolve_web_client(runtime, team_id=team_id):
             await client.views_open(  # pyright: ignore[reportUnknownMemberType]
                 trigger_id=str(payload.get("trigger_id") or ""), view=_form_view(form, meta)
@@ -192,9 +208,8 @@ async def handle_ask_action(runtime: SlackRuntime, payload: dict[str, Any]) -> N
     claimed = await answers.press(
         runtime.sessionmaker,
         runtime.settings,
-        platform="slack",
+        at=at,
         author=_field(payload, "user", "id"),
-        message_id=message_id,
         route=route,
     )
     await _tell(runtime, payload, claimed)
@@ -208,12 +223,18 @@ async def submit_ask_form(runtime: SlackRuntime, payload: dict[str, Any]) -> Non
     values = {name: _typed(box) for name, box in state.items()}
     route = meta.get("route", "")
     sent, comment = answers.form_answer(route, values)
+    try:
+        wait_id = uuid.UUID(meta.get("wait_id", ""))
+    except ValueError:
+        return  # a form opened before presses named their wait
+    at = _pressed(
+        meta.get("team_id", ""), meta.get("channel", ""), meta.get("message_id", ""), wait_id
+    )
     claimed = await answers.press(
         runtime.sessionmaker,
         runtime.settings,
-        platform="slack",
+        at=at,
         author=_field(payload, "user", "id"),
-        message_id=meta.get("message_id", ""),
         route=route,
         values=dict(sent),
         comment=comment,

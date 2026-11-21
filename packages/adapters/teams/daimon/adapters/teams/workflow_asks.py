@@ -110,10 +110,15 @@ class AskActions:
         message_id = activity.reply_to_id
         if parsed is None or actor is None or not message_id:
             return "This request is gone."
-        route = parsed[1]
-        form = await answers.ask_form(
-            runtime.sessionmaker, platform="teams", message_id=message_id, route=route
+        wait_id, route = parsed
+        at = answers.Pressed(
+            platform="teams",
+            tenant_ids=(actor.tenant_id,),
+            channel_id=actor.conversation_id,
+            message_id=message_id,
+            wait_id=wait_id,
         )
+        form = await answers.ask_form(runtime.sessionmaker, at=at, route=route)
         values = (
             {} if form is None else {b.name: str(fields.get(b.name) or "") for b in form.fields}
         )
@@ -124,9 +129,8 @@ class AskActions:
         claimed = await answers.press(
             runtime.sessionmaker,
             runtime.settings,
-            platform="teams",
+            at=at,
             author=actor.user_id,
-            message_id=message_id,
             route=route,
             values=sent,
             comment=reason,

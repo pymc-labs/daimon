@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.workflows import answers
 from daimon.core.workflows.answers import Attachment, Claimed
@@ -51,10 +52,10 @@ async def _tell(interaction: discord.Interaction, claimed: Claimed) -> None:
 class AskModal(discord.ui.Modal):
     """An ask's answer: one text box, a form's fields (at most five), or a reject's reason."""
 
-    def __init__(self, form: answers.AskForm, *, route: str, message_id: str) -> None:
+    def __init__(self, form: answers.AskForm, *, route: str, at: answers.Pressed) -> None:
         super().__init__(title=form.title or "Answer")
         self._route = route
-        self._message_id = message_id
+        self._at = at
         self._inputs: dict[str, discord.ui.TextInput[AskModal]] = {}
         self._picks: dict[str, discord.ui.Select[AskModal]] = {}
         for box in form.fields[:5]:
@@ -84,9 +85,8 @@ class AskModal(discord.ui.Modal):
         claimed = await answers.press(
             runtime.sessionmaker,
             runtime.settings,
-            platform="discord",
+            at=self._at,
             author=str(interaction.user.id),
-            message_id=self._message_id,
             route=self._route,
             values=sent,
             comment=comment,
@@ -127,24 +127,29 @@ class AskButton(
             parsed = answers.parse_action(self.item.custom_id or "")
             if parsed is None or interaction.message is None:
                 return
-            _, route = parsed
-            message_id = str(interaction.message.id)
-            runtime = _runtime(interaction)
-            form = await answers.ask_form(
-                runtime.sessionmaker, platform="discord", message_id=message_id, route=route
+            wait_id, route = parsed
+            message = interaction.message
+            guild = None if interaction.guild is None else str(interaction.guild.id)
+            at = answers.Pressed(
+                platform="discord",
+                tenant_ids=None
+                if guild is None
+                else (derive_tenant_uuid(platform="discord", workspace_id=guild),),
+                channel_id=str(message.channel.id),
+                message_id=str(message.id),
+                wait_id=wait_id,
             )
+            runtime = _runtime(interaction)
+            form = await answers.ask_form(runtime.sessionmaker, at=at, route=route)
             if form is not None and form.fields:
-                await interaction.response.send_modal(
-                    AskModal(form, route=route, message_id=message_id)
-                )
+                await interaction.response.send_modal(AskModal(form, route=route, at=at))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             claimed = await answers.press(
                 runtime.sessionmaker,
                 runtime.settings,
-                platform="discord",
+                at=at,
                 author=str(interaction.user.id),
-                message_id=message_id,
                 route=route,
             )
             await _tell(interaction, claimed)

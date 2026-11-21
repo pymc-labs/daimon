@@ -325,22 +325,30 @@ async def posts_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[WaitP
     return [WaitPost.model_validate(o) for o in found]
 
 
-async def post_by_message(
-    session: AsyncSession, *, platform: str, message_id: str
-) -> tuple[WaitPost, Wait] | None:
-    """The ask posted as `message_id`, whatever its wait's state: its buttons' presses."""
-    row = (
-        await session.execute(
-            select(WorkflowWaitPost, WorkflowWait)
-            .join(WorkflowWait, WorkflowWait.id == WorkflowWaitPost.wait_id)
-            .where(
-                WorkflowWaitPost.platform == platform,
-                WorkflowWaitPost.message_id == message_id,
-            )
-            .limit(1)
+async def posts_by_message(
+    session: AsyncSession,
+    *,
+    tenant_ids: Sequence[uuid.UUID] | None,
+    platform: str,
+    message_id: str,
+    wait_id: uuid.UUID,
+) -> list[tuple[WaitPost, Wait]]:
+    """`wait_id`'s asks posted as `message_id`, whatever the wait's state: its buttons' presses.
+
+    `tenant_ids` None: the platform's message ids are global (a Discord DM)."""
+    stmt = (
+        select(WorkflowWaitPost, WorkflowWait)
+        .join(WorkflowWait, WorkflowWait.id == WorkflowWaitPost.wait_id)
+        .where(
+            WorkflowWaitPost.platform == platform,
+            WorkflowWaitPost.message_id == message_id,
+            WorkflowWaitPost.wait_id == wait_id,
         )
-    ).first()
-    return None if row is None else (WaitPost.model_validate(row[0]), Wait.model_validate(row[1]))
+    )
+    if tenant_ids is not None:
+        stmt = stmt.where(WorkflowWaitPost.tenant_id.in_(tenant_ids))
+    rows = (await session.execute(stmt)).all()
+    return [(WaitPost.model_validate(post), Wait.model_validate(wait)) for post, wait in rows]
 
 
 async def open_post_for(

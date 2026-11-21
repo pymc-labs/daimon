@@ -338,12 +338,39 @@ def form_of(ask: dict[str, Any], route: str) -> AskForm | None:
     return AskForm(title, (Box("text", "Your answer"),))
 
 
-async def ask_form(sm: Sessions, *, platform: Chat, message_id: str, route: str) -> AskForm | None:
-    """`form_of` the ask posted as `message_id`."""
+@dataclass(frozen=True)
+class Pressed:
+    """A press on an ask's post, in platform ids: the post must match every one."""
+
+    platform: Chat
+    #: The tenants the press can come from; None when the ids are global (a Discord DM).
+    tenant_ids: tuple[uuid.UUID, ...] | None
+    channel_id: str
+    message_id: str
+    #: The wait the button names (`parse_action`).
+    wait_id: uuid.UUID
+
+
+def _channel(channel_id: str) -> str:
+    """Teams names a channel post `<channel>;messageid=<id>`: the channel alone."""
+    return channel_id.split(";", 1)[0]
+
+
+async def _post_pressed(session: AsyncSession, at: Pressed) -> tuple[WaitPost, Wait] | None:
+    found = await workflow_waits.posts_by_message(
+        session,
+        tenant_ids=at.tenant_ids,
+        platform=at.platform,
+        message_id=at.message_id,
+        wait_id=at.wait_id,
+    )
+    return next((f for f in found if _channel(f[0].channel_id) == _channel(at.channel_id)), None)
+
+
+async def ask_form(sm: Sessions, *, at: Pressed, route: str) -> AskForm | None:
+    """`form_of` the ask pressed `at`."""
     async with sm() as session:
-        found = await workflow_waits.post_by_message(
-            session, platform=platform, message_id=message_id
-        )
+        found = await _post_pressed(session, at)
         ask = {} if found is None else await _ask(session, found[1])
     return form_of(ask, route)
 
@@ -405,19 +432,17 @@ async def press(
     sm: Sessions,
     settings: Settings,
     *,
-    platform: Chat,
+    at: Pressed,
     author: str,
-    message_id: str,
     route: str,
     values: dict[str, JsonValue] | None = None,
     comment: str | None = None,
     now: datetime | None = None,
 ) -> Claimed:
-    """A press of the buttons on the ask posted as `message_id`, or its answer form sent."""
+    """A press of the buttons on the ask pressed `at`, or its answer form sent."""
+    platform, message_id = at.platform, at.message_id
     async with sm() as session:
-        found = await workflow_waits.post_by_message(
-            session, platform=platform, message_id=message_id
-        )
+        found = await _post_pressed(session, at)
     if found is None:
         return Claimed("hint", "This request is gone.")
     post, wait = found

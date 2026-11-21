@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from daimon.core.stores import tenants, web_identities, workflow_waits
 from daimon.core.stores.accounts import get_account
 from daimon.core.workflows import answers
@@ -121,3 +123,46 @@ async def test_a_role_approver_answers_by_the_groups_of_their_sign_ins(
     )
     claimed = await answers.claim_reply(world.sm, world.settings, reply, now=NOW)
     assert claimed is not None and claimed.status == "answered", claimed
+
+
+async def test_a_press_decides_only_the_wait_its_button_names_in_its_channel(
+    db_session: AsyncSession,
+) -> None:
+    """Slack ids are unique per channel: two asks posted as one ts stay apart."""
+    approve = {k: v for k, v in ASK.items() if k != "answer"} | {"approvers": ["owner"]}
+    nodes = {"ok": approve, "f": {"kind": "finish"}}
+    world = await make_world(db_session, nodes, "ok", home="C1")
+    tenant = await tenants.get_tenant(db_session, world.tenant_id)
+    owner = await get_account(db_session, world.owner)
+    assert tenant is not None and owner is not None
+    await make_platform_principal(
+        db_session, platform="slack", external_id="U1", tenant=tenant, account=owner
+    )
+    first, second = await world.run(), await world.run()
+    waits = [await world.park(first.id, "ok"), await world.park(second.id, "ok")]
+    async with world.sm.begin() as s:
+        for wait_id, channel in zip(waits, ("C1", "C2"), strict=True):
+            await workflow_waits.record_post(
+                s,
+                tenant_id=world.tenant_id,
+                wait_id=wait_id,
+                platform="slack",
+                channel_id=channel,
+                thread_id=None,
+                message_id="1700000000.000100",
+                addressee_account_id=None,
+            )
+
+    def at(wait_id: uuid.UUID, channel: str) -> answers.Pressed:
+        return answers.Pressed("slack", (world.tenant_id,), channel, "1700000000.000100", wait_id)
+
+    wrong = await answers.press(
+        world.sm, world.settings, at=at(waits[0], "C2"), author="U1", route="approve", now=NOW
+    )
+    assert wrong.status == "hint", f"no ask of that wait in that channel: {wrong}"
+    pressed = await answers.press(
+        world.sm, world.settings, at=at(waits[1], "C2"), author="U1", route="approve", now=NOW
+    )
+    assert pressed.status == "answered", pressed
+    assert (await world.get(first.id)).status == "waiting", "the other channel's ask is open"
+    assert (await world.get(second.id)).status == "succeeded", "the pressed ask decided"

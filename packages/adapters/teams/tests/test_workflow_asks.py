@@ -16,6 +16,7 @@ from daimon.adapters.teams.workflow_delivery import make_teams_workflow_poster
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.stores import accounts, tenants, workflow_waits
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.workflow_waits import WaitPost
 from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.testing.factories import make_account, make_platform_principal
 from daimon.testing.platform_surface import SurfaceRecorder
@@ -86,15 +87,17 @@ def _runtime(world: World) -> Any:
 
 
 async def _press(
-    world: World, monkeypatch: pytest.MonkeyPatch, user: str, message_id: str, custom_id: str
+    world: World, monkeypatch: pytest.MonkeyPatch, user: str, post: WaitPost, custom_id: str
 ) -> str:
     async def actor(runtime: object, activity: object) -> object:
-        return SimpleNamespace(user_id=user)
+        return SimpleNamespace(
+            user_id=user, tenant_id=world.tenant_id, conversation_id=post.channel_id
+        )
 
     monkeypatch.setattr(workflow_asks, "card_actor", actor)
     data = {"action": workflow_asks.VERB, "custom_id": custom_id}
     activity = SimpleNamespace(
-        value=SimpleNamespace(action=SimpleNamespace(data=data)), reply_to_id=message_id
+        value=SimpleNamespace(action=SimpleNamespace(data=data)), reply_to_id=post.message_id
     )
     reply = await workflow_asks.AskActions(_runtime(world)).on_action(
         cast("Any", SimpleNamespace(activity=activity))
@@ -134,8 +137,8 @@ async def test_ask_derick_by_dm_resolves_by_its_button_and_closes_the_card(
     ), post
 
     approve = f"wfa:{wait_id}:approve"
-    assert "Ask " in await _press(world, monkeypatch, "aad-9", post.message_id, approve)
-    await _press(world, monkeypatch, "aad-2", post.message_id, approve)
+    assert "Ask " in await _press(world, monkeypatch, "aad-9", post, approve)
+    await _press(world, monkeypatch, "aad-2", post, approve)
     assert (await world.get(run.id)).status == "succeeded"
     await _deliver(world, recorder)
     [closed] = recorder.surviving_messages()
