@@ -283,9 +283,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
-        doc=(
-            "The agent can read the docs and source of the Daimon release it runs on."
-        ),
+        doc=("The agent can read the docs and source of the Daimon release it runs on."),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
         page="how-daimon-works.md#knows-daimon",
