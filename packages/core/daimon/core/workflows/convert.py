@@ -27,6 +27,7 @@ from daimon.core.stores import workflows as store
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.lead_intake import configured_routines
+from daimon.core.workflows import catalog as tool_catalogs
 from daimon.core.workflows.lanes import OWNER_DM
 from daimon.core.workflows.service import (
     Env,
@@ -198,10 +199,12 @@ async def from_routine(env: Env, routine_id: uuid.UUID) -> uuid.UUID:
             platform=tenant.platform,
             external_id=row.created_by_user_id,
         )
-        validation = validate_document(plan.spec)
+        catalog = await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents)
+        validation = validate_document(plan.spec, catalog)
         if validation.errors:
             raise Invalid(validation.errors[0].message)
-        spec = dump_spec(parse_spec(plan.spec))
+        parsed = parse_spec(plan.spec)
+        spec = dump_spec(parsed)
         workflow = await store.create_workflow(
             session,
             tenant_id=row.tenant_id,
@@ -230,6 +233,7 @@ async def from_routine(env: Env, routine_id: uuid.UUID) -> uuid.UUID:
             approved_by=env.who.account_id if validation.grants else None,
             now=env.now,
             cursors={TRIGGER: cursor},
+            agent_tools=tool_catalogs.spec_agent_tools(parsed, catalog),
         )
         if plan.paused:
             await store.set_status(

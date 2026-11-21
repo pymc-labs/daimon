@@ -10,28 +10,30 @@ import pytest
 from daimon.core._models import Routine, Tenant, Workflow, WorkflowTrigger
 from daimon.core.errors import RoutineMoved
 from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.stores import routines
+from daimon.core.stores import routines, workflows
 from daimon.core.workflows import convert, triggers
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.catalog import AgentLister
 from daimon.core.workflows.lanes import OWNER_DM
 from daimon.core.workflows.service import Env, Forbidden, Refused
 from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.workflows import NOW, make_settings
+from daimon.testing.workflows import NOW, agents_with, make_settings
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SLOT = NOW + timedelta(hours=1)
 
 
-async def _env(db: AsyncSession, *, admin: bool = True) -> Env:
+async def _env(db: AsyncSession, *, admin: bool = True, agents: AgentLister | None = None) -> Env:
+    agents = agents or agents_with({"daimon": []})
     tenant = await make_tenant(db)
     account = await make_account(db, tenant=tenant)
     await db.execute(
         update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")
     )
     sm = async_sessionmaker(bind=db.bind, expire_on_commit=False)
-    return Env(sm, make_settings(), Who(tenant.id, account.id, admin=admin), NOW)
+    return Env(sm, make_settings(), Who(tenant.id, account.id, admin=admin), NOW, agents)
 
 
 async def _routine(db: AsyncSession, env: Env, **fields: Any) -> uuid.UUID:
@@ -106,6 +108,21 @@ async def test_routines_that_cannot_move_are_refused(db_session: AsyncSession) -
     member = Env(env.sm, env.settings, Who(env.who.tenant_id, env.who.account_id), NOW)
     with pytest.raises(Forbidden):
         await convert.from_routine(member, plain)
+
+
+async def test_a_moved_routine_keeps_its_agents_tools_on_its_version(
+    db_session: AsyncSession,
+) -> None:
+    """The run-time exposure check reads the tools stored on the version, so the move must
+    record them as every other publish does."""
+    env = await _env(db_session, agents=agents_with({"daimon": ["gmail/send_message"]}))
+    flow = await convert.from_routine(env, await _routine(db_session, env))
+    async with env.sm() as s:
+        version = await workflows.get_version(
+            s, tenant_id=env.who.tenant_id, workflow_id=flow, number=1
+        )
+    assert version is not None, "the move publishes v1"
+    assert version.agent_tools == {"daimon": ["gmail/send_message"]}, version.agent_tools
 
 
 async def test_a_dm_routine_becomes_an_owner_dm_step_that_posts_to_the_owner(
