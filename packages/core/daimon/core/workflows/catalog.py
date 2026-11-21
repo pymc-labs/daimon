@@ -16,6 +16,11 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def tool_label(tool_id: str) -> str:
+    """A `server/tool` id in words, as the editor names it: `Send message`."""
+    return tool_id.rsplit("/", 1)[-1].replace("_", " ").capitalize()
+
+
 class AgentOption(BaseModel):
     key: str
     id: str

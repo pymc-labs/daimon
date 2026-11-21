@@ -122,12 +122,14 @@ async def test_text_answers_become_the_output(db_session: AsyncSession) -> None:
     wait_id = await _park(world, run.id, "ok")
     with pytest.raises(waits.BadAnswer):
         await _decide(world, world.owner, wait_id, "answer", values={"text": " "})
-    await _decide(world, world.owner, wait_id, "answer", values={"text": "Ship it"})
+    await _decide(
+        world, world.owner, wait_id, "answer", values={"text": "Ship it", "note": "Today"}
+    )
     output = (await world.steps(run.id))["f"].output
-    assert isinstance(output, dict) and output["text"] == "Ship it", output
+    assert isinstance(output, dict) and output["text"] == "Ship it\n\nNote: Today", output
     async with world.sm() as s:
         wait = await workflow_waits.get_wait(s, wait_id)
-    assert wait is not None and wait.answer_text == "Ship it", "the text stays on the wait"
+    assert wait is not None and wait.answer_text == output["text"], "the text stays on the wait"
 
 
 async def test_timers_arrive_and_approvals_time_out_to_their_route(
@@ -217,6 +219,11 @@ async def test_the_inbox_lists_and_decides_for_the_addressee(db_session: AsyncSe
     assert decided.decision is not None and decided.decision.label == "Approved", decided
     with pytest.raises(inbox.service.Refused, match="Already decided"):
         await inbox.decide(env(world.owner), wait_id, inbox.Decide(route="approve"))
+
+
+def test_proposal_reviews_reject_all_or_send_the_selected() -> None:
+    labels = [r.label for r in inbox.routes(None, waits.PROPOSALS)]
+    assert labels == ["Reject all", "Send selected"], labels
 
 
 async def test_an_admin_approves_a_publish_request_from_the_inbox(

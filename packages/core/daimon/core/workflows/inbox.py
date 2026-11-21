@@ -19,16 +19,20 @@ from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_waits import Wait
 from daimon.core.stores.workflows import WorkflowRow
-from daimon.core.workflows import run_views, runs, service, views, waits
+from daimon.core.workflows import catalog, lanes, run_views, runs, service, views, waits
 from daimon.core.workflows.service import Env
-from daimon.core.workflows.spec import AnyNode, ApprovalNode, Spec
+from daimon.core.workflows.spec import AgentNode, AnyNode, ApprovalNode, Spec
 from daimon.core.workflows.views import Person, iso
 from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 KEPT: Final = timedelta(days=7)
+#: Who asks when no agent does: approvals and the default agent's questions. An agent's
+#: question or proposals name its key; the web shows the agent's name.
 ASKED_BY: Final = "Daimon"
+_NOTE: Final = {"type": "string", "title": "Note"}
 _VERB: Final = {"approve": "Approved", "reject": "Rejected", "answer": "Answered"}
+_PROPOSAL_ROUTES: Final = {waits.REJECT: "Reject all", waits.APPROVE: "Send selected"}
 
 Kind = Literal["approval", "question", "publish", "proposals"]
 
@@ -94,7 +98,11 @@ def routes(node: AnyNode | None, kind: str) -> list[Route]:
     return [
         Route(
             name=n,
-            label="Send answer" if n == waits.ANSWER else n[:1].upper() + n[1:],
+            label="Send answer"
+            if n == waits.ANSWER
+            else _PROPOSAL_ROUTES[n]
+            if kind == waits.PROPOSALS
+            else n[:1].upper() + n[1:],
             primary=i == len(names) - 1,
             comment=waits.needs_comment(node, kind, n),
         )
@@ -122,19 +130,19 @@ def _form(node: AnyNode | None, wait: Wait) -> dict[str, Any] | None:
         return {"type": "object", "properties": fields}
     if not _typed(node, wait):
         return None
-    text: dict[str, Any] = {"type": "string", "title": "Answer"}
+    fields: dict[str, Any] = {"text": {"type": "string"}}
     if options := (wait.shown or {}).get("options"):
-        text["enum"] = list(options)
-    return {"type": "object", "required": ["text"], "properties": {"text": text}}
+        fields = {"text": {"type": "string", "enum": list(options)}, "note": _NOTE}
+    return {"type": "object", "required": ["text"], "properties": fields}
 
 
-def _bound(preview: dict[str, Any], approved: dict[str, Any]) -> dict[str, Any]:
+def _bound(preview: dict[str, Any], approved: dict[str, Any], spec: Spec) -> dict[str, Any]:
     """A bound Action as shown: the approved call once decided, else the preview."""
     call = approved.get(preview["node"]) or preview
     return {
         "tool": call["tool"],
-        "label": call["tool"].replace("/", " "),
-        "step": preview["node"],
+        "label": catalog.tool_label(call["tool"]),
+        "step": waits.step_title(spec.nodes.get(preview["node"]), preview["node"]),
         "args": call.get("args") or {},
     }
 
@@ -144,9 +152,23 @@ def _previews(shown: dict[str, Any]) -> list[dict[str, Any]]:
     return previews
 
 
+def _in_words(arguments: dict[str, Any]) -> str:
+    """A proposal's arguments on one line: `issue: 412, body: Thanks...`."""
+    return ", ".join(
+        f"{k}: {v if isinstance(v, str | int | float) else json.dumps(v)}"
+        for k, v in arguments.items()
+    )[:2000]
+
+
 async def _proposals(session: AsyncSession, step_id: uuid.UUID) -> list[dict[str, Any]]:
+    """Each proposal: the agent's reason as its title, then its arguments and `server/tool`."""
     return [
-        {"id": str(p.id), "tool": p.tool, "title": p.tool, "detail": json.dumps(p.arguments)[:2000]}
+        {
+            "id": str(p.id),
+            "tool": p.tool,
+            "title": p.reason or catalog.tool_label(p.tool),
+            "detail": _in_words(p.arguments),
+        }
         for p in await proposals_store.proposals_of(session, step_id)
     ]
 
@@ -200,7 +222,8 @@ async def _wait_detail(
     if run is None or step is None or not await waits.answerable(seen.session, env.who, wait, run):
         return None
     workflow = await seen.workflow(run.tenant_id, run.workflow_id)
-    node = (await seen.spec(run)).nodes.get(step.node_id)
+    spec = await seen.spec(run)
+    node = spec.nodes.get(step.node_id)
     key = runs.key_of(step)
     kind = waits.kind_of(wait)
     typed = kind != waits.PROPOSALS and _typed(node, wait)
@@ -222,13 +245,13 @@ async def _wait_detail(
         workflow={"id": str(run.workflow_id), "name": workflow.name if workflow else ""},
         run={"id": str(run.id), "number": run.number},
         step=key,
-        step_title=node.title if node and node.title else key,
-        asked_by=ASKED_BY,
+        step_title=waits.step_title(node, key),
+        asked_by=(lanes.agent_of(spec, node) if isinstance(node, AgentNode) else None) or ASKED_BY,
         since=iso(wait.opened_at) or "",
         expires_at=iso(wait.expires_at),
         decision=decision,
         show=shown.get("show"),
-        bound=[_bound(b, shown.get("binds") or {}) for b in _previews(shown)],
+        bound=[_bound(b, shown.get("binds") or {}, spec) for b in _previews(shown)],
         proposals=await _proposals(seen.session, step.id) if kind == waits.PROPOSALS else [],
         question=_question(node, wait, key) if typed else None,
         form=_form(node, wait),

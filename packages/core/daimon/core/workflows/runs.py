@@ -1417,7 +1417,8 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
                 session, loaded, step, now=now, delay=timedelta(0), message="The worker stopped"
             )
             return
-        outcome = engine.Unknown("The worker stopped after it may have written something")
+        tool = node.tool if isinstance(node, ActionNode) else "the step"
+        outcome = engine.Unknown(f"The worker stopped during {tool}. It may have finished.")
         await _resolve(session, loaded, step, outcome, now=now)
 
 

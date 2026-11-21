@@ -527,6 +527,9 @@ def _form_values(node: ApprovalNode | None, kind: str, answer: Answer) -> dict[s
         text = answer.values.get("text")
         if not isinstance(text, str) or not text.strip():
             raise BadAnswer("Write an answer first.")
+        note = answer.values.get("note")
+        if isinstance(note, str) and note.strip():
+            return {"text": f"{text.strip()}\n\nNote: {note.strip()}"}
         return {"text": text.strip()}
     if node.answer != "form":
         return {}

@@ -186,7 +186,7 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
                     tool_id,
                     catalog.ToolOption(
                         id=tool_id,
-                        label=tool_id.split("/")[1].replace("_", " ").capitalize(),
+                        label=catalog.tool_label(tool_id),
                         writes=tool_writes(tool_id, None),
                     ),
                 )

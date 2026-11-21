@@ -1015,9 +1015,9 @@ async def attention(env: Env) -> list[Attention]:
                         step=None,
                         since=views.iso(env.now) or "",
                         expires_at=None,
-                        detail="Needs an owner."
+                        detail="The owner left"
                         if summary.status == "needs_owner"
-                        else "Needs review.",
+                        else "Changed grants",
                     )
                 )
             latest_runs[workflow_id] = ref
@@ -1046,15 +1046,18 @@ async def attention(env: Env) -> list[Attention]:
             except NotFound:
                 continue
             if rights.controls_run(own=run_views.started_by_me(run, env.who.account_id)):
+                steps = await runs_store.list_steps(session, run.id)
+                unknown = next((s for s in steps if s.status == "unknown"), None)
                 out.append(
                     Attention(
                         kind="unknown",
                         workflow={"id": str(workflow.id), "name": workflow.name},
                         run={"id": str(run.id), "number": run.number},
-                        step=run.failure_step,
+                        step=unknown.node_id if unknown else run.failure_step,
                         since=views.iso(run.started_at or run.created_at) or "",
                         expires_at=None,
-                        detail="A step may or may not have happened. Say what to do.",
+                        detail=(unknown and unknown.error_message)
+                        or "A step may or may not have happened. Say what to do.",
                     )
                 )
     return sorted(out, key=lambda a: a.since, reverse=True)
