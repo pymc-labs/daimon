@@ -120,3 +120,13 @@ async def step_events(
         .order_by(WorkflowRunEvent.seq)
     )
     return [EventRow.model_validate(orm) for orm in rows]
+
+
+async def posted_links(session: AsyncSession, run_id: uuid.UUID) -> list[str]:
+    """The links of the run's sent posts, oldest first."""
+    rows = await session.scalars(
+        select(WorkflowRunEvent.data["link"].as_string())
+        .where(WorkflowRunEvent.run_id == run_id, WorkflowRunEvent.type == "delivery.sent")
+        .order_by(WorkflowRunEvent.seq)
+    )
+    return [link for link in rows if link]

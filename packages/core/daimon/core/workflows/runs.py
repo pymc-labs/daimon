@@ -25,11 +25,11 @@ from daimon.core.stores import (
     workflow_waits,
     workflows,
 )
-from daimon.core.stores.workflow_run_events import NewEvent, append_events
+from daimon.core.stores.workflow_run_events import NewEvent, append_events, posted_links
 from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
 from daimon.core.workflows import asks, callbacks, delivery, engine
 from daimon.core.workflows.asks import Ask
-from daimon.core.workflows.clock import add_duration
+from daimon.core.workflows.clock import add_duration, run_times
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
@@ -46,6 +46,7 @@ from daimon.core.workflows.spec import (
     Spec,
     parse_spec,
 )
+from daimon.core.workflows.state import STATE_LIMIT, reads_of
 from daimon.core.workflows.taint import Catalog, SkillPin, catalog_of
 from pydantic import JsonValue
 from sqlalchemy import func, select
@@ -282,8 +283,9 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
             "mode": run.mode,
             "label": run.label,
             "callbacks": dict(callbacks.urls(settings, spec, run.id)),
+            **run_times(run.started_at or now, spec.timezone),
         },
-        workflow={"id": str(workflow.id), "name": workflow.name},
+        workflow=await _workflow_facts(session, workflow, spec),
         trigger={"kind": run.trigger_kind, "key": run.trigger_key},
         now=now,
         max_steps=_max_steps(spec, settings),
@@ -296,6 +298,37 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
     pins = {k: SkillPin.model_validate(v) for k, v in skills.items()}
     catalog = catalog_of(settings.tool_safety, agent_tools, pins or None)
     return Loaded(run, workflow, spec, steps, facts, catalog)
+
+
+async def _workflow_facts(
+    session: AsyncSession, workflow: workflows.WorkflowRow, spec: Spec
+) -> dict[str, JsonValue]:
+    """`workflow`: its id and name, plus the saved state and the last run when a template
+    reads them (the state is copied into every expression's context, so it stays out when
+    unused)."""
+    facts: dict[str, JsonValue] = {"id": str(workflow.id), "name": workflow.name}
+    reads = reads_of(spec.model_dump_json())
+    if "state" in reads:
+        facts["state"] = workflow.state
+    if "last_run" in reads:
+        facts["last_run"] = await _last_run(session, workflow.id)
+    return facts
+
+
+async def _last_run(session: AsyncSession, workflow_id: uuid.UUID) -> JsonValue:
+    """The latest succeeded live run: number, times, what its Finish returned, its post links."""
+    run = await workflow_runs.last_succeeded(session, workflow_id=workflow_id)
+    if run is None:
+        return None
+    spec = await spec_of(session, run)
+    steps = await workflow_runs.list_steps(session, run.id)
+    return {
+        "number": run.number,
+        "started_at": run.started_at and run.started_at.astimezone(UTC).isoformat(),
+        "ended_at": run.ended_at and run.ended_at.astimezone(UTC).isoformat(),
+        "output": _finish_output(spec, steps),
+        "posted": [{"link": link} for link in await posted_links(session, run.id)],
+    }
 
 
 async def _lock(session: AsyncSession, run_id: uuid.UUID) -> RunRow | None:
@@ -358,6 +391,18 @@ async def _apply(
             if isinstance(loaded.spec.nodes.get(r.node_id), ForEachNode):
                 events += await _cancel_items(session, r, now=now, reason="parent_cancelled")
     end = transition.end
+    if end is not None and end.state and run.mode == "live" and end.status == "succeeded":
+        saved = await workflows.merge_state(
+            session, tenant_id=run.tenant_id, workflow_id=run.workflow_id, patch=end.state, now=now
+        )
+        if saved is None:
+            # The run's own `run.succeeded` is replaced, so the ledger shows one ending.
+            message = f"The saved state would pass {STATE_LIMIT // 1024} KB"
+            end = RunEnd("failed", reason="state_too_large", message=message, step=end.step)
+            events = [e for e in events if e.type != "run.succeeded"]
+            events.append(Event("run.failed", end.step, {"reason": end.reason, "message": message}))
+        else:
+            events.append(Event("state.saved", None, {"keys": list(saved)}))
     if end is not None:
         await workflow_runs.update_run(
             session,
@@ -744,8 +789,12 @@ async def offer_event(
 
 
 def _finish_output(spec: Spec, rows: Sequence[StepRow]) -> JsonValue:
-    """A run's output: what its last Finish visit produced."""
-    finish = [r for r in rows if isinstance(spec.nodes.get(r.node_id), FinishNode)]
+    """A run's output: what its last Finish visit produced (a skipped Finish made none)."""
+    finish = [
+        r
+        for r in rows
+        if r.status == "succeeded" and isinstance(spec.nodes.get(r.node_id), FinishNode)
+    ]
     return max(finish, key=lambda r: r.visit).output if finish else None
 
 

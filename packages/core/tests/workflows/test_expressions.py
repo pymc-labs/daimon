@@ -44,6 +44,12 @@ def test_render_keeps_the_type_of_a_lone_expression_and_joins_text() -> None:
     assert render("${{ lowerAscii(steps.draft.output.body) }}", CONTEXT, now=NOW) == "hi", "funcs"
 
 
+def test_last_takes_the_final_items_of_a_list() -> None:
+    assert render("${{ last(inputs.tags, 1) }}", CONTEXT, now=NOW) == ["b"], "the final one"
+    assert render("${{ last(inputs.tags, 5) }}", CONTEXT, now=NOW) == ["a", "b"], "all when short"
+    assert render("${{ last(inputs.tags, 0) }}", CONTEXT, now=NOW) == [], "none"
+
+
 @pytest.mark.parametrize(
     ("source", "message"),
     [

@@ -17,10 +17,10 @@ from typing import Any, Literal
 
 from daimon.core.config import Settings
 from daimon.core.routine_files import RoutineFile
+from daimon.core.stores import security_audit, workflow_waits
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
-from daimon.core.stores import workflow_waits
 from daimon.core.stores import workflows as store
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import GrantRow, RunRow
@@ -767,6 +767,46 @@ async def export(
         return exchange.dump(spec, fmt), exchange.filename(
             str(spec.get("name") or workflow.name), fmt
         )
+
+
+# ---------- saved state ----------
+
+
+def _saved(workflow: WorkflowRow) -> views.SavedState:
+    return views.SavedState(state=workflow.state, updated_at=views.iso(workflow.state_updated_at))
+
+
+async def saved_state(env: Env, workflow_id: uuid.UUID) -> views.SavedState:
+    """What the workflow's runs saved; runners, who see only their own runs, do not see it."""
+    async with env.sm() as session:
+        workflow, _, rights = await _load(session, env, workflow_id)
+        await _need(
+            session, workflow, rights.sees_run(own=False), "the owner, an editor or a viewer"
+        )
+        return _saved(workflow)
+
+
+async def clear_state(env: Env, workflow_id: uuid.UUID) -> views.SavedState:
+    async with env.sm.begin() as session:
+        workflow, _, rights = await _load(session, env, workflow_id, lock=True)
+        await _need(session, workflow, rights.edit, "the owner or an editor")
+        await store.clear_state(
+            session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, now=env.now
+        )
+        await security_audit.append_event(
+            session,
+            tenant_id=workflow.tenant_id,
+            account_id=env.who.account_id,
+            agent_id=None,
+            platform=None,
+            platform_user_id=None,
+            tool_name="workflow_state",
+            operation="cleared",
+            outcome="allowed",
+            reason=f"workflow {workflow.id} state cleared",
+            occurred_at=env.now,
+        )
+        return views.SavedState(state={}, updated_at=views.iso(env.now))
 
 
 # ---------- runs ----------

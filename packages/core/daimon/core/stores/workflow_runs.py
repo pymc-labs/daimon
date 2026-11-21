@@ -977,6 +977,21 @@ async def previous_end(
     )
 
 
+async def last_succeeded(session: AsyncSession, *, workflow_id: uuid.UUID) -> RunRow | None:
+    """The workflow's latest succeeded live run (`workflow.last_run`)."""
+    orm = await session.scalar(
+        select(WorkflowRun)
+        .where(
+            WorkflowRun.workflow_id == workflow_id,
+            WorkflowRun.mode == "live",
+            WorkflowRun.status == "succeeded",
+        )
+        .order_by(WorkflowRun.ended_at.desc().nulls_last(), WorkflowRun.number.desc())
+        .limit(1)
+    )
+    return None if orm is None else RunRow.model_validate(orm)
+
+
 async def queued_runs(session: AsyncSession, *, limit: int) -> list[uuid.UUID]:
     rows = await session.scalars(
         select(WorkflowRun.id)

@@ -42,6 +42,13 @@ class Person(BaseModel):
     name: str
 
 
+class SavedState(BaseModel):
+    """What a workflow keeps between runs (`workflow.state`)."""
+
+    state: dict[str, Any]
+    updated_at: str | None
+
+
 class Tick(BaseModel):
     number: int
     status: str

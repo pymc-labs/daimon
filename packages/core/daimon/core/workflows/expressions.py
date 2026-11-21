@@ -253,6 +253,11 @@ def _functions(now: datetime) -> dict[str, CELFunction]:
             raise TypeError("join takes a list")
         return celtypes.StringType(str(separator).join(str(v) for v in values))
 
+    def last(values: celtypes.Value, count: celtypes.Value) -> celtypes.Value:
+        if not isinstance(values, list) or not isinstance(count, celtypes.IntType):
+            raise TypeError("last takes a list and a count")
+        return celtypes.ListType(values[max(len(values) - int(count), 0) :])
+
     def current_time() -> celtypes.Value:
         return celtypes.TimestampType(now)
 
@@ -261,6 +266,7 @@ def _functions(now: datetime) -> dict[str, CELFunction]:
         "upperAscii": upper_ascii,
         "trim": trim,
         "join": join,
+        "last": last,
         "now": current_time,
     }
 

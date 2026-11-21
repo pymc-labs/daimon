@@ -22,6 +22,7 @@ from typing import Final, Literal
 from daimon.core.workflows.expressions import ExpressionError, evaluate, expressions_in, render
 from daimon.core.workflows.graph import Edge, ancestors, back_edges, edges_of
 from daimon.core.workflows.spec import (
+    MAX_TITLE,
     ActionNode,
     AgentNode,
     AnyNode,
@@ -109,6 +110,8 @@ class RunEnd:
     reason: str | None = None
     message: str | None = None
     step: str | None = None
+    #: What the Finish asks to merge into `workflow.state` (a null value deletes the key).
+    state: Mapping[str, JsonValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,8 @@ class Succeeded:
     files: tuple[dict[str, JsonValue], ...] = ()
     #: `finish_early`: the run ends here as succeeded with outcome `nothing_to_do`.
     early: bool = False
+    #: A Finish's rendered `state`.
+    state: Mapping[str, JsonValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -275,6 +280,21 @@ def expression_context(
     }
 
 
+def _state_patch(
+    node: FinishNode, context: Mapping[str, JsonValue], now: datetime
+) -> dict[str, JsonValue] | None:
+    """The Finish's `state` with its keys and values rendered."""
+    if not node.state:
+        return None
+    patch: dict[str, JsonValue] = {}
+    for key, value in node.state.items():
+        name = render(key, context, now=now)
+        if not isinstance(name, str) or not name or len(name) > MAX_TITLE:
+            raise ExpressionError(f"A state key must be 1 to {MAX_TITLE} characters of text")
+        patch[name] = render(value, context, now=now)
+    return patch
+
+
 class _Walk:
     """One transition's working copy of the run's steps."""
 
@@ -389,7 +409,7 @@ class _Walk:
                     if node.deliver is not None:
                         # A delivery whose templates fail fails the Finish, before any post.
                         render(node.deliver.model_dump(), context, now=now)
-                    outcome = Succeeded(output=output)
+                    outcome = Succeeded(output=output, state=_state_patch(node, context, now))
         except ExpressionError as err:
             outcome = Failed("fatal", str(err))
         self.complete(step, outcome)
@@ -469,7 +489,9 @@ class _Walk:
                 )
                 quiet = node.output is None and node.deliver is None and not acted
                 outcome_of = "nothing_to_do" if quiet else "completed"
-                self.end_run(RunEnd("succeeded", outcome=outcome_of, step=done.key))
+                self.end_run(
+                    RunEnd("succeeded", outcome=outcome_of, step=done.key, state=outcome.state)
+                )
             return
         self.leave(done, taken)
 

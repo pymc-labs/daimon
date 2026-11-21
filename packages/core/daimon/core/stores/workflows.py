@@ -27,7 +27,8 @@ from daimon.core._models import (
     WorkflowWaitAnswer,
 )
 from daimon.core.stores import workflow_triggers
-from pydantic import BaseModel, ConfigDict
+from daimon.core.workflows.state import merged, oversized
+from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,6 +123,43 @@ async def get_workflow(
     stmt = select(Workflow).where(Workflow.tenant_id == tenant_id, Workflow.id == workflow_id)
     orm = (await session.execute(stmt.with_for_update() if lock else stmt)).scalar_one_or_none()
     return None if orm is None else WorkflowRow.model_validate(orm)
+
+
+async def merge_state(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    workflow_id: uuid.UUID,
+    patch: Mapping[str, JsonValue],
+    now: datetime,
+) -> list[str] | None:
+    """Merge `patch` into the workflow's state under its row lock, so two finishes both
+    land. Returns the keys touched, or None (nothing written) when the result is too large."""
+    # The column, not the row object: a loaded Workflow would answer from the session's
+    # earlier read, not from the finish that committed while this waited for the lock.
+    current = await session.scalar(
+        select(Workflow.state)
+        .where(Workflow.tenant_id == tenant_id, Workflow.id == workflow_id)
+        .with_for_update()
+    )
+    assert current is not None, "a run's workflow outlives it"
+    state = merged(current, patch)
+    if oversized(state):
+        return None
+    await session.execute(
+        update(Workflow).where(Workflow.id == workflow_id).values(state=state, state_updated_at=now)
+    )
+    return sorted(patch)
+
+
+async def clear_state(
+    session: AsyncSession, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID, now: datetime
+) -> None:
+    await session.execute(
+        update(Workflow)
+        .where(Workflow.tenant_id == tenant_id, Workflow.id == workflow_id)
+        .values(state={}, state_updated_at=now)
+    )
 
 
 async def list_workflows(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[WorkflowRow]:

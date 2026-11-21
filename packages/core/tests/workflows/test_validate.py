@@ -15,7 +15,7 @@ from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import spec_agent_tools, tool_catalog
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import parse_spec
-from daimon.core.workflows.taint import Catalog, catalog_of, tool_facts
+from daimon.core.workflows.taint import Catalog, catalog_of, tainted_steps, tool_facts
 from daimon.core.workflows.unattended import exposed_at_run
 from daimon.core.workflows.validate import validate_document, validate_spec
 from daimon.testing.ma_models import ma_agent
@@ -153,3 +153,14 @@ async def test_a_toolset_on_by_default_offers_its_unlisted_tools() -> None:
     assert "rule_of_two" in codes and "unknown_tool" not in codes, codes
     stored = catalog_of(OPEN_TOOL_SAFETY, spec_agent_tools(spec, catalog))
     assert exposed_at_run(spec, "read", untrusted_inputs=False, catalog=stored), "at run"
+
+
+@pytest.mark.parametrize("root", ["workflow.state", "workflow.last_run"])
+def test_an_agent_reading_what_earlier_runs_saved_is_exposed(root: str) -> None:
+    """Earlier runs wrote it from whatever they read, so it is untrusted like their inputs."""
+    nodes = {
+        "a": {"kind": "agent", "instructions": "x", "inputs": {"seen": f"${{{{ {root} }}}}"}},
+        "b": {"kind": "agent", "instructions": "y"},
+    }
+    spec = parse_spec({"schema": "daimon.workflow/v1", "name": "T", "start": "a", "nodes": nodes})
+    assert tainted_steps(spec, untrusted_inputs=False) == {"a"}, f"only the reader of {root}"
