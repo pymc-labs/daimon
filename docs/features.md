@@ -458,7 +458,7 @@ The skills Daimon adds for the chat app, such as its formatting. They need the r
 
 ## Agent skills
 
-The skills listed on the agent. Off leaves them out of new conversations; the agent keeps its list. Skills need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Always on for Gemini and OpenAI agents.
+The skills listed on the agent. Off leaves them out of new conversations; the agent keeps its list. Skills need the read tool. A conversation keeps what it started with until /new. Always on for Gemini and OpenAI agents.
 
 | | |
 | --- | --- |
@@ -1130,7 +1130,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before the agent makes or resumes a watch. Skip makes it without the card, reporting in the same thread for the default duration. Editing a watch, long jobs, watch key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before the agent makes or resumes a watch. Skip makes it without the card, reporting in the same thread for the default duration. Editing a watch, long jobs, key rotation and Fly launches keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1170,7 +1170,7 @@ Keeps what people ask this agent in direct messages and private chats, and what 
 
 ## Monitor coding tools
 
-Keeps what people ask this agent from their coding tools and what it answers, and the name, time and outcome of each other tool they call on it, never what the call sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
+Keeps what people ask this agent from their coding tools and what it answers, and the name, time and outcome of each other tool call, never what it sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
 
 | | |
 | --- | --- |
