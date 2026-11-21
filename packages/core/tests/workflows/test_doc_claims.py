@@ -31,7 +31,7 @@ _UNTRUSTED = (
 )
 _STRANGERS = (
     _ASKS.format("discord")
-    + "test_ask_reviewer_in_a_thread_refuses_strangers_and_leaves_chat_alone",
+    + "test_ask_reviewer_in_a_thread_is_answered_there_and_refuses_strangers",
     _ASKS.format("slack") + "test_ask_reviewer_in_a_thread_refuses_strangers",
     _ASKS.format("teams") + "test_ask_reviewer_in_a_thread_refuses_strangers",
 )

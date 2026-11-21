@@ -6591,6 +6591,8 @@ class WorkflowDelivery(Base):
     note: Mapped[str | None]
     created_at: Mapped[TsNow]
     sent_at: Mapped[datetime | None]
+    #: Where a sent post landed: channel, thread, message, link, and whether it opened the thread.
+    placed: Mapped[dict[str, Any] | None]
 
 
 class WorkflowWaitPost(Base):

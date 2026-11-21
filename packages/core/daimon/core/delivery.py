@@ -1,7 +1,7 @@
 """One claim, post, settle loop for every post Daimon makes on its own schedule.
 
 Two sources feed it: routine results (the outbox on the routine row, unchanged) and
-workflow posts (`workflow_deliveries`: Finish results and owner notices). Each chat
+workflow posts (`workflow_deliveries`: Finish results, post steps, asks, notices). Each chat
 adapter runs `run_poller` with one `JobPoster`, its routine poster and, where it has
 one, its workflow poster. A source with no poster is left pending, the safe default for
 a platform that cannot post it yet.
@@ -69,6 +69,7 @@ REFUSALS: Final[frozenset[str]] = frozenset(
         "reach",
         "speaker_not_on_platform",
         "dm_disabled",
+        "not_a_destination",
     }
 )
 
@@ -79,6 +80,9 @@ class DeliveryOutcome:
     #: A `SkipReason`, or `dm_fallback:<reason>` for a result delivered to the
     #: creator by direct message instead of the destination.
     note: str | None = None
+    #: A workflow post's landing: `channel`, `thread`, `message`, `link`, and `opened` when
+    #: the post opened (or found by title) the thread it went to.
+    placed: dict[str, str | bool | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -165,7 +169,13 @@ async def _settle(
     assert job.workflow is not None
     status = _settled_status(outcome)
     settled = await workflow_deliveries.settle_delivery(
-        session, job.workflow.id, owner=owner, status=status, now=now, note=outcome.note
+        session,
+        job.workflow.id,
+        owner=owner,
+        status=status,
+        now=now,
+        note=outcome.note,
+        placed=outcome.placed if status == "sent" else None,
     )
     if settled is not None and settled.run_id is not None:
         kind = {"sent": "sent", "refused": "refused"}.get(status, "skipped")
@@ -181,6 +191,7 @@ async def _settle(
                         "kind": settled.kind,
                         "status": status,
                         "note": outcome.note,
+                        "link": (settled.placed or {}).get("link"),
                     },
                 )
             ],

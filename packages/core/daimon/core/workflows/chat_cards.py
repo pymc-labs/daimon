@@ -88,6 +88,8 @@ _TRIGGER_WORDS: Final[dict[str, str]] = {
     "webhook": "from a webhook",
     "event": "when another workflow finishes",
     "call": "from another workflow",
+    "mention": "when someone posts in a channel",
+    "poll": "when something changes in a tool",
 }
 _GRANT_WORDS: Final[dict[str, str]] = {
     "unattended_write": "writes without asking",
@@ -96,6 +98,7 @@ _GRANT_WORDS: Final[dict[str, str]] = {
     "unverified_webhook": "an unsigned webhook",
     "budget_over_default": "a budget over the default",
     "untrusted_waiver": "a step that trusts outside input",
+    "scoped_write": "writes only to set places",
 }
 
 
@@ -516,7 +519,9 @@ async def start_on_card(
 ) -> PostedCard:
     """Start a run that shows itself on the card at `place`; the card to show now."""
     try:
-        run = await service.start(env, workflow_id, dict(inputs), test={} if test else None)
+        run = await service.start(
+            env, workflow_id, dict(inputs), test={} if test else None, origin=place.ref()
+        )
     except WorkflowError as err:
         return notice(str(err))
     await show_on_card(env.sm, uuid.UUID(run.id), place)

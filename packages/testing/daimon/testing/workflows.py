@@ -220,6 +220,7 @@ async def make_world(
     platform: Platform = "discord",
     home: str | None = None,
     workspace_id: str | None = None,
+    spec_fields: dict[str, Any] | None = None,
     **settings: Any,  # noqa: ANN401 - WorkflowSettings fields
 ) -> World:
     tenant = await make_tenant(db_session, platform=platform, workspace_id=workspace_id)
@@ -228,6 +229,7 @@ async def make_world(
         update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")
     )
     spec = _spec(nodes, start) | ({"home": {"channel": home}} if home else {})
+    spec |= spec_fields or {}
     flow_id = await _publish(db_session, tenant.id, owner.id, spec, home)
     await db_session.commit()
     sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)

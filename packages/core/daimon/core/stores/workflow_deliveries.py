@@ -1,4 +1,4 @@
-"""Store for workflow posts: Finish results and owner notices, claimed and settled at most once.
+"""Store for workflow posts (Finish results, post steps, asks, notices), settled at most once.
 
 Same contract as the routine outbox (`stores.routines.claim_routine_deliveries`): a claim
 whose lease ran out is settled `skipped/interrupted`, never handed out again, and pending
@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from daimon.core._models import Tenant, WorkflowDelivery
+from daimon.core._models import Tenant, WorkflowDelivery, WorkflowStep
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +39,8 @@ class DeliveryRow(BaseModel):
     note: str | None
     created_at: datetime
     sent_at: datetime | None
+    #: Where a sent post landed (`channel`, `thread`, `message`, `link`, `opened`).
+    placed: dict[str, Any] | None = None
 
 
 async def queue_delivery(
@@ -135,6 +137,7 @@ async def settle_delivery(
     status: SettledStatus,
     now: datetime,
     note: str | None = None,
+    placed: dict[str, Any] | None = None,
 ) -> DeliveryRow | None:
     """Finish a claim `owner` still holds; None when the claim was lost."""
     orm = (
@@ -149,6 +152,7 @@ async def settle_delivery(
                 status=status,
                 note=note,
                 sent_at=now if status == "sent" else None,
+                placed=placed,
                 lease_owner=None,
                 lease_expires_at=None,
             )
@@ -168,3 +172,39 @@ async def deliveries_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[
         .order_by(WorkflowDelivery.created_at, WorkflowDelivery.id)
     )
     return [DeliveryRow.model_validate(o) for o in found]
+
+
+async def post_of_step(session: AsyncSession, step_id: uuid.UUID) -> DeliveryRow | None:
+    """The post a post step queued, so a step claimed again does not post twice."""
+    orm = await session.scalar(
+        select(WorkflowDelivery).where(
+            WorkflowDelivery.step_id == step_id, WorkflowDelivery.kind == "post"
+        )
+    )
+    return None if orm is None else DeliveryRow.model_validate(orm)
+
+
+async def settled_post_steps(session: AsyncSession, *, limit: int) -> list[uuid.UUID]:
+    """Post steps still waiting on a post that has settled."""
+    rows = await session.scalars(
+        select(WorkflowStep.id)
+        .join(WorkflowDelivery, WorkflowDelivery.step_id == WorkflowStep.id)
+        .where(
+            WorkflowStep.status == "waiting",
+            WorkflowDelivery.kind == "post",
+            WorkflowDelivery.status.not_in(("pending", "claimed")),
+        )
+        .limit(limit)
+    )
+    return list(rows)
+
+
+async def opened_threads(session: AsyncSession, run_id: uuid.UUID) -> set[str]:
+    """Threads this run's own posts opened or found by title."""
+    rows = await session.scalars(
+        select(WorkflowDelivery.placed["thread"].astext).where(
+            WorkflowDelivery.run_id == run_id,
+            WorkflowDelivery.placed["opened"].as_boolean().is_(True),
+        )
+    )
+    return {r for r in rows if r}

@@ -194,6 +194,7 @@ async def create_run(
     forked_from_run_id: uuid.UUID | None = None,
     forked_from_step: str | None = None,
     test_options: dict[str, Any] | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> RunRow:
     """A queued run, numbered from the workflow's counter. Only `runs.start_run` calls this."""
     number = await session.scalar(
@@ -223,6 +224,7 @@ async def create_run(
         forked_from_run_id=forked_from_run_id,
         forked_from_step=forked_from_step,
         test_options=test_options,
+        origin=origin,
         budget_usd=budget_usd,
         deadline_at=deadline_at,
     )

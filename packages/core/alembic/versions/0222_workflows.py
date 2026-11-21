@@ -949,6 +949,7 @@ def create_tables() -> None:
             nullable=False,
         ),
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("placed", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.CheckConstraint(
             "kind IN ('finish', 'ask', 'reminder', 'ask_update', 'notice', 'post')",
             name="ck_workflow_deliveries_kind",

@@ -21,7 +21,14 @@ from daimon.core.stores.workflow_deliveries import DeliveryKind, DeliveryRow
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_waits import Wait, WaitPost
-from daimon.core.workflows.delivery import ASK_CLOSED, dm_target, target_for
+from daimon.core.workflows.delivery import (
+    ASK_CLOSED,
+    Reach,
+    address,
+    dm_target,
+    queue_post,
+    target_for,
+)
 from daimon.core.workflows.engine import Event
 from daimon.core.workflows.views import people_of
 from pydantic import JsonValue
@@ -84,7 +91,11 @@ class Ask:
     #: `(name, label)` per button, the primary last.
     routes: tuple[tuple[str, str], ...]
     home: str | None = None
+    #: `origin`, a channel or thread id, rendered when the spec templated it.
     channel: str | None = None
+    #: A templated channel must land in these (`delivery.address`).
+    templated: bool = False
+    destinations: tuple[str, ...] = ()
     files: tuple[dict[str, JsonValue], ...] = ()
     #: A form's fields, asked in the platform's modal.
     fields: tuple[Box, ...] = field(default=())
@@ -113,8 +124,17 @@ def _targets(run: RunRow, addressees: Sequence[str], ask: Ask) -> list[dict[str,
     channel = ask.channel or ask.home
     if ask.deliver != "thread" or channel is None:
         return []
-    target = target_for(channel, home=ask.home, mode="live", run_as=None, owner=None)
-    return [target | {"open_thread": target["kind"] == "channel"}]
+    target = address(
+        channel,
+        templated=ask.templated,
+        home=ask.home,
+        mode="live",
+        run_as=None,
+        owner=None,
+        reach=Reach(ask.destinations, run.origin),
+    )
+    # An origin message on Discord gets its thread first, and the ask goes in it.
+    return [target | {"open_thread": target["kind"] == "channel" and "open_on" not in target}]
 
 
 async def queue(
@@ -305,23 +325,20 @@ async def tell_owner_undelivered(session: AsyncSession, row: DeliveryRow, note: 
         if isinstance(home, str)
         else dm_target(workflow.owner_account_id, home=None)
     )
-    number = row.payload.get("run_number")
-    await workflow_deliveries.queue_delivery(
+    run = await workflow_runs.get_run(session, row.run_id)
+    if run is None:
+        return
+    await queue_post(
         session,
-        tenant_id=row.tenant_id,
-        workflow_id=row.workflow_id,
-        run_id=row.run_id,
-        wait_id=row.wait_id,
+        run=run,
+        workflow=workflow,
         kind="notice",
-        target=target,
-        payload={
-            "text": (
-                f'Run {number} of "{workflow.name}" could not ask {who} on chat: {why}. '
-                "The question waits in the Workflows inbox."
-            ),
-            "files": [],
-            "workflow": workflow.name,
-            "run_number": number,
-            "speaker": str(workflow.owner_account_id),
-        },
+        targets=[target],
+        text=(
+            f'Run {run.number} of "{workflow.name}" could not ask {who} on chat: {why}. '
+            "The question waits in the Workflows inbox."
+        ),
+        files=[],
+        speaker=workflow.owner_account_id,
+        wait_id=row.wait_id,
     )

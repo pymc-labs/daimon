@@ -109,6 +109,7 @@ async def test_a_confirmed_run_starts_on_its_card_and_the_card_follows_it(
             session, platform="discord", ended_after=now, started_after=NOW - timedelta(days=1)
         )
     assert run.triggered_by["card"] == PLACE.ref(), "the run names the card it shows on"
+    assert run.origin == PLACE.ref(), "a run started on a card posts back to it as `origin`"
     edits: list[tuple[ChatPlace, str]] = []
 
     async def edit(_: uuid.UUID, place: ChatPlace, shown: PostedCard) -> None:

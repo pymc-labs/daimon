@@ -19,6 +19,7 @@ from typing import Any, Final, Literal, Protocol
 from daimon.core.config import Settings
 from daimon.core.stores import (
     security_audit,
+    workflow_deliveries,
     workflow_runs,
     workflow_triggers,
     workflow_waits,
@@ -109,6 +110,8 @@ class Start:
     parent_step_id: uuid.UUID | None = None
     #: A published version to run instead of the live one.
     version: int | None = None
+    #: The chat message the run started from (`deliver.to: origin`).
+    origin: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,8 +159,15 @@ class Parked:
     number: int
 
 
+@dataclass(frozen=True)
+class Posted:
+    """A post step's answer: it waits until the delivery loop settles its post."""
+
+    delivery_id: uuid.UUID
+
+
 class StepExecutor(Protocol):
-    async def __call__(self, work: StepWork, /) -> Outcome | Park | Parked: ...
+    async def __call__(self, work: StepWork, /) -> Outcome | Park | Parked | Posted: ...
 
 
 def node_of(spec: Spec, step: StepRow) -> AnyNode:
@@ -647,23 +657,18 @@ async def _queue_posts(
     run, wf, spec = loaded.run, loaded.workflow, loaded.spec
     if end.status == "succeeded":
         node_id = next((v.node_id for v in views if v.key == end.step), None)
-        queued = (
-            None
-            if node_id is None
-            else await delivery.queue_finish(
-                session,
-                run=run,
-                workflow=wf,
-                spec=spec,
-                steps=views,
-                facts=loaded.facts,
-                node_id=node_id,
-            )
+        if node_id is None:
+            return []
+        return await delivery.queue_finish(
+            session,
+            run=run,
+            workflow=wf,
+            spec=spec,
+            steps=views,
+            facts=loaded.facts,
+            node_id=node_id,
         )
-    else:
-        queued = await delivery.queue_failure_notice(
-            session, run=run, workflow=wf, spec=spec, end=end
-        )
+    queued = await delivery.queue_failure_notice(session, run=run, workflow=wf, spec=spec, end=end)
     return [] if queued is None else [queued]
 
 
@@ -899,6 +904,7 @@ async def start_run(
                 if start.mode == "test"
                 else None
             ),
+            origin=start.origin,
         )
         queued = [Event("run.queued", None, {"trigger": start.trigger_kind})]
         if start.fork_of:
@@ -1099,7 +1105,7 @@ async def execute(
         budget_usd=loaded.run.budget_usd,
         cost_usd=loaded.run.cost_usd,
     )
-    outcome: Outcome | Park | Parked
+    outcome: Outcome | Park | Parked | Posted
     if isinstance(refusal, Refusal):
         if refusal.gate:
             await _block(sm, settings, claimed, refusal, now=clock())
@@ -1134,6 +1140,9 @@ async def execute(
         return
     if isinstance(outcome, Parked):
         await park(sm, settings, claimed, outcome, now=clock())
+        return
+    if isinstance(outcome, Posted):
+        await park_post(sm, settings, claimed, outcome, now=clock())
         return
     await settle(
         sm,
@@ -1529,18 +1538,101 @@ async def settle_from_child(
         return True
 
 
+async def park_post(
+    sm: Sessions, settings: Settings, claimed: Claimed, posted: Posted, *, now: datetime
+) -> None:
+    """A post step waits as `event` on its post; its attempt stays open until the post settles."""
+    async with sm.begin() as session:
+        held = await _locked_step(session, claimed.step.id, claimed.step.generation, "running")
+        if held is None:
+            return
+        run, step = held
+        write: StepWrite = {
+            "status": "waiting",
+            "waiting_reason": "event",
+            "lease_owner": None,
+            "lease_expires_at": None,
+        }
+        data: dict[str, JsonValue] = {
+            "id": str(posted.delivery_id),
+            "kind": "event",
+            "addressees": [],
+            "post": str(posted.delivery_id),
+        }
+        event = Event("wait.opened", key_of(step), data)
+        await _write_step(
+            session, await _load(session, settings, run, now), step, write, [event], now=now
+        )
+    await settle_from_post(sm, settings, step_id=claimed.step.id, now=now)
+
+
+#: Why a post did not go, in words for the run page.
+_NOT_POSTED: Final[dict[str, str]] = {
+    "not_a_destination": "The post went to a place this workflow does not list.",
+    "protected_channel": "The channel does not take Daimon's posts.",
+    "creator_cannot_post": "The person the run runs as cannot post there.",
+    "destination_unavailable": "The place to post is gone or out of reach.",
+    "dm_disabled": "Direct messages are off here.",
+    "recipient_not_on_platform": "The person has no linked account here.",
+    "speaker_not_on_platform": "The person the run runs as has no linked account here.",
+    "reach": "The post would reach more places or people than allowed.",
+}
+
+
+async def settle_from_post(
+    sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: datetime
+) -> bool:
+    """A waiting post step settles once its post did: where it landed, or why it did not go
+    (the step fails, so `on_error` applies). False while the post is still due."""
+    async with sm.begin() as session:
+        held = await _locked_step(session, step_id, None, "waiting")
+        post = None if held is None else await workflow_deliveries.post_of_step(session, step_id)
+        if held is None or post is None or post.status in ("pending", "claimed"):
+            return False
+        run, step = held
+        outcome: Outcome
+        if post.status == "sent":
+            placed = post.placed or {}
+            output: dict[str, JsonValue] = {"status": "sent"} | {
+                k: placed.get(k) for k in ("channel", "thread", "message", "link")
+            }
+            outcome = engine.Succeeded(output, summary="Posted")
+        else:
+            why = _NOT_POSTED.get(post.note or "", "The post did not go.")
+            outcome = engine.Failed("fatal", why, reason=post.note or post.status)
+        failed = isinstance(outcome, engine.Failed)
+        await workflow_runs.finish_attempt(
+            session,
+            step_id=step_id,
+            status="failed" if failed else "succeeded",
+            now=now,
+            error_class="fatal" if failed else None,
+            error_message=outcome.message if isinstance(outcome, engine.Failed) else None,
+        )
+        data: dict[str, JsonValue] = {"decision": post.status, "post": str(post.id)}
+        event = Event("wait.decided", key_of(step), data)
+        loaded = await _load(session, settings, run, now)
+        await _resolve(session, loaded, step, outcome, now=now, before=[event])
+        return True
+
+
 async def sync_children(sm: Sessions, settings: Settings, *, now: datetime, limit: int = 50) -> int:
-    """Workflow steps settle from child runs that ended; children of a step that ended (its
-    run was cancelled or stopped) are cancelled. Returns how many it handled."""
+    """Workflow steps settle from child runs that ended, post steps from posts that settled;
+    children of a step that ended (its run was cancelled or stopped) are cancelled. Returns
+    how many it handled."""
     async with sm() as session:
         parents = await workflow_runs.parents_of_ended_children(session, limit=limit)
         orphans = await workflow_runs.orphaned_children(session, limit=limit)
     for step_id in parents:
         await settle_from_child(sm, settings, step_id=step_id, now=now)
+    async with sm() as session:
+        posted = await workflow_deliveries.settled_post_steps(session, limit=limit)
+    for step_id in posted:
+        await settle_from_post(sm, settings, step_id=step_id, now=now)
     end = RunEnd("cancelled", reason="parent_stopped", message="The calling run stopped")
     for run_id in orphans:
         await stop_run(sm, settings, run_id=run_id, end=end, now=now)
-    return len(parents) + len(orphans)
+    return len(parents) + len(orphans) + len(posted)
 
 
 async def stop_run(

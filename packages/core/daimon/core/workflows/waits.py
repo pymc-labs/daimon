@@ -28,7 +28,7 @@ from daimon.core.workflows import asks, callbacks, engine, runs
 from daimon.core.workflows.access import Who, holders, rights_of
 from daimon.core.workflows.clock import add_duration
 from daimon.core.workflows.engine import Event, Outcome
-from daimon.core.workflows.expressions import ExpressionError, render
+from daimon.core.workflows.expressions import ExpressionError, expressions_in, render
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, account_actor
 from daimon.core.workflows.spec import (
     ActionNode,
@@ -268,6 +268,7 @@ class ApprovalExecutor:
                 if f.default is not None
             }
             binds = bound_preview(work.spec, node, work.context, now, values, work.step.node_id)
+            channel = str(render(node.channel, work.context, now=now)) if node.channel else None
         except ExpressionError as err:
             return engine.Failed("fatal", str(err))
         if not addressees and not tokens:
@@ -284,7 +285,9 @@ class ApprovalExecutor:
             shape=_shape(node),
             routes=route_labels(routes_of(node, "approval")),
             home=home_of(work.spec, workflow),
-            channel=node.channel,
+            channel=channel,
+            templated=bool(expressions_in(node.channel or "")),
+            destinations=tuple(work.spec.destinations or ()),
             files=files,
             fields=tuple(
                 asks.Box(k, f.title or k, tuple(f.enum or ())) for k, f in (node.form or {}).items()

@@ -29,10 +29,12 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.workflows.delivery import target_for
+from daimon.core.workflows.expressions import expressions_in
 from daimon.core.workflows.features import KEYS, workflow_features
 from daimon.core.workflows.spec import (
     AgentNode,
     CodeNode,
+    Deliver,
     FinishNode,
     ForEachNode,
     Spec,
@@ -187,7 +189,8 @@ async def check(
 
 
 def _reached(spec: Spec, home_channel_id: str | None) -> tuple[list[str], set[str]]:
-    """The channels a workflow posts to (home and delivery targets) and its step agents."""
+    """The channels a workflow posts to (home, literal delivery targets and destinations) and
+    its step agents."""
     home = spec.home.channel if spec.home is not None else home_channel_id
     channels = [home] if home else []
     agents = {spec.defaults.agent} if spec.defaults and spec.defaults.agent else set[str]()
@@ -195,10 +198,12 @@ def _reached(spec: Spec, home_channel_id: str | None) -> tuple[list[str], set[st
         inner = node.do if isinstance(node, ForEachNode) else node
         if isinstance(inner, AgentNode) and inner.agent:
             agents.add(inner.agent)
-        if isinstance(node, FinishNode) and node.deliver and node.deliver.to not in DM_TARGETS:
-            target = target_for(node.deliver.to, home=home, mode="live", run_as=None, owner=None)
-            if isinstance(target.get("channel_id"), str):
+        deliver = node.deliver if isinstance(node, FinishNode) else inner
+        if isinstance(deliver, Deliver) and deliver.to not in DM_TARGETS:
+            target = target_for(deliver.to, home=home, mode="live", run_as=None, owner=None)
+            if isinstance(target.get("channel_id"), str) and not expressions_in(deliver.to):
                 channels.append(target["channel_id"])
+    channels += [d for d in spec.destinations or [] if not d.startswith("person:")]
     return channels, agents
 
 

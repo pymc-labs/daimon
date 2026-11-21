@@ -898,8 +898,10 @@ async def start(
     inputs: dict[str, Any],
     *,
     test: dict[str, Any] | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> run_views.RunSummary:
-    """A manual run of the live version, or a test run of the draft (`test` options)."""
+    """A manual run of the live version, or a test run of the draft (`test` options).
+    `origin` is the chat message it started from, which `deliver.to: origin` posts under."""
     async with env.sm() as session:
         workflow, _, rights = await _load(session, env, workflow_id)
     if test is not None:
@@ -927,6 +929,7 @@ async def start(
             untrusted_inputs=True,
             pinned=pins,
             pinned_from=pinned_from,
+            origin=origin,
         ),
         now=env.now,
     )

@@ -1,8 +1,14 @@
 """Workflow posts: what a run queues when it ends, and the rules each post passes.
 
-A Finish with `deliver` queues one `finish` post when its run succeeds. A live run that
-fails or times out queues one `notice` to the owner, unless the run before it failed
-too. A Finish speaks for the run-as person, a notice for the owner. At post time the
+A Finish with `deliver` queues one `finish` post when its run succeeds, and a post step
+one `post` as it runs (`queue_deliver`). A live run that fails or times out queues one
+`notice` to the owner, unless the run before it failed too. Every one of them is written by
+`queue_post`. A Finish or post speaks for the run-as person, a notice for the owner.
+
+A templated `to`, `also` or `mention` must land in the spec's `destinations`, a thread
+under a listed channel, the run's origin or a thread this run's posts opened; anything else
+is refused `not_a_destination` (at queue time, or at post time where only the platform knows
+a thread's parent). Literal ids were approved at publish. At post time the
 rules of a routine's result apply (`clear_post`, then `post_refusal` once the adapter has
 placed the channel): a live workspace, a readable access policy, a speaker still allowed
 to invoke, no write protection, the audience gate, and reach. The adapter checks that
@@ -18,9 +24,10 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from datetime import datetime
+from typing import Any, Final, Literal, cast
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
@@ -32,7 +39,13 @@ from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.outbound.reach import ReachPlan, ReachTally, check_reach
 from daimon.core.routine_delivery import creator_refusal_for
 from daimon.core.routine_hold import DeliveryGate, workflow_delivery_gate
-from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits
+from daimon.core.stores import (
+    web_people,
+    workflow_deliveries,
+    workflow_runs,
+    workflow_threads,
+    workflow_waits,
+)
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
@@ -44,28 +57,39 @@ from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.web_links import WebAt
 from daimon.core.workflows.engine import Event, RunEnd, RunFacts, StepView, expression_context
-from daimon.core.workflows.expressions import ExpressionError, render
-from daimon.core.workflows.spec import FinishNode, Spec
+from daimon.core.workflows.expressions import ExpressionError, expressions_in, render
+from daimon.core.workflows.spec import Deliver, FinishNode, Spec
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "ASK_CLOSED",
     "DM_OFF",
+    "NOT_A_DESTINATION",
+    "Reach",
     "WorkflowPost",
+    "address",
     "clear_post",
+    "origin_target",
     "post_refusal",
     "post_text",
+    "queue_deliver",
     "queue_failure_notice",
     "queue_finish",
+    "queue_post",
     "reach_limits",
     "target_for",
+    "titled_thread",
 ]
 
 DM_OFF: Final[str] = "dm_disabled"
 #: An ask or reminder whose wait closed before it went: nothing to post, no one to tell.
 ASK_CLOSED: Final[str] = "ask_closed"
 NOTICE_TITLE: Final[str] = "Workflow run failed"
+#: A templated address outside the spec's destinations, the run's origin and its own threads.
+NOT_A_DESTINATION: Final[str] = "not_a_destination"
+_KEYWORDS: Final = frozenset({"home", "owner", "run_as", "origin"})
+PostKind = Literal["finish", "post", "notice"]
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"([CG][A-Z0-9]{2,}):([0-9]+\.[0-9]+)")
 _TEAMS_THREAD: Final[str] = ";messageid="
 
@@ -105,6 +129,205 @@ def dm_target(account: uuid.UUID | str | None, *, home: str | None) -> dict[str,
     return {"kind": "dm", "account_id": None if account is None else str(account), "via": home}
 
 
+@dataclass(frozen=True)
+class Reach:
+    """Where a templated address may land besides a listed destination."""
+
+    destinations: tuple[str, ...] = ()
+    #: The chat message the run started from (`workflow_runs.origin`).
+    origin: Mapping[str, Any] | None = None
+    #: Threads this run's own posts opened.
+    opened: frozenset[str] = frozenset()
+
+
+def origin_target(
+    origin: Mapping[str, Any], *, home: str | None, title: str | None = None
+) -> dict[str, Any]:
+    """The thread the run started from. A Slack or Teams message not in a thread is replied
+    under; a Discord one gets a thread on it (`open_on`, named `title`)."""
+    platform = origin.get("platform")
+    channel, thread = str(origin.get("channel") or ""), origin.get("thread")
+    message = origin.get("message")
+    live: dict[str, Any] = {"home": home, "mode": "live", "run_as": None, "owner": None}
+    if platform == "discord":
+        # A Discord thread is a channel: an origin in one names it as its channel.
+        target = target_for(str(thread or channel), **live)
+        return (
+            target
+            if thread or not message
+            else target | {"open_on": str(message)} | ({"title": title} if title else {})
+        )
+    if thread is None and (platform != "teams" or _TEAMS_THREAD not in channel) and message:
+        thread = message
+    if thread is None or _TEAMS_THREAD in channel:
+        return target_for(channel, **live)
+    under = str(thread).rsplit(":", 1)[-1]
+    return target_for(f"{channel}{_TEAMS_THREAD if platform == 'teams' else ':'}{under}", **live)
+
+
+def _titled(target: dict[str, Any], title: str | None) -> dict[str, Any]:
+    return target | {"title": title} if title and target["kind"] == "channel" else target
+
+
+def _place(target: Mapping[str, Any]) -> tuple[object, object]:
+    return target.get("channel_id"), target.get("thread_id")
+
+
+def address(
+    value: str,
+    *,
+    templated: bool,
+    home: str | None,
+    mode: str,
+    run_as: uuid.UUID | None,
+    owner: uuid.UUID | None,
+    reach: Reach,
+    title: str | None = None,
+) -> dict[str, Any]:
+    """Where one `to` value points. A templated one outside `reach` is refused here, or checked
+    at post time against the listed channels (`within`) when only the platform knows whether
+    it is a thread under one of them."""
+    if mode == "test":
+        return dm_target(run_as, home=home)
+    if value == "origin":
+        if reach.origin is None:
+            return _titled(
+                target_for("home", home=home, mode=mode, run_as=run_as, owner=owner), title
+            )
+        return origin_target(reach.origin, home=home, title=title)
+    if value.startswith("person:"):
+        target = dm_target(value.removeprefix("person:"), home=home)
+        listed = not templated or value in reach.destinations
+        return target if listed else target | {"refused": NOT_A_DESTINATION}
+    target = _titled(target_for(value, home=home, mode=mode, run_as=run_as, owner=owner), title)
+    if not templated or value in _KEYWORDS or value in reach.destinations:
+        return target
+    origin = None if reach.origin is None else origin_target(reach.origin, home=home)
+    if (
+        value in reach.opened
+        or (origin is not None and _place(target) in (_place(origin), (origin["channel_id"], None)))
+        or (target["kind"] == "thread" and target["channel_id"] in reach.destinations)
+    ):
+        return target
+    channels = [d for d in reach.destinations if not d.startswith("person:")]
+    return target | ({"within": channels} if channels else {"refused": NOT_A_DESTINATION})
+
+
+def _flat(value: JsonValue) -> list[str]:
+    return [str(v) for v in value if v is not None] if isinstance(value, list) else [str(value)]
+
+
+async def queue_post(
+    session: AsyncSession,
+    *,
+    run: RunRow,
+    workflow: WorkflowRow,
+    kind: PostKind,
+    targets: Sequence[dict[str, Any]],
+    text: str,
+    files: list[JsonValue],
+    speaker: uuid.UUID | None,
+    mention: Sequence[str] = (),
+    step_id: uuid.UUID | None = None,
+    wait_id: uuid.UUID | None = None,
+) -> tuple[uuid.UUID, list[Event]]:
+    """The one writer of a run's own posts (Finish, post step, notice): the first target is the
+    post, any others its `also` DMs. Returns the post's id and the ledger events."""
+    payload: dict[str, Any] = {
+        "text": text,
+        "files": files,
+        "workflow": workflow.name,
+        "run_number": run.number,
+        "speaker": None if speaker is None else str(speaker),
+        "mention": list(mention),
+    }
+    ids: list[uuid.UUID] = []
+    for index, target in enumerate(targets):
+        ids.append(
+            await workflow_deliveries.queue_delivery(
+                session,
+                tenant_id=run.tenant_id,
+                workflow_id=run.workflow_id,
+                run_id=run.id,
+                wait_id=wait_id,
+                step_id=step_id if index == 0 else None,
+                kind=kind,
+                target=target,
+                payload=payload if index == 0 else payload | {"mention": []},
+            )
+        )
+    events = [Event("delivery.queued", None, {"delivery_id": str(i), "kind": kind}) for i in ids]
+    return ids[0], events
+
+
+async def queue_deliver(
+    session: AsyncSession,
+    *,
+    run: RunRow,
+    workflow: WorkflowRow,
+    spec: Spec,
+    deliver: Deliver,
+    context: dict[str, JsonValue],
+    now: datetime,
+    kind: Literal["finish", "post"],
+    fallback: JsonValue = None,
+    step_id: uuid.UUID | None = None,
+) -> tuple[uuid.UUID, list[Event]]:
+    """Render a Finish's or post step's `deliver` and queue it; the message is `fallback`
+    unless it names one. Raises `ExpressionError`."""
+    home, owner = _home(spec, workflow.home_channel_id), workflow.owner_account_id
+    reach = Reach(
+        tuple(spec.destinations or ()),
+        run.origin,
+        frozenset(await workflow_deliveries.opened_threads(session, run.id)),
+    )
+
+    def rendered(template: str) -> list[str]:
+        return _flat(render(template, context, now=now))
+
+    title = None if deliver.thread is None else " ".join(rendered(deliver.thread))[:100] or None
+    to = " ".join(rendered(deliver.to))
+    common: dict[str, Any] = {"home": home, "mode": run.mode, "run_as": run.run_as_account_id}
+    target = address(
+        to,
+        templated=bool(expressions_in(deliver.to)),
+        owner=owner,
+        reach=reach,
+        title=title,
+        **common,
+    )
+    also: list[dict[str, Any]] = []
+    mention: list[str] = []
+    if run.mode == "live":
+        for raw in deliver.also or []:
+            for value in rendered(raw):
+                person = {"owner": owner, "run_as": run.run_as_account_id}.get(value, value)
+                to_person = value if value.startswith("person:") else f"person:{person}"
+                templated = bool(expressions_in(raw)) and value not in ("owner", "run_as")
+                also.append(
+                    address(to_person, templated=templated, owner=owner, reach=reach, **common)
+                )
+        for raw in deliver.mention or []:
+            values = rendered(raw)
+            if expressions_in(raw) and any(v not in reach.destinations for v in values):
+                target = target | {"refused": NOT_A_DESTINATION}
+            mention += values
+    message = None if deliver.message is None else render(deliver.message, context, now=now)
+    files = render(deliver.files, context, now=now)
+    return await queue_post(
+        session,
+        run=run,
+        workflow=workflow,
+        kind=kind,
+        targets=[target, *also[:5]],
+        text=_text(fallback if deliver.message is None else message),
+        files=cast("list[JsonValue]", files) if isinstance(files, list) else [],
+        speaker=run.run_as_account_id,
+        mention=mention[:10],
+        step_id=step_id,
+    )
+
+
 def _home(spec: Spec, home_channel_id: str | None) -> str | None:
     return spec.home.channel if spec.home is not None else home_channel_id
 
@@ -124,40 +347,29 @@ async def queue_finish(
     steps: list[StepView],
     facts: RunFacts,
     node_id: str,
-) -> Event | None:
+) -> list[Event]:
     """Queue the Finish `node_id`'s post; its message is the output unless it names one."""
-    owner, home = workflow.owner_account_id, _home(spec, workflow.home_channel_id)
     node = spec.nodes.get(node_id)
     if not isinstance(node, FinishNode) or node.deliver is None:
-        return None
+        return []
     output = next((s.output for s in reversed(steps) if s.node_id == node_id), None)
-    context = expression_context(spec, steps, node_id, facts)
     try:
-        message = render(node.deliver.message, context, now=facts.now)
-        files = render(node.deliver.files, context, now=facts.now)
+        _, events = await queue_deliver(
+            session,
+            run=run,
+            workflow=workflow,
+            spec=spec,
+            deliver=node.deliver,
+            context=expression_context(spec, steps, node_id, facts),
+            now=facts.now,
+            kind="finish",
+            fallback=output,
+        )
     except ExpressionError:
         # The engine rendered the same templates when the Finish ran, so this is unreachable
         # short of a changed context; the run keeps its output and posts nothing.
-        return None
-    target = target_for(
-        node.deliver.to, home=home, mode=run.mode, run_as=run.run_as_account_id, owner=owner
-    )
-    delivery_id = await workflow_deliveries.queue_delivery(
-        session,
-        tenant_id=run.tenant_id,
-        workflow_id=run.workflow_id,
-        run_id=run.id,
-        kind="finish",
-        target=target,
-        payload={
-            "text": _text(output if node.deliver.message is None else message),
-            "files": files if isinstance(files, list) else [],
-            "workflow": workflow.name,
-            "run_number": run.number,
-            "speaker": None if run.run_as_account_id is None else str(run.run_as_account_id),
-        },
-    )
-    return Event("delivery.queued", None, {"delivery_id": str(delivery_id), "kind": "finish"})
+        return []
+    return events
 
 
 def _notice_text(workflow_name: str, number: int, end: RunEnd) -> str:
@@ -188,22 +400,17 @@ async def queue_failure_notice(
         if home is not None
         else dm_target(owner, home=None)
     )
-    delivery_id = await workflow_deliveries.queue_delivery(
+    _, events = await queue_post(
         session,
-        tenant_id=run.tenant_id,
-        workflow_id=run.workflow_id,
-        run_id=run.id,
+        run=run,
+        workflow=workflow,
         kind="notice",
-        target=target,
-        payload={
-            "text": _notice_text(workflow.name, run.number, end),
-            "files": [],
-            "workflow": workflow.name,
-            "run_number": run.number,
-            "speaker": str(owner),
-        },
+        targets=[target],
+        text=_notice_text(workflow.name, run.number, end),
+        files=[],
+        speaker=owner,
     )
-    return Event("delivery.queued", None, {"delivery_id": str(delivery_id), "kind": "notice"})
+    return events[0]
 
 
 @dataclass(frozen=True)
@@ -222,6 +429,10 @@ class WorkflowPost:
     dm_to: str | None = None
     #: A reminder or an ask's update goes to this earlier post (`reply`, `edit` targets).
     message_id: str | None = None
+    #: Under the channel, the thread with this exact title (`titled_thread`).
+    title: str | None = None
+    #: Discord: the origin message to open the thread on, unless the channel is a thread.
+    open_on: str | None = None
 
     @property
     def notice(self) -> bool:
@@ -277,6 +488,8 @@ async def clear_post(
         tenant = await get_tenant(session, row.tenant_id)
         if tenant is None or tenant.archived_at is not None:
             return "tenant_archived"
+        if isinstance(refused := target.get("refused"), str):
+            return refused
         if row.kind in ("ask", "reminder") and row.wait_id is not None:
             wait = await workflow_waits.get_wait(session, row.wait_id, tenant_id=row.tenant_id)
             if wait is None or wait.status != "waiting":
@@ -365,6 +578,7 @@ async def clear_post(
         except Exception:  # named boundary: an unreadable audience mode refuses the post
             return "audience_unreadable"
     thread_id = thread if isinstance(thread, str) else None
+    title, open_on = target.get("title"), target.get("open_on")
     return WorkflowPost(
         row=row,
         policy=policy,
@@ -375,6 +589,8 @@ async def clear_post(
         link=await run_link(links, row, channel_id, thread_id),
         dm_to=dm_to,
         message_id=message if isinstance(message, str) else None,
+        title=title if isinstance(title, str) and kind == "channel" else None,
+        open_on=open_on if isinstance(open_on, str) and kind == "channel" else None,
     )
 
 
@@ -396,6 +612,11 @@ async def post_refusal(
 ) -> str | None:
     """Why the placed post must not go, or None. `place_id` is the channel or thread posted
     into; a Slack or Teams thread is placed at its channel. A DM or edit has no gate."""
+    within = post.row.target.get("within")
+    if isinstance(within, list) and not {place_id, parent_channel_id} & set(
+        cast("list[str]", within)
+    ):
+        return NOT_A_DESTINATION
     if post.gate is None:
         return None
     try:
@@ -426,19 +647,92 @@ async def post_refusal(
     return None if verdict == "ok" else "reach"
 
 
+async def _mention_tags(
+    sm: async_sessionmaker[AsyncSession], row: DeliveryRow, platform: Platform
+) -> str:
+    """The post's `mention` list as the platform's tags. A role is named, never pinged: every
+    post turns role and group pings off (`render_post`), and Teams posts tag no one."""
+    raw = cast("list[object]", row.payload.get("mention") or [])
+    values = [str(v) for v in raw]
+    people = [a for v in values if (a := _uuid(v.removeprefix("person:"))) is not None]
+    async with sm() as session:
+        ids = await platform_external_ids(
+            session, tenant_id=row.tenant_id, platform=platform, account_ids=people
+        )
+        names = (
+            await web_people.get_people_for_accounts(
+                session, tenant_id=row.tenant_id, account_ids=set(people)
+            )
+            if platform == "teams"
+            else {}
+        )
+    tags: list[str] = []
+    for value in values:
+        account = _uuid(value.removeprefix("person:"))
+        if platform == "teams":
+            if account is not None and account in names:
+                tags.append(f"@{names[account].display_name}")
+        elif account is not None and (user := ids.get(account)) is not None:
+            tags.append(f"<@{user}>")
+        elif value.startswith("role:"):
+            role = value.removeprefix("role:")
+            tags.append(f"<@&{role}>" if platform == "discord" else f"<!subteam^{role}>")
+    return " ".join(tags)
+
+
 async def post_text(
-    sessionmaker: async_sessionmaker[AsyncSession], post: WorkflowPost, platform: Platform
+    sm: async_sessionmaker[AsyncSession], post: WorkflowPost, platform: Platform
 ) -> RenderedPost:
-    """The post's words with every mention rule, the run link and, unless it is the owner's
-    notice, the line naming the workflow."""
-    text = await untag_opted_out(
-        sessionmaker,
-        tenant_id=post.row.tenant_id,
-        platform=platform,
-        text=str(post.row.payload.get("text") or ""),
-    )
+    """The post's words with its mentions first, every mention rule, the run link and, unless
+    it is the owner's notice, the line naming the workflow."""
+    words = str(post.row.payload.get("text") or "")
+    if tags := await _mention_tags(sm, post.row, platform):
+        words = f"{tags} {words}"
+    text = await untag_opted_out(sm, tenant_id=post.row.tenant_id, platform=platform, text=words)
     if post.link is not None:
         text = f"{text}\n\n{post.link}"
     name = str(post.row.payload.get("workflow") or "")
     line = None if post.notice else attribution_line(platform, workflow_name=name)
     return render_post(text, platform, attribution=line)
+
+
+#: Opens a thread with this title under the post's channel; returns the platform's thread id.
+ThreadMaker = Callable[[str], Awaitable[str]]
+#: Finds an existing thread with exactly this title on the platform (Discord), or None.
+ThreadFinder = Callable[[str], Awaitable[str | None]]
+
+
+async def titled_thread(
+    sm: async_sessionmaker[AsyncSession],
+    post: WorkflowPost,
+    *,
+    platform: str,
+    create: ThreadMaker,
+    find: ThreadFinder | None = None,
+) -> str:
+    """The thread titled `post.title` under the post's channel: the one this workflow's posts
+    used before, else one the platform finds by that name, else a new one. When two posts race,
+    the first recorded thread is the one both use."""
+    assert post.title is not None, "only a titled post finds its thread"
+    row = post.row
+    async with sm() as session:
+        known = await workflow_threads.find_thread(
+            session,
+            workflow_id=row.workflow_id,
+            platform=platform,
+            channel_id=post.channel_id,
+            title=post.title,
+        )
+    if known is not None:
+        return known
+    made = (None if find is None else await find(post.title)) or await create(post.title)
+    async with sm.begin() as session:
+        return await workflow_threads.record_thread(
+            session,
+            tenant_id=row.tenant_id,
+            workflow_id=row.workflow_id,
+            platform=platform,
+            channel_id=post.channel_id,
+            title=post.title,
+            thread_id=made,
+        )

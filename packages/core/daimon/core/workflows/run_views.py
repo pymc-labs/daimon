@@ -204,6 +204,9 @@ _DETAIL: dict[str, str] = {
     "wait.decided": "Decided",
     "wait.timed_out": "Timed out",
     "delivery.queued": "Delivery queued",
+    "delivery.sent": "Posted",
+    "delivery.refused": "Not posted: not allowed there",
+    "delivery.skipped": "Not posted",
 }
 _TRIGGER = {
     "schedule": "Schedule",
@@ -218,7 +221,12 @@ _WAITING = {
     "event": "Waiting for an event",
 }
 _DECIDED = {"approve": "Approved", "reject": "Rejected", "cleared": "Cleared", "arrived": "Arrived"}
-_DELIVERY = {"ask": "Ask queued", "finish": "Result queued", "notice": "Notice queued"}
+_DELIVERY = {
+    "ask": "Ask queued",
+    "finish": "Result queued",
+    "post": "Post queued",
+    "notice": "Notice queued",
+}
 
 
 def _name(value: object) -> str | None:
