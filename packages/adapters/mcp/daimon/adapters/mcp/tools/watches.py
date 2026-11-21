@@ -1050,7 +1050,8 @@ async def check_edited_mcp_arguments(
         owner_account_id=row.owner_account_id,
         server_url=server_url,
         credential=str(row.source_state.get("credential")),
-        relay=RelayBinding(agent_name, watch_id=row.id, owner=row.owner_external_id),
+        # Unbound, as at create: a listing names nobody and is no poll of this watch.
+        relay=RelayBinding(agent_name),
     )
     try:
         async with asyncio.timeout(25), polling.open_source(server_url, token) as source:

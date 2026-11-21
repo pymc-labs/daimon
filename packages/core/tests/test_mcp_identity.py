@@ -29,6 +29,7 @@ from daimon.core.mcp_identity import (
     parse_relay_claim,
     public_jwk,
     public_pem,
+    relay_server_name,
     relay_url,
     requester_conversation,
     routine_conversation,
@@ -158,6 +159,20 @@ def test_relay_urls_are_only_this_deployments_relay() -> None:
     assert found == (relay + "/",), "only the relay, kept exactly as attached"
     twice = identity_relay_urls([relay + "/", relay], public_url=PUBLIC_URL)
     assert len(twice) == 1, "one URL per server, so a vault never holds two slots for it"
+
+
+@pytest.mark.parametrize(
+    ("url", "name"),
+    [
+        ("https://Daimon.Example.com/mcp-identity/tools/", "tools"),
+        ("https://other.example.com/mcp-identity/tools", None),
+        ("https://daimon.example.com/mcp-identity/a/b", None),
+        ("https://daimon.example.com/mcp-identity/../mcp", None),
+        ("https://daimon.example.com/mcp-identity/tools?next=/mcp", None),
+    ],
+)
+def test_relay_server_name_is_only_this_relays_one_segment_url(url: str, name: str | None) -> None:
+    assert relay_server_name(url, PUBLIC_URL) == name, f"{url} names {name}"
 
 
 def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:

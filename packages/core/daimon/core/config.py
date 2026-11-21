@@ -11,6 +11,7 @@ import binascii
 import ipaddress
 import json
 import os
+import re
 import ssl
 import uuid
 from collections.abc import Mapping
@@ -2682,7 +2683,10 @@ class PollableTool(BaseModel):
         elif self.credential == "relay":
             from daimon.core.mcp_identity import RELAY_PATH
 
-            if f"{RELAY_PATH}/" not in urlsplit(self.server).path:
+            parts = urlsplit(self.server)
+            if parts.query or not re.fullmatch(
+                rf"(/[^/]+)*{RELAY_PATH}/[a-z0-9][a-z0-9-]{{0,62}}", parts.path
+            ):
                 raise ValueError(f'credential "relay" needs a <root>{RELAY_PATH}/<name> URL')
         return self
 
@@ -3271,6 +3275,24 @@ class Settings(BaseSettings):
         if not was_set and raw is None:
             policy.__pydantic_fields_set__.discard("enabled")  # a default, not an operator value
         self.tool_safety = policy
+        return self
+
+    @model_validator(mode="after")
+    def _relay_polls_name_this_deployment(self) -> Settings:
+        """A relay poll sends Daimon's own credential, so its URL must be this relay's."""
+        from daimon.core.mcp_identity import relay_server_name
+
+        public_url = self.mcp.public_url
+        for entry in self.watches.pollable_tools:
+            if (
+                entry.credential == "relay"
+                and public_url is not None
+                and relay_server_name(entry.server, str(public_url)) is None
+            ):
+                raise ValueError(
+                    "DAIMON_WATCHES__POLLABLE_TOOLS: a relay entry's server must be "
+                    "<MCP public URL root>/mcp-identity/<name>"
+                )
         return self
 
     model_config = SettingsConfigDict(

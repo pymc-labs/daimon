@@ -738,6 +738,11 @@ def create_mcp_app(
                 anthropic=effective_anthropic,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
+                public_url=(
+                    str(effective_settings.mcp.public_url)
+                    if effective_settings.mcp.public_url is not None
+                    else None
+                ),
             ),
             methods=RELAY_METHODS,
         )

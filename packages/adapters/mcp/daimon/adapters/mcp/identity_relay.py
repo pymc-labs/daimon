@@ -43,11 +43,13 @@ from daimon.core.mcp_identity import (
     origin_turn_place,
     parse_relay_claim,
     read_request_body,
+    relay_url,
     requester_conversation,
     routine_conversation,
     stamp_parsed,
     watch_conversation,
 )
+from daimon.core.mcp_server_url import same_ascii_mcp_url
 from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, WatchRow
@@ -235,7 +237,8 @@ async def _watch_poll(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     agent_id: uuid.UUID,
-    server: str,
+    server: SignedIdentityServer,
+    public_url: str | None,
 ) -> WatchRow | None:
     """The active watch a poll's credential names, or None.
 
@@ -243,7 +246,7 @@ async def _watch_poll(
     credential was minted for and still polling this relay server, counts; a paused,
     deleted or handed-over watch names nobody.
     """
-    if binding.watch_id is None:
+    if binding.watch_id is None or public_url is None:
         return None
     async with sessionmaker() as session:
         row = await watches.get_watch(session, binding.watch_id)
@@ -254,10 +257,29 @@ async def _watch_poll(
         or (row.tenant_id, row.owner_account_id) != (tenant_id, account_id)
         or row.owner_external_id != binding.owner
         or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
-        or not str(row.source_state.get("server_url")).endswith(f"{RELAY_PATH}/{server}")
+        or row.source_state.get("credential") != "relay"
+        or not same_ascii_mcp_url(
+            str(row.source_state.get("server_url")), relay_url(public_url, server.name)
+        )
     ):
         return None
     return row
+
+
+def _is_poll_message(message: object, tool: str) -> bool:
+    """Whether a relayed body is part of a watch poll: the handshake, a tool listing or
+    one call of the watch's own tool. A watch's credential is for nothing else."""
+    if not isinstance(message, dict):
+        return False
+    fields = cast("dict[str, object]", message)
+    method, params = fields.get("method"), fields.get("params")
+    if method in ("initialize", "notifications/initialized", "tools/list"):
+        return True
+    return (
+        method == "tools/call"
+        and isinstance(params, dict)
+        and cast("dict[str, object]", params).get("name") == tool
+    )
 
 
 async def _listed_as_builtin(
@@ -338,6 +360,7 @@ def build_identity_relay_route(
     clock: Callable[[], datetime],
     bearers: Mapping[str, SecretStr] | None = None,
     anthropic: AsyncAnthropic | None = None,
+    public_url: str | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
     the key of each server whose auth is bearer. A server with neither is refused (503)."""
@@ -409,6 +432,29 @@ def build_identity_relay_route(
         # people: the server must not apply a member's permissions to them.
         if origin is not None and (origin.sender_foreign or FOREIGN_HOME_CLAIM in claims):
             origin = None
+        watch: WatchRow | None = None
+        if binding.watch_id is not None:
+            # A poll's credential is for its watch alone; a gone or handed-over watch
+            # names no tool to allow, so it reaches nothing.
+            watch = await _watch_poll(
+                sessionmaker,
+                binding,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_id=agent_id,
+                server=server,
+                public_url=public_url,
+            )
+            if watch is None or request.method != "POST":
+                return Response(status_code=403)
+        message: object = None
+        if watch is not None or (server.requester_meta and request.method == "POST"):
+            try:
+                message = read_request_body(body)
+            except RequesterBodyError:
+                return Response(status_code=400)
+        if watch is not None and not _is_poll_message(message, str(watch.source_state.get("tool"))):
+            return Response(status_code=403)
         headers = {
             name: value
             for name in _REQUEST_HEADERS
@@ -466,28 +512,15 @@ def build_identity_relay_route(
                         "routine",
                     )
             elif (
-                binding.watch_id is not None
+                watch is not None
                 and platform in REQUESTER_PLATFORMS
                 and FOREIGN_HOME_CLAIM not in claims
             ):
-                watch = await _watch_poll(
-                    sessionmaker,
-                    binding,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    agent_id=agent_id,
-                    server=server.name,
+                named, conversation, kind = (
+                    watch.owner_external_id,
+                    watch_conversation(watch),
+                    "routine",
                 )
-                if watch is not None:
-                    named, conversation, kind = (
-                        watch.owner_external_id,
-                        watch_conversation(watch),
-                        "routine",
-                    )
-            try:
-                message = read_request_body(body)
-            except RequesterBodyError:
-                return Response(status_code=400)
             wake_url: str | None = None
             # Only a person's call that names them and their place gets a link.
             if (

@@ -70,7 +70,7 @@ from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
-from daimon.core.mcp_identity import RelayBinding, identity_relay_urls
+from daimon.core.mcp_identity import RelayBinding, relay_server_name
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_annotations import annotations_from_mcp
 from daimon.core.mcp_tool_call import McpToolSession, mcp_tool_session
@@ -80,6 +80,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.direct_messages import is_dm_thread
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watch_credentials import load_watch_credential
@@ -102,6 +103,7 @@ from daimon.core.tool_safety import (
     classify_tool,
 )
 from daimon.core.turn.approvals import agent_rule_lookup
+from daimon.core.turn_hold import TurnHold
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
@@ -204,6 +206,7 @@ async def poll_credential(
     server_url: str,
     credential: str,
     relay: RelayBinding | None = None,
+    hold: TurnHold | None = None,
 ) -> str | None:
     """Decrypt exactly one credential for this exact URL: the agent-wide one, the
     watch owner's own key (looked up by tenant and owner, never another owner's), or none.
@@ -220,7 +223,7 @@ async def poll_credential(
             relay is None
             or mcp.public_url is None
             or mcp.jwt_secret is None
-            or not identity_relay_urls([server_url], public_url=str(mcp.public_url))
+            or relay_server_name(server_url, str(mcp.public_url)) is None
         ):
             raise PollAccessRevoked("Watch credential unavailable")
         async with runtime.session_factory.begin() as db:
@@ -231,6 +234,7 @@ async def poll_credential(
                 secret=mcp.jwt_secret.get_secret_value().encode(),
                 now=datetime.now(UTC),
                 relay=relay,
+                hold=hold,
                 ttl=RELAY_POLL_TTL,
             )
         return token
@@ -530,16 +534,24 @@ async def read_mcp(
     server_url = str(watch.source_state["server_url"])
     tool = str(watch.source_state["tool"])
     arguments = TypeAdapter(dict[str, JsonValue]).validate_python(watch.source_state["arguments"])
-    token = await poll_credential(
-        runtime,
-        tenant_id=watch.tenant_id,
-        agent_id=watch.agent_id,
-        owner_account_id=watch.owner_account_id,
-        server_url=server_url,
-        credential=credential,
-        relay=RelayBinding(agent_name, watch_id=watch.id, owner=watch.owner_external_id),
+    # A poll reports where the watch does, so a contained room's audience rule binds it
+    # as it binds a turn there; a DM has no audience.
+    hold = (
+        None
+        if watch.delivery == "dm" or is_dm_thread(watch.platform, watch.thread_id)
+        else TurnHold(watch.platform, watch.parent_channel_id, client=False, relay=True)
     )
     with SOURCE_BUDGET.take(ascii_mcp_url(server_url)):
+        token = await poll_credential(
+            runtime,
+            tenant_id=watch.tenant_id,
+            agent_id=watch.agent_id,
+            owner_account_id=watch.owner_account_id,
+            server_url=server_url,
+            credential=credential,
+            relay=RelayBinding(agent_name, watch_id=watch.id, owner=watch.owner_external_id),
+            hold=hold,
+        )
         async with open_source(ascii_mcp_url(server_url), token) as source:
             entry = await listed_read_tool(
                 runtime, source, server_name=server_name, tool=tool, arguments=arguments

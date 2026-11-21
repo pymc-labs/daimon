@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
@@ -32,7 +33,7 @@ import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url, same_ascii_mcp_url
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import origin_place
 
@@ -120,6 +121,18 @@ def relay_base(public_url: str) -> str:
 
 def relay_url(public_url: str, name: str) -> str:
     return relay_base(public_url) + name
+
+
+_RELAY_NAME: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+
+
+def relay_server_name(url: str, public_url: str) -> str | None:
+    """The server name when `url` is exactly `relay_url(public_url, name)` (this host, one
+    path segment, no dot segments or query), else None."""
+    name = ascii_mcp_url(url).rpartition("/")[2]
+    if _RELAY_NAME.fullmatch(name) and same_ascii_mcp_url(url, relay_url(public_url, name)):
+        return name
+    return None
 
 
 def identity_relay_urls(server_urls: Iterable[str], *, public_url: str) -> tuple[str, ...]:
