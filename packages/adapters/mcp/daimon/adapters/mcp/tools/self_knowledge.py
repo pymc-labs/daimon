@@ -64,7 +64,7 @@ def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Read Daimon's own source code, for the release that is running.
 
-        `path` is under `packages/` or `defaults/` (`packages/core/daimon/core/config.py`).
+        `path` is under `packages/` (`packages/core/daimon/core/config.py`).
         A file comes back with line numbers from `start_line`; a folder, or no path, lists
         what is in it.
         """
@@ -76,7 +76,7 @@ def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Search Daimon's own source code for some plain text, ignoring case.
 
-        Searches `packages/` and `defaults/`, or only the file or folder `path` names.
+        Searches `packages/`, or only the file or folder `path` names.
         Returns each matching line as `path:line: text`.
         """
         return await _read(ctx, runtime, lambda library: library.search_source(query, path))

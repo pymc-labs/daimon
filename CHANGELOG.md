@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the docs and source code of the release it runs on, on every model
   backend and every path. Four read-only tools (`read_daimon_docs`,
   `search_daimon_docs`, `read_daimon_source`, `search_daimon_source`) read and
-  search the pages and the `packages/` and `defaults/` code in the image, and
+  search the pages and the `packages/` code in the image, and
   each result names the source repository and commit. Where Web app is Off,
   pages and code about the web app are left out. The image ships `docs/`;
   `DAIMON_SELF_KNOWLEDGE__*` sets where they are read. New pages cover

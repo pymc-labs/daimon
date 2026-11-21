@@ -3,7 +3,8 @@
 Synchronous file reads (the MCP tools run them in a thread). No settings, network or tenant
 data: the caller passes the roots, the public addresses and whether `web_awareness` is On
 where the call runs. Only `.md` pages under the docs root and text files under `packages/`
-and `defaults/` are read; dotfiles, symlinks out of a root and other files are refused.
+are read; dotfiles, symlinks out of a root and other files are refused. `defaults/` is not
+served: an operator may mount their own, holding other agents' prompts.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ def controls_hint(*, on: bool, held: bool) -> str | None:
 
 OVERVIEW_PAGE: Final = "how-daimon-works.md"
 PAGE_INDEX: Final = "llms.txt"
-SOURCE_DIRS: Final = ("packages", "defaults")
+SOURCE_DIR: Final = "packages"
 WEB_SOURCE: Final = PurePosixPath("packages/adapters/web")
 """The web app's adapter: hidden with the web pages where `web_awareness` is Off."""
 TEXT_SUFFIXES: Final = frozenset(
@@ -244,11 +245,11 @@ class Library:
 
     def _source_path(self, path: str) -> tuple[Path, tuple[str, ...]]:
         parts = _parts(path)
-        if parts and parts[0] not in SOURCE_DIRS:
-            raise SelfKnowledgeError(f"Only {' and '.join(SOURCE_DIRS)} can be read.")
+        if parts and parts[0] != SOURCE_DIR:
+            raise SelfKnowledgeError(f"Only {SOURCE_DIR}/ can be read.")
         target = _inside(self.source, parts)
         relative = target.relative_to(self.source.resolve())
-        if (relative.parts and relative.parts[0] not in SOURCE_DIRS) or not self._shown(
+        if (relative.parts and relative.parts[0] != SOURCE_DIR) or not self._shown(
             PurePosixPath(relative.as_posix())
         ):
             raise SelfKnowledgeError(f"There is no {path!r} here.")
@@ -265,7 +266,7 @@ class Library:
         shown = "/".join(parts) or "."
         if target.is_dir():
             entries = (
-                [f"{name}/" for name in SOURCE_DIRS if (target / name).is_dir()]
+                [f"{SOURCE_DIR}/"]
                 if not parts
                 else [
                     f"{child.name}/" if child.is_dir() else child.name
@@ -297,7 +298,7 @@ class Library:
 
     def _files(self, top: Path, parts: tuple[str, ...]) -> Iterator[Path]:
         base = self.source.resolve()
-        roots = [top / name for name in SOURCE_DIRS] if not parts else [top]
+        roots = [top / SOURCE_DIR] if not parts else [top]
         for root in roots:
             for folder, dirs, names in os.walk(root):
                 here = Path(folder)
@@ -319,7 +320,7 @@ class Library:
         except SelfKnowledgeError:
             return False
         real = PurePosixPath(target.relative_to(self.source.resolve()).as_posix())
-        return real.parts[0] in SOURCE_DIRS and self._shown(real)
+        return real.parts[0] == SOURCE_DIR and self._shown(real)
 
     def _results(self, hits: Iterator[str], query: str) -> str:
         found: list[str] = []

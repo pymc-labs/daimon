@@ -49,7 +49,7 @@ def _library(tmp_path: Path, *, web: bool) -> Library:
         docs,
         source / "packages/core",
         source / "packages/adapters/web",
-        source / "defaults",
+        source / "defaults",  # an operator's own, never served
     ):
         folder.mkdir(parents=True)
     (docs / "llms.txt").write_text(_INDEX)
@@ -59,6 +59,7 @@ def _library(tmp_path: Path, *, web: bool) -> Library:
     (tmp_path / "outside.md").write_text("# Outside\n")
     (source / "packages/core/config.py").write_text("A = 1\nneedle = '[a-z]+'\n")
     (source / "packages/core/.env").write_text("SECRET=1\n")
+    (source / "defaults/agents.yaml").write_text("prompt: needle\n")
     (source / "packages/adapters/web/app.py").write_text("needle = 2\n")
     (source / "pyproject.toml").write_text("needle\n")
     (tmp_path / "secret.py").write_text("needle\n")
@@ -109,31 +110,33 @@ def test_pages_and_search_follow_web_awareness(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "path",
     ["/etc/passwd", "../secret.py", "packages/../../secret.py", "packages/core/.env",
-     "packages/core/link.py", "packages/core/dotlink.py", "pyproject.toml", "docs"],
+     "packages/core/link.py", "packages/core/dotlink.py", "pyproject.toml", "docs",
+     "defaults", "defaults/agents.yaml"],
 )  # fmt: skip
-def test_source_reads_stay_inside_packages_and_defaults(tmp_path: Path, path: str) -> None:
+def test_source_reads_stay_inside_packages(tmp_path: Path, path: str) -> None:
     with pytest.raises(SelfKnowledgeError):
         _library(tmp_path, web=True).read_source(path)
 
 
 def test_source_lists_reads_and_searches_text_literally(tmp_path: Path) -> None:
     library = _library(tmp_path, web=True)
-    assert library.read_source().endswith("./\npackages/\ndefaults/"), "the two roots only"
+    assert library.read_source().endswith("./\npackages/"), "packages only, never defaults"
     listing = library.read_source("packages/core")
     assert "config.py" in listing and ".env" not in listing, "dotfiles are never listed"
     assert "    2  needle = '[a-z]+'" in library.read_source("packages/core/config.py", 2)
     found = library.search_source("[a-z]+")
     assert "packages/core/config.py:2" in found, "a query is plain text, not a pattern"
     assert "secret" not in library.search_source("needle"), "no symlink out of the root"
+    assert "defaults" not in library.search_source("needle"), "defaults/ is never searched"
     with pytest.raises(SelfKnowledgeError):
         library.search_source("x")
 
 
 def test_search_stops_at_the_match_cap(tmp_path: Path) -> None:
     library = _library(tmp_path, web=True)
-    (library.source / "defaults/many.md").write_text("hit\n" * (MAX_MATCHES + 5))
-    found = library.search_source("hit", "defaults")
-    assert found.count("defaults/many.md:") == MAX_MATCHES, "capped"
+    (library.source / "packages/core/many.md").write_text("hit\n" * (MAX_MATCHES + 5))
+    found = library.search_source("hit", "packages/core")
+    assert found.count("packages/core/many.md:") == MAX_MATCHES, "capped"
     assert "search for something narrower" in found
 
 

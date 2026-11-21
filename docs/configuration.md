@@ -1348,8 +1348,8 @@ The docs/ directory in the image, relative to the working directory.
 
 `Path` · optional · default `.`
 
-The directory holding packages/ and defaults/, relative to the working directory. Only
-those two are read.
+The directory holding packages/, relative to the working directory. Only packages/ is
+read.
 
 ## Microsoft Accounts
 

@@ -80,7 +80,7 @@ COPY --chown=daimon:daimon docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 COPY --chown=daimon:daimon defaults/ ./defaults/
-# Read by the `self_knowledge` tools, with packages/ and defaults/ (DAIMON_SELF_KNOWLEDGE__*).
+# Read by the `self_knowledge` tools, with packages/ (DAIMON_SELF_KNOWLEDGE__*).
 COPY --chown=daimon:daimon docs/ ./docs/
 COPY --chown=daimon:daimon packages/ ./packages/
 COPY --from=web --chown=daimon:daimon /web/dist ./packages/adapters/web/daimon/adapters/web/static/

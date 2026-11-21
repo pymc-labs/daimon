@@ -3035,8 +3035,8 @@ class SelfKnowledgeSettings(BaseModel):
     source_root: Path = Field(
         default_factory=lambda: Path("."),
         description=(
-            "The directory holding packages/ and defaults/, relative to the working "
-            "directory. Only those two are read."
+            "The directory holding packages/, relative to the working directory. Only "
+            "packages/ is read."
         ),
     )
 
