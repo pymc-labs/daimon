@@ -544,10 +544,13 @@ def _output(
     return {**fields, **out}
 
 
-def _outcome(node: ApprovalNode, route: str, output: dict[str, JsonValue]) -> Outcome:
+def _outcome(
+    node: ApprovalNode, route: str, output: dict[str, JsonValue], answer: Answer
+) -> Outcome:
+    """The approval step's result; an answer's files become `steps.<id>.files`."""
     if route == REJECT and _route(node, REJECT) is None:
         return engine.Failed("fatal", "Rejected")
-    return engine.Succeeded(output, _route(node, route))
+    return engine.Succeeded(output, _route(node, route), files=tuple(answer.files))
 
 
 def _digest(values: dict[str, JsonValue], answer: Answer) -> str:
@@ -627,7 +630,10 @@ async def decide_wait(
             None
             if approval is None
             else _outcome(
-                approval, answer.route, _output(answer.route, values, answer, who.account_id, via)
+                approval,
+                answer.route,
+                _output(answer.route, values, answer, who.account_id, via),
+                answer,
             )
         )
         shown: dict[str, Any] | None = None

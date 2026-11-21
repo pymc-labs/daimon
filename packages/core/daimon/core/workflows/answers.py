@@ -11,14 +11,22 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast
 
+import anthropic
+import structlog
+from anthropic import AsyncAnthropic
 from daimon.core.config import Settings
+from daimon.core.mux_backend import managed_agents
+from daimon.core.mux_compat import legacy_call
+from daimon.core.routine_files import MAX_FILES, RoutineFile
 from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits, workflows
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
+from daimon.core.stores.file_uploads import MAX_UPLOAD_BYTES
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.workflow_run_events import NewEvent, append_events, list_events
 from daimon.core.stores.workflow_waits import Wait, WaitPost
@@ -26,15 +34,20 @@ from daimon.core.workflows import asks, waits
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.views import people_of
+from mux.contracts.ids import Scope
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
     "ASK_ACTION",
+    "MAX_FILE_BYTES",
+    "MAX_FILES",
     "REFUSALS_PER_WAIT",
     "AskForm",
+    "Attachment",
     "Button",
     "Claimed",
+    "Ingest",
     "Reply",
     "action_id",
     "ask_form",
@@ -42,6 +55,7 @@ __all__ = [
     "claim_reply",
     "form_answer",
     "form_of",
+    "ingest_files",
     "parse_action",
     "press",
 ]
@@ -52,6 +66,9 @@ ASK_ACTION: Final = "wfa"
 REFUSALS_PER_WAIT: Final = 3
 _ACTION = re.compile(rf"^{ASK_ACTION}:([0-9a-f-]{{36}}):([\w-]{{1,64}})$")
 _WORD = re.compile(r"^\W*(\w+)\W*\s*(.*)$", re.S)
+#: An answer file's ceiling: what an ask's chat posts can carry on again.
+MAX_FILE_BYTES: Final = MAX_UPLOAD_BYTES
+log = structlog.get_logger(__name__)
 
 
 def action_id(wait_id: str, route: str) -> str:
@@ -76,7 +93,63 @@ class Reply:
     thread_id: str | None = None
     #: The message it explicitly replies to.
     reply_to: str | None = None
-    files: tuple[dict[str, JsonValue], ...] = ()
+    #: Its attachments as Files API refs, fetched only once it answers; None: it has none.
+    files: Ingest | None = None
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """A file a chat answer carries, downloaded by the adapter."""
+
+    name: str
+    mime_type: str
+    content: bytes
+
+
+#: A reply's attachments ingested as Files API refs (`ingest_files`).
+Ingest = Callable[[], Awaitable[list[dict[str, JsonValue]]]]
+
+
+async def ingest_files(
+    client: AsyncAnthropic, attachments: Sequence[Attachment]
+) -> list[dict[str, JsonValue]]:
+    """Upload an answer's files to the Files API, as refs the wait and later steps keep.
+
+    The refs have the shape a step's files have, so asks attach them and the run's files
+    route downloads them. A file that fails to upload is left out; the answer stands.
+    """
+    scope = Scope.legacy_host_authorized(call_site="workflow_answers:ingest_files")
+    artifacts = managed_agents(client, scope=scope).artifacts
+    refs: list[dict[str, JsonValue]] = []
+    for file in attachments[:MAX_FILES]:
+        if not 0 < len(file.content) <= MAX_FILE_BYTES:
+            continue
+
+        async def body(content: bytes = file.content) -> AsyncIterator[bytes]:
+            yield content
+
+        try:
+            made = await legacy_call(
+                artifacts.upload(
+                    scope,
+                    body(),
+                    filename=file.name,
+                    media_type=file.mime_type,
+                    key=uuid.uuid4().hex,
+                )
+            )
+        except anthropic.APIError as err:
+            log.warning("workflow_answer.file_upload_failed", err_type=type(err).__name__)
+            continue
+        refs.append(
+            RoutineFile(
+                file_id=made.ref.id,
+                filename=made.filename or file.name,
+                mime_type=made.media_type or file.mime_type,
+                size_bytes=made.size_bytes or len(file.content),
+            ).model_dump()
+        )
+    return refs
 
 
 @dataclass(frozen=True)
@@ -179,12 +252,16 @@ async def _decide(
     key: str,
     in_thread: bool,
     now: datetime,
+    files: Ingest | None = None,
 ) -> Claimed:
     async with sm() as session:
         who = await _who(session, wait.tenant_id, platform, author)
     if who is None:
         why = "Only people with a Daimon account here can answer this."
         return await _refused(sm, wait, why, now=now)
+    if files is not None:
+        # Uploaded only for someone with an account here: a stranger's reply stores nothing.
+        answer = answer.model_copy(update={"files": await files()})
     try:
         decided = await waits.decide_wait(
             sm,
@@ -296,7 +373,6 @@ async def claim_reply(
             else f"Start your reply with {words}, or use a button."
         )
         return Claimed("hint", hint)
-    answer = answer.model_copy(update={"files": list(reply.files)})
     return await _decide(
         sm,
         settings,
@@ -307,6 +383,7 @@ async def claim_reply(
         key=f"{reply.platform}:{reply.message_id}",
         in_thread=_in_thread(post),
         now=now or datetime.now(UTC),
+        files=reply.files,
     )
 
 
