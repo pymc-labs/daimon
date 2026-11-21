@@ -40,7 +40,7 @@ class Replay:
         self.obj = SimpleNamespace(
             _processing=HeldThreads(),
             _pending={},
-            _queued_reactions=set(),
+            _queued_reactions={},
             # Teams' reactions, with no client: every call does nothing.
             _reactions=TeamsReactions(None),
             _thread_stops=ThreadStops(),
@@ -163,7 +163,7 @@ class Replay:
         self.effects.append(("cap", self.cap))
         return self.cap
 
-    async def feature_off(self, *args):
+    async def feature_off(self, *args, **kwargs):
         return False
 
     async def post(self, **kwargs):

@@ -366,6 +366,7 @@ source_modules = [
     "daimon.core.scheduler",
     "daimon.core.scope",
     "daimon.core.scope_cascade",
+    "daimon.core.secret_share_flow",
     "daimon.core.secret_shares",
     "daimon.core.selfhosted_usage",
     "daimon.core.server_skills",
