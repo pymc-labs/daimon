@@ -48,6 +48,7 @@ MIN_QUERY_CHARS, MAX_QUERY_CHARS = 2, 200
 _SKIPPED_DIRS: Final = frozenset({"__pycache__", "node_modules"})
 _WEB_PAGE: Final = re.compile(r"^knowledge:\s*web\s*$", re.MULTILINE)
 _WEB_OPEN, _WEB_CLOSE = "<!-- knowledge: web -->", "<!-- /knowledge -->"
+_FENCES: Final = ("```", "~~~")
 _INDEX_ENTRY: Final = re.compile(
     r"^- \[(?P<title>[^\]]+)\]\((?P<page>[^)\s]+)\)(?::\s*(?P<about>.*))?$"
 )
@@ -60,18 +61,22 @@ class SelfKnowledgeError(ValueError):
 def visible_text(text: str, *, web: bool) -> str | None:
     """`text` as a reader here sees it: None for a web page (front matter `knowledge: web`)
     while `web` is False, else without its marker lines and, while False, the web blocks
-    between them. An unclosed block hides the rest of the page."""
+    between them. An unclosed block hides the rest of the page; a marker inside a code fence
+    is text, not a marker."""
     if not web and text.startswith("---\n"):
         end = text.find("\n---", 4)
         if end != -1 and _WEB_PAGE.search(text[4:end]):
             return None
     kept: list[str] = []
-    hiding = False
+    hiding = fenced = False
     for line in text.splitlines():
         marker = line.strip()
-        if marker in (_WEB_OPEN, _WEB_CLOSE):
+        if marker.startswith(_FENCES):
+            fenced = not fenced
+        elif not fenced and marker in (_WEB_OPEN, _WEB_CLOSE):
             hiding = marker == _WEB_OPEN and not web
-        elif not hiding:
+            continue
+        if not hiding:
             kept.append(line)
     return "\n".join(kept)
 

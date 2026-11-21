@@ -78,6 +78,8 @@ def test_visible_text_hides_web_pages_and_blocks_only_when_web_is_off() -> None:
     assert "knowledge" not in (visible_text(_SLACK, web=True) or ""), "markers never shown"
     unclosed = "a\n<!-- knowledge: web -->\nb\n"
     assert visible_text(unclosed, web=False) == "a", "an unclosed block hides the rest"
+    fenced = "a\n```md\n<!-- knowledge: web -->\n```\nb\n"
+    assert visible_text(fenced, web=False) == fenced.rstrip("\n"), "a fenced marker is text"
 
 
 def test_overview_lists_visible_pages_and_names_the_release(tmp_path: Path) -> None:

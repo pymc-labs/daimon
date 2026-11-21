@@ -44,8 +44,29 @@ def _is_web_page(text: str) -> bool:
     return text.startswith("---\nknowledge: web\n---")
 
 
+def _marker_lines(text: str) -> list[tuple[int, str]]:
+    """(line number, marker) for each marker line outside a code fence."""
+    found, fenced = [], False
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and (OPEN in line or CLOSE in line):
+            found.append((number, line))
+    return found
+
+
 def _unmarked(text: str) -> str:
-    return re.sub(rf"{re.escape(OPEN)}.*?{re.escape(CLOSE)}", "", text, flags=re.S)
+    """The text a reader with the web app off sees: web blocks and fenced lines' markers aside."""
+    out, hiding, fenced = [], False, False
+    for line in text.splitlines():
+        if line.strip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and line.strip() in (OPEN, CLOSE):
+            hiding = line.strip() == OPEN
+            continue
+        if not hiding:
+            out.append(line)
+    return "\n".join(out)
 
 
 def test_every_feature_names_a_real_page_and_anchor() -> None:
@@ -63,11 +84,10 @@ def test_every_feature_names_a_real_page_and_anchor() -> None:
 @pytest.mark.parametrize("path", _pages(), ids=lambda p: p.name)
 def test_markers_are_paired_on_their_own_lines(path: Path) -> None:
     depth = 0
-    for number, line in enumerate(path.read_text().splitlines(), 1):
-        if OPEN in line or CLOSE in line:
-            assert line.strip() in (OPEN, CLOSE), f"{path.name}:{number} marker shares a line"
-            depth += 1 if line.strip() == OPEN else -1
-            assert depth in (0, 1), f"{path.name}:{number} markers nest or close early"
+    for number, line in _marker_lines(path.read_text()):
+        assert line.strip() in (OPEN, CLOSE), f"{path.name}:{number} marker shares a line"
+        depth += 1 if line.strip() == OPEN else -1
+        assert depth in (0, 1), f"{path.name}:{number} markers nest or close early"
     assert depth == 0, f"{path.name}: unclosed marker"
 
 
