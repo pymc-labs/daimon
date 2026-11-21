@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 from daimon.core.config import Settings
+from daimon.core.stores import workflow_runs
 from daimon.core.workflows import engine, runs
 from daimon.core.workflows.code_step import (
     CodeJob,
@@ -115,6 +117,25 @@ async def test_the_executor_renders_inputs_and_checks_its_attempts_nonce(
     [job] = jobs
     assert '"xs": [2, 5]' not in job.command, "inputs travel encoded, never as shell text"
     assert (job.run_id, job.step_id, job.network) == (run.id, claimed.step.id, False)
+
+
+async def test_a_lost_worker_with_no_saved_session_keeps_its_attempt(
+    db_session: AsyncSession,
+) -> None:
+    """Its worker is found again by attempt, so a retry never leaves the first one behind."""
+    world = await make_world(db_session, CODE, "c")
+    world.settings = code_on(world.settings)
+    run = await world.run(inputs={"xs": [1]})
+    claimed = await world.claim(run.id, "c")
+    async with world.sm() as s:
+        first = await workflow_runs.running_attempt(s, claimed.step.id)
+    await runs.reclaim(
+        world.sm, world.settings, step_id=claimed.step.id, now=NOW + timedelta(minutes=10)
+    )
+    again = await world.claim(run.id, "c")
+    async with world.sm() as s:
+        attempts = await workflow_runs.list_attempts(s, again.step.id)
+    assert first is not None and [a.id for a in attempts] == [first.id], attempts
 
 
 async def test_the_worker_is_stamped_for_the_run_step_and_person(
