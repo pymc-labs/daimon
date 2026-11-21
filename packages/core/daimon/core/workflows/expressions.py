@@ -285,8 +285,9 @@ def evaluate(
     environment = _environment()
     runner = celpy.InterpretedRunner(environment, tree, _functions(now))
     evaluator = _BoundedEvaluator(tree, runner.new_activation(), _Budget(steps))
-    activation: dict[str, celtypes.Value] = {k: json_to_cel(v) for k, v in context.items()}
     try:
+        # Inside the try: a deeply nested payload overflows the converter, too.
+        activation: dict[str, celtypes.Value] = {k: json_to_cel(v) for k, v in context.items()}
         return _to_json(evaluator.evaluate(activation))
     except (CELEvalError, CELUnsupportedError) as err:
         raise ExpressionError(f"Expression failed: {err.args[0] if err.args else err}") from err

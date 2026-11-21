@@ -6,7 +6,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from daimon.core._models import Tenant, WorkflowRun, WorkflowTrigger, WorkflowTriggerEvent
+from daimon.core._models import (
+    Tenant,
+    WorkflowRun,
+    WorkflowTrigger,
+    WorkflowTriggerEvent,
+    WorkflowVersion,
+)
 from daimon.core.stores import workflow_triggers, workflows
 from daimon.core.workflows import runs, triggers
 from daimon.core.workflows.preflight import Refusal
@@ -177,3 +183,55 @@ async def test_skip_refuses_a_second_run_with_the_same_key(db_session: AsyncSess
     again = await start("ann")
     assert isinstance(again, Refusal) and again.reason == "skipped", again
     assert not isinstance(await start("bob"), Refusal), "another key runs"
+
+
+async def _webhook_event(
+    db: AsyncSession, tenant_id: uuid.UUID, flow: uuid.UUID, inputs: dict[str, Any], at: datetime
+) -> None:
+    trigger = await workflow_triggers.find_trigger(
+        db, tenant_id=tenant_id, workflow_id=flow, key="hook"
+    )
+    assert trigger is not None, "publishing made the trigger"
+    await workflow_triggers.record_event(
+        db, trigger=trigger, status="accepted", received_at=at, verified=True, inputs=inputs
+    )
+
+
+async def test_an_event_that_cannot_start_is_rejected_and_the_batch_goes_on(
+    db_session: AsyncSession,
+) -> None:
+    """A payload too deep for the concurrency key and a version that no longer parses each
+    fail their own event; the batch's other event still starts, and the loop lives."""
+    tenant_id, owner = await _workspace(db_session)
+    hook = {"id": "hook", "kind": "webhook", "verify": "bearer"}
+    keyed = await _publish(
+        db_session, tenant_id, owner, triggers=[hook], concurrency={"key": "${{ inputs.n }}"}
+    )
+    broken = await _publish(db_session, tenant_id, owner, triggers=[hook])
+    deep: dict[str, Any] = {"n": 1}
+    for _ in range(3000):
+        deep = {"n": deep}
+    await _webhook_event(db_session, tenant_id, keyed, deep, NOW)
+    await _webhook_event(db_session, tenant_id, broken, {"n": 1}, NOW + timedelta(seconds=1))
+    await _webhook_event(db_session, tenant_id, keyed, {"n": 2}, NOW + timedelta(seconds=2))
+    await db_session.execute(
+        update(WorkflowVersion)
+        .where(WorkflowVersion.workflow_id == broken)
+        .values(spec={"schema": "daimon.workflow/v1"})
+    )
+    await db_session.commit()
+    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+
+    assert await triggers.start_from_events(sm, make_settings(), now=NOW) == 1, "one starts"
+    marks = (
+        await db_session.execute(
+            select(WorkflowTriggerEvent.status, WorkflowTriggerEvent.reason).order_by(
+                WorkflowTriggerEvent.received_at
+            )
+        )
+    ).all()
+    assert [tuple(m) for m in marks] == [
+        ("rejected", "invalid_inputs"),
+        ("rejected", "failed"),
+        ("started", None),
+    ], marks

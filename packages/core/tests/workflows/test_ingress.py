@@ -226,3 +226,19 @@ async def test_a_listening_test_url_captures_one_delivery_as_a_test_run(
     assert await triggers.start_from_events(hook.sm, settings(), now=NOW) == 1, "a test run"
     mode = await db_session.scalar(select(WorkflowRun.mode))
     assert mode == "test", mode
+
+
+async def test_a_body_nested_too_deep_is_refused_before_it_is_stored(
+    db_session: AsyncSession,
+) -> None:
+    """Too deep for an expression to read, it never becomes an accepted event."""
+    hook = await make_hook(db_session)
+    deep: dict[str, Any] = {"n": 3}
+    for _ in range(ingress.MAX_DEPTH):
+        deep = {"d": deep}
+    reply = await hook.post(**hook.signed({**GOOD, "data": deep}, "msg_1"))
+    assert (reply.status, reply.body["error"]) == (422, "invalid_body"), reply
+    event = await db_session.scalar(select(WorkflowTriggerEvent))
+    assert event is not None and (event.status, event.reason) == ("rejected", "too_deep"), event
+    brackets = b"[" * 100_000 + b"]" * 100_000
+    assert ingress.parse(brackets, "application/json") is None, "no RecursionError escapes"

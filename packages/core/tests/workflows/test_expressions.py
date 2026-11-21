@@ -69,3 +69,12 @@ def test_step_budget_covers_macros() -> None:
 def test_runtime_errors_become_expression_errors() -> None:
     with pytest.raises(ExpressionError, match="failed"):
         evaluate("inputs.n / 0", CONTEXT, now=NOW)
+
+
+def test_a_context_nested_past_the_stack_is_an_expression_error() -> None:
+    deep: JsonValue = 1
+    for _ in range(3000):
+        deep = {"a": deep}
+
+    with pytest.raises(ExpressionError, match="nested too deeply"):
+        evaluate("inputs.n", {"inputs": deep}, now=NOW)

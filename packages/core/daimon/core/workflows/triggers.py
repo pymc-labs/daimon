@@ -15,6 +15,7 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
+import structlog
 from daimon.core.config import Settings
 from daimon.core.stores import workflow_triggers as store
 from daimon.core.stores import workflows
@@ -36,6 +37,7 @@ FRESHNESS: Final = timedelta(minutes=15)
 DEFAULT_SPEND_CAP_USD: Final = Decimal(20)
 _UNTRUSTED: Final = frozenset({"webhook", "event"})
 _BATCH: Final = 50
+log = structlog.get_logger(__name__)
 
 
 class MappingError(ValueError):
@@ -240,22 +242,46 @@ async def _start_one(
     )
 
 
+async def _settle_event(
+    sm: Sessions,
+    settings: Settings,
+    session: AsyncSession,
+    event: EventRow,
+    trigger: TriggerRow,
+    now: datetime,
+) -> bool:
+    """Start one event's run and mark the event; True when a run started."""
+    result = await _start_one(sm, settings, session, event, trigger, now)
+    if result is None:
+        return False
+    if isinstance(result, str):
+        await store.mark_event(session, event.id, status="skipped", reason=result)
+    elif isinstance(result, Refusal):
+        status = "skipped" if result.reason == "skipped" else "rejected"
+        await store.mark_event(session, event.id, status=status, reason=result.reason)
+    else:
+        await store.mark_event(session, event.id, status="started", run_id=result.id)
+        return True
+    return False
+
+
 async def start_from_events(sm: Sessions, settings: Settings, *, now: datetime) -> int:
-    """Turn accepted trigger events into runs; each is marked started, skipped or rejected."""
+    """Turn accepted trigger events into runs; each is marked started, skipped or rejected.
+
+    Each event has its own savepoint. One that raises (a bug, a payload no expression can
+    read) is rejected as `failed` and the batch goes on: the starts loop is shared by every
+    workspace, and an event left accepted would raise again on every tick."""
     started = 0
     async with sm.begin() as session:
         for event, trigger in await store.claim_accepted_events(session, limit=_BATCH):
-            result = await _start_one(sm, settings, session, event, trigger, now)
-            if result is None:
-                continue
-            if isinstance(result, str):
-                await store.mark_event(session, event.id, status="skipped", reason=result)
-            elif isinstance(result, Refusal):
-                status = "skipped" if result.reason == "skipped" else "rejected"
-                await store.mark_event(session, event.id, status=status, reason=result.reason)
-            else:
-                started += 1
-                await store.mark_event(session, event.id, status="started", run_id=result.id)
+            try:
+                async with session.begin_nested():
+                    started += await _settle_event(sm, settings, session, event, trigger, now)
+            except Exception as err:  # named boundary: one event never stops the shared loop
+                log.exception(
+                    "workflow_event.start_failed", event_id=str(event.id), error=type(err).__name__
+                )
+                await store.mark_event(session, event.id, status="rejected", reason="failed")
     return started
 
 

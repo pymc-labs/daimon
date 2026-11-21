@@ -39,6 +39,8 @@ _MAX_HEADERS: Final = 64
 _MAX_HEADER_VALUE: Final = 1024
 _MAX_DELIVERY_ID: Final = 200
 _MINUTE: Final = timedelta(minutes=1)
+#: Deeper bodies are refused: evaluating one would overflow the interpreter's stack.
+MAX_DEPTH: Final = 64
 
 
 @dataclass(frozen=True)
@@ -74,9 +76,23 @@ def parse(body: bytes, content_type: str) -> dict[str, JsonValue] | None:
         if content_type.startswith("application/x-www-form-urlencoded"):
             return dict(parse_qsl(body.decode(), keep_blank_values=True))
         value = json.loads(body)
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     return cast("dict[str, JsonValue]", value) if isinstance(value, dict) else None
+
+
+def too_deep(value: JsonValue) -> bool:
+    """Nested more than `MAX_DEPTH` levels; walked without recursion."""
+    stack: list[tuple[JsonValue, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > MAX_DEPTH:
+            return True
+        if isinstance(item, dict):
+            stack.extend((v, depth + 1) for v in item.values())
+        elif isinstance(item, list):
+            stack.extend((v, depth + 1) for v in item)
+    return False
 
 
 def _delivery_id(
@@ -242,6 +258,10 @@ async def receive(
         if payload is None:
             await reject(422, "not_an_object", None)
             return Reply(422, {"error": "invalid_body", "message": "Send a JSON object"})
+        if too_deep(payload):
+            await reject(422, "too_deep", None)
+            message = f"Nest the JSON at most {MAX_DEPTH} levels deep"
+            return Reply(422, {"error": "invalid_body", "message": message})
         if scheme == "slack" and payload.get("type") == "url_verification":
             return Reply(200, {"challenge": payload.get("challenge")})
         context: dict[str, JsonValue] = {"payload": payload, "headers": kept}
