@@ -483,7 +483,9 @@ def test_every_action_call_and_proposal_send_passes_the_rule() -> None:
                 assert "decide_unattended_call" in names, f"{path.name}:{fn.name} decides first"
     assert found == CALLERS, f"tool calls live where the rule is checked: {found}"
     client = (root / "tool_client.py").read_text()
-    assert client.count("call_tool(") == 1, "the client is the one place that calls MCP"
+    # the action client and the poll client, each deciding before it calls
+    assert client.count("call_tool(") == 2, "the client is the one place that calls MCP"
+    assert client.count("decide_unattended_call(") >= 1, "the poll client decides on the listing"
 
 
 async def test_a_write_grant_is_requested_approved_and_carried_over(
