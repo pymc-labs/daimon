@@ -242,7 +242,9 @@ async def test_renew_and_rotate_link_for_an_imported_callback(operator, tmp_path
     saved = await run("rotate-link", str(watch_id), "--tenant", tenant, "--urls-out", str(written))
     assert saved.exit_code == 0 and "callbacks/watches" not in saved.output, saved.output
     assert stat.S_IMODE(written.stat().st_mode) == 0o600
-    assert str(watch_id) in next(iter(json.loads(written.read_text()).values()))
+    ((key, url),) = json.loads(written.read_text()).items()
+    assert key == callback_entry()["legacy_id"], "keyed by the old id, as the import file is"
+    assert str(watch_id) in url, "the link opens the watch here"
     live = await rows(operator, "SELECT count(*) FROM watch_capabilities WHERE revoked_at IS NULL")
     assert live == [(1,)], "each rotation leaves exactly one live link"
 

@@ -672,7 +672,7 @@ async def test_rotate_revokes_every_link_and_returns_one_new_token(db_session_fa
             thread_id="900",
             now=datetime.now(UTC),
         )
-        fresh = await watches.rotate_callback_link(
+        fresh, _ = await watches.rotate_callback_link(
             db, item.watch.id, tenant_id=moved.id, now=datetime.now(UTC)
         )
     async with TestClient(TestServer(create_app(db_session_factory))) as client:
@@ -952,7 +952,9 @@ async def test_a_permanent_callback_watch_and_its_link_keep_working(db_session_f
     assert renewed.expires_at is None
     assert links == [None, None], links
     async with db_session_factory.begin() as db:
-        token = await watches.rotate_callback_link(db, item.watch.id, tenant_id=moved.id, now=now)
+        token, _ = await watches.rotate_callback_link(
+            db, item.watch.id, tenant_id=moved.id, now=now
+        )
         rotated = await db.scalar(
             text("SELECT expires_at FROM watch_capabilities WHERE revoked_at IS NULL")
         )

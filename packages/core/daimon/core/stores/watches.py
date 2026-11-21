@@ -2099,8 +2099,11 @@ async def renew_callback_watch(
 
 async def rotate_callback_link(
     session: AsyncSession, watch_id: uuid.UUID, *, tenant_id: uuid.UUID, now: datetime
-) -> str:
-    """Operator: revoke every link of a callback watch and issue one new; shown once."""
+) -> tuple[str, str | None]:
+    """Operator: revoke every link of a callback watch and issue one new; shown once.
+
+    Returns the token and, for an imported watch, its id in the old system, which is
+    how that system's forwarder knows it (`watches import --urls-out` keys by it too)."""
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.tenant_id != tenant_id or row.source != "callback":
@@ -2127,7 +2130,8 @@ async def rotate_callback_link(
         else max(row.expires_at, now + timedelta(minutes=1)),
     )
     await session.flush()
-    return token
+    legacy_id = row.source_state.get("legacy_id")
+    return token, legacy_id if isinstance(legacy_id, str) else None
 
 
 async def unpause_imported_watch(
