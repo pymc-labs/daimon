@@ -6,7 +6,7 @@ import { ApiError, api, stream } from "@/lib/api"
 import { ACTIVE_RUN, project } from "./runs"
 import { diff, validate } from "./spec"
 import type {
-  AttentionItem, Catalog, DeliveryRow, Draft, InboxDecide, InboxDetail, InboxItem, MappingPreview, NewWorkflow, RunDetail, RunEvent, RunSummary, RunTest, Secret, Spec,
+  AttentionItem, Board, Calendar, Catalog, DeliveryRow, Draft, InboxDecide, InboxDetail, InboxItem, MappingPreview, NewWorkflow, RunDetail, RunEvent, RunSummary, RunTest, Secret, Spec,
   SavedState, StepDetail, Template, Version, VersionSpec, WebhookInfo, Workflow, WorkflowChat, WorkflowPatch, WorkflowSummary,
 } from "./types"
 
@@ -26,6 +26,8 @@ export function useClearState(id: string) {
   })
 }
 export const useRuns = (id: string) => useQuery({ queryKey: ["workflows", id, "runs"], queryFn: () => api.get<RunSummary[]>(`${base(id)}/runs`) })
+export const useBoard = (id: string) => useQuery({ queryKey: ["workflows", id, "runs", "board"], queryFn: () => api.get<Board>(`${base(id)}/runs?view=board`) })
+export const useCalendar = (id: string, month: string) => useQuery({ queryKey: ["workflows", id, "runs", "calendar", month], queryFn: () => api.get<Calendar>(`${base(id)}/runs?view=calendar&month=${month}`) })
 export const useCatalog = () => useQuery({ queryKey: ["workflows", "catalog"], queryFn: () => api.get<Catalog>("/api/workflows/catalog"), staleTime: Infinity })
 export const useTemplates = () => useQuery({ queryKey: ["workflows", "templates"], queryFn: () => api.get<Template[]>("/api/workflows/templates"), staleTime: Infinity })
 

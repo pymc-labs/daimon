@@ -64,3 +64,22 @@ export function useTestRun(wf: string, n: string) {
   return { ...live, overlay }
 }
 export type TestRun = ReturnType<typeof useTestRun>
+
+/** The month `YYYY-MM` of a moment. */
+export const monthOf = (at: number) => new Date(at).toISOString().slice(0, 7)
+
+/** The month `by` months from `month`. */
+export function shiftMonth(month: string, by: number) {
+  const [y, m] = month.split("-").map(Number) as [number, number]
+  return new Date(Date.UTC(y, m - 1 + by, 1)).toISOString().slice(0, 7)
+}
+
+/** A month as weeks, Monday first: each cell is a `YYYY-MM-DD` day, or null outside the month. */
+export function monthWeeks(month: string): (string | null)[][] {
+  const [y, m] = month.split("-").map(Number) as [number, number]
+  const days = new Date(Date.UTC(y, m, 0)).getUTCDate()
+  const lead = (new Date(Date.UTC(y, m - 1, 1)).getUTCDay() + 6) % 7
+  const cells = [...Array<null>(lead).fill(null), ...Array.from({ length: days }, (_, i) => `${month}-${String(i + 1).padStart(2, "0")}`)]
+  while (cells.length % 7) cells.push(null)
+  return Array.from({ length: cells.length / 7 }, (_, w) => cells.slice(w * 7, w * 7 + 7))
+}

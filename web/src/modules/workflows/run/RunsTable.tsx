@@ -1,4 +1,5 @@
 import { CircleHelp, CircleX, Hourglass, MessageCircleQuestion, UserX, Eye } from "lucide-react"
+import { useState } from "react"
 import { useLocation, useNavigate } from "react-router"
 
 import { Ago, Money } from "@/components/common"
@@ -7,6 +8,7 @@ import { Tag } from "@/components/panel"
 import { QueryState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { rowProps, useParam } from "@/lib/filters"
 import { duration, plural } from "@/lib/format"
@@ -15,7 +17,8 @@ import { useAllRuns, useAttention, useNow, useRuns } from "../api"
 import { RUN, TRIGGER } from "../kinds"
 import type { AttentionItem, AttentionKind, RunStatus, RunSummary, Workflow } from "../types"
 import { RunBadge } from "../ui"
-import { until } from "./lib"
+import { monthOf, until } from "./lib"
+import { BoardView, CalendarView } from "./RunsBoard"
 
 const live = (r: RunSummary) => r.status === "running" || r.status === "waiting" || r.status === "queued"
 
@@ -63,10 +66,31 @@ export function RunsTable({ runs, showWorkflow }: { runs: RunSummary[]; showWork
   )
 }
 
-/** A workflow's Runs tab. */
+/** A workflow's Runs tab: the list, and a board and a calendar when the spec names stages or a card. */
 export function RunsTab({ wf }: { wf: Workflow }) {
+  const [view, setView] = useParam("view")
+  const [month, setMonth] = useParam("month")
+  const [today] = useState(() => monthOf(Date.now()))
   const query = useRuns(wf.id)
-  return <QueryState query={query} className="px-6 pt-6" isEmpty={(r) => !r.length} empty="No runs">{(runs) => <RunsTable runs={runs} />}</QueryState>
+  const staged = Object.values(wf.spec.nodes).some((n) => n.stage) || !!wf.spec.card
+  const dated = !!wf.spec.card?.date
+  const shown = staged && (view === "board" || (view === "calendar" && dated)) ? view : "list"
+  return (
+    <>
+      {staged && (
+        <FilterBar>
+          <ToggleGroup type="single" value={shown} onValueChange={(x) => x && setView(x === "list" ? null : x)} variant="segmented" size="sm">
+            <ToggleGroupItem value="list" className="px-3 text-xs">List</ToggleGroupItem>
+            <ToggleGroupItem value="board" className="px-3 text-xs">Board</ToggleGroupItem>
+            {dated && <ToggleGroupItem value="calendar" className="px-3 text-xs">Calendar</ToggleGroupItem>}
+          </ToggleGroup>
+        </FilterBar>
+      )}
+      {shown === "board" ? <BoardView id={wf.id} />
+        : shown === "calendar" ? <CalendarView id={wf.id} month={month || today} onMonth={(m) => setMonth(m === today ? null : m)} />
+        : <QueryState query={query} className="px-6 pt-6" isEmpty={(r) => !r.length} empty="No runs">{(runs) => <RunsTable runs={runs} />}</QueryState>}
+    </>
+  )
 }
 
 const STATUSES: RunStatus[] = ["running", "waiting", "succeeded", "failed", "cancelled", "timed_out"]

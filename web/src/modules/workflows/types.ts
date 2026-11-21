@@ -154,6 +154,11 @@ export type RunSummary = {
   redriven: boolean
 }
 
+/** A run on the board or the calendar: its stage now, the card fields the spec names, and its calendar day. */
+export type RunCard = { run: RunSummary; stage: string; card: Record<string, string | number | boolean | null>; attention: boolean; date: string | null }
+export type Board = { view: "board"; columns: { stage: string; cards: RunCard[] }[] }
+export type Calendar = { view: "calendar"; month: string; cards: RunCard[] }
+
 // ---------- Run page ----------
 
 export type ErrorClass = "retryable" | "gate" | "contract" | "agent" | "unknown" | "fatal"

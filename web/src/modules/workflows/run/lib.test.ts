@@ -4,7 +4,7 @@ import { start, visible, type Run } from "@/mock/workflows-runs"
 import { SPECS } from "@/mock/workflows-specs"
 import { edgeStates, nodeRuns, project } from "../runs"
 import type { RunDetail } from "../types"
-import { listeningAt, nodeOf, pendingNodes, until } from "./lib"
+import { listeningAt, monthWeeks, nodeOf, pendingNodes, shiftMonth, until } from "./lib"
 import { answerRows } from "./rows"
 
 const T = Date.parse("2026-11-13T09:00:00Z")
@@ -67,5 +67,20 @@ describe("answerRows", () => {
       labels: { channel: "Channel", note: "Note" },
     })
     expect(rows.filter(([, v]) => v).map(([k]) => k)).toEqual(["Answered by", "Channel", "Note"])
+  })
+})
+
+describe("month grid", () => {
+  it("lays a month out in Monday-first weeks, null outside the month", () => {
+    const weeks = monthWeeks("2026-11")
+    expect(weeks[0]).toEqual([null, null, null, null, null, null, "2026-11-01"])
+    expect(weeks.at(-1)).toEqual(["2026-11-30", null, null, null, null, null, null])
+    expect(weeks.every((w) => w.length === 7)).toBe(true)
+    expect(weeks.flat().filter(Boolean)).toHaveLength(30)
+  })
+
+  it("moves across year ends", () => {
+    expect(shiftMonth("2026-12", 1)).toBe("2027-01")
+    expect(shiftMonth("2026-01", -1)).toBe("2025-12")
   })
 })
