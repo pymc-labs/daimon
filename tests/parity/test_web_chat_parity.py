@@ -53,11 +53,7 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 catalogue = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = catalogue  # dataclasses resolve their module here
-sys.path.insert(0, str(ROOT / "scripts"))  # the generator imports its sibling `_knowledge`
-try:
-    SPEC.loader.exec_module(catalogue)
-finally:
-    sys.path.remove(str(ROOT / "scripts"))
+SPEC.loader.exec_module(catalogue)
 
 
 def _app_routes() -> list[APIRoute]:

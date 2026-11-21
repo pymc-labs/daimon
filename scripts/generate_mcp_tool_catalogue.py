@@ -39,7 +39,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from _knowledge import web_only
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.hub.app import build_hub_app
@@ -63,6 +62,10 @@ from daimon.core.defaults.loader import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.tools.tool import Tool
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+
+# The siblings below import the same way run as a script or imported as `scripts.<name>`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _knowledge import web_only
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE_PATH = REPO_ROOT / "docs" / "mcp-tools.md"

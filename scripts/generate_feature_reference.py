@@ -8,12 +8,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from _knowledge import web_only
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import EVERY_PLATFORM, FEATURES, FeatureSpec
 from daimon.core.stores.domain import CHAT_PLATFORMS
 from pydantic import PostgresDsn, SecretStr
+
+# The siblings below import the same way run as a script or imported as `scripts.<name>`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _knowledge import web_only
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
 OUT = DOCS / "features.md"
