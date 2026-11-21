@@ -173,11 +173,13 @@ call with no `requester_kind` as a routine.
 A `requester_meta` server that starts long work can list the tools that start it
 in `"wake_tools"`. A call to one in a person's turn also carries
 `params._meta.wake_url`, a private [callback watch](watches.md#callback-watches)
-link for that conversation; one the caller supplied is removed. Each `POST` of
-the outcome to it wakes the conversation once, in a turn that reads and reports.
-Calls from one chat session share the link for 12 hours; it lasts a day. Keep it
-secret and out of logs. It needs watches on and
-`DAIMON_WATCHES__CALLBACK_BASE_URL`; a DM, or an owner at the watch limit, gets none.
+link; one the caller supplied is removed. Each `POST` of the outcome wakes the
+conversation once, in a turn that reads and reports. Keep the link out of logs.
+
+Each call gets its own link to one watch per conversation and server. The watch
+follows the conversation to its newest session and lasts a day after the latest call.
+It needs the `watches` feature and `DAIMON_WATCHES__CALLBACK_BASE_URL`. A DM, a
+helper or an owner at the watch limit gets none.
 
 A request body that is not JSON, repeats a key, cannot be re-encoded, or holds
 a tool call without object `params` is refused with a 400. GET and DELETE
