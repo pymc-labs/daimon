@@ -316,7 +316,9 @@ def needs_admin(spec: FeatureSpec, platform: str) -> ChannelChangeRefused:
     admin = admin_word(platform)
     if spec.authority.native:
         return _refused(
-            f"Only {admin} can change approvals. Ask {admin}.", "native_admin_required", "forbidden"
+            f"Only {admin} can change {spec.name.lower()}. Ask {admin}.",
+            "native_admin_required",
+            "forbidden",
         )
     return _refused(
         f"Only {admin} can change {spec.name.lower()} here. Ask {admin}.",
@@ -409,7 +411,7 @@ def feature_refusal(
 
 
 async def _native_admin(
-    sessions: Sessions, settings: Settings, actor: FeatureActor, platform: str
+    sessions: Sessions, settings: Settings, actor: FeatureActor, spec: FeatureSpec, platform: str
 ) -> Subject:
     """A live, uncached native admin check of the actor's chat identity, or a refusal.
     The operator at the CLI is the one other admin; it is checked by type, nothing else."""
@@ -421,7 +423,7 @@ async def _native_admin(
         )
         if subject.is_admin:
             return subject
-    raise needs_admin(FEATURES["approvals"], platform)
+    raise needs_admin(spec, platform)
 
 
 def thread_open_to_anyone(key: str, *, locked: bool = False) -> bool:
@@ -470,7 +472,7 @@ async def change_refusal(
     spec = FEATURES[key]
     try:
         if spec.authority.native:
-            await _native_admin(sessions, settings, actor, place.platform)
+            await _native_admin(sessions, settings, actor, spec, place.platform)
         elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
         async with sessions() as session:
@@ -579,7 +581,7 @@ async def _change_approvals(
     expected: Expected[str] | None,
 ) -> TierSetting:
     subject = replace(
-        await _native_admin(sessions, settings, actor, place.platform),
+        await _native_admin(sessions, settings, actor, FEATURES["approvals"], place.platform),
         origin_channel_ids=actor.inside,
         operator=actor.operator,
     )
@@ -708,10 +710,12 @@ async def change_feature(
     spec = FEATURES[key]
     await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)
-    if spec.authority.native:
+    if key == "approvals":  # the one native feature kept in the approval gate, not feature storage
         before = await _change_approvals(sessions, settings, actor, tier, value, place, expected)
     else:
-        if not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
+        if spec.authority.native:
+            await _native_admin(sessions, settings, actor, spec, place.platform)
+        elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
         if tier == "agent" and key.startswith("tool."):
             before = await _write_builtin(sessions, settings, actor, spec, after, place, expected)

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **"Approvals in direct messages" no longer changes Approvals for everyone.**
+  Setting it, from the CLI, the web app or an agent, wrote the server-wide
+  Approvals value instead of its own, so Off turned Allow writes on everywhere.
+  It now changes only itself; a server admin still sets it.
+
 - **Operators can rename a workspace's own agent.** `daimon agents rename OLD NEW`
   keeps the agent's id, so its saved MCP logins, memory and sessions stay, and
   moves every channel default, rule, routine and access-policy rule to the new
