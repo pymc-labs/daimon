@@ -395,7 +395,7 @@ class Library:
         target, parts = self._source_path(path)
         base = self.source.resolve()
         if target.is_file():
-            files = [target.relative_to(base).as_posix()]
+            files = [target.relative_to(base).as_posix()] if _readable(target) else []
         else:
             top = "/".join(parts) + "/" if parts else ""
             files = [
@@ -427,11 +427,18 @@ def _title(text: str) -> str | None:
     return next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), None)
 
 
+def _readable(path: Path, suffixes: frozenset[str] = TEXT_SUFFIXES) -> bool:
+    """Whether `path` has a suffix in `suffixes` and is at most `MAX_FILE_BYTES`."""
+    try:
+        return path.suffix in suffixes and path.stat().st_size <= MAX_FILE_BYTES
+    except OSError:
+        return False
+
+
 def _source_text(path: Path) -> str:
     refusal = SelfKnowledgeError(f"{_named(path.name)} is not a text file that can be read here.")
     try:
-        fits = path.suffix in TEXT_SUFFIXES and path.stat().st_size <= MAX_FILE_BYTES
-        text = path.read_text(encoding="utf-8") if fits else None
+        text = path.read_text(encoding="utf-8") if _readable(path) else None
     except (OSError, ValueError) as exc:  # gone, unreadable or not UTF-8
         raise refusal from exc
     if text is None:
@@ -448,7 +455,7 @@ def _read_quietly(path: Path) -> str | None:
 
 
 def _walk(folder: Path, suffixes: frozenset[str]) -> Iterator[Path]:
-    """Files under `folder` with a suffix in `suffixes` and at most `MAX_FILE_BYTES`, in name
+    """Files under `folder` that pass `_readable` for `suffixes`, in name
     order. Symlinks, dot-named entries and `_SKIPPED_DIRS` are skipped as they are met, so
     nothing found leads out of the tree."""
     with os.scandir(folder) as entries:
@@ -457,11 +464,7 @@ def _walk(folder: Path, suffixes: frozenset[str]) -> Iterator[Path]:
                 continue
             if entry.is_dir(follow_symlinks=False):
                 yield from _walk(Path(entry.path), suffixes)
-            elif (
-                entry.is_file(follow_symlinks=False)
-                and Path(entry.name).suffix in suffixes
-                and entry.stat(follow_symlinks=False).st_size <= MAX_FILE_BYTES
-            ):
+            elif entry.is_file(follow_symlinks=False) and _readable(Path(entry.path), suffixes):
                 yield Path(entry.path)
 
 

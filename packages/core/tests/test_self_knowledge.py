@@ -11,6 +11,7 @@ from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
 from daimon.core.features.tool_gate import SELF_KNOWLEDGE_TOOLS, server_gate_key
 from daimon.core.self_knowledge import (
+    MAX_FILE_BYTES,
     MAX_MATCHES,
     SELF_KNOWLEDGE_HINT,
     Library,
@@ -150,6 +151,18 @@ def test_source_lists_reads_and_searches_text_literally(tmp_path: Path) -> None:
     assert "defaults" not in library.search_source("needle"), "defaults/ is never searched"
     with pytest.raises(SelfKnowledgeError):
         library.search_source("x")
+
+
+def test_a_search_aimed_at_one_file_skips_what_a_read_refuses(tmp_path: Path) -> None:
+    library = _library(tmp_path, web=True)
+    core = library.source / "packages/core"
+    (core / "blob.dat").write_text("needle\n")
+    (core / "big.py").write_text("needle\n" + "x" * MAX_FILE_BYTES)
+    for name in ("blob.dat", "big.py"):
+        with pytest.raises(SelfKnowledgeError):
+            library.read_source(f"packages/core/{name}")
+        assert "Nothing matches" in library.search_source("needle", f"packages/core/{name}")
+    assert "config.py:2" in library.search_source("needle", "packages/core/config.py")
 
 
 def test_search_stops_at_the_match_cap(tmp_path: Path) -> None:
