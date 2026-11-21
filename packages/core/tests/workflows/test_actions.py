@@ -18,7 +18,7 @@ from daimon.core.stores import (
     workflow_waits,
     workflows,
 )
-from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolCall, ToolSafetyPolicy
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.workflows import engine, inbox, runs, service, views, waits
 from daimon.core.workflows.access import Who
@@ -406,7 +406,9 @@ async def test_a_write_grant_is_requested_approved_and_carried_over(
 
     async def status() -> str:
         async with world.sm() as s:
-            (summary,) = await views.list_summaries(s, owner.who, now=NOW, default_budget_usd=5.0)
+            (summary,) = await views.list_summaries(
+                s, owner.who, now=NOW, default_budget_usd=5.0, policy=OPEN_TOOL_SAFETY
+            )
         return summary.status
 
     assert await status() == "needs_review", "the live version lacks its write grant"
@@ -443,5 +445,9 @@ async def test_a_budget_over_the_default_marks_the_workflow_unreviewed(
         )
         assert live is not None
         over = live.model_copy(update={"spec": live.spec | {"limits": {"budget_usd": 50}}})
-        assert await views.unreviewed(s, flow, over, 5.0), "its budget grant is missing"
-        assert not await views.unreviewed(s, flow, over, 100.0), "within the default"
+        assert await views.unreviewed(s, flow, over, 5.0, OPEN_TOOL_SAFETY), (
+            "its budget grant is missing"
+        )
+        assert not await views.unreviewed(s, flow, over, 100.0, OPEN_TOOL_SAFETY), (
+            "within the default"
+        )

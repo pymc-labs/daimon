@@ -48,7 +48,7 @@ from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
 from daimon.core.workflows.spec import slug
-from daimon.core.workflows.taint import tool_writes
+from daimon.core.workflows.taint import tool_facts
 from daimon.core.workflows.validate import Validation
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -187,7 +187,7 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
                     catalog.ToolOption(
                         id=tool_id,
                         label=catalog.tool_label(tool_id),
-                        writes=tool_writes(tool_id, None),
+                        writes=tool_facts(runtime.settings.tool_safety, tool_id).writes,
                     ),
                 )
             key = slug(name)

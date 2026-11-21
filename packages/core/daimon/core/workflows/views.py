@@ -17,6 +17,7 @@ from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow, WorkflowVersionRow
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.workflows import preflight
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
 from daimon.core.workflows.spec import parse_spec
@@ -216,15 +217,18 @@ def status_of(workflow: WorkflowRow, *, unreviewed: bool = False) -> Status:
 
 
 async def unreviewed(
-    session: AsyncSession, workflow: WorkflowRow, live: WorkflowVersionRow | None, budget: float
+    session: AsyncSession,
+    workflow: WorkflowRow,
+    live: WorkflowVersionRow | None,
+    budget: float,
+    policy: ToolSafetyPolicy,
 ) -> bool:
     """The live version lacks a grant, the budget's over the workspace default `budget` too."""
     if live is None:
         return False
     spec = parse_spec(live.spec)
-    return (
-        await preflight.missing_grant(session, workflow.id, live.number, spec, budget) is not None
-    )
+    missing = await preflight.missing_grant(session, workflow.id, live.number, spec, budget, policy)
+    return missing is not None
 
 
 def _failing(runs: Sequence[RunRow]) -> bool:
@@ -301,7 +305,12 @@ def _summary(
 
 
 async def list_summaries(
-    session: AsyncSession, who: Who, *, now: datetime, default_budget_usd: float
+    session: AsyncSession,
+    who: Who,
+    *,
+    now: datetime,
+    default_budget_usd: float,
+    policy: ToolSafetyPolicy,
 ) -> list[WorkflowSummary]:
     """The workflows the caller may see, by name."""
     workflows = await workflows_store.list_workflows(session, tenant_id=who.tenant_id)
@@ -342,7 +351,7 @@ async def list_summaries(
             spend=float(spend.get(w.id, 0)),
             who=who,
             next_run=fires.get(w.id),
-            unreviewed=await unreviewed(session, w, lives.get(w.id), default_budget_usd),
+            unreviewed=await unreviewed(session, w, lives.get(w.id), default_budget_usd, policy),
             origin=origins.get(w.id),
         )
         for w in seen
@@ -377,6 +386,7 @@ async def workflow_view(
     *,
     now: datetime,
     default_budget_usd: float,
+    policy: ToolSafetyPolicy,
     access: Sequence[WorkflowAccessRow] | None = None,
 ) -> Workflow:
     """The workflow page's record, for a caller who may see it."""
@@ -429,7 +439,7 @@ async def workflow_view(
         spend=float(spend),
         who=who,
         next_run=fires.get(workflow.id),
-        unreviewed=await unreviewed(session, workflow, live, default_budget_usd),
+        unreviewed=await unreviewed(session, workflow, live, default_budget_usd, policy),
         origin=origin,
     )
     spec = _live_spec(workflow, versions)

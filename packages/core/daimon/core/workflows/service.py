@@ -146,7 +146,13 @@ async def _view(
 ) -> views.Workflow:
     """`budget` is read before the transaction opens: its read takes a connection of its own."""
     return await views.workflow_view(
-        session, workflow, env.who, now=env.now, default_budget_usd=budget, access=access
+        session,
+        workflow,
+        env.who,
+        now=env.now,
+        default_budget_usd=budget,
+        policy=env.settings.tool_safety,
+        access=access,
     )
 
 
@@ -176,7 +182,11 @@ def _sync(spec: dict[str, Any]) -> store.Settings:
 async def list_workflows(env: Env) -> list[views.WorkflowSummary]:
     async with env.sm() as session:
         return await views.list_summaries(
-            session, env.who, now=env.now, default_budget_usd=await _budget(env)
+            session,
+            env.who,
+            now=env.now,
+            default_budget_usd=await _budget(env),
+            policy=env.settings.tool_safety,
         )
 
 
@@ -723,9 +733,7 @@ async def export(
 # ---------- runs ----------
 
 
-async def _run(
-    session: AsyncSession, env: Env, run_id: uuid.UUID
-) -> tuple[RunRow, WorkflowRow, Rights]:
+async def _run(session: AsyncSession, env: Env, run_id: uuid.UUID) -> tuple[RunRow, WorkflowRow]:
     run = await runs_store.get_run(session, run_id, tenant_id=env.who.tenant_id)
     if run is None:
         raise NotFound(RUN_GONE)
@@ -735,7 +743,7 @@ async def _run(
         raise NotFound(RUN_GONE) from err
     if not rights.sees_run(own=run_views.started_by_me(run, env.who.account_id)):
         raise NotFound(RUN_GONE)
-    return run, workflow, rights
+    return run, workflow
 
 
 async def list_runs(
@@ -1002,7 +1010,11 @@ async def attention(env: Env) -> list[Attention]:
         out: list[Attention] = []
         latest_runs: dict[uuid.UUID, dict[str, str]] = {}
         for summary in await views.list_summaries(
-            session, env.who, now=env.now, default_budget_usd=await _budget(env)
+            session,
+            env.who,
+            now=env.now,
+            default_budget_usd=await _budget(env),
+            policy=env.settings.tool_safety,
         ):
             ref = {"id": summary.id, "name": summary.name}
             workflow_id = uuid.UUID(summary.id)

@@ -27,6 +27,7 @@ from daimon.core.spend_gate import (
 from daimon.core.stores import accounts, identity, tenants, workflow_runs
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.workflows import WorkflowRow
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.workflows.delivery import target_for
 from daimon.core.workflows.features import KEYS, workflow_features
 from daimon.core.workflows.spec import (
@@ -38,6 +39,7 @@ from daimon.core.workflows.spec import (
     node_hash,
     slug,
 )
+from daimon.core.workflows.taint import Catalog
 from daimon.core.workflows.validate import validate_spec
 from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -146,7 +148,12 @@ async def check(
         default = features.run_budget_usd
         if place.mode == "live" and (
             missing := await missing_grant(
-                session, place.workflow.id, place.version, place.spec, float(default)
+                session,
+                place.workflow.id,
+                place.version,
+                place.spec,
+                float(default),
+                settings.tool_safety,
             )
         ):
             return Refusal("grant_needs_review", f"{missing} needs approval. Ask the owner.")
@@ -240,10 +247,17 @@ async def private_reach(
 
 
 async def missing_grant(
-    session: AsyncSession, workflow_id: uuid.UUID, version: int, spec: Spec, budget: float
+    session: AsyncSession,
+    workflow_id: uuid.UUID,
+    version: int,
+    spec: Spec,
+    budget: float,
+    policy: ToolSafetyPolicy,
 ) -> str | None:
-    """The first grant the spec needs that this version has no live, matching row for."""
-    needed = validate_spec(spec, run_budget_usd=budget).grants
+    """The first grant the spec needs that this version has no live, matching row for; its
+    tools are classed by the operator's policy now, as the calls will be."""
+    catalog = Catalog(agents={}, tools={}, policy=policy)
+    needed = validate_spec(spec, catalog, run_budget_usd=budget).grants
     if not needed:
         return None
     held = await workflow_runs.live_grants(session, workflow_id=workflow_id, version=version)

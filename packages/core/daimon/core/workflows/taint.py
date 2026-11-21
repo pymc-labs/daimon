@@ -9,9 +9,9 @@ earlier. Taint follows references until nothing changes.
 
 from __future__ import annotations
 
-import re
 from typing import Final
 
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, classify_tool
 from daimon.core.workflows.expressions import ExpressionError, template_refs
 from daimon.core.workflows.graph import ancestors, templates_of
 from daimon.core.workflows.spec import (
@@ -26,10 +26,6 @@ from daimon.core.workflows.spec import (
 )
 from pydantic import BaseModel, ConfigDict
 
-#: Without a catalog, a tool writes when its name says so (as the canvas guesses).
-_WRITE_TOOL = re.compile(
-    r"send|tag|create|update|post|delete|comment|note|page|issue|folder|project"
-)
 _TRUSTED_ANSWERERS: Final = frozenset({"owner", "editors"})
 
 
@@ -48,12 +44,21 @@ class Catalog(BaseModel):
 
     agents: dict[str, frozenset[str]]
     tools: dict[str, ToolFacts]
+    #: Classes the tools it does not list, as the run-time rule does.
+    policy: ToolSafetyPolicy = OPEN_TOOL_SAFETY
+
+
+def tool_facts(policy: ToolSafetyPolicy, tool: str) -> ToolFacts:
+    """A `server/tool` as `decide_unattended_call` classes it: the operator's overrides,
+    then the name, and any name not plainly a read writes."""
+    server, _, name = tool.rpartition("/")
+    return ToolFacts(writes=classify_tool(policy, server_name=server, tool_name=name) == "write")
 
 
 def tool_writes(tool: str, catalog: Catalog | None) -> bool:
     if catalog is not None and tool in catalog.tools:
         return catalog.tools[tool].writes
-    return bool(_WRITE_TOOL.search(tool.split("/")[-1]))
+    return tool_facts(catalog.policy if catalog else OPEN_TOOL_SAFETY, tool).writes
 
 
 def node_writes(node: AnyNode, catalog: Catalog | None) -> bool:
