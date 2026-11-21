@@ -52,6 +52,7 @@ from daimon.core.continuity.poll_tools import (
 from daimon.core.dm_access import member_roles, roles_by_membership
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_identity import RelayBinding
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_call import McpCallError
 from daimon.core.membership_subject import resolve_subject
@@ -715,6 +716,8 @@ async def create_mcp_watch(
                 owner_account_id=auth.account_id,
                 server_url=server_url,
                 credential=listed.credential,
+                # No watch yet: the listing names nobody, as no tool is called.
+                relay=RelayBinding(str(agent.name)),
             )
         except CredentialMissing:
             raise ToolError(
@@ -1037,7 +1040,7 @@ async def check_edited_mcp_arguments(
 ) -> None:
     """New arguments for an MCP server poll must fit the tool the owner approved, as its
     server lists it now with the poll's own credential."""
-    _, _, server_name = await polling.authorize_source(runtime, row)
+    _, _, server_name, agent_name = await polling.authorize_source(runtime, row)
     server_url = str(row.source_state.get("server_url"))
     tool = str(row.source_state.get("tool"))
     token = await poll_credential(
@@ -1047,6 +1050,8 @@ async def check_edited_mcp_arguments(
         owner_account_id=row.owner_account_id,
         server_url=server_url,
         credential=str(row.source_state.get("credential")),
+        # Unbound, as at create: a listing names nobody and is no poll of this watch.
+        relay=RelayBinding(agent_name),
     )
     try:
         async with asyncio.timeout(25), polling.open_source(server_url, token) as source:

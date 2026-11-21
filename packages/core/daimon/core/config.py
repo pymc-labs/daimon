@@ -11,6 +11,7 @@ import binascii
 import ipaddress
 import json
 import os
+import re
 import ssl
 import uuid
 from collections.abc import Mapping
@@ -2631,8 +2632,11 @@ class PollableTool(BaseModel):
         )
     )
     tool: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$", description="Exact tool name.")
-    credential: Literal["agent", "owner", "none"] = Field(
-        description='The one credential a poll may use; native readers use "none".'
+    credential: Literal["agent", "owner", "relay", "none"] = Field(
+        description=(
+            'The one credential a poll may use; native readers use "none", and "relay" '
+            "needs this Daimon's own signed-identity relay URL."
+        )
     )
     returns_chat: bool = Field(
         description=(
@@ -2676,6 +2680,14 @@ class PollableTool(BaseModel):
                 )
         elif self.returns_chat or self.tool in CHAT_TOOLS:
             raise ValueError(f"{self.tool} returns chat; MCP server tools that do cannot be polled")
+        elif self.credential == "relay":
+            from daimon.core.mcp_identity import RELAY_PATH
+
+            parts = urlsplit(self.server)
+            if parts.query or not re.fullmatch(
+                rf"(/[^/]+)*{RELAY_PATH}/[a-z0-9][a-z0-9-]{{0,62}}", parts.path
+            ):
+                raise ValueError(f'credential "relay" needs a <root>{RELAY_PATH}/<name> URL')
         return self
 
 
@@ -2727,14 +2739,17 @@ class WatchesSettings(BaseModel):
             "tool can be polled: a watch on a tool taken off the list pauses at its next "
             'poll and its owner is told. Each entry has server ("daimon-mcp" for a native '
             "reader, otherwise an https MCP server URL, never a server name), tool (exact "
-            'name), credential ("none" for native readers; "agent" or "owner" for '
-            "MCP servers), returns_chat (required: true only for native readers, which "
+            'name), credential ("none" for native readers; "agent", "owner" or "relay" '
+            "for MCP servers), returns_chat (required: true only for native readers, which "
             "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
             "least 60, default 300) and label (shown on the approval card). Native "
             "entries must be read_thread or read_channel. Daimon's chat readers and chat_tools "
             "are refused on MCP servers. Credential owner polls with each watch owner's "
             "own read-only key, which they send once through a private form: for example "
-            "a read-scoped API key the person creates on that server. A server's read-only "
+            "a read-scoped API key the person creates on that server. Credential relay "
+            "polls a signed-identity relay server (<root>/mcp-identity/<name>) as the "
+            "watch owner, marked unattended, at the place the watch reports to. "
+            "A server's read-only "
             "annotation never allows a poll; only this "
             "list does, and a server can still write when it says it only reads. A "
             "watch below a raised floor polls at the "
@@ -3260,6 +3275,24 @@ class Settings(BaseSettings):
         if not was_set and raw is None:
             policy.__pydantic_fields_set__.discard("enabled")  # a default, not an operator value
         self.tool_safety = policy
+        return self
+
+    @model_validator(mode="after")
+    def _relay_polls_name_this_deployment(self) -> Settings:
+        """A relay poll sends Daimon's own credential, so its URL must be this relay's."""
+        from daimon.core.mcp_identity import relay_server_name
+
+        public_url = self.mcp.public_url
+        for entry in self.watches.pollable_tools:
+            if (
+                entry.credential == "relay"
+                and public_url is not None
+                and relay_server_name(entry.server, str(public_url)) is None
+            ):
+                raise ValueError(
+                    "DAIMON_WATCHES__POLLABLE_TOOLS: a relay entry's server must be "
+                    "<MCP public URL root>/mcp-identity/<name>"
+                )
         return self
 
     model_config = SettingsConfigDict(

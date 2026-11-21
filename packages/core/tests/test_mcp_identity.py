@@ -29,13 +29,15 @@ from daimon.core.mcp_identity import (
     parse_relay_claim,
     public_jwk,
     public_pem,
+    relay_server_name,
     relay_url,
     requester_conversation,
     routine_conversation,
     sign_identity,
     stamp_requester,
+    watch_conversation,
 )
-from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.domain import Role, TurnOriginRow, WatchRow
 from pydantic import ValidationError
 
 NOW = dt.datetime(2026, 10, 1, 12, 0, tzinfo=dt.UTC)
@@ -157,6 +159,20 @@ def test_relay_urls_are_only_this_deployments_relay() -> None:
     assert found == (relay + "/",), "only the relay, kept exactly as attached"
     twice = identity_relay_urls([relay + "/", relay], public_url=PUBLIC_URL)
     assert len(twice) == 1, "one URL per server, so a vault never holds two slots for it"
+
+
+@pytest.mark.parametrize(
+    ("url", "name"),
+    [
+        ("https://Daimon.Example.com/mcp-identity/tools/", "tools"),
+        ("https://other.example.com/mcp-identity/tools", None),
+        ("https://daimon.example.com/mcp-identity/a/b", None),
+        ("https://daimon.example.com/mcp-identity/../mcp", None),
+        ("https://daimon.example.com/mcp-identity/tools?next=/mcp", None),
+    ],
+)
+def test_relay_server_name_is_only_this_relays_one_segment_url(url: str, name: str | None) -> None:
+    assert relay_server_name(url, PUBLIC_URL) == name, f"{url} names {name}"
 
 
 def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
@@ -552,6 +568,67 @@ def test_a_person_without_a_kind_is_not_stamped() -> None:
         )
     )
     assert out["params"]["_meta"] == {}
+
+
+def test_the_relay_claim_carries_a_watch_with_its_owner_and_no_other_binding() -> None:
+    watch_id = uuid.uuid4()
+    binding = RelayBinding("daimon", watch_id=watch_id, owner="42")
+    assert parse_relay_claim(binding.claim()) == binding, "the watch and owner read back"
+    for other in ({"session": str(uuid.uuid4())}, {"routine": str(uuid.uuid4())}):
+        with pytest.raises(ValueError):
+            parse_relay_claim({"agent_name": "daimon", "watch": str(watch_id), **other})
+    with pytest.raises(ValueError):
+        parse_relay_claim({"agent_name": "daimon", "watch": 7})
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, {"place_type": "thread", "channel_id": "9", "parent_channel_id": "5"}),
+        (
+            {"delivery": "new_thread"},
+            {"place_type": "channel", "channel_id": "5", "parent_channel_id": None},
+        ),
+        ({"delivery": "dm"}, {"place_type": "dm", "channel_id": None, "parent_channel_id": None}),
+    ],
+)
+def test_a_watch_poll_is_placed_where_the_watch_reports(
+    changes: dict[str, Any], expected: dict[str, str | None]
+) -> None:
+    row = WatchRow.model_validate(
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": uuid.uuid4(),
+            "owner_account_id": uuid.uuid4(),
+            "owner_external_id": "42",
+            "platform": "discord",
+            "parent_channel_id": "5",
+            "thread_id": "9",
+            "agent_id": "agent_1",
+            "agent_name": "daimon",
+            "session_id": None,
+            "instructions": "Report changes.",
+            "producer": "poll",
+            "page_id": uuid.uuid4(),
+            "revision": 1,
+            "source": "mcp_poll",
+            "status": "active",
+            "expires_at": None,
+            "max_turns_per_day": 24,
+            "max_fires": None,
+            "fire_count": 0,
+            "baseline": {},
+            "rule": {},
+            "source_state": {},
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "next_check_at": None,
+            "backoff_until": None,
+            "consecutive_errors": 0,
+            **changes,
+        }
+    )
+    assert watch_conversation(row) == expected, "the poll's place is the watch's report place"
 
 
 def test_the_relay_claim_carries_a_routine_and_never_both_bindings() -> None:

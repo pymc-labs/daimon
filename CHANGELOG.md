@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Watches can poll a signed-identity relay server.** List a tool in
+  `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its
+  `<root>/mcp-identity/<name>` URL. Each poll mints the watch owner a
+  two-minute relay credential bound to that watch, so a `requester_meta`
+  server sees the owner, `requester_kind` `"routine"` and the place the watch
+  reports to. A paused or deleted watch's credential names nobody. Such
+  watches could not be created before: no stored key matches a relay URL.
+
 - **Images over 5 MiB, or over 8000 px on an edge, are resized instead of sent
   as a link.** In Discord, Slack, Teams and the web app, an image of up to 25
   MiB is shrunk to fit the model's limits and shown to the agent inline, with
