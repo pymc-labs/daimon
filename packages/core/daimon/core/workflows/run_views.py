@@ -873,7 +873,7 @@ def file_view(run_id: uuid.UUID, ref: object) -> dict[str, Any]:
         "name": file.get("filename"),
         "type": file.get("mime_type"),
         "size": file.get("size_bytes"),
-        "url": f"/runs/{run_id}/files/{file.get('file_id')}",
+        "url": f"/api/workflows/runs/{run_id}/files/{file.get('file_id')}",
     }
 
 

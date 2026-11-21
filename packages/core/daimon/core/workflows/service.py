@@ -16,9 +16,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from daimon.core.config import Settings
+from daimon.core.routine_files import RoutineFile
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
+from daimon.core.stores import workflow_waits
 from daimon.core.stores import workflows as store
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import GrantRow, RunRow
@@ -775,6 +777,21 @@ async def step(env: Env, run_id: uuid.UUID, key: str, attempt: int | None) -> ru
     if found is None:
         raise NotFound("That step has not run.")
     return found
+
+
+async def run_file(env: Env, run_id: uuid.UUID, file_id: str) -> RoutineFile:
+    """A file the run holds, a step's or an answer's, for a viewer of the run to download."""
+    async with env.sm() as session:
+        run, _, _ = await _run(session, env, run_id)
+        refs: list[Any] = []
+        for step_row in await runs_store.list_steps(session, run.id):
+            refs += step_row.files or []
+            for wait in await workflow_waits.waits_of_step(session, step_row.id):
+                refs += wait.answer_files or []
+    for ref in refs:
+        if isinstance(ref, dict) and ref.get("file_id") == file_id:  # pyright: ignore[reportUnknownMemberType]  # JSONB refs
+            return RoutineFile.model_validate(ref)
+    raise NotFound("There is no such file.")
 
 
 def _refused(refusal: Refusal) -> WorkflowError:
