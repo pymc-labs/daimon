@@ -207,6 +207,13 @@ async def test_digest_continues_the_main_lane_through_a_branch(db_session: Async
     assert steps["collect"].cost_usd > 0 and steps["write"].cost_usd > 0, "each step has its cost"
     assert done.cost_usd == steps["collect"].cost_usd + steps["write"].cost_usd, f"{done}"
     await world.verified(run.id)
+    async with world.sm() as s:
+        state = run_views.project(await run_views.event_views(s, done))
+    lanes = {x.key: x.lane for x in state.steps if x.key in ("collect", "write")}
+    assert set(lanes.values()) == {steps["collect"].lane}, f"step.started names the lane: {lanes}"
+    assert [(x.id, x.session) for x in state.lanes] == [(steps["collect"].lane, "ses_1")], (
+        f"the run lists its one lane with the session its first brief opened: {state.lanes}"
+    )
 
 
 async def test_a_steps_files_are_the_new_ones_its_session_made(db_session: AsyncSession) -> None:

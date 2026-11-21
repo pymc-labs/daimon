@@ -57,6 +57,8 @@ async def test_items_run_within_concurrency_and_output_in_item_order(
         events = await workflow_run_events.list_events(s, run.id)
     started = next(e for e in events if e.type == "step.started" and e.step_key == "each")
     assert started.data == {"attempt": 1, "total": 3}, "progress reads the total"
+    item = next(e for e in events if e.type == "step.started" and e.step_key == "each[1]")
+    assert item.data.get("lane") == second.step.lane, f"an item starts in its lane: {item.data}"
     ready = next(e for e in events if e.type == "step.ready" and e.step_key == "each[1]")
     assert ready.data["item"] == {"index": 1, "label": "Globex"}, "items carry a label"
     await world.verified(run.id)

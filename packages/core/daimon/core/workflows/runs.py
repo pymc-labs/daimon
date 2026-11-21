@@ -32,7 +32,7 @@ from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepV
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
 from daimon.core.workflows.items import ItemState, item_label, items_next, items_problem
-from daimon.core.workflows.lanes import lane_key
+from daimon.core.workflows.lanes import OWNER_DM, agent_of, lane_key
 from daimon.core.workflows.preflight import Cleared, Place, Refusal, check
 from daimon.core.workflows.spec import (
     ActionNode,
@@ -1030,15 +1030,40 @@ async def claim(
         if got is None:
             return None
         run, step, attempt = got
+        started: dict[str, JsonValue] = {"attempt": attempt}
+        if step.lane is not None:
+            lane = await _take_lane(session, run, step, step.lane)
+            step = step.model_copy(update={"lane": lane})
+            spec = await spec_of(session, run)
+            node = node_of(spec, step)
+            assert isinstance(node, AgentNode), "only agent steps run in lanes"
+            started |= {
+                "lane": lane,
+                "agent": agent_of(spec, node) or "",
+                "session": await workflow_runs.get_lane(session, run_id=run.id, lane=lane),
+            }
         await append_events(
             session,
             run_id=run.id,
-            events=[NewEvent("step.started", key_of(step), {"attempt": attempt})],
+            events=[NewEvent("step.started", key_of(step), started)],
             actor=ENGINE,
             at=now,
         )
         await _notify(session, run_channel(run.tenant_id), str(run.id))
     return Claimed(run, step, attempt)
+
+
+async def _take_lane(session: AsyncSession, run: RunRow, step: StepRow, lane: str) -> str:
+    """A step whose lane is busy gets one of its own: a session runs one turn at a time."""
+    if (
+        "@" in lane
+        or lane.startswith(f"{OWNER_DM}:")
+        or not await workflow_runs.lane_busy(session, run_id=run.id, lane=lane, step_id=step.id)
+    ):
+        return lane
+    lane = f"{lane}@{key_of(step)}"
+    await workflow_runs.set_lane(session, step_id=step.id, lane=lane)
+    return lane
 
 
 async def execute(

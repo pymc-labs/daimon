@@ -305,12 +305,8 @@ class AgentStepExecutor:
         async with self.sm.begin() as s:
             attempt = await workflow_runs.running_attempt(s, work.step.id)
             assert attempt is not None, "a claimed step has a running attempt"
+            # `runs.claim` gave a busy lane's step a lane of its own.
             lane = work.step.lane or lane_key(work.spec, work.step.node_id, node, work.step.visit)
-            if "@" not in lane and await workflow_runs.lane_busy(
-                s, run_id=work.run.id, lane=lane, step_id=work.step.id
-            ):
-                lane = f"{lane}@{key}"
-                await workflow_runs.set_lane(s, step_id=work.step.id, lane=lane)
             session_id = attempt.session_id or await workflow_runs.get_lane(
                 s, run_id=work.run.id, lane=lane
             )

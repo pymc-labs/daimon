@@ -530,6 +530,9 @@ def project(events: Sequence[RunEvent]) -> RunState:
                         )
             case "step.brief_sent" if last:
                 last.session = _str(d.get("session"))
+                for x in s.lanes:  # a new lane's session starts with its first brief
+                    if st and x.id == st.lane and not x.session:
+                        x.session = last.session or ""
             case "step.route_chosen" if st:
                 st.route = _str(d.get("route"))
             case "step.retry_scheduled":
