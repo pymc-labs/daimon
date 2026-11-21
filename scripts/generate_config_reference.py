@@ -34,6 +34,7 @@ import typing
 from dataclasses import dataclass
 from pathlib import Path
 
+from _knowledge import web_only
 from _settings_walk import (
     ADAPTER_REQUIRED_NOTES,
     BILLING_FLAT_VARS,
@@ -413,7 +414,9 @@ def _header(sections: typing.Sequence[Section]) -> list[str]:
         "## Contents",
         "",
     ]
-    lines.extend(f"- [{section.title}](#{section.anchor})" for section in sections)
+    for section in sections:
+        item = f"- [{section.title}](#{section.anchor})"
+        lines.extend(web_only([item]) if section.title == "Web" else [item])
     return lines
 
 
@@ -461,8 +464,9 @@ def render_reference() -> str:
 
     lines = _header(sections)
     for section in sections:
-        lines.extend(["", f"## {section.title}", "", *section.intro, ""])
-        lines.extend(section.body)
+        block = ["", f"## {section.title}", "", *section.intro, ""]
+        block.extend(section.body)
+        lines.extend(web_only(block) if section.title == "Web" else block)
     return "\n".join(lines).rstrip("\n") + "\n"
 
 

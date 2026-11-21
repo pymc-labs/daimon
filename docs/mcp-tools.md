@@ -26,7 +26,9 @@ tool is hidden by default and restored only for a matching caller.
 - **operator tokens with tenant:read** — carries the `scope:tenant:read` tag.
 - **Slack callers** — carries the `slack` tag.
 - **Teams callers** — carries the `teams` tag.
+<!-- knowledge: web -->
 - **web app callers** — carries the `web` tag.
+<!-- /knowledge -->
 
 A CLI token matches no platform tag, so it sees none of the Discord, Slack or Teams
 tools. An agent token is narrowed to the agent-chat tools alone — everything else is
@@ -738,6 +740,7 @@ Owner-bound watch management.
 | `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
 | `update_watch` | Discord callers | Change your watch in place, after `preview_watch_edit`, with the same changes. |
 
+<!-- knowledge: web -->
 ## `web_invites`
 
 Web invites and visitor sign-in links, from chat.
@@ -750,6 +753,8 @@ Web invites and visitor sign-in links, from chat.
 | `revoke_web_link` | admin only | Revoke a web invite (id) or a person's sign-in links (id is the person). |
 | `set_web_invite_files` | admin only | Turn file attachments on or off for a visitor invite, accepted or not. |
 
+<!-- /knowledge -->
+<!-- knowledge: web -->
 ## `web_people`
 
 The web app's people, groups and agent access, from chat.
@@ -763,6 +768,8 @@ The web app's people, groups and agent access, from chat.
 | `set_agent_web_access` | admin only | Turn an agent's web chat on or off and set who may use it: everyone or up to 100 groups or invitees. |
 | `update_web_person` | admin only | Set a web person's role (web app admin or member, not Daimon admin) or suspend or restore them. |
 
+<!-- /knowledge -->
+<!-- knowledge: web -->
 ## `web_workspace_settings`
 
 The web app's workspace settings, from chat: modules, who may start turns and direct
@@ -772,6 +779,7 @@ messages.
 | --- | --- | --- |
 | `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message settings. |
 
+<!-- /knowledge -->
 ## `wizard`
 
 post_wizard: the agent-facing tool that posts a multi-step form.

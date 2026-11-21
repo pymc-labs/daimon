@@ -38,7 +38,9 @@ typo is silent — check the spelling here.
 - [Mcp Context](#mcp-context)
 - [Slack](#slack)
 - [Teams](#teams)
+<!-- knowledge: web -->
 - [Web](#web)
+<!-- /knowledge -->
 - [GitHub](#github)
 - [GitHub App](#github-app)
 - [Repo Memory](#repo-memory)
@@ -1114,6 +1116,7 @@ get the admin role in turns, create routines, replace shared keys, top up and se
 everyone's usage. Adding an admin means making them an owner of that team; no redeploy.
 The app must be installed in that team. To find the ID, open the team's ⋯ menu in Teams,
 choose Get link to team and copy the groupId parameter. Unset: nobody is an admin.
+<!-- knowledge: web -->
 
 ## Web
 
@@ -1216,6 +1219,7 @@ Let admins add credit by hand instead of paying, for staging deployments.
 
 Local development only: serves the fake sign-in and dev routes. Refused unless the
 public URL is localhost or a loopback address.
+<!-- /knowledge -->
 
 ## GitHub
 

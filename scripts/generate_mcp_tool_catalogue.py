@@ -39,6 +39,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from _knowledge import web_only
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.hub.app import build_hub_app
@@ -302,9 +303,10 @@ def _render_group(group: ToolGroup, *, heading: str, note: str = "") -> list[str
 
 
 def _header(total: int, hub_total: int) -> list[str]:
-    tag_lines = [
-        f"- **{label}** — carries the `{tag}` tag." for tag, label in sorted(TAG_LABELS.items())
-    ]
+    tag_lines: list[str] = []
+    for tag, label in sorted(TAG_LABELS.items()):
+        line = f"- **{label}** — carries the `{tag}` tag."
+        tag_lines.extend(web_only([line]) if tag == "web" else [line])
     return [
         "# MCP tool catalogue",
         "",
@@ -370,9 +372,10 @@ def render_catalogue() -> str:
 
     lines = _header(len(main_tools), len(hub_tools))
     for group in groups:
-        lines.extend(
-            _render_group(group, heading=f"`{group.module_name.removeprefix(TOOLS_PACKAGE)}`")
-        )
+        name = group.module_name.removeprefix(TOOLS_PACKAGE)
+        section = _render_group(group, heading=f"`{name}`")
+        # Web-app modules are hidden from agents that have the web app off.
+        lines.extend(web_only(section) if name.startswith("web_") else section)
 
     for group in _group_tools(hub_tools):
         lines.extend(
