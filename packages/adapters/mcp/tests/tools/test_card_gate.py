@@ -36,6 +36,7 @@ _TOOLS = {
     "set_agent_owners",
     "restore_library_skill_version",
     "approve_server_skill_update",
+    "eval_run_start",
 }
 
 

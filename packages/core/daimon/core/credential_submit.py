@@ -105,7 +105,7 @@ async def apply_env_submit(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     row: CredentialRequestRow,
-    agent: BetaManagedAgentsAgent,
+    agent: BetaManagedAgentsAgent | None,
     platform: ChatPlatform | None,
     value: str,
     plan: EnvSubmitPlan,

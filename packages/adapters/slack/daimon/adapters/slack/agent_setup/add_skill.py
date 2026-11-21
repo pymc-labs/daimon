@@ -28,7 +28,6 @@ from daimon.adapters.slack.agent_setup.actions import load_details_view
 from daimon.adapters.slack.agent_setup.panel_views import ADD_SKILL_INPUT_ID, build_add_skill_form
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_panel_metadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_backend import backend_refusal_causes
@@ -40,6 +39,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_markdown
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.identity import get_or_create_platform_principal
 from mux.errors import ScopeViolation
 from slack_sdk.web.async_client import AsyncWebClient

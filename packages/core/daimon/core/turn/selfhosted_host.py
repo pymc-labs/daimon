@@ -28,6 +28,7 @@ from daimon.core.turn.carry_over import (
     replaced_session,
 )
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
+from daimon.core.turn.host_tools import host_tools
 from daimon.core.turn.hosted_codec import SELFHOSTED
 from daimon.core.turn.hosted_io import SelfHostedTurnIO
 from daimon.core.turn.io import TurnCodecRequest, TurnIO
@@ -192,7 +193,7 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
             request.session.id, "self-hosted codec requires an active persisted turn"
         )
     active.check_session(request.scope, request.session)
-    return SelfHostedTurnIO(
+    io = SelfHostedTurnIO(
         request.backend,
         request.scope,
         request.session,
@@ -204,6 +205,9 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
             session, runtime.skipped_notice() if runtime.skipped_notice is not None else ""
         ),
     )
+    # Only a turn that runs host tools (an eval item's) answers the harness's function calls.
+    io.host_calls = host_tools.get() is not None
+    return io
 
 
 BUSY_RETRY_S = 5

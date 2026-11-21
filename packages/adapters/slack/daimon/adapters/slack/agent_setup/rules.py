@@ -11,7 +11,6 @@ import functools
 import uuid
 from typing import Any, cast
 
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
 from daimon.core.authz import build_subject, origin_ids
@@ -19,6 +18,7 @@ from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import ChannelRuleRefused, set_channel_rule
 from daimon.core.errors import DaimonError
 from daimon.core.panel_audit import record_panel_write
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient

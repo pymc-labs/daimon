@@ -398,3 +398,38 @@ async def test_shell_uses_private_home_cwd_and_temporary_directory(tmp_path):
     assert home == cwd == str(runtime.work)
     assert Path(temporary).parent == runtime.home / "tmp"
     assert (runtime.home / "tmp").stat().st_mode & 0o777 == 0o700
+
+
+async def test_host_tool_when_called_then_it_waits_for_the_host_result_and_never_runs(
+    tmp_path: Path,
+) -> None:
+    """A host tool's call pauses as a `function_result` action; only the host's result
+    answers it, and any other decision is a refusal."""
+    from mux.drivers.selfhosted.wire import ActionRequest
+
+    events: list[tuple[str, dict[str, JsonValue]]] = []
+
+    async def emit(kind: str, data: dict[str, JsonValue]) -> None:
+        events.append((kind, data))
+
+    runtime = TurnContext(TurnRequest.model_validate(turn()), tmp_path, emit)
+
+    async def execute() -> JsonValue:
+        raise AssertionError("a host tool never runs in the harness")
+
+    async def answer(decision: ActionRequest) -> JsonValue:
+        call = asyncio.create_task(runtime.tool("c1", "lookup", {"q": 1}, execute, host=True))
+        async with asyncio.timeout(2):
+            while not runtime.pending:
+                await asyncio.sleep(0)
+        action_id = next(iter(runtime.pending))
+        runtime.pending[action_id].set_result(decision.model_copy(update={"action_id": action_id}))
+        return await call
+
+    content = {"content": [{"type": "text", "text": "found"}], "is_error": True}
+    assert await answer(ActionRequest(action_id="a", decision="result", result=content)) == "found"
+    kinds = [(kind, data.get("kind") or data.get("executor")) for kind, data in events]
+    assert kinds == [("tool_use", "host"), ("requires_action", "function_result"),
+                     ("tool_result", None)], kinds  # fmt: skip
+    assert events[-1][1]["is_error"] is True, "the host's failure reaches the model"
+    assert await answer(ActionRequest(action_id="a", decision="allow")) == "Tool execution denied"

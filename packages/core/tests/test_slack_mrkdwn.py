@@ -11,7 +11,7 @@ These tests verify the ordering invariant.
 from __future__ import annotations
 
 import pytest
-from daimon.adapters.slack.mrkdwn import (
+from daimon.core.slack_mrkdwn import (
     escape_markdown_block,
     escape_mrkdwn,
     escape_mrkdwn_preserving_mentions,

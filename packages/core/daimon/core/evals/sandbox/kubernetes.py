@@ -33,6 +33,7 @@ from daimon.core.evals.sandbox.runtime import (
     PodSpec,
     SandboxError,
     agent_command,
+    environment_label,
     gateway_config,
     main_config,
     main_tar,
@@ -52,6 +53,7 @@ _MAIN_CAPS: Final = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "SET
 _START_S: Final = 300
 _STDOUT, _STDERR, _STATUS = 1, 2, 3
 _ITEM_LABEL: Final = "daimon.eval/item"
+_ENVIRONMENT_LABEL: Final = "daimon.eval/environment"
 _SIDECAR: Final[JsonObject] = {"cpu": "500m", "memory": "512Mi", "ephemeral-storage": "1Gi"}
 
 
@@ -84,6 +86,13 @@ def _secret_volume(volume: str, name: str, items: dict[str, tuple[str, int]]) ->
     return {"name": volume, "secret": {"secretName": name, "items": listed}}
 
 
+def pod_labels(spec: PodSpec) -> JsonObject:
+    labels: JsonObject = {_ITEM_LABEL: str(spec.item.id)}
+    if spec.shared_environment is not None:
+        labels[_ENVIRONMENT_LABEL] = environment_label(spec.shared_environment)
+    return labels
+
+
 def pod_manifest(spec: PodSpec, name: str) -> JsonObject:
     no_caps: JsonObject = {"drop": ["ALL"]}
     gateway_mount: JsonObject = {
@@ -100,7 +109,7 @@ def pod_manifest(spec: PodSpec, name: str) -> JsonObject:
     return {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {"name": name, "labels": {_ITEM_LABEL: str(spec.item.id)}},
+        "metadata": {"name": name, "labels": pod_labels(spec)},
         "spec": {
             "restartPolicy": "Never",
             "automountServiceAccountToken": False,
@@ -327,6 +336,17 @@ class KubernetesRuntime:
         query = urlencode({"labelSelector": _ITEM_LABEL})
         listed = await self._call("GET", f"{self._path('pods')}?{query}")
         names = overdue_pods(cast(list[JsonObject], listed.get("items") or []), time.time())
+        for name in names:
+            await self.stop(PodHandle(name, "kubernetes"))
+        return names
+
+    async def stop_environment(self, environment_id: str) -> list[str]:
+        query = urlencode(
+            {"labelSelector": f"{_ENVIRONMENT_LABEL}={environment_label(environment_id)}"}
+        )
+        listed = await self._call("GET", f"{self._path('pods')}?{query}")
+        pods = cast(list[JsonObject], listed.get("items") or [])
+        names = [str(cast(JsonObject, p["metadata"])["name"]) for p in pods]
         for name in names:
             await self.stop(PodHandle(name, "kubernetes"))
         return names

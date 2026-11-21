@@ -8,6 +8,7 @@ returns. `off` reads nothing, `shadow` logs, and a failed read refuses the post.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -101,6 +102,31 @@ async def test_an_unheld_turn_is_refused_in_a_contained_room_even_with_no_rules(
             runtime, auth, channel_id="thread-9", parent_channel_id="room-1"
         )
     await require_channel_writable(runtime, auth, channel_id="room-2")
+
+
+async def test_a_private_answer_turn_cannot_post_into_the_room_it_came_from(
+    world: _World,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """E3: the Private answer is a DM turn, so its credential carries no hold. Asked to
+    post into the contained room, its thread or through the Discord guard, it is refused."""
+    runtime, tenant_id = await _setup(db_session, db_session_factory)
+    world.contained = {"1001"}
+    private = replace(
+        _auth(tenant_id), is_admin=False, is_chat_execution=True, chat_session_id="sesn_private"
+    )
+    with pytest.raises(ToolError, match="outside the team can read this channel"):
+        await require_channel_writable(runtime, private, channel_id="1001")
+    with pytest.raises(ToolError, match="outside the team can read this channel"):
+        await require_channel_writable(
+            runtime, private, channel_id="2002", parent_channel_id="1001"
+        )
+    room = MagicMock(spec=discord.TextChannel)
+    room.id = 1001
+    room.category_id = None
+    with pytest.raises(ToolError, match="outside the team"):
+        await _require_discord_channel_writable(runtime, private, room)
 
 
 async def test_a_held_turn_posts_in_its_room_and_its_thread_only(

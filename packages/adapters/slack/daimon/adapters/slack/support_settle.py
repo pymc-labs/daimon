@@ -29,7 +29,6 @@ from daimon.adapters.slack.click_replies import (
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import finish_modal
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.support_post import (
     SETTLE_ACCEPT_ACTION_ID,
@@ -38,6 +37,7 @@ from daimon.adapters.slack.support_post import (
     status_line,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support import get_support_channel
 from daimon.core.stores.support_escalation import SettleOutcome, get_request

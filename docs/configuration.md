@@ -293,6 +293,33 @@ Effort the eval world simulator runs at.
 Base URL where eval sandbox gateways reach the eval worker's fake world, e.g.
 http://eval-worker:8090. Unset: no sandbox can be enclosed.
 
+### `DAIMON_EVALS__WORLD_PORT`
+
+`int` · optional · default `8090`
+
+Port the eval worker serves its fake world on.
+
+### `DAIMON_EVALS__WORLD_HOST`
+
+`str` · optional · default `0.0.0.0`
+
+Address the eval worker serves its fake world on: the interface its sandbox pods reach.
+Default: every interface.
+
+### `DAIMON_EVALS__ENVIRONMENT_ID`
+
+`str | None` · optional · default unset
+
+Self-hosted environment eval items run in, made in the provider's console. Items on it
+run one at a time, across workers. Unset: live arms cannot run.
+
+### `DAIMON_EVALS__ENVIRONMENT_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Environment key the eval sandbox's executor polls that environment with. Unset: live
+arms cannot run.
+
 ### `DAIMON_EVALS__SANDBOX_RUNTIME`
 
 `'docker' | 'kubernetes' | None` · optional · default unset
@@ -358,11 +385,62 @@ control plane. Matched by TLS server name, not Host. Shells the executor starts 
 the agent and reach the fake world; commands it starts without a shell run as the
 executor and reach these hosts.
 
+### `DAIMON_EVALS__HARNESS_CONFIG`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+Settings for the self-hosted harness in a harness arm's pod, as a JSON object of its
+environment variables: its model endpoint and credentials. Add the endpoint's host to
+DAIMON_EVALS__PASSTHROUGH_HOSTS. Default: {} (none).
+
+### `DAIMON_EVALS__CODEX_CONFIG`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+Settings for codex exec-server in an OpenAI arm's pod, as a JSON object of its
+environment variables: CODEX_REMOTE_URL and CODEX_API_KEY. The URL is readable inside
+the pod, so it carries no credential; the key reaches codex on stdin only. Default: {}
+(none).
+
 ### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
 
 `Decimal` · optional · default `0`
 
 What an hour of one eval sandbox pod costs, for run cost reports.
+
+### `DAIMON_EVALS__JUDGE_MODELS`
+
+`list[JudgeModelSetting]` · optional · default unset
+
+The judge panel for eval runs that name none: each model scores each item and the panel
+votes. Every model needs a known price, and none may share a model or a provider with an
+arm it judges. Empty: judging names its models.
+
+### `DAIMON_EVALS__ADMIN_APPROVAL_USD`
+
+`float` · optional · default `25.0`
+
+An eval run's spend cap above this, in USD, waits for the operator to approve it
+(`daimon evals runs approve`).
+
+### `DAIMON_EVALS__WORKSPACE_CAP_USD`
+
+`float` · optional · default `100.0`
+
+What one workspace's open eval runs may be capped at together, in USD; a run past it
+waits for the operator to approve it.
+
+### `DAIMON_EVALS__WORKER_CONCURRENCY`
+
+`int` · optional · default `2`
+
+Eval items one eval worker runs at once.
+
+### `DAIMON_EVALS__KAPPA_WARN`
+
+`float` · optional · default `0.4`
+
+A judge whose kappa against human scores is below this is flagged.
 
 ## Long Jobs
 

@@ -40,7 +40,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.turn.card_state import (
     CardEvent as _CardEvent,
 )

@@ -8,14 +8,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import importlib.util
 import json
 import tempfile
 import time
 import uuid
 import zipfile
-from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -38,6 +45,20 @@ from daimon.core.evals.access import (
     suite_role,
 )
 from daimon.core.evals.agents import AgentLookup, agent_lookup
+from daimon.core.evals.blind import (
+    ID_SEP,
+    arm_labels,
+    arm_names,
+    blind_blobs,
+    blind_item_view,
+    blind_pool,
+    case_view,
+    is_blind,
+    keyed,
+    new_run_id,
+    opaque_id,
+    run_handle,
+)
 from daimon.core.evals.blobs import ObjectStore, blob_path, blob_refs, object_key
 from daimon.core.evals.draft import (
     Complete,
@@ -62,7 +83,9 @@ from daimon.core.evals.format import (
     SourceInfo,
     Suite,
     SuiteDefaults,
+    SuitePin,
     ToolAlias,
+    TranscriptEvent,
     canonical_json,
     case_hash,
     sha256_hex,
@@ -91,7 +114,7 @@ from daimon.core.evals.validate import (
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores import eval_scrub
 from daimon.core.stores import evals as store
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -101,6 +124,7 @@ OFF: Final = "Evals are off here. Ask an admin or an owner to turn them on."
 _SPOOL_BYTES: Final = 8 * 1024 * 1024
 _IMPORT_SECONDS: Final = 120.0
 _UNFINISHED_RUN: Final = frozenset({"draft", "estimated", "approved", "running"})
+_EVENT: Final = TypeAdapter(TranscriptEvent)
 
 
 class EvalRefused(Exception):
@@ -238,13 +262,9 @@ def _daimon_version() -> str | None:
         return None
 
 
-def _keyed(secret: str, text: str) -> str:
-    return hmac.new(secret.encode(), text.encode(), hashlib.sha256).hexdigest()
-
-
 def _instance(secret: str) -> str:
     """An opaque, stable name for a workspace as a bundle source."""
-    return _keyed(secret, "instance")[:16]
+    return keyed(secret, "instance")[:16]
 
 
 def _label_people(document: JsonObject, secret: str) -> JsonObject:
@@ -259,7 +279,7 @@ def _label_people(document: JsonObject, secret: str) -> JsonObject:
         kind, ref = node.get("kind"), node.get("id")
         is_ref = node.keys() <= {"kind", "id", "display_name"} and isinstance(ref, str)
         if is_ref and kind in ("person", "group", "agent"):
-            return {"kind": "label", "id": f"{kind}-{_keyed(secret, f'{kind}:{ref}')[:12]}"}
+            return {"kind": "label", "id": f"{kind}-{keyed(secret, f'{kind}:{ref}')[:12]}"}
         return {k: walk(v) for k, v in node.items()}
 
     walked = walk(document)
@@ -267,36 +287,48 @@ def _label_people(document: JsonObject, secret: str) -> JsonObject:
     return walked
 
 
-def arm_labels(run: Run) -> dict[str, str]:
-    """The neutral name of each arm a blind reviewer sees."""
-    return run.blind_labels or {a.id: f"Arm {n}" for n, a in enumerate(run.arms, start=1)}
+class BlindRun(_Out):
+    """A run as a blind reader sees it: arms only as their neutral labels, and nothing that
+    names a model, an agent, an arm's kind, a cost or who approved it."""
+
+    id: str
+    suite: SuitePin
+    arms: list[str]
+    case_ids: list[str] | None
+    repeats: int
+    status: str
+    origin: str
+    started_at: datetime | None
+    finished_at: datetime | None
 
 
-def blind_run(run: Run) -> Run:
-    """A run as a blind reviewer sees it: arms under their neutral labels, and nothing that
-    names a model, an agent, a cost or who approved it."""
-    labels = arm_labels(run)
-    arms = [Arm(id=n, label=n, kind=a.kind) for a in run.arms if (n := labels.get(a.id, "Arm"))]
-    return Run(
-        id=run.id, suite=run.suite, arms=arms, case_ids=run.case_ids, repeats=run.repeats,
-        status=run.status, origin=run.origin, started_at=run.started_at,
-        finished_at=run.finished_at,
+def blind_run(run: Run, secret: str) -> BlindRun:
+    return BlindRun(
+        id=run.id, suite=run.suite, arms=sorted(arm_labels(run, secret).values()),
+        case_ids=run.case_ids, repeats=run.repeats, status=run.status, origin=run.origin.kind,
+        started_at=run.started_at, finished_at=run.finished_at,
     )  # fmt: skip
 
 
-def blind_item(document: JsonObject, labels: dict[str, str]) -> JsonObject:
-    """An item as a blind reviewer sees it: only what the agent said and did, under the arm's
-    neutral label. Usage, the enclosure, extensions and the stored transcript are left out."""
-    item = RunItem.model_validate(document)
-    events = item.transcript.events if item.transcript else None
-    quiet = [e.model_copy(update={"model": None, "usage": None}) for e in events or []]
-    blind = RunItem(
-        id=item.id, run_id=item.run_id, case=item.case, arm_id=labels.get(item.arm_id, "Arm"),
-        repeat=item.repeat, status=item.status, error=item.error, started_at=item.started_at,
-        finished_at=item.finished_at, transcript=EventStream(events=quiet) if events else None,
-        chat=item.chat, outputs=item.outputs, world_calls=item.world_calls,
-    )  # fmt: skip
-    return to_document(blind)
+def blind_item(item: RunItem, run: Run, item_id: str, secret: str) -> RunItem:
+    """An item as a blind reader sees it (`blind_item_view`), under the arm's neutral label."""
+    label = arm_labels(run, secret).get(item.arm_id, "Arm")
+    view = blind_item_view(item, item_id=item_id, label=label, names=arm_names(run))
+    return RunItem.model_validate(view)
+
+
+async def with_transcript(
+    item: RunItem, fetch: Callable[[str], Awaitable[bytes | None]]
+) -> RunItem:
+    """The item with its transcript read from the blob when it is stored there (NDJSON)."""
+    stream = item.transcript
+    if stream is None or stream.events is not None or stream.blob is None:
+        return item
+    data = await fetch(stream.blob.sha256)
+    if data is None:
+        return item
+    events = [_EVENT.validate_json(line) for line in data.splitlines() if line.strip()]
+    return item.model_copy(update={"transcript": EventStream(events=events, blob=stream.blob)})
 
 
 @dataclass
@@ -361,6 +393,28 @@ class EvalService:
         groups = await held_groups(actor, shares)
         role = suite_role(actor, owner_key=suite.owner_key, shares=shares, groups=groups)
         return role if role == "owner" or scrub == "scrubbed" else None
+
+    async def check_on(self, actor: Subject) -> None:
+        """Refuse unless `actor` may use evals here at all."""
+        await self._check_on(actor)
+
+    async def version_access(
+        self,
+        session: AsyncSession,
+        actor: Subject,
+        suite_id: str,
+        version: int | None,
+        action: Action,
+    ) -> tuple[store.SuiteRow, SuiteRole, int]:
+        """A suite version the actor may `action`, with their role and the version's number."""
+        return await self._version(session, actor, suite_id, version, action)
+
+    async def run_access(
+        self, session: AsyncSession, actor: Subject, run_id: str, action: Action
+    ) -> tuple[store.RunRow, SuiteRole]:
+        """A run of the actor's workspace and their role on its suite; refuses without `action`."""
+        found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
+        return await self._run(session, actor, found, action)
 
     async def _suite(
         self, session: AsyncSession, actor: Subject, key: str, action: Action, *, lock: bool = False
@@ -479,6 +533,8 @@ class EvalService:
             )
         if row is None or (role != "owner" and row.scrub_status != "scrubbed"):
             raise EvalNotFound(f"No case {case_id} in suite {suite_id}.")
+        if role == "reviewer":
+            return to_document(case_view(_case_model(row.document), ()))
         return row.document
 
     @staticmethod
@@ -794,7 +850,13 @@ class EvalService:
     # ---------- arms, runs and items ----------
 
     async def arms(self, actor: Subject) -> list[Arm]:
+        """The workspace's arms: for admins and for editors and owners of a suite. Anyone else
+        could be reviewing blind, and the list names every arm's agent and model."""
         await self._check_on(actor)
+        if not actor.is_admin and not any(
+            s.role in ("editor", "owner") for s in await self.suites(actor)
+        ):
+            raise EvalForbidden("Arms are for editors and owners. Ask an admin or an owner.")
         async with self._sessions() as session:
             rows = await store.list_arms(session, tenant_id=actor.tenant_id)
         return [Arm.model_validate(r.document) for r in rows]
@@ -826,75 +888,151 @@ class EvalService:
             )
         return Arm.model_validate(row.document)
 
-    async def run(self, actor: Subject, run_id: str, *, blind: bool = False) -> Run:
+    async def run(self, actor: Subject, run_id: str, *, blind: bool = False) -> Run | BlindRun:
         """A run. Reviewers, and `blind`, get the blind view (`blind_run`)."""
         await self._check_on(actor)
-        async with self._sessions() as session:
+        async with self._sessions() as session, session.begin():
             found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
             run, role = await self._run(session, actor, found, "view")
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
         document = Run.model_validate(run.document)
-        return blind_run(document) if blind or role == "reviewer" else document
+        return blind_run(document, secret) if is_blind(role, blind) else document
 
     async def items(
         self, actor: Subject, run_id: str, page: Page, *, blind: bool = False
     ) -> list[RunItemSummary]:
-        """A page of a run's items; reviewers, and `blind`, see arms by their neutral label."""
+        """A page of a run's items. Reviewers, and `blind`, get only finished items of repeats
+        every arm finished, by neutral arm label, opaque id and no repeat index or case
+        revision, in an order the workspace secret shuffles."""
         await self._check_on(actor)
-        async with self._sessions() as session:
+        async with self._sessions() as session, session.begin():
             found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
             run, role = await self._run(session, actor, found, "view")
-            rows = await store.items_of_run(
-                session, run_id=run.id, offset=page.offset, limit=page.limit
-            )
-        labels = arm_labels(Run.model_validate(run.document)) if blind or role == "reviewer" else {}
+            if not is_blind(role, blind):
+                rows = await store.items_of_run(
+                    session, run_id=run.id, offset=page.offset, limit=page.limit
+                )
+                return [
+                    RunItemSummary(
+                        id=str(r.id), key=r.key, case_id=r.case_key,
+                        case_revision=r.case_revision, arm_id=r.arm_key, repeat=r.repeat,
+                        status=r.status,
+                    )
+                    for r in rows
+                ]  # fmt: skip
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
+            index = await store.item_index(session, run_id=run.id)
+        shown = Run.model_validate(run.document)
+        labels = arm_labels(shown, secret)
+        ids = {i.key: opaque_id(secret, run.key, "items", i.key) for i in blind_pool(
+            index, {a.id for a in shown.arms}
+        )}  # fmt: skip
+        pool = {i.key: i for i in index}
+        wanted = sorted(ids, key=ids.__getitem__)[page.offset : page.offset + page.limit]
         return [
             RunItemSummary(
-                id=str(r.id), key=str(r.id) if labels else r.key, case_id=r.case_key,
-                case_revision=r.case_revision,
-                arm_id=labels.get(r.arm_key, "Arm") if labels else r.arm_key, repeat=r.repeat,
-                status=r.status,
+                id=ids[k], key=ids[k], case_id=pool[k].case_key, case_revision=0,
+                arm_id=labels[pool[k].arm_key], repeat=0, status="done",
             )
-            for r in rows
+            for k in wanted
         ]  # fmt: skip
 
+    async def _blind_row(
+        self, session: AsyncSession, actor: Subject, item_id: str
+    ) -> tuple[store.RunRow, store.ItemRow, str]:
+        """The run, row and workspace secret behind an opaque id a blind view gave out. Ids
+        can't be made up, so any other id, and any item not finished, reads as missing."""
+        parts = item_id.split(ID_SEP)
+        if len(parts) != 3:
+            raise EvalNotFound("No such item here.")
+        wanted, scope, _ = parts
+        secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
+        keys = await store.run_keys(session, tenant_id=actor.tenant_id)
+        run_key = next((k for k in keys if run_handle(secret, k) == wanted), None)
+        if run_key is None:
+            raise EvalNotFound("No such item here.")
+        run, _ = await self.run_access(session, actor, run_key, "view")
+        for i in await store.item_index(session, run_id=run.id):
+            if i.status == "done" and opaque_id(secret, run.key, scope, i.key) == item_id:
+                found = (await store.items_by_key(session, run_id=run.id, keys=[i.key]))[i.key]
+                return run, found, secret
+        raise EvalNotFound("No such item here.")
+
     async def item(self, actor: Subject, item_id: str, *, blind: bool = False) -> RunItem:
-        """One run item. Reviewers, and `blind`, get the blind view (`blind_item`)."""
+        """One run item. Reviewers, and `blind`, get the blind view (`blind_item`) and open
+        only the opaque ids blind views gave them; others pass a row id."""
         await self._check_on(actor)
-        try:
-            item_uuid = uuid.UUID(item_id)
-        except ValueError:
-            raise EvalNotFound("No such item here.") from None
+        async with self._sessions() as session, session.begin():
+            if ID_SEP in item_id:
+                run, row, secret = await self._blind_row(session, actor, item_id)
+            else:
+                try:
+                    item_uuid = uuid.UUID(item_id)
+                except ValueError:
+                    raise EvalNotFound("No such item here.") from None
+                found = await store.item_by_id(
+                    session, tenant_id=actor.tenant_id, item_id=item_uuid
+                )
+                if found is None:
+                    raise EvalNotFound("No such item here.")
+                run, role = await self._run(
+                    session, actor, await store.run_by_id(session, found.run_id), "view"
+                )
+                if is_blind(role, blind):
+                    raise EvalNotFound("No such item here.")
+                return RunItem.model_validate(found.document)
+        item = RunItem.model_validate(row.document)
+        item = await with_transcript(item, lambda sha: self.blob_bytes(actor.tenant_id, sha))
+        return blind_item(item, Run.model_validate(run.document), item_id, secret)
+
+    async def blob_bytes(self, tenant_id: uuid.UUID, sha256: str) -> bytes | None:
+        """A blob's bytes wherever they are kept, for services that checked access already."""
         async with self._sessions() as session:
-            row = await store.item_by_id(session, tenant_id=actor.tenant_id, item_id=item_uuid)
-            if row is None:
-                raise EvalNotFound("No such item here.")
-            run, role = await self._run(
-                session, actor, await store.run_by_id(session, row.run_id), "view"
-            )
-        document = row.document
-        if blind or role == "reviewer":
-            document = blind_item(document, arm_labels(Run.model_validate(run.document)))
-            document = {**document, "id": str(row.id)}  # the stored id can name the arm
-        return RunItem.model_validate(document)
+            return await self._read_blob(session, tenant_id, sha256)
 
     async def blob(self, actor: Subject, sha256: str) -> tuple[store.BlobRow, bytes]:
         """A blob the actor may read: one a live suite's cases or runs reference, at content
         the actor may see there."""
         await self._check_on(actor)
+        if ID_SEP in sha256:
+            return await self._blind_blob(actor, sha256)
         async with self._sessions() as session:
             rows = await store.blob_rows(session, tenant_id=actor.tenant_id, shas=[sha256])
-            readable = actor.is_admin and sha256 in rows
-            if sha256 in rows and not readable:
-                uses = await store.blob_uses(session, tenant_id=actor.tenant_id, sha256=sha256)
-                suites = await store.suites_by_id(session, {s for s, _ in uses})
-                for suite_id, scrub in uses:
-                    if await self._role(session, actor, suites[suite_id], scrub):
-                        readable = True
-                        break
+            readable = await self._may_read(session, actor, sha256, rows)
             content = await self._read_blob(session, actor.tenant_id, sha256) if readable else None
         if content is None:
             raise EvalNotFound("No such file here.")
         return rows[sha256], content
+
+    async def _may_read(
+        self, session: AsyncSession, actor: Subject, sha256: str, rows: Mapping[str, store.BlobRow]
+    ) -> bool:
+        """Whether the actor may read a stored blob: admins always, others where a live suite
+        they hold uses it at the scrub level their role reaches."""
+        if sha256 not in rows:
+            return False
+        if actor.is_admin:
+            return True
+        uses = await store.blob_uses(session, tenant_id=actor.tenant_id, sha256=sha256)
+        suites = await store.suites_by_id(session, {s for s, _ in uses})
+        return any([await self._role(session, actor, suites[sid], scrub) for sid, scrub in uses])
+
+    async def _blind_blob(self, actor: Subject, ref: str) -> tuple[store.BlobRow, bytes]:
+        """A file of a blind item, by the name its blind view gave it (`item id~out1`)."""
+        item_id, _, name = ref.rpartition(ID_SEP)
+        async with self._sessions() as session, session.begin():
+            _, row, _ = await self._blind_row(session, actor, item_id)
+            blob = blind_blobs(RunItem.model_validate(row.document)).get(name)
+            if blob is None:
+                raise EvalNotFound("No such file here.")
+            rows = await store.blob_rows(session, tenant_id=actor.tenant_id, shas=[blob.sha256])
+            readable = await self._may_read(session, actor, blob.sha256, rows)
+            content = (
+                await self._read_blob(session, actor.tenant_id, blob.sha256) if readable else None
+            )
+        if content is None:
+            raise EvalNotFound("No such file here.")
+        return rows[blob.sha256], content
 
     # ---------- bundles ----------
 
@@ -1103,16 +1241,18 @@ class EvalService:
             skipped: list[str] = []
             for run in report.runs:
                 run_id = str(run.document["id"])
-                if await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id):
+                if await store.imported_run(session, tenant_id=actor.tenant_id, key=run_id):
                     skipped.append(run_id)
                     continue
                 try:  # a concurrent import of the same run wins; this one skips it
                     async with session.begin_nested():
-                        await self._import_run(session, actor, manifest, run, renamed, signature)
+                        done.append(
+                            await self._import_run(
+                                session, actor, manifest, run, renamed, signature
+                            )
+                        )
                 except IntegrityError:
                     skipped.append(run_id)
-                    continue
-                done.append(run_id)
             await store.record_bundle(
                 session, tenant_id=actor.tenant_id, direction="import", manifest=raw_manifest,
                 actor_key=actor.key, signature=signature,
@@ -1218,8 +1358,9 @@ class EvalService:
         loaded: LoadedRun,
         renamed: dict[str, str],
         signature: str,
-    ) -> None:
-        """Store a run as a record of work done elsewhere: never as one to carry on here."""
+    ) -> str:
+        """Store a run as a record of work done elsewhere, never as one to carry on here, under
+        a new id; the id it had stays in `ext["daimon.imported_id"]`."""
         run = Run.model_validate(loaded.document)
         key = renamed.get(run.suite.id, run.suite.id)
         if key in renamed.values():  # `_import_suite` just stored it for this actor
@@ -1238,6 +1379,9 @@ class EvalService:
             raise EvalRefused(f"Run {run.id} has cases suite {key} does not pin.", stray)
         document = {k: v for k, v in loaded.document.items() if k != "approval"}
         document["suite"] = {"id": key, "version": run.suite.version}
+        # The bundle's run id was chosen elsewhere and may name an arm: keep it as a note only.
+        document["id"] = run_id = new_run_id()
+        document["ext"] = {**(run.ext or {}), "daimon.imported_id": run.id}
         if run.status in _UNFINISHED_RUN:
             document["status"] = "cancelled"
         if run.origin.kind == "local":
@@ -1247,7 +1391,8 @@ class EvalService:
             )  # fmt: skip
             document["origin"] = to_document(origin)
         documents = [
-            {**raw, "status": "cancelled"} if item.status in ("pending", "running") else raw
+            {**raw, "run_id": run_id}
+            | ({"status": "cancelled"} if item.status in ("pending", "running") else {})
             for raw, item in zip(loaded.items, items, strict=True)
         ]
         scrub = await store.version_scrub(session, suite_id=suite.id, version=run.suite.version)
@@ -1257,6 +1402,7 @@ class EvalService:
             reviews=loaded.reviews, scrub_status=_worst([manifest.scrub.status, scrub]),
             created_by=actor.key, signature=signature,
         )  # fmt: skip
+        return run_id
 
 
 def eval_service(

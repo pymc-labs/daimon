@@ -20,7 +20,6 @@ import json
 import uuid
 from typing import Any
 
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.privacy import (
     DELETE_PAUSED,
     PRIVACY_TITLE,
@@ -30,6 +29,7 @@ from daimon.core.privacy import (
     privacy_lines,
 )
 from daimon.core.purge import AccountPurgeResult
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 
 # ---------------------------------------------------------------------------
 # Internal helpers

@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Eval cases from threads.** Turn answered chat turns into scrubbed eval cases,
   draft their pass criteria after a cost estimate, and mark near-duplicates.
   `daimon evals bundle scrub` scrubs a bundle offline with a dictionary of names.
+- **Eval runs with spending caps.** Estimate a run, start it with a cap, or cancel it,
+  from the web API, MCP tools or `daimon evals runs`. A cap past the operator's limits
+  waits for the operator's approval. Items play the case's script on a simulated chat
+  and stop at the cap, even mid-turn, and at their turn and time limits.
+  `daimon evals worker` runs each item as a real turn of a copy of the arm's agent in its
+  own sandbox, and the script presses its approve cards and receives its files.
 - **A fake world for eval cases.** A running case's web, GitHub, Google, git and
   MCP calls are answered from the case, its earlier writes or a checked
   simulation, and never reach real services.

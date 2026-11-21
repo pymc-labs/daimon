@@ -16,14 +16,24 @@ its turn lists the agent's own recent posts there instead, by reply (`own_posts`
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from xml.sax.saxutils import escape, quoteattr
 
 import httpx
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.chat_history import (
+    ContextOptions,
+    HistoryAttachment,
+    HistoryMessage,
+    render_frame,
+    render_message,
+    teams_head,
+    teams_history_unavailable,
+    teams_own_posts,
+)
 from daimon.core.teams_graph import (
     FILE_ATTACHMENT_TYPES,
     GraphMessage,
@@ -35,7 +45,6 @@ from daimon.core.teams_graph import (
 )
 from daimon.core.teams_sharepoint import file_link
 from daimon.core.thread_participation import ClassifierMessage
-from daimon.core.untrusted import untrusted_block
 
 # Top-level posts replayed for a mention that starts a thread, as on Discord.
 CHANNEL_BACKFILL_LIMIT = 25
@@ -44,41 +53,6 @@ CHANNEL_REPLIES_PER_POST = 10
 # Per turn: earlier messages' images inlined and files given a download URL, newest first.
 HISTORY_IMAGE_LIMIT = 4
 HISTORY_FILE_LIMIT = 10
-# What the agent does, in a channel where files cannot be saved, when asked for one.
-_FILES_HINT = (
-    "Files can't be attached in this channel until a Microsoft 365 admin grants daimon's app "
-    "the Files.ReadWrite.All application permission, with admin consent. Mention it only if "
-    "someone asks for a file here; do not swap in an artifact, report or notebook unless they "
-    "ask for one."
-)
-_GROUP_FILES_HINT = (
-    "Files can't be attached in a group chat. Mention it only if someone asks for a file "
-    "here: they can ask you for it in their 1:1 chat with you."
-)
-# The same, for a person from another organisation, who has no 1:1 chat with the agent.
-_GROUP_FILES_HINT_FOREIGN = (
-    "Files can't be attached in a group chat. This person is from another organisation, so "
-    "a 1:1 chat with Daimon can't be opened for them; don't suggest one. Mention it only if "
-    "someone asks for a file here: paste short text inline."
-)
-# A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
-# (`output_delivery.is_preview_output`). Page one only: typst's PNG export of a multi-page
-# document needs a page template. The default environment has no office suite.
-_OWN_POSTS_HINT = (
-    "Your latest messages in this chat, newest reply first. A reply spans several "
-    "messages: its answer text (role answer), a status card (progress), a notice and a "
-    "controls card (summary and buttons). To delete your reply or your last reply, pass "
-    "this chat's id and any message_id of it to delete_reply. To edit or delete one "
-    "message only, use edit_message or delete_message."
-)
-_DIRECT_FILES_HINT = (
-    "When you deliver a .docx, .pptx, .xlsx or .pdf here, you may also save a PNG of its "
-    "first page or slide to your outputs as <file name>.preview.png "
-    "(report.pdf.preview.png for report.pdf): it shows inline as a picture and is never "
-    "offered as a file. Only when you can render one cheaply, such as from a PDF with "
-    "PyMuPDF (pip install pymupdf): pymupdf.open(pdf)[0].get_pixmap(dpi=96).save(png). "
-    "No office renderer is installed by default."
-)
 
 
 @dataclass(frozen=True)
@@ -228,7 +202,7 @@ def _render(
     *,
     bot_app_id: str,
     attached: Attached = NOTHING_ATTACHED,
-    extra: str = "",
+    extra: Mapping[str, str] | None = None,
 ) -> list[str]:
     """One message as `<message>` lines, or none for what a reader would not see as one."""
     if not _readable(message):
@@ -239,46 +213,37 @@ def _render(
     author = user or app
     text, files = message_text(message), _files(message)
     is_bot = user is None and app is not None
-    if is_bot and app is not None and app.id == bot_app_id:
+    is_self = is_bot and app is not None and app.id == bot_app_id
+    if is_self:
         # Its files are listed as attachments below, not in its words.
         text = _without_saved_links(text, message)
-    attrs = (
-        f" author_name={quoteattr((author.display_name if author else None) or 'unknown')}"
-        f" user_id={quoteattr((author.id if author else None) or '')}"
-        f" is_bot={quoteattr(str(is_bot).lower())}"
-        + (' is_self="true"' if is_bot and app is not None and app.id == bot_app_id else "")
-        + f" timestamp={quoteattr(message.created_date_time or '')}"
-        + f" message_id={quoteattr(message.id)}"
-        + extra
-    )
+    extra_attrs = dict(extra or {})
     if images := attached.images.get(message.id):
-        attrs += f' images_attached="{images}"'
-    if not files:
-        return [f"<message{attrs}>{escape(text)}</message>"]
-    shared = [_attachment(f, attached) for f in files]
-    return [
-        f"<message{attrs}>",
-        escape(text),
-        "<attachments>",
-        *shared,
-        "</attachments>",
-        "</message>",
-    ]
+        extra_attrs["images_attached"] = str(images)
+    return render_message(
+        HistoryMessage(
+            user_id=(author.id if author else None) or "",
+            username=(author.display_name if author else None) or "unknown",
+            is_bot=is_bot,
+            timestamp=message.created_date_time or "",
+            text=text,
+            attachments=[_attachment(f, attached) for f in files],
+            message_id=message.id,
+            is_self=is_self,
+            extra_attrs=extra_attrs,
+        ),
+        "teams",
+    )
 
 
-def _attachment(file: SharedFile, attached: Attached) -> str:
-    name = quoteattr(file.name)
-    if url := attached.downloads.get(file.content_url or ""):
-        hint = "short-lived download URL: fetch it now (curl to disk, then read it)"
-        version = attached.versions.get(file.content_url or "")
-        if not (file.content_url and version):
-            return f"<attachment name={name} url={quoteattr(url)} hint={quoteattr(hint)}/>"
-        hint += "; to save an edited file over it, pass link and version to replace_channel_file"
-        return (
-            f"<attachment name={name} url={quoteattr(url)} link={quoteattr(file.content_url)}"
-            f" version={quoteattr(version)} hint={quoteattr(hint)}/>"
-        )
-    return f'<attachment name={name} fetchable="false"/>'
+def _attachment(file: SharedFile, attached: Attached) -> HistoryAttachment:
+    key = file.content_url or ""
+    return HistoryAttachment(
+        name=file.name,
+        url=attached.downloads.get(key) or None,
+        link=file.content_url,
+        version=attached.versions.get(key),
+    )
 
 
 def _order(messages: Iterable[GraphMessage]) -> list[GraphMessage]:
@@ -402,11 +367,11 @@ def channel_block(
     count = 0
     for post in _order(posts.value):
         replies, more = _replies_kept(post)
-        thread = f" thread_id={quoteattr(f'{channel_id};messageid={post.id}')}"
+        thread = {"thread_id": f"{channel_id};messageid={post.id}"}
         for message in (post, *replies):
             if message.id in skip_ids:
                 continue
-            extra = thread + (' more_replies="true"' if message is post and more else "")
+            extra = thread | ({"more_replies": "true"} if message is post and more else {})
             rendered = _render(message, bot_app_id=bot_app_id, attached=attached, extra=extra)
             count += bool(rendered)
             lines += rendered
@@ -489,85 +454,44 @@ def render_user_message(
     thread participation). `own_posts` are the agent's latest replies in a
     1:1 chat, newest first, each its messages (message id, role, posted at).
     """
-    hint = quoteattr(_DIRECT_FILES_HINT)
-    context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)} files_hint={hint}/>']
-    if inbound.kind == "channel":
-        files = ""
-        if channel_files is not None:
-            files = f' files="{"available" if channel_files else "unavailable"}"'
-        if channel_files is False:
-            files += f" files_hint={quoteattr(_FILES_HINT)}"
-        names = "".join(
-            f" {attr}={quoteattr(value)}"
-            for attr, value in (
-                ("name", inbound.channel_name),
-                ("type", inbound.channel_type),
-                ("team_name", inbound.team_name),
-            )
-            if value
-        )
-        context = [
-            f'<channel platform="teams" id={quoteattr(inbound.channel_id)}'
-            f' role="parent_channel"{names}{files}/>',
-            f'<thread platform="teams" id={quoteattr(inbound.thread_id)} role="current_thread"/>',
-        ]
-    elif inbound.kind == "group":
-        name = f" name={quoteattr(inbound.channel_name)}" if inbound.channel_name else ""
-        hint = quoteattr(_GROUP_FILES_HINT_FOREIGN if inbound.is_foreign else _GROUP_FILES_HINT)
-        context = [
-            f'<channel platform="teams" id={quoteattr(inbound.channel_id)} role="group_chat"'
-            f'{name} files="unavailable" files_hint={hint}/>'
-        ]
-    if own_posts:
-        context += [
-            f"<your_posts hint={quoteattr(_OWN_POSTS_HINT)}>",
-            *(
-                line
-                for reply in own_posts
-                for line in (
-                    "<reply>",
-                    *(
-                        f"<post message_id={quoteattr(id_)}"
-                        f"{f' role={quoteattr(role)}' if role else ''} timestamp={quoteattr(at)}/>"
-                        for id_, role, at in reply
-                    ),
-                    "</reply>",
-                )
-            ),
-            "</your_posts>",
-        ]
-    author = f" author_name={quoteattr(inbound.user_name)}" if inbound.user_name else ""
-    sent = f" timestamp={quoteattr(inbound.timestamp)}" if inbound.timestamp else ""
-    query = (
-        f"<user_query{author} author_id={quoteattr(inbound.user_id)}{sent} "
-        f'is_admin="{str(is_admin).lower()}"'
-        + (' unprompted="true"' if inbound.unprompted else "")
-        + f">{escape(inbound.text)}</user_query>"
+    head = [
+        *teams_head(
+            inbound.kind,
+            inbound.channel_id,
+            thread_id=inbound.thread_id,
+            channel_name=inbound.channel_name,
+            channel_type=inbound.channel_type,
+            team_name=inbound.team_name,
+            channel_files=channel_files,
+            is_foreign=inbound.is_foreign,
+        ),
+        *teams_own_posts(own_posts),
+        *([keys] if keys else []),
+    ]
+    options = ContextOptions(
+        channel_id=inbound.channel_id,
+        block=None,
+        is_admin=is_admin,
+        head=head,
+        unprompted=inbound.unprompted,
+        lead=controls,
+        query_prefix=prefix,
     )
-    replay: Sequence[str] = ()
+    body: Sequence[str] = ()
     if history is not None and history.unavailable:
-        hint = (
-            "daimon could not read this conversation's earlier messages from Microsoft Teams. "
-            "If the request needs them, say so instead of guessing"
-            + (
-                "."
-                if inbound.kind == "group"
-                else "; read_channel or read_thread may still reach them."
-            )
+        options = dataclasses.replace(
+            options, tail=(teams_history_unavailable(inbound.kind, history.unavailable),)
         )
-        reason = quoteattr(history.unavailable)
-        replay = (f'<history status="unavailable" reason={reason} hint={quoteattr(hint)}/>',)
     elif history is not None:
-        replay = untrusted_block(history.tag, history.lines, {"source": "teams", **history.attrs})
-    return "\n".join(
-        [
-            controls,
-            "<context>",
-            *context,
-            *([keys] if keys else []),
-            *replay,
-            "</context>",
-            "",
-            prefix + query,
-        ]
+        options = dataclasses.replace(
+            options, block=history.tag, block_attrs={"source": "teams", **history.attrs}
+        )
+        body = history.lines
+    trigger = HistoryMessage(
+        user_id=inbound.user_id,
+        username=inbound.user_name or "",
+        is_bot=False,
+        timestamp=inbound.timestamp or "",
+        text=inbound.text,
     )
+    return render_frame("teams", body, trigger, options)

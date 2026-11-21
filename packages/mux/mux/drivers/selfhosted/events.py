@@ -61,17 +61,23 @@ def segment(value: str) -> str:
 
 
 def agent_tool_policy(spec: AgentSpec) -> dict[str, Literal["auto", "ask", "deny"]]:
-    """Compile the pinned agent permissions before adding host safety gates."""
+    """Compile the pinned agent permissions before adding host safety gates.
+
+    Custom tools are an eval agent's only: the host runs them (`host_tools`), so they
+    carry no harness permission."""
     builtin_names = {"bash", "read", "write", "edit"}
     policy: dict[str, Literal["auto", "ask", "deny"]] = {}
     if spec.tools is not None:
         if any(
-            tool.kind == "custom" or (tool.kind == "builtin" and tool.name not in builtin_names)
+            (tool.kind == "custom" and spec.purpose != "eval")
+            or (tool.kind == "builtin" and tool.name not in builtin_names)
             for tool in spec.tools
         ):
             raise UnsupportedCapability(("custom_tools_or_tool_permissions",), "selfhosted.loop")
         policy.update(dict.fromkeys(builtin_names, "deny"))
         for tool in spec.tools:
+            if tool.kind == "custom":
+                continue
             name = tool.name + "/*" if tool.kind == "mcp_toolset" else tool.name
             policy[name] = tool.permission
     for connection in spec.mcp_servers or ():
@@ -408,6 +414,15 @@ class SelfHostedEvents:
             mcp_servers=servers,
             skills=skills,
             limits=wire.Limits(max_tool_calls=self._max_tool_calls, deadline_s=self._deadline_s),
+            host_tools=[
+                wire.HostTool(
+                    name=tool.name,
+                    description=tool.description or "",
+                    input_schema=tool.model_dump(mode="json")["input_schema"] or {"type": "object"},
+                )
+                for tool in agent.spec.tools or ()
+                if tool.kind == "custom"
+            ],
         )
 
     async def send(

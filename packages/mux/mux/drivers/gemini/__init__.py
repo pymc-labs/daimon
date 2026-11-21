@@ -23,6 +23,7 @@ from mux.drivers.gemini.core import (
     compile_agent,
     compile_environment,
     page_values,
+    self_hosted_id,
 )
 from mux.drivers.gemini.deployment import (
     GeminiClients,
@@ -54,6 +55,7 @@ from mux.drivers.gemini.transport import (
     NO_TOOLS_TOOL,
     EnvironmentTransport,
     SDKTransport,
+    SelfHostedTransport,
     Transport,
 )
 from mux.errors import UnsupportedCapability
@@ -180,6 +182,8 @@ class GeminiManagedAgents:
 
 __all__ = [
     "EnvironmentTransport",
+    "SelfHostedTransport",
+    "self_hosted_id",
     "GeminiCompletions",
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",

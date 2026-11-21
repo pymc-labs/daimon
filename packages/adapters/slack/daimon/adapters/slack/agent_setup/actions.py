@@ -114,7 +114,6 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.errors import render_error_notice
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import fit_title
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.outsiders import channel_outsiders
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.setup_conversations import (
@@ -161,6 +160,7 @@ from daimon.core.panel_operator_tokens import list_panel_operator_tokens
 from daimon.core.permissions import channel_permissions
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.channel_skills import list_channel_skills
