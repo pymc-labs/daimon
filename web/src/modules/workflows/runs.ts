@@ -72,6 +72,14 @@ export function project(events: RunEvent[]): RunState {
         }
         break
       }
+      case "step.brief_sent": {
+        // A new lane's session starts with its first brief.
+        const session = str(d.session)
+        if (last && session) last.session = session
+        const lane = s.lanes.find((l) => l.id === st?.lane)
+        if (lane && !lane.session && session) lane.session = session
+        break
+      }
       case "step.route_chosen": if (st) st.route = str(d.route); break
       case "step.retry_scheduled": close("failed", err); break
       case "step.succeeded":

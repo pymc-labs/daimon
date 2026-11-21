@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { cancel, decideUnknown, redrive, start, verify, visible, type Run, type Script } from "@/mock/workflows-runs"
 import { SPECS } from "@/mock/workflows-specs"
 import { axis, edgeStates, nodeRuns, project, timeline } from "./runs"
-import type { Spec } from "./types"
+import type { RunEvent, Spec } from "./types"
 
 const T = Date.parse("2026-11-13T09:00:00Z")
 const maya = { id: "p_maya", name: "Maya Lindqvist" }
@@ -25,6 +25,19 @@ describe("project", () => {
     expect(s.steps[0]!.route).toBe("qualified")
     expect(s.steps[2]!.wait).toMatchObject({ kind: "approval", status: "completed", decision: "approve" })
     expect(s.cost_usd).toBeGreaterThan(0)
+  })
+
+  it("lists the lanes steps start in, and a new lane's session from its first brief", () => {
+    const s = project(run(SPECS.lead).events)
+    expect(s.lanes.map((l) => l.id)).toEqual(["main:sales"])
+    expect(s.steps.filter((x) => x.lane).map((x) => x.key)).toEqual(["research", "draft_reply"])
+    const at = "2026-11-13T09:00:00Z"
+    const brief = project([
+      { seq: 1, at, type: "step.ready", step: "a", actor: "Engine", detail: "", data: { node: "a", visit: 1 } },
+      { seq: 2, at, type: "step.started", step: "a", actor: "Engine", detail: "", data: { attempt: 1, lane: "main:x", agent: "x", session: null } },
+      { seq: 3, at, type: "step.brief_sent", step: "a", actor: "Engine", detail: "", data: { session: "ses_1" } },
+    ] as RunEvent[])
+    expect(brief.lanes).toEqual([{ id: "main:x", agent: "x", session: "ses_1" }])
   })
 
   it("keeps a failed step's attempts with their error classes", () => {

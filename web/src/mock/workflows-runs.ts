@@ -63,6 +63,8 @@ const DUR: Record<Node["kind"], number> = {
   agent: 42 * S, action: 3 * S, transform: 400, branch: 300, code: 5 * S, finish: 400, approval: 0, wait: 0, for_each: 0, workflow: 50 * S,
 }
 const agentOf = (spec: Spec, n: Node) => n.agent ?? spec.defaults?.agent ?? "daimon"
+/** As `lanes.lane_key`: `main:<agent>`, `<lane>:<agent>`, or `fresh:<node>#<visit>`. */
+const laneOf = (spec: Spec, n: Node, id: string, v: number) => n.session === "fresh" ? `fresh:${id}#${v}` : `${n.session ?? "main"}:${agentOf(spec, n)}`
 export const agentName = (key: string) => CATALOG.agents.find((a) => a.key === key)?.name ?? key
 /** A webhook body or a typed form is untrusted; the publisher's grants never vouch for either. */
 const untrustedRun = (run: Run) => run.trigger?.kind === "webhook" || run.trigger?.kind === "manual"
@@ -152,7 +154,7 @@ function exec(c: Ctx, id: string, key: string, v: number, t: number, attempt: nu
   if (n.kind === "for_each") return each(c, id, key, n, v, t)
   const pace = script.pace ?? 1
   const agent = n.kind === "agent" ? agentOf(spec, n) : null
-  const lane = agent ? `${agent}:${n.session ?? id}` : null
+  const lane = agent ? laneOf(spec, n, id, v) : null
   const session = agent ? `ses_${chain("", c.run.id + key + attempt).slice(0, 8)}` : null
   const actor = agent ? agentName(agent) : "Engine"
   const d = DUR[n.kind] * pace * (0.7 + 0.6 * rand(c.run.id + key))
@@ -263,7 +265,7 @@ function each(c: Ctx, id: string, key: string, n: Node, v: number, t: number) {
     const a = free[slot]!, k = `${key}[${i}]`
     const d = DUR.agent * (c.run.script.pace ?? 1) * (0.6 + 0.8 * rand(c.run.id + k))
     emit(c, a, "step.ready", k, "Engine", label, { node: id, visit: v, item: { index: i, label } })
-    emit(c, a + 100, "step.started", k, "Engine", "Attempt 1", { attempt: 1, agent, lane: `${agent}:${k}`, session: `ses_${chain("", c.run.id + k).slice(0, 8)}` })
+    emit(c, a + 100, "step.started", k, "Engine", "Attempt 1", { attempt: 1, agent, lane: `${laneOf(c.run.spec, n.do ?? n, id, v)}@${k}`, session: `ses_${chain("", c.run.id + k).slice(0, 8)}` })
     emit(c, a + d, "step.output_recorded", k, agentName(agent), "Output recorded")
     emit(c, a + d, "step.succeeded", k, "Engine", `Succeeded in ${Math.round(d / S)}s`, { cost: round2(0.05 + 0.1 * rand(k + c.run.id)) })
     free[slot] = a + d + 150
