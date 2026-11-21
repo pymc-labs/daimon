@@ -49,8 +49,11 @@ async def _delivered(db_session: AsyncSession, nodes: dict[str, Any]) -> Platfor
     async def no_routine(row: RoutineRow) -> DeliveryOutcome:
         raise AssertionError("no routine is due")
 
+    async def no_links(*_: object) -> None:
+        return None
+
     poster = make_teams_workflow_poster(
-        world.sm, chats, tenant_id=world.tenant_id, settings=world.settings
+        world.sm, chats, tenant_id=world.tenant_id, settings=world.settings, links=no_links
     )
     assert await poll_once(world.sm, platform="teams", post=JobPoster(no_routine, poster), now=NOW)
     [message] = recorder.surviving_messages()

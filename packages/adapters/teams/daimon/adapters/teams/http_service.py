@@ -442,12 +442,16 @@ def create_teams_http_service(
             team_members=team_member_lookup(runtime),
         ),
         workflow_poster=make_teams_workflow_poster(
-            runtime.sessionmaker, direct, tenant_id=installs.tenant_id, settings=runtime.settings
+            runtime.sessionmaker,
+            direct,
+            tenant_id=installs.tenant_id,
+            settings=runtime.settings,
+            links=workflow_cards.web_at(runtime),
         ),
         run_cards=chat_cards.follower(
             runtime.sessionmaker,
-            runtime.settings,
             platform="teams",
+            links=workflow_cards.web_at(runtime),
             edit=workflow_cards.card_editor(TimedSender(teams_app)),
         ),
     )

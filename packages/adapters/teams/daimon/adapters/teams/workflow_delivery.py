@@ -27,6 +27,7 @@ from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_files import unsupported_files_note
 from daimon.core.stores.workflow_deliveries import DeliveryRow
+from daimon.core.web_links import WebAt
 from daimon.core.workflows import asks
 from daimon.core.workflows.delivery import (
     NOTICE_TITLE,
@@ -66,6 +67,7 @@ def make_teams_workflow_poster(
     *,
     tenant_id: uuid.UUID,
     settings: Settings,
+    links: WebAt,
 ) -> WorkflowPoster:
     async def place(post: WorkflowPost) -> str | DeliveryOutcome:
         """The conversation to post in, or why the post is skipped."""
@@ -81,7 +83,7 @@ def make_teams_workflow_poster(
     async def post(row: DeliveryRow) -> DeliveryOutcome:
         if row.tenant_id != tenant_id:
             return _skipped("tenant_archived")
-        cleared = await clear_post(sessionmaker, row, platform="teams", web=settings.web)
+        cleared = await clear_post(sessionmaker, row, platform="teams", links=links)
         if isinstance(cleared, str):
             return _skipped(cleared)
         try:

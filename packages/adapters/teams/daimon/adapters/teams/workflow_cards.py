@@ -12,11 +12,18 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from daimon.adapters.teams.card import notice_adaptive_card
-from daimon.adapters.teams.card_actions import card_actor, replace_card, submitted_fields, toast
+from daimon.adapters.teams.card_actions import (
+    card_actor,
+    replace_card,
+    submitted_fields,
+    toast,
+    web_links,
+)
 from daimon.adapters.teams.lifecycle import TeamsSender
 from daimon.core.posted_controls import PostedCard
 from daimon.core.posted_controls.teams_card import CONTROL_VERB, build_adaptive_card
 from daimon.core.teams_bot_framework import SERVICE_URL
+from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from daimon.core.workflows.views import seq
@@ -35,6 +42,28 @@ PREFIXES = ("wfc:", "wfl:", "wff:")
 #: Fields a run form shows before the web app runs it instead.
 FORM_LIMIT = 10
 PICK_FIELD = "workflow"
+
+
+def web_at(runtime: TeamsRuntime, *, foreign: bool = False) -> WebAt:
+    """The web links a workflow card may offer in a conversation, where `web_awareness` is On
+    at its channel; none to a sender from another organisation. Teams names a post
+    ``<channel>;messageid=<id>``, which splits into its channel and thread."""
+
+    async def at(
+        tenant_id: uuid.UUID, channel_id: str | None, thread_id: str | None
+    ) -> TenantLinks | None:
+        if channel_id is not None and ";" in channel_id:
+            channel_id, thread_id = channel_id.split(";", 1)[0], thread_id or channel_id
+        return await web_links(
+            runtime,
+            tenant_id,
+            admin=False,
+            foreign=foreign,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+
+    return at
 
 
 def is_workflow_press(custom_id: str) -> bool:
@@ -91,13 +120,16 @@ async def answer(
     actor = await card_actor(runtime, activity)
     if actor is None or not activity.reply_to_id:
         return toast(chat_cards.UNAVAILABLE)
-    presser = Presser(actor.tenant_id, "teams", actor.user_id)
+    presser = Presser(actor.tenant_id, "teams", actor.user_id, channel_id=activity.conversation.id)
     place = ChatPlace("teams", activity.conversation.id, activity.reply_to_id)
+    links = web_at(runtime, foreign=actor.foreign)
     sm, settings = runtime.sessionmaker, runtime.settings
     try:
         if custom_id == chat_cards.PICK_ID:
             picked = str(fields.get(PICK_FIELD) or "")
-            return replace_card(_adaptive(await chat_cards.pick(sm, settings, presser, picked)))
+            return replace_card(
+                _adaptive(await chat_cards.pick(sm, settings, presser, picked, links))
+            )
         if custom_id.startswith("wff:"):
             raw = {k: str(v) for k, v in fields.items() if k not in ("action", "custom_id")}
             submitted = await chat_cards.submit_form(
@@ -107,12 +139,18 @@ async def answer(
                 return toast(submitted)
             env, form, inputs = submitted
             shown = await chat_cards.start_on_card(
-                env, form.workflow_id, inputs, test=form.test, place=place
+                env, form.workflow_id, inputs, test=form.test, place=place, links=links
             )
             return replace_card(_adaptive(shown))
         # An invoke carries no card text: a confirmation's inputs cannot be read back here.
         pressed = await chat_cards.press(
-            sm, settings, presser=presser, custom_id=custom_id, place=place, form_limit=FORM_LIMIT
+            sm,
+            settings,
+            presser=presser,
+            custom_id=custom_id,
+            place=place,
+            links=links,
+            form_limit=FORM_LIMIT,
         )
         if pressed.form is not None:
             return replace_card(form_card(pressed.form))
@@ -123,7 +161,9 @@ async def answer(
             if env is None:
                 return toast(chat_cards.UNAVAILABLE)
             workflow_id, test = pressed.start
-            shown = await chat_cards.start_on_card(env, workflow_id, {}, test=test, place=place)
+            shown = await chat_cards.start_on_card(
+                env, workflow_id, {}, test=test, place=place, links=links
+            )
             return replace_card(_adaptive(shown))
         say = pressed.say or chat_cards.UNAVAILABLE
         return toast(f"{say} {pressed.link}" if pressed.link else say)

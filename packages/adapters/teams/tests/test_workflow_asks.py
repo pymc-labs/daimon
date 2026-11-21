@@ -60,8 +60,12 @@ async def _world(db_session: AsyncSession, ask: dict[str, Any]) -> tuple[World, 
 async def _deliver(world: World, recorder: SurfaceRecorder) -> None:
     sender = OfflineTeamsSender(recorder, service_url=SERVICE_URL)
     chats = RosterChats(MagicMock(), cast(TeamsSender, sender), entra_tenant_id="entra")
+
+    async def no_links(*_: object) -> None:
+        return None
+
     poster = make_teams_workflow_poster(
-        world.sm, chats, tenant_id=world.tenant_id, settings=world.settings
+        world.sm, chats, tenant_id=world.tenant_id, settings=world.settings, links=no_links
     )
 
     async def no_routine(row: RoutineRow) -> DeliveryOutcome:
