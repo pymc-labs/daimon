@@ -38,6 +38,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.agent_identity import (
+    agent_display_name,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
@@ -53,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _DISCORD_ATTACHMENT_MAX_BYTES: int = 25 * 1024 * 1024
 _MAX_ATTACHMENTS_PER_MESSAGE: int = 10
 # (name, built-in, expiry) per (tenant, actor).
-_actor_names: dict[tuple[uuid.UUID, uuid.UUID], tuple[str, bool, float]] = {}
+_actor_names: dict[tuple[uuid.UUID, uuid.UUID], tuple[str, bool, str | None, float]] = {}
 _ACTOR_NAME_TTL_SECONDS = 600
 _log = structlog.get_logger()
 
@@ -178,6 +179,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                         runtime.session_factory
                     ).find_by_derived_uuid(resource_scope(tenant_id=str(auth.tenant_id)), actor_id)
                     actor_name = local_actor.spec.name if local_actor is not None else None
+                    actor_ma_id = local_actor.ref.id if local_actor is not None else None
                     builtin = local_actor is not None and is_builtin_agent(
                         name=local_actor.spec.name,
                         metadata=local_actor.spec.metadata,
@@ -186,8 +188,8 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                 else:
                     key = (auth.tenant_id, actor_id)
                     cached = _actor_names.get(key)
-                    if cached is not None and cached[2] > time.monotonic():
-                        actor_name, builtin = cached[0], cached[1]
+                    if cached is not None and cached[3] > time.monotonic():
+                        actor_name, builtin, actor_ma_id = cached[0], cached[1], cached[2]
                     else:
                         actor = await find_agent_by_derived_uuid_cached(
                             runtime.client,
@@ -197,6 +199,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             records=runtime.session_factory,
                         )
                         actor_name = actor.name if actor is not None else None
+                        actor_ma_id = actor.id if actor is not None else None
                         builtin = actor is not None and is_builtin_agent(
                             name=actor.name,
                             metadata=actor.metadata,
@@ -206,6 +209,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             _actor_names[key] = (
                                 actor_name,
                                 builtin,
+                                actor_ma_id,
                                 time.monotonic() + _ACTOR_NAME_TTL_SECONDS,
                             )
                 if actor_name is not None:
@@ -214,6 +218,12 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             identity_session,
                             tenant_id=auth.tenant_id,
                             agent_name=actor_name,
+                            display_name=await agent_display_name(
+                                runtime.session_factory,
+                                tenant_id=auth.tenant_id,
+                                agent_id=actor_ma_id,
+                                fallback=actor_name,
+                            ),
                             is_builtin=builtin,
                             public_base_url=runtime.settings.mcp.app_root_url,
                             enabled=identity_enabled_for(runtime.settings, "discord", guild_id),

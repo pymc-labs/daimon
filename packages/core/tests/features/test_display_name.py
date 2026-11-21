@@ -1,7 +1,9 @@
 import uuid
 
 import pytest
+from daimon.core.agent_identity import shown_name
 from daimon.core.features.registry import FEATURES
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import feature_refusal
 from daimon.core.features.snapshot import FeaturePlace
 
@@ -20,3 +22,9 @@ def test_a_bad_display_name_is_refused_with_the_rule() -> None:
         "display_name", "agent", "a:b", locked=False, place=place, settings=None
     )
     assert refused is not None and "40 characters" in str(refused)
+
+
+def test_shown_name_is_the_setting_or_the_fallback() -> None:
+    assert shown_name(ResolvedFeature("display_name", "Ada", "agent"), "research") == "Ada"
+    assert shown_name(ResolvedFeature("display_name", "id", "default"), "research") == "research"
+    assert shown_name(None, "research") == "research"

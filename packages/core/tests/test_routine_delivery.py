@@ -257,6 +257,14 @@ def test_the_fallback_post_names_the_agent_unless_the_post_carries_its_identity(
     ), "the agent's own header says who it is from; the schedule stays"
 
 
+def test_the_fallback_texts_name_the_agent_by_its_display_name() -> None:
+    row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
+    assert render_fallback_post(row, agent_name="Ada").startswith(
+        "Result from Ada's Friday routine"
+    )
+    assert render_fallback_dm(row, "destination_unavailable", "Ada").startswith("Ada, ")
+
+
 def test_the_fallback_post_keeps_a_schedule_it_cannot_say_exactly_as_cron() -> None:
     row = _row(agent_name="research", cron_expr="*/15 9-17 * * 1-5", timezone="UTC")
     assert render_fallback_post(row) == (

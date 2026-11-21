@@ -34,6 +34,7 @@ from anthropic import APIError, APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
+from daimon.core.agent_identity import shown_name
 from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate
@@ -581,10 +582,7 @@ class Admission:
 
     def display_name(self, fallback: str) -> str:
         """The agent's name as people see it: its `display_name` setting, else `fallback`."""
-        found = self.resolved("display_name")
-        if found is None or found.value in FEATURES["display_name"].values:
-            return fallback
-        return found.value
+        return shown_name(self.resolved("display_name"), fallback)
 
     @property
     def is_admin(self) -> bool:

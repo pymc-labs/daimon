@@ -12,6 +12,9 @@ from typing import Literal
 import structlog
 from daimon.core.config import Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.resolver import ResolvedFeature
+from daimon.core.features.snapshot import Sessions, resolve_agent_features
 from daimon.core.stores.agent_avatars import (
     get_agent_avatar,
     get_or_create_avatar,
@@ -38,6 +41,32 @@ class AgentIdentity:
     name: str
     avatar_url: str | None
     builtin: bool
+
+
+def shown_name(found: ResolvedFeature | None, fallback: str) -> str:
+    """The agent's name as people see it: its resolved `display_name`, else `fallback`."""
+    if found is None or found.value in FEATURES["display_name"].values:
+        return fallback
+    return found.value
+
+
+async def agent_display_name(
+    sessions: Sessions, *, tenant_id: uuid.UUID, agent_id: str | None, fallback: str
+) -> str:
+    """`shown_name` for a path with no admission (a poster, a card, an MCP send).
+
+    Never raises: a failed read shows the agent's own name.
+    """
+    if not agent_id:
+        return fallback
+    try:
+        found = await resolve_agent_features(
+            sessions, None, tenant_id=tenant_id, agent_id=agent_id, keys=("display_name",)
+        )
+    except Exception as exc:
+        log.warning("agent_identity.display_name_failed", error_type=type(exc).__name__)
+        return fallback
+    return shown_name(found.features.get("display_name"), fallback)
 
 
 def identity_enabled_for(

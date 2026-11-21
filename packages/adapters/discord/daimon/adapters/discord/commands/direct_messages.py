@@ -70,7 +70,12 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
-from daimon.core.dm_access import decide_dm, list_dm_agents, list_routable_dm_agents
+from daimon.core.dm_access import (
+    decide_dm,
+    dm_agent_display_name,
+    list_dm_agents,
+    list_routable_dm_agents,
+)
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
@@ -839,11 +844,12 @@ class DirectMessageCog(commands.Cog):
                     return "failed"
                 guild = self.bot.get_guild(int(tenant.external_id))
                 server_name = guild.name if guild else tenant.external_id
+                shown = admission.display_name(admission.config.agent_name or admission.agent.name)
                 try:
                     # First, so a closed DM makes no conversation.
                     await channel.send(
                         embed=build_notice_embed(
-                            f"Private answer from {admission.config.agent_name} in "
+                            f"Private answer from {shown} in "
                             f"{server_name}.\n\nReply here to follow up.",
                             neutral=True,
                         ),
@@ -947,6 +953,14 @@ class DirectMessageCog(commands.Cog):
                 if current is not None
                 else None
             )
+            if agent:
+                agent = await dm_agent_display_name(
+                    session,
+                    tenant_id=current.tenant_id,
+                    anthropic=self.bot.runtime.turn_deps.anthropic,
+                    records=self.bot.runtime.sessionmaker,
+                    name=agent,
+                )
         if current is None:
             await interaction.response.send_message(
                 "There is no conversation yet. Send a message to start one.", ephemeral=True

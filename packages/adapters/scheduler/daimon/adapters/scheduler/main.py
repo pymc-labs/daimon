@@ -121,6 +121,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     record_routine_failure,
     render_routine_controls,
+    routine_agent_name,
     routine_links,
 )
 from daimon.core.routine_files import collect_routine_files
@@ -448,7 +449,7 @@ async def _build_fire(
             if owner is None or send_dm is None or not await _owner_dm_open(s, row, platform):
                 return
         try:
-            await send_dm(owner, *lapsed_role_card(row))
+            await send_dm(owner, *lapsed_role_card(row, await routine_agent_name(sm, row)))
         except (httpx.HTTPError, ValueError) as exc:
             # The routine stays paused; the panel shows why.
             log.warning(
