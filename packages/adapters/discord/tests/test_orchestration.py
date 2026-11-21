@@ -1996,7 +1996,7 @@ class TestResolverSelfHeal:
         router.add("GET", r"/v1/environments", env_list_handler)
 
         anthropic = build_fake_anthropic(router.dispatch)
-        settings = MagicMock()
+        settings = mock_settings()
         # Plain string on the MagicMock: bot.py applies str(), identity on str — assertion stays literal.
         settings.mcp.public_url = "https://example.test/mcp"
         settings.defaults_root = tmp_path
