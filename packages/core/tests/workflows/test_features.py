@@ -17,6 +17,13 @@ def test_workflow_features_default_off() -> None:
         place, 1, {k: resolve_one(FEATURES[k], None, place, []) for k in keys}
     )
     assert workflow_features(snapshot) == WorkflowFeatures(
-        enabled=False, webhooks=False, code=False, run_budget_usd=Decimal(5), retention_days=90
+        enabled=False,
+        webhooks=False,
+        code=False,
+        mentions=False,
+        polls=False,
+        scoped_writes=False,
+        run_budget_usd=Decimal(5),
+        retention_days=90,
     )
     assert not snapshot.on("web.workflows"), "the web module is off too"

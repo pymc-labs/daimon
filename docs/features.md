@@ -89,6 +89,9 @@ Where each feature can be set, and its default.
 | Workflows | `workflows` | Capability | Off | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | Workflow webhooks | `workflow_webhooks` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Workflow code steps | `workflow_code` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
+| Workflow mentions | `workflow_mentions` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
+| Workflow polls | `workflow_polls` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
+| Workflow scoped writes | `workflow_scoped_writes` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Workflow run budget | `workflow_run_budget` | Limit | $5 | ✓ | ✓ |  |  |  |  |  |
 | Workflow run history | `workflow_retention_days` | Limit | 90 days | ✓ | ✓ |  |  |  |  |  |
@@ -957,7 +960,7 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Workflows
 
-Lets people run workflows. Off stops runs here.
+People can run workflows.
 
 | | |
 | --- | --- |
@@ -969,7 +972,7 @@ Lets people run workflows. Off stops runs here.
 
 ## Workflow webhooks
 
-Workflows can start from a webhook. Off refuses those calls.
+Webhooks can start workflows.
 
 | | |
 | --- | --- |
@@ -981,11 +984,47 @@ Workflows can start from a webhook. Off refuses those calls.
 
 ## Workflow code steps
 
-Workflows can run code steps. Off fails them.
+Workflows can run code steps.
 
 | | |
 | --- | --- |
 | Key | `workflow_code` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Workflow mentions
+
+Mentions can start workflows.
+
+| | |
+| --- | --- |
+| Key | `workflow_mentions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Workflow polls
+
+Polls can start workflows.
+
+| | |
+| --- | --- |
+| Key | `workflow_polls` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Workflow scoped writes
+
+Steps can write unattended within approved limits.
+
+| | |
+| --- | --- |
+| Key | `workflow_scoped_writes` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace |
@@ -1005,7 +1044,7 @@ The most one workflow run may spend.
 
 ## Workflow run history
 
-How long finished workflow runs keep their steps.
+How long finished runs keep steps.
 
 | | |
 | --- | --- |
