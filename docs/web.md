@@ -1,3 +1,7 @@
+---
+knowledge: web
+---
+
 # Web app
 
 The web app lets people chat with Daimon's agents in a browser. Members also

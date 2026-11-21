@@ -150,6 +150,33 @@ changing anything, run:
 daimon routines check-roles --tenant TENANT_UUID
 ```
 
+## Read monitored conversations
+
+An admin can keep an agent's conversations for review. Two features turn it on, each
+at the deployment, workspace or agent level, and an agent's owner who is not an admin
+cannot set them:
+
+| Feature | Keeps |
+| --- | --- |
+| `monitor_direct_messages` | Questions and answers in direct messages. |
+| `monitor_mcp` | Questions and answers from coding tools, plus the name, time and outcome of each other tool call, never its content. |
+
+Monitoring starts when it is turned on and keeps nothing from before. Each person is
+told once per agent, in the conversation or their first tool result. Entries are
+deleted after
+[`DAIMON_MONITORING__RETENTION_DAYS`](configuration.md#daimon_monitoring__retention_days).
+
+Workspace admins read what is kept with the `list_monitored_activity` and
+`get_monitored_conversation` tools, or with the CLI. Every read is audited.
+
+<!-- knowledge: web -->
+The web app has an admin page for the same reads, and `monitor_direct_messages` also keeps web chat.
+<!-- /knowledge -->
+
+```bash
+daimon monitoring list TENANT_UUID --agent AGENT_ID --where coding_tools --json
+```
+
 ## How membership is checked
 
 Discord checks use `DAIMON_DISCORD__BOT_TOKEN`, so set it on the scheduler and

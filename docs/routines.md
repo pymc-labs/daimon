@@ -36,11 +36,13 @@ numbers"). Each platform has a panel:
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
+- **Discord** `/routines` lists your routines, or all for an admin. Admins
+  create; the creator or an admin can pause, resume or delete.
+<!-- knowledge: web -->
 - **Web app** Routines page: members manage their own, admins all. Changing one
   needs a linked chat account. **Run now** makes an active routine
   due at once.
-- **Discord** `/routines` lists your routines, or all for an admin. Admins
-  create; the creator or an admin can pause, resume or delete.
+<!-- /knowledge -->
 
 The CLI creates routines for an owner (`daimon routines create`), sets
 [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools), checks
@@ -185,8 +187,8 @@ Delivery is at most once and checks first:
   Discord channel in such a category is refused as `protected_channel`.
 - **Only where the creator could post.** A creator who lost view or send access,
   or is not in a private channel, gets the result by direct message instead.
-- **Live workspace only.** A channel in another server, or one that no longer
-  exists or is archived, is `destination_unavailable`.
+- **Live workspace only.** A channel in another server, or one that does not
+  exist or is archived, is `destination_unavailable`.
 - **Never silently nowhere.** When nobody may write in the destination, the
   result goes to the creator by DM, under the tenant's DM policy
   ([configuration.md](configuration.md#daimon_direct_message_policies)). If
@@ -234,7 +236,11 @@ timeout cannot be set below it. Settings are in [configuration.md](configuration
 | list and read last output | admin or the creator | admin or the creator | admin or the creator |
 | pause and resume | admin or the creator | admin or the creator | admin or the creator |
 | delete | admin or the creator | admin or the creator, after a confirmation | admin or the creator |
-| run now | admin or the creator, web app only | not offered | not offered |
+| run now | admin or the creator | not offered | not offered |
+
+<!-- knowledge: web -->
+Run now is offered on the web app's Routines page.
+<!-- /knowledge -->
 
 Ownerless routines are admin-only, and a refusal reads as "not found".
 Non-admins see only their own routines, since output often holds business

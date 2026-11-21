@@ -36,7 +36,7 @@ server admin, or an owner of that agent, gets a private link bound to that
 agent. An owner is not made an admin and can connect repos only to their own
 agent. Members can request setup, and their request is recorded for an admin.
 
-On the web page, the person signs in to GitHub and picks repositories. None is
+On the connect page, the person signs in to GitHub and picks repositories. None is
 preselected. The page lists repositories the App installation covers and the
 signed-in person can see, and says how many it hides. Each selection is checked
 again against GitHub at confirmation, and the grants go live then. A repository
@@ -172,7 +172,7 @@ then starts another pass.
 
 The GitHub panel in the agent editor shows the agent's repos, how many skills each
 holds and whether the latest sync failed. Its **Resync** button syncs the repo skills
-now, unless a sync is already running. Each skill's panel shows where it came from.
+at once, unless a sync is already running. Each skill's panel shows where it came from.
 A pipeline that publishes the agent can set three metadata keys for the Skills panel
 to show: `source_release` (the release name), `source_release_at` (ISO 8601 with an
 offset) and `source_release_url` (an https page). Daimon ignores a bad time or URL.
