@@ -90,9 +90,11 @@ To scrub many bundles one after another, pass the same `--learned names-found.js
 model finds in a run are added to it at the end, so a name found in one bundle is replaced in
 every later one. It holds real names in plain text (created mode 600): keep it private and
 delete it with the raw bundles. The map and that file are saved before the bundle is
-written, under a lock; run batches one at a time, not side by side. Only what looks like a
-name is learned: no code or JSON fragments, and a word that is no everyday word (from the
-spaCy model's dictionary when installed), acronym, number or kept name.
+written, under a lock; run batches one at a time, not side by side.
+
+Only what looks like a name is learned: no code or JSON fragments, and at least one word that
+is not an everyday word (the spaCy model's dictionary, when installed), an acronym, a number or
+a kept name.
 
 A `keep` list in the dictionary holds public names (the platforms and products you use, your
 suites' own ids). They are never faked, learned or reported as leftovers, in any field, ids,
