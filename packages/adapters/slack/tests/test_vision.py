@@ -4,7 +4,7 @@ import base64
 import httpx
 import pytest
 from daimon.adapters.slack.vision import (
-    MAX_VISION_IMAGE_BYTES,
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGES,
     SlackFile,
     download_as_image_blocks,
@@ -34,7 +34,7 @@ def test_is_vision_image_false_for_unsupported_mimetype():
 
 
 def test_is_vision_image_false_when_oversized():
-    assert is_vision_image(_file(size=MAX_VISION_IMAGE_BYTES + 1)) is False, "over the byte cap"
+    assert is_vision_image(_file(size=MAX_DOWNSCALE_SOURCE_BYTES + 1)) is False, "too big to shrink"
 
 
 def test_is_vision_image_false_when_dimension_exceeds_cap():

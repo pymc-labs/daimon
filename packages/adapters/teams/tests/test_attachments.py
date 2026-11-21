@@ -15,7 +15,7 @@ from daimon.adapters.teams.attachments import (
     parse_attachments,
     prepare_attachments,
 )
-from daimon.core.media.vision import MAX_VISION_IMAGE_BYTES, MAX_VISION_IMAGE_DIMENSION
+from daimon.core.media.vision import MAX_DOWNSCALE_SOURCE_BYTES, MAX_VISION_IMAGE_DIMENSION
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
 from PIL import Image
 
@@ -156,7 +156,7 @@ async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"0" * MAX_VISION_IMAGE_BYTES)
+        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"0" * MAX_DOWNSCALE_SOURCE_BYTES)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         prepared = await _prepare_attachments(
@@ -165,7 +165,7 @@ async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() ->
 
     assert "authorization" not in requests[0].headers, "a download URL carries its own auth"
     assert prepared.image_blocks == []
-    assert "larger than 5 MiB" in prepared.prefix and DOWNLOAD_URL in prepared.prefix
+    assert "larger than 25 MiB" in prepared.prefix and DOWNLOAD_URL in prepared.prefix
 
 
 async def test_image_past_the_pixel_cap_and_channel_shares_are_explained() -> None:

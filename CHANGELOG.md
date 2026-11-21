@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Images over 5 MiB are downscaled instead of sent as a link.** In Discord,
+  Slack, Teams and the web app, an image of up to 25 MiB is shrunk to fit the
+  model's 5 MiB limit and shown to the agent inline.
+
 - **"Approvals in direct messages" no longer changes Approvals for everyone.**
   Setting it, from the CLI, the web app or an agent, wrote the server-wide
   Approvals value instead of its own, so Off turned Allow writes on everywhere.

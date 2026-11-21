@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
+import os
 from dataclasses import dataclass
 from typing import Any, cast
 
 import discord
 import pytest
 from daimon.adapters.discord.vision import (
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGE_BYTES,
     MAX_VISION_IMAGE_DIMENSION,
     MAX_VISION_IMAGES,
@@ -18,6 +21,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from PIL import Image
 
 
 @dataclass
@@ -65,12 +69,12 @@ class TestIsVisionImageAttachment:
             "missing content_type should route to the notebook path"
         )
 
-    def test_oversized_image_is_not_vision(self) -> None:
+    def test_image_too_big_to_downscale_is_not_vision(self) -> None:
         att = FakeAttachment(
-            filename="huge.png", content_type="image/png", size=MAX_VISION_IMAGE_BYTES + 1
+            filename="huge.png", content_type="image/png", size=MAX_DOWNSCALE_SOURCE_BYTES + 1
         )
         assert is_vision_image_attachment(_as_attachment(att)) is False, (
-            "image over the API size cap should route to the notebook path"
+            "image over the downscale cap should route to the notebook path"
         )
 
     def test_image_at_exact_cap_is_vision(self) -> None:
@@ -281,7 +285,7 @@ class TestDownloadAsImageBlocks:
                 return b""
 
         big = TrackingAttachment(
-            filename="huge.png", content_type="image/png", size=MAX_VISION_IMAGE_BYTES + 1
+            filename="huge.png", content_type="image/png", size=MAX_DOWNSCALE_SOURCE_BYTES + 1
         )
 
         blocks, skipped = await download_as_image_blocks([_as_attachment(big)])
@@ -291,6 +295,28 @@ class TestDownloadAsImageBlocks:
         assert skipped[0][0].filename == "huge.png"
         assert "size cap" in skipped[0][1]
         assert fetched == [], "oversized image should be skipped before the CDN fetch"
+
+    @pytest.mark.asyncio
+    async def test_image_over_the_byte_cap_is_downscaled(self) -> None:
+        buffer = io.BytesIO()
+        Image.frombytes("RGB", (1500, 1500), os.urandom(1500 * 1500 * 3)).save(buffer, "PNG")
+        noise = buffer.getvalue()
+        assert len(noise) > MAX_VISION_IMAGE_BYTES
+        att = FakeAttachment(
+            filename="photo.png",
+            content_type="image/png",
+            size=len(noise),
+            width=1500,
+            height=1500,
+            _content=noise,
+        )
+
+        blocks, skipped = await download_as_image_blocks([_as_attachment(att)])
+
+        assert skipped == [], "an image over 5 MiB is downscaled, not refused"
+        source = blocks[0]["source"]
+        assert source["type"] == "base64" and source["media_type"] == "image/jpeg"
+        assert len(base64.standard_b64decode(source["data"])) <= MAX_VISION_IMAGE_BYTES
 
     @pytest.mark.asyncio
     async def test_oversized_dimension_skipped_without_download(self) -> None:

@@ -2,8 +2,9 @@
 
 Attachments the Anthropic API can consume as vision content blocks are
 downloaded from Discord's CDN and forwarded inline on the ``user.message``
-event. Everything else — unsupported media types, oversized images, and
-non-image files — belongs on the notebook-host upload path, which has its
+event, downscaled first when over the byte cap. Everything else — unsupported
+media types, images over 25 MiB, and non-image files — belongs on the
+notebook-host upload path, which has its
 own size cap and skip reporting. ``is_vision_image_attachment`` is the
 single routing predicate for that split.
 """
@@ -15,11 +16,13 @@ import asyncio
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.media.vision import (
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGE_BYTES,
     MAX_VISION_IMAGE_DIMENSION,
     MAX_VISION_IMAGES,
     VISION_MEDIA_TYPES,
     build_image_block,
+    downscale_image,
     sniff_image_media_type,
 )
 
@@ -60,10 +63,11 @@ def is_oversized_image(attachment: discord.Attachment) -> bool:
 
 
 def is_vision_image_attachment(attachment: discord.Attachment) -> bool:
-    """True when the attachment can be sent as an API vision content block."""
+    """True when the attachment can be sent as an API vision content block, downscaled
+    first when it is over the byte cap."""
     return (
         (attachment.content_type or "") in VISION_MEDIA_TYPES
-        and attachment.size <= MAX_VISION_IMAGE_BYTES
+        and attachment.size <= MAX_DOWNSCALE_SOURCE_BYTES
         and not _exceeds_dimension_cap(attachment)
     )
 
@@ -203,9 +207,9 @@ def _static_skip_reason(attachment: discord.Attachment) -> str | None:
     if media_type not in VISION_MEDIA_TYPES:
         log.warning("image_attachment.skipped.media_type", name=name, media_type=media_type)
         return f"unsupported image media type: {media_type or 'unknown'}"
-    if attachment.size > MAX_VISION_IMAGE_BYTES:
+    if attachment.size > MAX_DOWNSCALE_SOURCE_BYTES:
         log.warning("image_attachment.skipped.oversize", name=name, size=attachment.size)
-        return f"exceeds vision size cap ({attachment.size} > {MAX_VISION_IMAGE_BYTES})"
+        return f"exceeds vision size cap ({attachment.size} > {MAX_DOWNSCALE_SOURCE_BYTES})"
     if _exceeds_dimension_cap(attachment):
         log.warning(
             "image_attachment.skipped.dimensions",
@@ -248,4 +252,10 @@ async def _fetch_image_block(
             declared_media_type=media_type,
             sniffed_media_type=sniffed_media_type,
         )
+    if len(data) > MAX_VISION_IMAGE_BYTES:
+        smaller = await asyncio.to_thread(downscale_image, data)
+        if smaller is None:
+            log.warning("image_attachment.skipped.oversize", name=name, size=len(data))
+            return f"exceeds vision size cap and could not be downscaled ({len(data)} bytes)"
+        data, sniffed_media_type = smaller
     return build_image_block(data, sniffed_media_type)

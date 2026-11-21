@@ -20,6 +20,7 @@ for its answer to explain: nothing is posted on its own.
 
 from __future__ import annotations
 
+import asyncio
 import io
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -34,10 +35,12 @@ from daimon.core.errors import DaimonError
 from daimon.core.media.attachments import AttachedFile, attachment_line
 from daimon.core.media.filenames import sanitize_title
 from daimon.core.media.vision import (
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGE_BYTES,
     MAX_VISION_IMAGE_DIMENSION,
     MAX_VISION_IMAGES,
     build_image_block,
+    downscale_image,
     sniff_image_media_type,
 )
 from daimon.core.teams_graph import (
@@ -226,8 +229,9 @@ async def fetch_bytes(
     raise FetchRefused("too many redirects")
 
 
-def image_block(data: bytes) -> BetaManagedAgentsImageBlockParam:
-    """An image block, or `FetchRefused` for bytes the vision API would reject."""
+async def image_block(data: bytes) -> BetaManagedAgentsImageBlockParam:
+    """An image block, downscaled when over the byte cap, or `FetchRefused` for bytes
+    the vision API would reject."""
     media_type = sniff_image_media_type(data)
     if media_type is None:
         raise FetchRefused("not a PNG, JPEG, GIF or WebP image")
@@ -238,6 +242,11 @@ def image_block(data: bytes) -> BetaManagedAgentsImageBlockParam:
         raise FetchRefused("unreadable image") from err
     if max(width, height) > MAX_VISION_IMAGE_DIMENSION:
         raise FetchRefused(f"larger than {MAX_VISION_IMAGE_DIMENSION}px")
+    if len(data) > MAX_VISION_IMAGE_BYTES:
+        smaller = await asyncio.to_thread(downscale_image, data)
+        if smaller is None:
+            raise FetchRefused(f"larger than {MAX_VISION_IMAGE_BYTES // (1024 * 1024)} MiB")
+        return build_image_block(*smaller)
     return build_image_block(data, media_type)
 
 
@@ -296,9 +305,9 @@ async def _inline_history(
                 url,
                 is_allowed=is_graph_url,
                 token=await graph_token(),
-                max_bytes=MAX_VISION_IMAGE_BYTES,
+                max_bytes=MAX_DOWNSCALE_SOURCE_BYTES,
             )
-            blocks.append(image_block(data))
+            blocks.append(await image_block(data))
             inlined += 1
         except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
             reason = str(err) if isinstance(err, FetchRefused) else type(err).__name__
@@ -389,9 +398,13 @@ async def prepare_attachments(
             else:
                 is_allowed, token = is_sharepoint_host, None
             data = await fetch_bytes(
-                http, file.url, is_allowed=is_allowed, token=token, max_bytes=MAX_VISION_IMAGE_BYTES
+                http,
+                file.url,
+                is_allowed=is_allowed,
+                token=token,
+                max_bytes=MAX_DOWNSCALE_SOURCE_BYTES,
             )
-            blocks.append(image_block(data))
+            blocks.append(await image_block(data))
             # Unnamed in the text, an image block reads as part of the prompt, not as shared.
             lines.append(attachment_line(AttachedFile(file.name, inlined=True)))
         except (FetchRefused, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:

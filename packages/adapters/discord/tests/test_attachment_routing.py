@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 from daimon.adapters.discord.attachments import build_attachment_url_prefix, prepare_attachments
-from daimon.adapters.discord.vision import MAX_VISION_IMAGE_BYTES
+from daimon.adapters.discord.vision import MAX_DOWNSCALE_SOURCE_BYTES
 
 
 @dataclass
@@ -74,11 +74,11 @@ async def test_prepare_attachments_inlines_images_and_links_data_files() -> None
 
 
 async def test_prepare_attachments_falls_back_to_a_url_for_an_oversized_image() -> None:
-    big = _attachment(3, "huge.png", "image/png", MAX_VISION_IMAGE_BYTES + 1)
+    big = _attachment(3, "huge.png", "image/png", MAX_DOWNSCALE_SOURCE_BYTES + 1)
 
     prefix, blocks = await prepare_attachments([big])
 
-    assert blocks is None, "an image over the byte cap is not downloaded"
+    assert blocks is None, "an image too big to downscale is not downloaded"
     assert "https://cdn.discord/huge.png?hm=ab" in prefix, "the agent can still fetch it"
     big.read.assert_not_awaited()
 
