@@ -111,7 +111,14 @@ def _typed(node: AnyNode | None, wait: Wait) -> bool:
 def _question(node: AnyNode | None, wait: Wait, key: str) -> str:
     if wait.kind == "question":
         return str((wait.shown or {}).get("question", ""))
-    return (node.title if node and node.title else None) or key
+    return _title(node, key)
+
+
+def _title(node: AnyNode | None, key: str) -> str:
+    """The step's title, else its key in words (as the canvas shows it)."""
+    return (node.title if node and node.title else None) or key[:1].upper() + key[1:].replace(
+        "_", " "
+    )
 
 
 def _form(node: AnyNode | None, wait: Wait) -> dict[str, Any] | None:
@@ -218,9 +225,7 @@ async def _wait_detail(
     return InboxDetail(
         id=str(wait.id),
         kind="question" if typed else "proposals" if kind == waits.PROPOSALS else "approval",
-        title=_question(node, wait, key)[:120]
-        if typed
-        else (node.title if node and node.title else key),
+        title=_question(node, wait, key)[:120] if typed else _title(node, key),
         workflow={"id": str(run.workflow_id), "name": workflow.name if workflow else ""},
         run={"id": str(run.id), "number": run.number},
         step=key,

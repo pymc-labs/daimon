@@ -16,7 +16,9 @@ from daimon.core.stores import workflow_runs, workflow_waits, workflows
 from daimon.core.workflows import inbox, runs, waits
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.service import Env
+from daimon.core.workflows.spec import ApprovalNode, parse_spec
 from daimon.testing.workflows import NOW, World, make_world
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 FINISH: dict[str, Any] = {"f": {"kind": "finish", "output": "${{ steps.ok.output }}"}}
@@ -195,6 +197,7 @@ async def test_the_inbox_lists_and_decides_for_the_addressee(db_session: AsyncSe
     assert [(i.id, i.kind, i.decision) for i in items] == [(str(wait_id), "approval", None)]
     detail = await inbox.item(env(world.owner), wait_id)
     assert [(r.name, r.comment) for r in detail.routes] == [("reject", True), ("approve", False)]
+    assert detail.title == "Ok", "an untitled step reads as its key in words"
     attention = await inbox.attention(env(world.owner))
     assert [a.kind for a in attention] == ["approval"], attention
 
@@ -259,3 +262,25 @@ def test_only_decision_surfaces_call_decide_wait() -> None:
     assert found == {c for c in callers}, f"only listed surfaces decide waits: {callers}"
     assert not [c for c in callers if c.endswith(NEVER)], "agents never decide"
     assert found, "the inbox decides through it"
+
+
+def test_the_approval_preview_shows_each_argument_it_can_render_now() -> None:
+    nodes: JsonValue = {
+        "review": {"kind": "approval", "binds": "send", "routes": {"approve": "send"}},
+        "send": {
+            "kind": "action",
+            "tool": "gmail/send_message",
+            "args": {"to": "${{ inputs.email }}", "body": "${{ steps.review.output.body }}"},
+            "next": "done",
+        },
+        "done": {"kind": "finish"},
+    }
+    spec = parse_spec(
+        {"schema": "daimon.workflow/v1", "name": "T", "start": "review", "nodes": nodes}
+    )
+    node = spec.nodes["review"]
+    assert isinstance(node, ApprovalNode)
+    preview = waits.bound_preview(spec, node, {"inputs": {"email": "a@b.co"}, "steps": {}}, NOW)
+    assert preview == [
+        {"node": "send", "tool": "gmail/send_message", "args": {"to": "a@b.co", "body": None}}
+    ], "the answer's own fields wait for the answer"

@@ -298,12 +298,16 @@ def bound_preview(
     for bound in _binds(node):
         action = spec.nodes.get(bound)
         if isinstance(action, ActionNode):
-            try:
-                args = render(dict(action.args or {}), context, now=now)
-            except ExpressionError:
-                args = None
+            args = {k: _rendered(v, context, now) for k, v in (action.args or {}).items()}
             preview.append({"node": bound, "tool": action.tool, "args": args})
     return preview
+
+
+def _rendered(value: JsonValue, context: dict[str, JsonValue], now: datetime) -> JsonValue:
+    try:
+        return render(value, context, now=now)
+    except ExpressionError:
+        return None
 
 
 async def _bound_calls(
