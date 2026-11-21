@@ -18,7 +18,7 @@ The file lists the Discord ids of people who never want to be tagged:
 ```
 
 Each person is opted out as if they had asked Daimon never to tag them, and gets an identity
-if they have none yet. The command prints how many were new and how many had
+if they have none yet. The command prints how many it added and how many had
 already opted out.
 
 ## Earlier private conversations

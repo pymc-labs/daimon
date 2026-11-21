@@ -180,8 +180,8 @@ posts it, in chunks that keep code fences intact. The post reads `Result from
 Delivery is at most once and checks first:
 
 - **Newest only.** A new run replaces a queued result, so no backlog posts.
-- **Creator first.** If the access policy cannot be read, or the creator may no
-  longer invoke the agent (admins pass unless the admin bypass is off),
+- **Creator first.** If the access policy cannot be read, or the creator may not
+  invoke the agent (admins pass unless the admin bypass is off),
   nothing is sent anywhere.
 - **Policy at post time.** A `writers: none` channel, a thread under one or a
   Discord channel in such a category is refused as `protected_channel`.
@@ -239,7 +239,7 @@ timeout cannot be set below it. Settings are in [configuration.md](configuration
 | run now | admin or the creator | not offered | not offered |
 
 <!-- knowledge: web -->
-Run now is offered on the web app's Routines page.
+**Run now** is offered on the web app's Routines page.
 <!-- /knowledge -->
 
 Ownerless routines are admin-only, and a refusal reads as "not found".

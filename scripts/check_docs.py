@@ -21,6 +21,11 @@ PARAGRAPH_WORDS = 100
 SENTENCE_WORDS = 40
 MAX_HEADING_LEVEL = 3
 
+_TIME_WORD_RE = re.compile(
+    r"\bnow\b|\bno longer\b|\bnewly\b|\bnew (?:in|since|as of|from)\b|\b(?:is|are|was|were) new\b",
+    re.IGNORECASE,
+)
+_LITERAL_RE = re.compile(r"`[^`]*`|\*\*[^*]*\*\*|“[^”]*”")  # code, button labels, quoted text
 _LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s")
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`\[(*])")
@@ -60,6 +65,9 @@ def _blocks(lines: list[str]) -> list[tuple[int, str]]:
 
 def check(path: Path) -> list[str]:
     lines = path.read_text().splitlines()
+    if lines[:1] == ["---"]:  # front matter: blank it, so line numbers stay true
+        end = lines.index("---", 1)
+        lines[: end + 1] = [""] * (end + 1)
     findings: list[str] = []
     blocks = _blocks(lines)
     budget = PAGE_WORDS_OVERRIDE.get(path.name, PAGE_WORDS)
@@ -67,6 +75,10 @@ def check(path: Path) -> list[str]:
     if total > budget:
         findings.append(f"{path}:1: page: {total} words of prose, budget {budget}; cut or split")
     for number, text in blocks:
+        if found := _TIME_WORD_RE.search(_LITERAL_RE.sub("", text)):
+            findings.append(
+                f"{path}:{number}: time word: {found.group(0)!r}; describe current behaviour"
+            )
         if (n := _words(text)) > PARAGRAPH_WORDS:
             findings.append(f"{path}:{number}: paragraph: {n} words, max {PARAGRAPH_WORDS}")
             continue
