@@ -5,12 +5,19 @@ Runbook:
    a JSON array containing id, repo_owner, repo_name, name, title, body, kind,
    scope, created_by_discord_id, created_at and updated_at. Never put that export
    or the maps in Git. Repository slugs, content and timestamps are preserved.
-2. Supply accounts JSON {discord_id: account_uuid} and repos JSON
-   {"owner/name": {"tenant_id": tenant_uuid, "repo_id": github_repository_id}}.
-   Every creator must map, including shared entries; do not guess personal owners.
-3. Run `uv run python scripts/import_repo_memory.py --snapshot EXPORT
-   --accounts ACCOUNTS --repos REPOS --manifest MANIFEST` against the destination
-   using DAIMON_DATABASE__URL. This defaults to dry run and rolls back all writes.
+2. Supply repos JSON
+   {"owner/name": {"tenant_id": tenant_uuid, "repo_id": github_repository_id}} and
+   either accounts JSON {discord_id: account_uuid} or `--tenant TENANT_UUID`, or both.
+   With `--tenant`, a creator missing from the accounts map gets (or keeps) the Discord
+   identity in that tenant, as their first message would; their repositories must map
+   to it. Without it every creator must map, including shared entries.
+3. Run `python scripts/import_repo_memory.py --snapshot EXPORT --repos REPOS
+   --tenant TENANT_UUID --manifest MANIFEST` against the destination using
+   DAIMON_DATABASE__URL. The image has no `scripts/`, but this imports only
+   `daimon.core`, so copy it and the inputs into a worker container and run it there:
+   `docker cp scripts/import_repo_memory.py WORKER:/tmp/`, then
+   `docker exec WORKER python /tmp/import_repo_memory.py ...`.
+   This defaults to dry run and rolls back all writes.
    Resolve every mapping or destination conflict, then inspect the manifest's
    per-repo row counts and content digests (which include personal directives).
 4. Repeat with --apply. Require its manifest to match the successful dry run.
@@ -41,9 +48,10 @@ from pathlib import Path
 from typing import Literal
 
 from daimon.core.repo_memory import slugify
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.repo_memory import MemoryEntry, import_entry
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
 class ExportEntry(BaseModel):
@@ -113,13 +121,41 @@ def prepare_entries(
     return entries
 
 
-def manifest_for(entries: list[MemoryEntry]) -> dict[str, dict[str, str | int]]:
+async def add_people(
+    session: AsyncSession,
+    export: list[ExportEntry],
+    accounts: dict[str, uuid.UUID],
+    repos: dict[str, RepoTarget],
+    tenant: uuid.UUID,
+) -> dict[str, uuid.UUID]:
+    """`accounts` plus an identity in `tenant` for every creator it leaves out."""
+    canonical = {key.casefold(): value for key, value in repos.items()}
+    found = dict(accounts)
+    for row in export:
+        if row.created_by_discord_id in found:
+            continue
+        target = canonical.get(f"{row.repo_owner}/{row.repo_name}".casefold())
+        if target is not None and target.tenant_id != tenant:
+            raise ValueError("A creator without an account writes to another tenant; map them.")
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant, platform="discord", external_id=row.created_by_discord_id
+        )
+        found[row.created_by_discord_id] = principal.account_id
+    return found
+
+
+def manifest_for(
+    entries: list[MemoryEntry], owners: dict[uuid.UUID, str] | None = None
+) -> dict[str, dict[str, str | int]]:
+    """Counts and digests per repository. `owners` names each account by its Discord id,
+    so a dry run and the apply that creates the same people match."""
     pools: dict[str, list[str]] = defaultdict(list)
     for entry in entries:
         key = f"{entry.tenant_id}/{entry.repo_id}"
-        pools[key].append(
-            json.dumps(entry.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
-        )
+        row = entry.model_dump(mode="json")
+        if owners and entry.created_by_account_id in owners:
+            row["created_by_account_id"] = owners[entry.created_by_account_id]
+        pools[key].append(json.dumps(row, sort_keys=True, ensure_ascii=False))
     return {
         key: {
             "count": len(rows),
@@ -129,39 +165,68 @@ def manifest_for(entries: list[MemoryEntry]) -> dict[str, dict[str, str | int]]:
     }
 
 
-async def run_import(entries: list[MemoryEntry], *, database_url: str, apply: bool) -> None:
+async def run_import(
+    export: list[ExportEntry],
+    accounts: dict[str, uuid.UUID],
+    repos: dict[str, RepoTarget],
+    *,
+    tenant: uuid.UUID | None,
+    database_url: str,
+    apply: bool,
+) -> tuple[list[MemoryEntry], dict[str, uuid.UUID]]:
+    """Import in one transaction, people added with `tenant` included; a dry run rolls
+    it all back. Returns the entries and every creator's account."""
     engine = create_async_engine(database_url, hide_parameters=True)
     try:
         async with async_sessionmaker(engine)() as session, session.begin():
+            if tenant is not None:
+                accounts = await add_people(session, export, accounts, repos, tenant)
+            entries = prepare_entries(export, accounts, repos)
             for entry in entries:
                 await import_entry(session, entry=entry)
             if not apply:
                 await session.rollback()
     finally:
         await engine.dispose()
+    return entries, accounts
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("snapshot", "accounts", "repos", "manifest"):
+    for name in ("snapshot", "repos", "manifest"):
         parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--accounts", type=Path, help="JSON {discord_id: account_uuid}.")
+    parser.add_argument("--tenant", type=uuid.UUID, help="Add unmapped creators to this tenant.")
     parser.add_argument("--apply", action="store_true", help="Commit; omitted means dry run.")
     args = parser.parse_args()
     try:
-        entries = prepare_entries(
-            TypeAdapter(list[ExportEntry]).validate_json(args.snapshot.read_text()),
-            TypeAdapter(dict[str, uuid.UUID]).validate_json(args.accounts.read_text()),
-            TypeAdapter(dict[str, RepoTarget]).validate_json(args.repos.read_text()),
+        export = TypeAdapter(list[ExportEntry]).validate_json(args.snapshot.read_text())
+        accounts = (
+            TypeAdapter(dict[str, uuid.UUID]).validate_json(args.accounts.read_text())
+            if args.accounts
+            else {}
         )
+        repos = TypeAdapter(dict[str, RepoTarget]).validate_json(args.repos.read_text())
     except ValidationError:
         parser.error("Invalid export or mapping schema; check the documented input formats.")
-    except ValueError as exc:
-        parser.error(str(exc))
     database_url = os.environ.get("DAIMON_DATABASE__URL")
     if not database_url:
         parser.error("Set DAIMON_DATABASE__URL for the destination database.")
-    asyncio.run(run_import(entries, database_url=database_url, apply=args.apply))
-    args.manifest.write_text(json.dumps(manifest_for(entries), indent=2) + "\n")
+    try:
+        entries, owners = asyncio.run(
+            run_import(
+                export,
+                accounts,
+                repos,
+                tenant=args.tenant,
+                database_url=database_url,
+                apply=args.apply,
+            )
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    names = {account: discord_id for discord_id, account in owners.items()}
+    args.manifest.write_text(json.dumps(manifest_for(entries, names), indent=2) + "\n")
     print(f"{'Applied' if args.apply else 'Dry run verified'} {len(entries)} entries.")
 
 
