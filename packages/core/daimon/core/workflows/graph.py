@@ -16,8 +16,10 @@ from daimon.core.workflows.spec import (
     ApprovalNode,
     BranchNode,
     CodeNode,
+    Deliver,
     FinishNode,
     ForEachNode,
+    PostNode,
     Spec,
     TransformNode,
     WaitNode,
@@ -25,9 +27,10 @@ from daimon.core.workflows.spec import (
 )
 from pydantic import JsonValue
 
-EdgeKind = Literal["next", "route", "case", "else", "error", "max"]
-#: Which names a template may read: a node's own data, a For each item, or a trigger's.
-Scope = Literal["node", "item", "payload", "event", "run"]
+EdgeKind = Literal["next", "route", "case", "else", "error", "max", "otherwise"]
+#: Which names a template may read: a node's own data, a For each item, a trigger's, a
+#: poll's result, or a run's card (any step, read when it settles).
+Scope = Literal["node", "item", "payload", "event", "run", "mention", "poll", "result", "card"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,8 @@ def edges_of(node_id: str, node: AnyNode) -> list[Edge]:
         out += [Edge(node_id, c.to, "case", f"cases.{i}") for i, c in enumerate(node.cases)]
         if node.else_:
             out.append(Edge(node_id, node.else_, "else", "else", "else"))
+    if isinstance(node, ApprovalNode) and node.otherwise:
+        out.append(Edge(node_id, node.otherwise, "otherwise", "otherwise", "otherwise"))
     if node.on_error and node.on_error != "fail":
         out.append(Edge(node_id, node.on_error, "error", "on_error", "error"))
     if node.on_max_visits:
@@ -174,6 +179,17 @@ def _strings(field: str, value: JsonValue, scope: Scope) -> list[Template]:
     return []
 
 
+def _deliver(prefix: str, deliver: Deliver, scope: Scope) -> list[Template]:
+    fields: dict[str, JsonValue] = {
+        "to": deliver.to,
+        "thread": deliver.thread,
+        "message": deliver.message,
+        "also": list(deliver.also or []),
+        "mention": list(deliver.mention or []),
+    }
+    return [t for name, value in fields.items() for t in _strings(prefix + name, value, scope)]
+
+
 def templates_of(node: AnyNode, scope: Scope = "node") -> list[Template]:
     """Every template string a node carries; a For each's inline node reads `item`."""
     found: list[Template] = []
@@ -197,12 +213,19 @@ def templates_of(node: AnyNode, scope: Scope = "node") -> list[Template]:
             if node.event:
                 found += _strings("event.match", node.event.match, "event")
                 found += _strings("event.key", node.event.key, scope)
+            if node.poll:
+                found += _strings("poll.args", node.poll.args or {}, scope)
+                found += _strings("poll.until", node.poll.until, "result")
         case ForEachNode():
             found += _strings("items", node.items, scope) + templates_of(node.do, "item")
         case FinishNode():
             found += _strings("output", node.output, scope)
             if node.deliver:
-                found += _strings("deliver.message", node.deliver.message, scope)
+                found += _deliver("deliver.", node.deliver, scope)
+            for key, value in (node.state or {}).items():
+                found += _strings("state", key, scope) + _strings(f"state.{key}", value, scope)
+        case PostNode():
+            found += _deliver("", node, scope)
         case ActionNode():
             found += _strings("args", node.args or {}, scope)
         case _:
@@ -211,7 +234,7 @@ def templates_of(node: AnyNode, scope: Scope = "node") -> list[Template]:
 
 
 def spec_templates(spec: Spec) -> list[Template]:
-    """Template strings outside the nodes: label, concurrency key and trigger mappings."""
+    """Template strings outside the nodes: label, concurrency key, trigger mappings and card."""
     found = _strings("label", spec.label, "run")
     if spec.concurrency:
         found += _strings("concurrency.key", spec.concurrency.key, "run")
@@ -222,4 +245,13 @@ def spec_templates(spec: Spec) -> list[Template]:
         elif trigger.kind == "event":
             found += _strings(f"triggers.{i}.match", trigger.match, "event")
             found += _strings(f"triggers.{i}.inputs", trigger.inputs, "event")
+        elif trigger.kind == "mention":
+            found += _strings(f"triggers.{i}.match", trigger.match, "mention")
+            found += _strings(f"triggers.{i}.inputs", trigger.inputs, "mention")
+        elif trigger.kind == "poll":
+            found += _strings(f"triggers.{i}.args", trigger.args or {}, "run")
+            found += _strings(f"triggers.{i}.start_when", trigger.start_when, "poll")
+            found += _strings(f"triggers.{i}.inputs", trigger.inputs, "poll")
+    if spec.card:
+        found += _strings("card.fields", spec.card.fields, "card")
     return found

@@ -168,6 +168,7 @@ async def _validate(env: Env, spec: dict[str, Any], catalog: Catalog | None = No
         spec,
         catalog or await _catalog(env),
         run_budget_usd=obj(spec.get("limits")).get("budget_usd") or budget,
+        now=env.now,
     )
 
 

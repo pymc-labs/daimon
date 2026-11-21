@@ -23,10 +23,12 @@ from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_triggers import EventRow, TriggerRow
 from daimon.core.workflows import runs
 from daimon.core.workflows.access import may_run
+from daimon.core.workflows.clock import add_duration
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.runs import Sessions
-from daimon.core.workflows.spec import CallTrigger, Spec, parse_duration, parse_spec
+from daimon.core.workflows.spec import CallTrigger, Spec, parse_spec
+from daimon.core.workflows.taint import UNTRUSTED_TRIGGERS
 from pydantic import JsonValue, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 FRESHNESS: Final = timedelta(minutes=15)
 #: The daily spend cap of a webhook or event trigger that names none.
 DEFAULT_SPEND_CAP_USD: Final = Decimal(20)
-_UNTRUSTED: Final = frozenset({"webhook", "event"})
 _BATCH: Final = 50
 log = structlog.get_logger(__name__)
 
@@ -139,12 +140,12 @@ async def _hold(
     concurrency = spec.concurrency
     if concurrency is None or concurrency.on_conflict != "debounce" or event.test:
         return None
-    quiet = parse_duration(concurrency.debounce) if concurrency.debounce else timedelta(minutes=1)
     key = runs.concurrency_key(spec, inputs, now)
     for newer in await store.accepted_after(session, event):
         if runs.concurrency_key(spec, newer.inputs or {}, now) == key:
             return "superseded"
-    return "later" if event.received_at + quiet > now else None
+    quiet_until = add_duration(event.received_at, concurrency.debounce or "1m", spec.timezone)
+    return "later" if quiet_until > now else None
 
 
 async def _over_cap(
@@ -213,7 +214,7 @@ async def _start_one(
         return None if held == "later" else held
     if (
         not event.test
-        and trigger.kind in _UNTRUSTED
+        and trigger.kind in UNTRUSTED_TRIGGERS
         and await _over_cap(session, trigger, config, now)
     ):
         return "spend_cap"
@@ -236,7 +237,7 @@ async def _start_one(
             trigger_key=trigger.trigger_key,
             inputs=inputs,
             mode="test" if event.test else "live",
-            untrusted_inputs=trigger.kind in _UNTRUSTED,
+            untrusted_inputs=trigger.kind in UNTRUSTED_TRIGGERS,
         ),
         now=now,
     )

@@ -10,8 +10,12 @@ codes it shares are listed in the shared fixtures
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 from typing import Final, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from daimon.core.continuity.watch_projection import projection_path
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.workflows.expressions import (
     ExpressionError,
     check_template,
@@ -39,18 +43,31 @@ from daimon.core.workflows.spec import (
     ApprovalNode,
     BranchNode,
     CodeNode,
+    Deliver,
     EventTrigger,
     FinishNode,
     ForEachNode,
+    MentionTrigger,
+    PollTrigger,
+    PostNode,
+    ScheduleTrigger,
     SchemaField,
     Spec,
     TransformNode,
     WaitNode,
     WebhookTrigger,
+    business_days,
     parse_duration,
     parse_spec,
 )
-from daimon.core.workflows.taint import Catalog, node_writes, offers, tainted_steps
+from daimon.core.workflows.taint import (
+    Catalog,
+    node_scopes,
+    node_writes,
+    offers,
+    tainted_steps,
+    tool_writes,
+)
 from daimon.core.workflows.unattended import bound_by
 from pydantic import BaseModel, JsonValue, ValidationError
 
@@ -74,7 +91,15 @@ _ROOTS: Final[dict[str, frozenset[str]]] = {
     "event": frozenset({"inputs", "trigger", "steps", "run", "workflow", "event"}),
     "payload": frozenset({"payload", "trigger"}),
     "run": frozenset({"inputs", "trigger", "run", "workflow"}),
+    "mention": frozenset({"message", "thread", "trigger"}),
+    "poll": frozenset({"item", "trigger"}),
+    "result": frozenset({"inputs", "trigger", "steps", "run", "workflow", "result"}),
+    "card": frozenset({"inputs", "trigger", "steps", "run", "workflow"}),
 }
+_POLL_EVERY: Final = (timedelta(minutes=1), timedelta(days=1))
+#: An extra direct message: owner, run_as, a person or a template.
+_DM: Final = re.compile(r"owner|run_as|person:\S.*|\$\{\{.+\}\}")
+_MENTION: Final = re.compile(r"(person|role):\S.*|\$\{\{.+\}\}")
 
 Severity = Literal["error", "warning"]
 RuleClass = Literal["U", "S", "W"]
@@ -85,6 +110,7 @@ GrantKind = Literal[
     "unverified_webhook",
     "budget_over_default",
     "untrusted_waiver",
+    "scoped_write",
 ]
 
 
@@ -129,6 +155,7 @@ def validate_document(
     catalog: Catalog | None = None,
     *,
     run_budget_usd: float = DEFAULT_RUN_BUDGET_USD,
+    now: datetime | None = None,
 ) -> Validation:
     """Validate raw JSON: schema problems first, then `validate_spec`."""
     try:
@@ -140,12 +167,17 @@ def validate_document(
             node = loc[1] if len(loc) > 1 and loc[0] == "nodes" else None
             report.error("schema", f"{'.'.join(loc)}: {e['msg']}", node)
         return Validation(errors=report.errors, warnings=[], grants=[], classes={})
-    return validate_spec(spec, catalog, run_budget_usd=run_budget_usd)
+    return validate_spec(spec, catalog, run_budget_usd=run_budget_usd, now=now)
 
 
 def validate_spec(
-    spec: Spec, catalog: Catalog | None = None, *, run_budget_usd: float = DEFAULT_RUN_BUDGET_USD
+    spec: Spec,
+    catalog: Catalog | None = None,
+    *,
+    run_budget_usd: float = DEFAULT_RUN_BUDGET_USD,
+    now: datetime | None = None,
 ) -> Validation:
+    """`now`, when given, refuses one-time schedules already past."""
     report = _Report()
     nodes = spec.nodes
     if spec.start not in nodes:
@@ -169,12 +201,15 @@ def validate_spec(
         _check_template(spec, template, None, None, report)
     _check_loops(spec, report)
     _check_spec(spec, report)
+    _check_durations(spec, report)
+    _check_triggers(spec, catalog, now, report)
     tainted = tainted_steps(spec, catalog)
     classes, grants = _classes_and_grants(spec, catalog, tainted, run_budget_usd)
     for node_id, node in nodes.items():
-        c = classes[node_id]
         waived = isinstance(node, AgentNode) and node.untrusted_waiver
-        if "U" in c and "W" in c and not bound_by(spec, node_id) and not waived:
+        # Scoped writes pin their destination, so untrusted input may steer only `free` args.
+        unscoped = node_writes(node, catalog)
+        if node_id in tainted and unscoped and not bound_by(spec, node_id) and not waived:
             report.error("rule_of_two", "Untrusted input reaches a write", node_id)
     return Validation(
         errors=report.errors, warnings=report.warnings, grants=grants, classes=classes
@@ -216,6 +251,9 @@ def _check_template(
             and rest[0] not in (spec.inputs.properties if spec.inputs else {})
         ):
             report.error("unknown_ref", f"Unknown input: {'.'.join(ref.path)}", node_id)
+        elif root == "steps" and rest and template.scope == "card":
+            if rest[0] not in spec.nodes:  # a card reads any step; one not yet run is null
+                report.error("unknown_ref", f"Unknown step: {'.'.join(ref.path)}", node_id)
         elif root == "steps" and rest:
             _check_step_ref(
                 spec, ref.path, node_id, up, sure, ref.guarded or rest[0] in guards, report
@@ -272,12 +310,12 @@ def _check_node(
     match node:
         case AgentNode():
             _check_agent(spec, node_id, node, catalog, report)
-            if node.timeout and parse_duration(node.timeout) > MAX_AGENT_TIMEOUT:
+            if _longer(node.timeout, MAX_AGENT_TIMEOUT):
                 report.error("limit", "An agent step runs at most 45 minutes", node_id)
-        case CodeNode() if node.timeout and parse_duration(node.timeout) > MAX_CODE_TIMEOUT:
+        case CodeNode() if _longer(node.timeout, MAX_CODE_TIMEOUT):
             report.error("limit", "A code step runs at most 60 minutes", node_id)
-        case ActionNode() if catalog is not None and not offers(catalog.tools, node.tool):
-            report.error("unknown_tool", f"Unknown tool: {node.tool}", node_id)
+        case ActionNode():
+            _check_action(node_id, node, catalog, report)
         case ApprovalNode():
             _check_approval(spec, node_id, node, report)
         case ForEachNode():
@@ -291,20 +329,88 @@ def _check_node(
                 report.error("do_edges", "The step run for each item has no next steps", node_id)
             if isinstance(inner, AgentNode):
                 _check_agent(spec, node_id, inner, catalog, report)
-            if (
-                isinstance(inner, ActionNode)
-                and catalog is not None
-                and not offers(catalog.tools, inner.tool)
-            ):
-                report.error("unknown_tool", f"Unknown tool: {inner.tool}", node_id)
+            if isinstance(inner, ActionNode):
+                _check_action(node_id, inner, catalog, report)
+            if isinstance(inner, PostNode):
+                _check_deliver(spec, node_id, inner, report)
             if (node.concurrency or 1) > _COSTLY_CONCURRENCY and isinstance(inner, AgentNode):
                 report.warn("cost", "Agent per item, high concurrency", node_id)
-        case WaitNode() if node.event and not _wait_source(spec, node.event.source):
-            report.error("bad_event_source", _BAD_WAIT_SOURCE, node_id)
-        case FinishNode() if node.deliver and node.deliver.to == "home" and spec.home is None:
-            report.error("no_home", "Delivery to home needs a home channel", node_id)
+        case WaitNode():
+            if node.event and not _wait_source(spec, node.event.source):
+                report.error("bad_event_source", _BAD_WAIT_SOURCE, node_id)
+            if node.poll:
+                poll = node.poll
+                _check_poll(node_id, poll.agent, poll.tool, poll.every, catalog, report)
+        case FinishNode() if node.deliver:
+            _check_deliver(spec, node_id, node.deliver, report)
+        case PostNode():
+            _check_deliver(spec, node_id, node, report)
         case _:
             pass
+
+
+def _longer(duration: str | None, limit: timedelta) -> bool:
+    if not duration or business_days(duration) is not None:
+        return False
+    return parse_duration(duration) > limit
+
+
+def _check_action(node_id: str, node: ActionNode, catalog: Catalog | None, report: _Report) -> None:
+    if catalog is not None and not offers(catalog.tools, node.tool):
+        report.error("unknown_tool", f"Unknown tool: {node.tool}", node_id)
+    if any(s.tool != node.tool for s in node.writes_to or []):
+        report.error("scope_tool", "A scoped write names a tool this Action does not call", node_id)
+    _check_scopes(node_id, node, report)
+
+
+def _check_scopes(node_id: str, node: AgentNode | ActionNode, report: _Report) -> None:
+    for scope in node.writes_to or []:
+        if not scope.where:
+            report.error("scope_unbounded", f"{scope.tool} needs at least one where rule", node_id)
+        for rule in scope.where.values():
+            # A template could carry untrusted text into the allowlist.
+            fixed = [*(rule.in_ or []), *(rule.prefix or []), *(rule.domains or [])]
+            if any(isinstance(x, str) and expressions_in(x) for x in fixed):
+                report.error("scope_literal", "Allowed values are fixed text", node_id)
+            if rule.created_by and not _is_path(rule.created_by.id):
+                report.error("scope_path", f"Not a path: {rule.created_by.id}", node_id)
+
+
+def _is_path(text: str) -> bool:
+    try:
+        projection_path(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _check_deliver(spec: Spec, node_id: str, deliver: Deliver, report: _Report) -> None:
+    if deliver.to == "home" and spec.home is None:
+        report.error("no_home", "Delivery to home needs a home channel", node_id)
+    if deliver.to == "origin" and spec.home is None:
+        report.warn("no_home", "A run that no chat message started delivers home", node_id)
+    for target in deliver.also or []:
+        if not _DM.fullmatch(target):
+            report.error("bad_target", f"Not a person: {target}", node_id)
+    for target in deliver.mention or []:
+        if not _MENTION.fullmatch(target):
+            report.error("bad_target", f"Not a person or a role: {target}", node_id)
+
+
+def _check_poll(
+    where: str | None, agent: str, tool: str, every: str, catalog: Catalog | None, report: _Report
+) -> None:
+    low, high = _POLL_EVERY
+    if business_days(every) is None and not low <= parse_duration(every) <= high:
+        report.error("poll_interval", "A poll runs every 1 minute to 1 day", where)
+    if tool.rpartition("/")[0] == DAIMON_SERVER_NAME or tool_writes(tool, catalog):
+        report.error("poll_tool", "A poll calls another service's read tool", where)
+    if catalog is None:
+        return
+    if agent not in catalog.agents:
+        report.error("unknown_agent", f"Unknown agent: {agent}", where)
+    elif not offers(catalog.agents[agent], tool):
+        report.error("unknown_tool", f"{agent} cannot call {tool}", where)
 
 
 def _check_agent(
@@ -313,12 +419,18 @@ def _check_agent(
     agent = node.agent or (spec.defaults.agent if spec.defaults else None)
     if agent is None:
         report.error("no_agent", "Choose an agent", node_id)
+    _check_scopes(node_id, node, report)
+    if catalog is not None and catalog.skills is not None:
+        for skill in node.skills or []:
+            if skill not in catalog.skills:
+                report.error("unknown_skill", f"Unknown skill: {skill}", node_id)
     if catalog is None or agent is None:
         return
     if agent not in catalog.agents:
         report.error("unknown_agent", f"Unknown agent: {agent}", node_id)
         return
-    for tool in node.tools if isinstance(node.tools, list) else []:
+    listed = node.tools if isinstance(node.tools, list) else []
+    for tool in [*listed, *(s.tool for s in node.writes_to or [])]:
         if not offers(catalog.agents[agent], tool):
             report.error("unknown_tool", f"{agent} cannot call {tool}", node_id)
 
@@ -348,6 +460,8 @@ def _check_approval(spec: Spec, node_id: str, node: ApprovalNode, report: _Repor
         report.error("approval_routes", "A choice needs two or more routes", node_id)
     if node.answer in (None, "approve") and routes and "approve" not in routes:
         report.error("approval_routes", "Approve or reject needs an approve route", node_id)
+    if node.otherwise and node.answer in ("text", "form"):
+        report.error("approval_routes", "Otherwise needs options to answer with", node_id)
     for bound in [node.binds] if isinstance(node.binds, str) else node.binds or []:
         if bound not in spec.nodes:
             report.error("unknown_bind", f"Binds unknown step: {bound}", node_id)
@@ -406,15 +520,92 @@ def _check_loops(spec: Spec, report: _Report) -> None:
             e.source,
         ]
         nodes = [spec.nodes[x] for x in loop if x in spec.nodes]
-        if not any(not isinstance(n, FinishNode) and n.max_visits for n in nodes):
+        capped = any(not isinstance(n, FinishNode) and n.max_visits for n in nodes)
+        if not capped and not _gated(spec, set(loop)):
             report.error("loop_limit", "Loop needs max visits", e.target)
         if not budget and any(isinstance(n, AgentNode) for n in nodes):
             report.warn("cost", "Agent loop without budget", e.target)
 
 
+def _gated(spec: Spec, loop: set[str]) -> bool:
+    """Every cycle through `loop` passes an Approval: a person answers before each lap, and
+    the run's step, budget and deadline limits bound it."""
+    rest = {x for x in loop if x in spec.nodes and not isinstance(spec.nodes[x], ApprovalNode)}
+    state: dict[str, int] = {}
+
+    def cycles(node_id: str) -> bool:
+        state[node_id] = 1
+        for e in edges_of(node_id, spec.nodes[node_id]):
+            if e.target in rest and (
+                state.get(e.target) == 1 or (e.target not in state and cycles(e.target))
+            ):
+                return True
+        state[node_id] = 2
+        return False
+
+    return not any(x not in state and cycles(x) for x in rest)
+
+
+def _check_durations(spec: Spec, report: _Report) -> None:
+    """Business days only time waits, approval timeouts and reminders."""
+    fixed: list[tuple[str | None, str | None]] = [
+        (None, spec.concurrency and spec.concurrency.debounce),
+        (None, spec.limits and spec.limits.deadline),
+        *((None, t.every) for t in spec.triggers or [] if isinstance(t, PollTrigger)),
+    ]
+    for node_id, node in spec.nodes.items():
+        inner = node.do if isinstance(node, ForEachNode) else node
+        if isinstance(inner, AgentNode | CodeNode | ActionNode):
+            fixed.append((node_id, inner.timeout))
+        if isinstance(node, WaitNode):
+            fixed += [(node_id, node.timeout), (node_id, node.poll and node.poll.every)]
+    for node_id, duration in fixed:
+        if duration and business_days(duration) is not None:
+            report.error("business_days_here", "Business days time waits and approvals", node_id)
+
+
+def _check_triggers(
+    spec: Spec, catalog: Catalog | None, now: datetime | None, report: _Report
+) -> None:
+    for trigger in spec.triggers or []:
+        match trigger:
+            case ScheduleTrigger():
+                _check_schedule(trigger, now, report)
+            case MentionTrigger() if not trigger.channels and not trigger.match:
+                report.error("mention_shape", "A mention trigger needs channels or a match")
+            case PollTrigger():
+                _check_poll(None, trigger.agent, trigger.tool, trigger.every, catalog, report)
+                paths = [trigger.items or ".", trigger.key, *(trigger.watch or [])]
+                if not all(_is_path(x) for x in paths):
+                    report.error("poll_shape", "Items, key and watched fields are paths, as .id")
+                if trigger.watch and trigger.rule != "updated":
+                    report.error("poll_shape", "Watched fields need the updated rule")
+            case _:
+                pass
+
+
+def _check_schedule(trigger: ScheduleTrigger, now: datetime | None, report: _Report) -> None:
+    if (trigger.cron is None) == (trigger.at is None):
+        report.error("schedule_shape", "A schedule has a cron or a time, not both")
+    if (trigger.every_weeks is None) != (trigger.anchor is None) or (
+        trigger.every_weeks and trigger.cron is None
+    ):
+        report.error("schedule_shape", "Every few weeks needs a cron and an anchor date")
+    if trigger.at and trigger.catch_up:
+        report.error("schedule_shape", "A one-time schedule has no catch-up")
+    if trigger.at and now and trigger.at <= now:
+        report.error("at_in_past", f"{trigger.id} is set for a time already past")
+
+
 def _check_spec(spec: Spec, report: _Report) -> None:
-    if spec.limits and spec.limits.deadline and parse_duration(spec.limits.deadline) > MAX_DEADLINE:
+    if spec.limits and _longer(spec.limits.deadline, MAX_DEADLINE):
         report.error("limit", "A run's deadline is at most 90 days")
+    if spec.timezone and not _is_timezone(spec.timezone):
+        report.error("bad_timezone", f"Unknown timezone: {spec.timezone}")
+    if any(expressions_in(x) for x in spec.destinations or []):
+        report.error("destination_literal", "Destinations are fixed ids")
+    if spec.card and spec.card.date and spec.card.date not in spec.card.fields:
+        report.error("card_date", f"The card has no field {spec.card.date}")
     if any(
         isinstance(t, EventTrigger) and not _EVENT_SOURCE.fullmatch(t.source)
         for t in spec.triggers or []
@@ -436,6 +627,14 @@ def _check_spec(spec: Spec, report: _Report) -> None:
         )
 
 
+def _is_timezone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+    return True
+
+
 def _classes_and_grants(
     spec: Spec, catalog: Catalog | None, tainted: set[str], run_budget_usd: float
 ) -> tuple[dict[str, list[RuleClass]], list[Grant]]:
@@ -443,13 +642,15 @@ def _classes_and_grants(
     grants: list[Grant] = []
     for node_id, node in spec.nodes.items():
         writes = node_writes(node, catalog)
+        scopes = node_scopes(node)
         c: list[RuleClass] = ["U"] if node_id in tainted else []
         if isinstance(node, AgentNode | ForEachNode) or (
-            isinstance(node, ActionNode) and not writes
+            isinstance(node, ActionNode) and not tool_writes(node.tool, catalog)
         ):
             c.append("S")
-        if writes:
+        if writes or scopes:
             c.append("W")
+        grants += [Grant(kind="scoped_write", node=node_id, detail=s.tool) for s in scopes]
         classes[node_id] = c
         if writes and not bound_by(spec, node_id):
             detail = node.tool if isinstance(node, ActionNode) else "Agent writes"

@@ -5817,6 +5817,757 @@
     "done": []
    },
    "seed": "prs"
+  },
+  {
+   "name": "a loop through an approval needs no max visits",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft.",
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "routes": {
+       "approve": "done",
+       "reject": "draft"
+      }
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": []
+  },
+  {
+   "name": "a loop with a lap that skips the approval needs max visits",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft.",
+      "routes": {
+       "again": "draft",
+       "ok": "review"
+      }
+     },
+     "review": {
+      "kind": "approval",
+      "routes": {
+       "approve": "done",
+       "reject": "draft"
+      }
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "errors": [
+    "loop_limit:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a scoped write on an exposed agent keeps the Rule of Two",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Reply.",
+      "builtins": "all",
+      "writes_to": [
+       {
+        "tool": "gmail/send_message",
+        "where": {
+         "to": {
+          "domains": [
+           "example.com"
+          ]
+         }
+        },
+        "free": [
+         "subject",
+         "body"
+        ]
+       }
+      ],
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "builtins:draft",
+    "scoped_write:draft"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S",
+     "W"
+    ],
+    "done": []
+   }
+  },
+  {
+   "name": "an exposed agent that also writes freely breaks the Rule of Two",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Reply.",
+      "builtins": "all",
+      "writes_to": [
+       {
+        "tool": "gmail/send_message",
+        "where": {
+         "to": {
+          "domains": [
+           "example.com"
+          ]
+         }
+        },
+        "free": [
+         "subject",
+         "body"
+        ]
+       }
+      ],
+      "writes": "allow",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "errors": [
+    "rule_of_two:draft"
+   ],
+   "warnings": [],
+   "grants": [
+    "builtins:draft",
+    "scoped_write:draft",
+    "unattended_write:draft"
+   ]
+  },
+  {
+   "name": "saved state from earlier runs is untrusted",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Reply.",
+      "inputs": {
+       "last": "${{ workflow.state.last }}"
+      },
+      "writes": "allow",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "errors": [
+    "rule_of_two:draft"
+   ],
+   "warnings": [],
+   "grants": [
+    "unattended_write:draft"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S",
+     "W"
+    ],
+    "done": []
+   }
+  },
+  {
+   "name": "business days time waits and approvals only",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "limits": {
+     "deadline": "3bd"
+    },
+    "start": "pause",
+    "nodes": {
+     "pause": {
+      "kind": "wait",
+      "for": "2bd",
+      "next": "ask"
+     },
+     "ask": {
+      "kind": "approval",
+      "timeout": {
+       "after": "1bd",
+       "route": "fail"
+      },
+      "remind_every": "1bd",
+      "routes": {
+       "approve": "draft",
+       "reject": "done"
+      }
+     },
+     "draft": {
+      "kind": "agent",
+      "instructions": "Go.",
+      "timeout": "1bd",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "business_days_here:",
+    "business_days_here:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "scoped writes need fixed where rules for their own tool",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Go.",
+      "next": "send",
+      "writes_to": [
+       {
+        "tool": "gmail/send_message",
+        "free": [
+         "body"
+        ]
+       },
+       {
+        "tool": "gmail/send_message",
+        "where": {
+         "to": {
+          "in": [
+           "${{ inputs.to }}"
+          ]
+         }
+        }
+       },
+       {
+        "tool": "notes/update_page",
+        "where": {
+         "page_id": {
+          "created_by": {
+           "tool": "notes/create_page",
+           "id": "id"
+          }
+         }
+        }
+       }
+      ]
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {},
+      "next": "done",
+      "writes_to": [
+       {
+        "tool": "slack/post",
+        "where": {
+         "channel": {
+          "in": [
+           "C1"
+          ]
+         }
+        }
+       }
+      ]
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "scope_literal:draft",
+    "scope_path:draft",
+    "scope_tool:send",
+    "scope_unbounded:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "mention, poll and schedule shapes",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "m",
+      "kind": "mention"
+     },
+     {
+      "id": "p",
+      "kind": "poll",
+      "agent": "writer",
+      "tool": "daimon-mcp/list_things",
+      "every": "30s",
+      "key": ".id",
+      "watch": [
+       ".status"
+      ]
+     },
+     {
+      "id": "s",
+      "kind": "schedule",
+      "cron": "0 9 * * 1",
+      "at": "2026-12-01T10:00:00+02:00"
+     },
+     {
+      "id": "w",
+      "kind": "schedule",
+      "cron": "0 9 * * 1",
+      "every_weeks": 2
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "done",
+    "nodes": {
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "mention_shape:",
+    "poll_interval:",
+    "poll_shape:",
+    "poll_tool:",
+    "schedule_shape:"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "valid mention, poll and schedule triggers",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "m",
+      "kind": "mention",
+      "match": "message.text.contains('request')",
+      "inputs": {
+       "text": "${{ message.text }}",
+       "link": "${{ thread.link }}"
+      }
+     },
+     {
+      "id": "p",
+      "kind": "poll",
+      "agent": "writer",
+      "tool": "notion/list_pages",
+      "every": "5m",
+      "items": ".results",
+      "key": ".id",
+      "rule": "updated",
+      "watch": [
+       ".properties.Status"
+      ],
+      "start_when": "${{ item.status == 'Done' }}",
+      "once": true,
+      "inputs": {
+       "page": "${{ item.id }}"
+      }
+     },
+     {
+      "id": "s",
+      "kind": "schedule",
+      "cron": "0 9 * * 1",
+      "timezone": "America/New_York",
+      "every_weeks": 2,
+      "anchor": "2026-07-20"
+     },
+     {
+      "id": "o",
+      "kind": "schedule",
+      "at": "2026-12-01T10:00:00+02:00"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "done",
+    "nodes": {
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [],
+   "warnings": []
+  },
+  {
+   "name": "delivery targets, timezone, destinations and card",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "timezone": "Mars/Base",
+    "destinations": [
+     "C1",
+     "${{ inputs.channel }}"
+    ],
+    "card": {
+     "fields": {
+      "due": "${{ steps.nope.output }}"
+     },
+     "date": "when"
+    },
+    "start": "post",
+    "nodes": {
+     "post": {
+      "kind": "post",
+      "to": "origin",
+      "thread": "Weekly ${{ run.date }}",
+      "also": [
+       "owner",
+       "#general"
+      ],
+      "mention": [
+       "role:pm",
+       "@here"
+      ],
+      "message": "Hi",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home"
+      },
+      "state": {
+       "${{ inputs.key }}": "${{ steps.post.output }}"
+      }
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "bad_target:post",
+    "bad_timezone:",
+    "card_date:",
+    "destination_literal:",
+    "no_home:done",
+    "unknown_ref:",
+    "unknown_ref:done"
+   ],
+   "warnings": [
+    "no_home:post"
+   ]
+  },
+  {
+   "name": "posts per item and a board card",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "home": {
+     "channel": "C0HOME"
+    },
+    "timezone": "Europe/Berlin",
+    "destinations": [
+     "C1",
+     "person:u1"
+    ],
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "rows": {
+       "type": "array"
+      }
+     }
+    },
+    "card": {
+     "fields": {
+      "rows": "${{ inputs.rows }}",
+      "posted": "${{ steps.each.output }}"
+     },
+     "date": "rows"
+    },
+    "start": "each",
+    "nodes": {
+     "each": {
+      "kind": "for_each",
+      "items": "${{ inputs.rows }}",
+      "do": {
+       "kind": "post",
+       "to": "home",
+       "message": "${{ item.name }}"
+      },
+      "next": "done",
+      "stage": "Posting"
+     },
+     "done": {
+      "kind": "finish",
+      "stage": "Done"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [],
+   "warnings": []
+  },
+  {
+   "name": "otherwise routes a reply with no option word",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "ask",
+    "nodes": {
+     "ask": {
+      "kind": "approval",
+      "answer": "choice",
+      "routes": {
+       "publish": "done",
+       "drop": "done"
+      },
+      "otherwise": "revise"
+     },
+     "revise": {
+      "kind": "agent",
+      "instructions": "Revise.",
+      "next": "ask"
+     },
+     "text": {
+      "kind": "approval",
+      "answer": "text",
+      "otherwise": "done",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "approval_routes:text",
+    "unreachable:text"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a poll wait and skills the library has",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Ext",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "pause",
+    "nodes": {
+     "pause": {
+      "kind": "wait",
+      "poll": {
+       "agent": "writer",
+       "tool": "notion/get_page",
+       "args": {
+        "id": "x"
+       },
+       "every": "10m",
+       "until": "${{ result.done }}"
+      },
+      "next": "draft"
+     },
+     "draft": {
+      "kind": "agent",
+      "instructions": "Go.",
+      "skills": [
+       "utm-rules",
+       "missing"
+      ],
+      "inputs": {
+       "page": "${{ steps.pause.output }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "unknown_skill:draft"
+   ],
+   "warnings": [],
+   "catalog": {
+    "agents": {
+     "writer": [
+      "notion/get_page"
+     ]
+    },
+    "tools": {
+     "notion/get_page": {
+      "untrusted": true
+     }
+    },
+    "skills": [
+     "utm-rules"
+    ]
+   },
+   "classes": {
+    "pause": [
+     "U"
+    ],
+    "draft": [
+     "U",
+     "S"
+    ],
+    "done": []
+   }
   }
  ]
 }

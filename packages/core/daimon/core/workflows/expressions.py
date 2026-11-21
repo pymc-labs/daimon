@@ -37,10 +37,24 @@ MAX_SOURCE: Final = 4096
 MAX_DEPTH: Final = 200
 MAX_STEPS: Final = 50_000
 MAX_STRING: Final = 1 << 20
-#: Names an expression may start from. `payload` (trigger mappings) and `event` (event
-#: matches) exist only where the spec says.
+#: Names an expression may start from. `payload` (trigger mappings), `event` (event
+#: matches), `message` and `thread` (mention triggers) and `result` (poll waits) exist only
+#: where the spec says.
 NAMESPACES: Final = frozenset(
-    {"inputs", "trigger", "steps", "item", "index", "run", "workflow", "payload", "event"}
+    {
+        "inputs",
+        "trigger",
+        "steps",
+        "item",
+        "index",
+        "run",
+        "workflow",
+        "payload",
+        "event",
+        "message",
+        "thread",
+        "result",
+    }
 )
 
 _EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)

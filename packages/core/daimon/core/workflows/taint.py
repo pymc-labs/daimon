@@ -1,8 +1,9 @@
 """Which steps see untrusted data, for the Rule of Two.
 
-Untrusted: inputs and trigger data when a webhook or event can start the run (or when the
-caller says so, as for a manual run by someone other than the publisher), Action results,
-Wait payloads, answers from people who are not the owner or an editor, built-in web tools,
+Untrusted: inputs and trigger data when a webhook, event, mention or poll can start the run
+(or when the caller says so, as for a manual run by someone other than the publisher),
+Action results, Wait payloads, answers from people who are not the owner or an editor,
+`workflow.state` and `workflow.last_run` (earlier runs wrote them), built-in web tools,
 third-party read tools (`tool_facts`), and agent lanes an exposed step shared
 earlier. Taint follows references until nothing changes.
 """
@@ -29,6 +30,7 @@ from daimon.core.workflows.spec import (
     ForEachNode,
     Spec,
     WaitNode,
+    WriteScope,
 )
 from pydantic import BaseModel, ConfigDict
 
@@ -36,6 +38,10 @@ _TRUSTED_ANSWERERS: Final = frozenset({"owner", "editors"})
 #: The tool name for every tool of a server whose toolset is on by default (`server/*`):
 #: its tools are not listed, so it counts as unknown, a write and an untrusted read.
 ANY_TOOL: Final = "*"
+#: Triggers whose runs start from outside data.
+UNTRUSTED_TRIGGERS: Final = frozenset({"webhook", "event", "mention", "poll"})
+#: `workflow.*` fields earlier runs wrote.
+_UNTRUSTED_WORKFLOW: Final = frozenset({"state", "last_run"})
 
 
 class ToolFacts(BaseModel):
@@ -55,6 +61,8 @@ class Catalog(BaseModel):
     tools: dict[str, ToolFacts]
     #: Classes the tools it does not list, as the run-time rule does.
     policy: ToolSafetyPolicy = OPEN_TOOL_SAFETY
+    #: The workspace library's skill names; None skips the skill check.
+    skills: frozenset[str] | None = None
 
 
 def catalog_of(policy: ToolSafetyPolicy, agent_tools: Mapping[str, Sequence[str]]) -> Catalog:
@@ -89,10 +97,13 @@ def tool_writes(tool: str, catalog: Catalog | None) -> bool:
 
 
 def node_writes(node: AnyNode, catalog: Catalog | None) -> bool:
-    """An outside effect at run time: a write Action, or an agent allowed to write."""
+    """An outside effect at run time beyond its `writes_to` scopes: a write Action whose
+    tool no scope names, or an agent allowed to write. A post is not one: its targets are
+    the spec's own, as a Finish's are."""
     match node:
         case ActionNode():
-            return tool_writes(node.tool, catalog)
+            scoped = any(s.tool == node.tool for s in node.writes_to or [])
+            return tool_writes(node.tool, catalog) and not scoped
         case AgentNode():
             return node.writes == "allow" or node.review == "auto"
         case CodeNode():
@@ -101,6 +112,12 @@ def node_writes(node: AnyNode, catalog: Catalog | None) -> bool:
             return node_writes(node.do, catalog)
         case _:
             return False
+
+
+def node_scopes(node: AnyNode) -> list[WriteScope]:
+    """The scoped writes a step (or a For each's item step) may make unwatched."""
+    inner = node.do if isinstance(node, ForEachNode) else node
+    return list(inner.writes_to or []) if isinstance(inner, AgentNode | ActionNode) else []
 
 
 def human_answer(node: ApprovalNode) -> bool:
@@ -134,7 +151,7 @@ def _exposed(node: AnyNode, spec: Spec, catalog: Catalog | None) -> bool:
                 (catalog.tools.get(t) or tool_facts(catalog.policy, t)).untrusted
                 for t in _agent_tools(inner, spec, catalog)
             )
-    return isinstance(node, WaitNode) and node.event is not None
+    return isinstance(node, WaitNode) and (node.event is not None or node.poll is not None)
 
 
 def _refs(node: AnyNode) -> list[tuple[str, ...]]:
@@ -159,7 +176,7 @@ def tainted_steps(
 ) -> set[str]:
     """Node ids that read or are exposed to untrusted data (class U)."""
     if untrusted_inputs is None:
-        untrusted_inputs = any(t.kind in ("webhook", "event") for t in spec.triggers or [])
+        untrusted_inputs = any(t.kind in UNTRUSTED_TRIGGERS for t in spec.triggers or [])
     refs = {node_id: _refs(node) for node_id, node in spec.nodes.items()}
     tainted: set[str] = set()
     changed = True
@@ -170,6 +187,9 @@ def tainted_steps(
                 continue
             reads = refs[node_id]
             from_inputs = untrusted_inputs and any(p[0] in ("inputs", "trigger") for p in reads)
+            from_runs = any(
+                p[0] == "workflow" and (len(p) == 1 or p[1] in _UNTRUSTED_WORKFLOW) for p in reads
+            )
             from_steps = any(
                 p[0] == "steps"
                 and len(p) > 1
@@ -181,7 +201,7 @@ def tainted_steps(
             from_lane = lane is not None and any(
                 lane_of(spec.nodes[other]) == lane for other in ancestors(spec, node_id) & tainted
             )
-            if from_inputs or from_steps or from_lane or _exposed(node, spec, catalog):
+            if from_inputs or from_runs or from_steps or from_lane or _exposed(node, spec, catalog):
                 tainted.add(node_id)
                 changed = True
     return tainted

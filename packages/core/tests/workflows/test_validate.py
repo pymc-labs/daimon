@@ -4,6 +4,7 @@ the publish it blocks."""
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,22 @@ def test_an_action_is_classified_as_tool_safety_classifies_it() -> None:
     assert grants("github/get_pull_request") == [], "a get_ name reads"
     marked = ToolSafetyPolicy(effects={"github/get_pull_request": "write"})
     assert tool_facts(marked, "github/get_pull_request").writes, "the operator's effect wins"
+
+
+def test_a_one_time_schedule_must_be_in_the_future() -> None:
+    spec: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "once",
+        "triggers": [{"id": "once", "kind": "schedule", "at": "2026-11-21T09:00:00Z"}],
+        "start": "done",
+        "nodes": {"done": {"kind": "finish"}},
+    }
+
+    def codes(now: datetime) -> list[str]:
+        return [p.code for p in validate_document(spec, None, now=now).errors]
+
+    assert codes(datetime(2026, 11, 21, 10, tzinfo=UTC)) == ["at_in_past"]
+    assert codes(datetime(2026, 11, 21, 8, tzinfo=UTC)) == []
 
 
 async def test_a_draft_with_errors_cannot_be_published(db_session: AsyncSession) -> None:
