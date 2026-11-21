@@ -113,7 +113,7 @@ function fromWait(run: Run, s: StepRun): Rec | null {
     : n.answer === "choice" ? Object.keys(n.routes ?? {}).map((name, i, all) => ({ name, label: name[0]!.toUpperCase() + name.slice(1), primary: i === all.length - 1, comment: false }))
     : approve
   return {
-    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, step_title: titleOf(s.node, n), asked_by: "Daimon",
+    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, step_title: titleOf(s.node, n), asked_by: run.spec.defaults?.agent ?? "Daimon",
     since: w.opened_at, expires_at: w.expires_at, to: w.addressees.map((p) => p.id), decision: null, routes, sent: w.sent, attachments: w.attachments,
     ...(!typed && n.form ? { form: { type: "object" as const, properties: n.form } } : {}),
     ...(typed ? { question: n.title ?? s.key, form: n.answer === "form" ? { type: "object" as const, properties: n.form ?? {} } : { type: "object" as const, properties: { text: { type: "string" as const } } } } : {}),

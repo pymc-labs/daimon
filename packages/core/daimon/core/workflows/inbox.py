@@ -27,8 +27,8 @@ from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 KEPT: Final = timedelta(days=7)
-#: Who asks when no agent does: approvals and the default agent's questions. An agent's
-#: question or proposals name its key; the web shows the agent's name.
+#: Who asks when no agent is named. An agent step names its agent and any other step the
+#: workflow's default agent, by key; the web shows the agent's name.
 ASKED_BY: Final = "Daimon"
 _NOTE: Final = {"type": "string", "title": "Note"}
 _VERB: Final = {"approve": "Approved", "reject": "Rejected", "answer": "Answered"}
@@ -120,6 +120,12 @@ def _question(node: AnyNode | None, wait: Wait, key: str) -> str:
     if wait.kind == "question":
         return str((wait.shown or {}).get("question", ""))
     return waits.step_title(node, key)
+
+
+def _asker(spec: Spec, node: AnyNode | None) -> str | None:
+    if isinstance(node, AgentNode):
+        return lanes.agent_of(spec, node)
+    return spec.defaults.agent if spec.defaults else None
 
 
 def _form(node: AnyNode | None, wait: Wait) -> dict[str, Any] | None:
@@ -246,7 +252,7 @@ async def _wait_detail(
         run={"id": str(run.id), "number": run.number},
         step=key,
         step_title=waits.step_title(node, key),
-        asked_by=(lanes.agent_of(spec, node) if isinstance(node, AgentNode) else None) or ASKED_BY,
+        asked_by=_asker(spec, node) or ASKED_BY,
         since=iso(wait.opened_at) or "",
         expires_at=iso(wait.expires_at),
         decision=decision,
