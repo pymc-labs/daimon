@@ -358,3 +358,38 @@ async def test_converted_step_decides_like_its_routine(
         assert workflow is not None
         held = await missing_grant(s, workflow, 1, spec, DEFAULT_RUN_BUDGET_USD, policy)
     assert held is None, "the move records the grants the admin approved"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"every_weeks": 2, "anchor": "2026-11-16"},
+        {"cron": None, "at": (NOW + timedelta(days=9)).isoformat()},
+    ],
+    ids=["every_weeks", "at"],
+)
+async def test_a_workflow_on_a_multi_week_or_one_time_schedule_does_not_move_back(
+    db_session: AsyncSession, change: dict[str, Any]
+) -> None:
+    env = await _env(db_session)
+    flow = await convert.from_routine(env, await _routine(db_session, env))
+    async with env.sm.begin() as s:
+        workflow = await workflows.get_workflow(s, tenant_id=env.who.tenant_id, workflow_id=flow)
+        assert workflow is not None and workflow.live_version is not None
+        live = await workflows.get_version(
+            s, tenant_id=env.who.tenant_id, workflow_id=flow, number=workflow.live_version
+        )
+        assert live is not None
+        trigger = {k: v for k, v in (live.spec["triggers"][0] | change).items() if v is not None}
+        await workflows.publish_version(
+            s,
+            tenant_id=env.who.tenant_id,
+            workflow_id=flow,
+            spec={**live.spec, "triggers": [trigger]},
+            spec_hash="h",
+            source="web",
+            published_by=env.who.account_id,
+            now=NOW,
+        )
+    with pytest.raises(Refused, match="schedule is more than a routine's"):
+        await convert.to_routine(env, flow)

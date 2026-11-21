@@ -115,6 +115,64 @@ async def test_a_republished_schedule_keeps_its_slot_and_a_dropped_one_stops(
     assert slot is None, "a dropped schedule stops"
 
 
+async def test_a_one_time_schedule_fires_once_even_late_and_stays_fired(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, owner = await _workspace(db_session)
+    at = NOW + timedelta(hours=2)
+    once = {"id": "once", "kind": "schedule", "at": at.isoformat()}
+    flow = await _publish(db_session, tenant_id, owner, triggers=[once])
+    await db_session.commit()
+    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    async with sm() as s:
+        assert await workflow_triggers.next_fires(s, workflow_ids=[flow]) == {flow: at}, "seeded"
+    assert await triggers.fire_schedules(sm, now=at - timedelta(seconds=1)) == 0, "not yet"
+    late = at + timedelta(days=3)
+    assert await triggers.fire_schedules(sm, now=late) == 1, "late, but still once"
+    assert await triggers.fire_schedules(sm, now=late + timedelta(minutes=1)) == 0, "only once"
+    trigger = await db_session.scalar(select(WorkflowTrigger))
+    assert trigger is not None and trigger.next_fire_at is None, "the trigger is done"
+    assert trigger.last_fired_slot == at, "the slot is the time asked for"
+    full = {"schema": "daimon.workflow/v1", "name": "T", "start": "b", "nodes": INLINE}
+    await workflows.publish_version(  # a restart or republish does not arm it again
+        db_session,
+        tenant_id=tenant_id,
+        workflow_id=flow,
+        spec={**full, "triggers": [once]},
+        spec_hash="h",
+        source="web",
+        published_by=owner,
+        now=late + timedelta(hours=1),
+    )
+    assert await db_session.scalar(select(WorkflowTrigger.next_fire_at)) is None, "stays fired"
+
+
+async def test_an_every_other_week_schedule_fires_in_its_weeks_only(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, owner = await _workspace(db_session)
+    biweekly = {
+        "id": "weekly",
+        "kind": "schedule",
+        "cron": "0 9 * * 1",
+        "every_weeks": 2,
+        "anchor": "2026-11-16",
+    }
+    flow = await _publish(db_session, tenant_id, owner, triggers=[biweekly])
+    await db_session.commit()
+    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    slot = datetime(2026, 11, 30, 9, tzinfo=UTC)
+    async with sm() as s:
+        assert await workflow_triggers.next_fires(s, workflow_ids=[flow]) == {flow: slot}, (
+            "Monday the 23rd is the off week"
+        )
+    assert await triggers.fire_schedules(sm, now=slot + timedelta(seconds=5)) == 1, "the slot"
+    trigger = await db_session.scalar(select(WorkflowTrigger))
+    assert trigger is not None and trigger.next_fire_at == datetime(2026, 12, 14, 9, tzinfo=UTC), (
+        "two weeks later, none lost and none twice"
+    )
+
+
 async def test_a_finished_run_starts_the_workflow_listening_for_it(
     db_session: AsyncSession,
 ) -> None:

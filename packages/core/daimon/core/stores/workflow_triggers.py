@@ -26,9 +26,10 @@ from daimon.core._models import (
     WorkflowTriggerEvent,
     WorkflowTriggerSecret,
 )
-from daimon.core.cron import InvalidScheduleError, validated_next_slot
-from daimon.core.workflows.spec import parse_duration
-from pydantic import BaseModel, ConfigDict
+from daimon.core.cron import InvalidScheduleError
+from daimon.core.workflows.clock import next_slot
+from daimon.core.workflows.spec import ScheduleTrigger, parse_duration
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,11 +106,14 @@ class Cursor:
     snapshot: Mapping[str, Any] | None = None
 
 
+_SLOT_FIELDS = ("cron", "timezone", "every_weeks", "anchor", "at")
+
+
 def _next_slot(spec: Mapping[str, Any], now: datetime) -> datetime | None:
     try:
-        return validated_next_slot(str(spec.get("cron")), str(spec.get("timezone") or "UTC"), now)
-    except InvalidScheduleError:
-        return None  # validation refuses such a cron at publish; an old row just never fires
+        return next_slot(ScheduleTrigger.model_validate(spec), now)
+    except (InvalidScheduleError, ValidationError):
+        return None  # validation refuses such a schedule at publish; an old row just never fires
 
 
 async def sync_live(
@@ -121,8 +125,8 @@ async def sync_live(
     now: datetime,
     cursors: Mapping[str, Cursor] | None = None,
 ) -> None:
-    """Make the rows match a newly published version. A schedule whose cron or zone changed
-    restarts from the next slot after `now`; triggers the version dropped stop firing.
+    """Make the rows match a newly published version. A schedule whose cron, zone, weeks or
+    time changed restarts from the next slot after `now`; triggers the version dropped stop firing.
     A schedule in `cursors` carries on from a routine's slot state and stays linked to it."""
     rows = {r.trigger_key: r for r in await list_triggers(session, workflow_id=workflow_id)}
     for spec in triggers:
@@ -136,7 +140,7 @@ async def sync_live(
             same = (
                 old is not None
                 and old.live is not None
-                and all(old.live.get(f) == spec.get(f) for f in ("cron", "timezone"))
+                and all(old.live.get(f) == spec.get(f) for f in _SLOT_FIELDS)
             )
             if not (same and old and old.next_fire_at):
                 values |= {"next_fire_at": _next_slot(spec, now), "seeded_after": now}
@@ -288,7 +292,8 @@ async def claim_due_schedules(
         assert slot is not None, "due rows have a slot"
         if spec is None:
             continue  # sync_live clears the slot of a dropped trigger; nothing is due
-        fresh = slot >= now - max_age or spec.get("catch_up") == "run-once"
+        # A one-time `at` fires even when late, once: its next slot is none.
+        fresh = slot >= now - max_age or spec.get("catch_up") == "run-once" or "at" in spec
         await session.execute(
             update(WorkflowTrigger)
             .where(WorkflowTrigger.id == row.id)
