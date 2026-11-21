@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord import audience_sync
 from daimon.adapters.discord.audience_sync import AudienceSync
 from daimon.adapters.discord.member_sync import MemberSync, tenant_of
 from daimon.core.access_policy import TenantAccessPolicy
@@ -21,6 +22,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from . import audience_fakes as fake
 
@@ -885,3 +887,50 @@ async def test_role_lists_that_changed_before_the_publish_retire_the_facts(
     clock.now += timedelta(seconds=60)
     await audience.tick([server])  # type: ignore[list-item]
     assert (await _fact(db_session_factory, clock, "1")).contained, "the new lists decide"
+
+
+async def test_a_channel_type_discord_py_does_not_know_does_not_stop_the_facts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fetch_channels` raises `InvalidData` for one unknown type. The reconcile reads the raw
+    list, skips that channel, publishes the known rooms and does not raise."""
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    known: dict[str, Any] = {"1": server.channels[0], "2": server.channels[1]}  # type: ignore[attr-defined]
+    server.fetch_channels = AsyncMock(  # type: ignore[attr-defined]
+        side_effect=discord.InvalidData("Unknown channel type 20 for channel ID 9")
+    )
+    server._state.http.get_all_guild_channels = AsyncMock(  # type: ignore[attr-defined]
+        return_value=[
+            {"type": 0, "id": "1"},
+            {"type": 20, "id": "9", "name": "never logged"},
+            {"type": 0, "id": "2"},
+        ]
+    )
+
+    def factory(channel_type: int) -> tuple[Any, Any]:
+        if channel_type != 0:
+            return None, None
+
+        def build(*, guild: object, state: object, data: dict[str, Any]) -> Any:
+            return known[data["id"]]
+
+        return build, channel_type
+
+    monkeypatch.setattr(audience_sync, "_guild_channel_factory", factory)
+
+    with capture_logs() as logs:
+        assert await audience.reconcile(server)  # type: ignore[arg-type]
+
+    assert await _fact(db_session_factory, clock, "1") == RoomFacts(False, False)
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False)
+    assert await _fact(db_session_factory, clock, "9") == UNKNOWN_FACTS, (
+        "the skipped room is unknown"
+    )
+    [skipped] = [log for log in logs if log["event"] == "discord.audience.channel_type_skipped"]
+    assert skipped["count"] == 1 and skipped["types"] == [20]
+    assert "never logged" not in str(logs)
