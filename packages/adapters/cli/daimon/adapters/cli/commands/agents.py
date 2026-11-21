@@ -879,6 +879,8 @@ def _print_rename_plan(console: Console, plan: AgentRenamePlan, *, tenant_label:
         out(f"Retire the built-in {plan.new!r} as {plan.retired_name!r}, then archive it:")
         for agent in plan.seeded:
             out(f"  provider agent {agent.id} ({agent.name})")
+        for agent in plan.seeded_readers:
+            out(f"  its reader {agent.id} ({agent.name}) is renamed and kept, not archived")
     moved = {label: n for label, n in plan.references.items() if n}
     out(f"Database rows to move: {sum(moved.values())}")
     for label, count in moved.items():

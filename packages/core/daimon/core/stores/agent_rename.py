@@ -190,6 +190,43 @@ async def count_agent_references(
     return counts
 
 
+async def agent_name_collisions(
+    session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
+) -> dict[str, int]:
+    """Entries held under both `old` and `new`, which the rename would leave behind.
+
+    Per `table.column` (rows under `old` whose key already exists under `new`)
+    and per policy key (`agent_rules`, `agent_channel_pins`: 1 when both names
+    have an entry). Empty when nothing collides; read-only.
+    """
+    found: dict[str, int] = {}
+    for table_name, column_name, key_columns in _KEYED_NAME_COLUMNS:
+        table = _table(table_name)
+        movable = _keyed_filters(
+            table, column_name, key_columns, tenant_id=tenant_id, old=old, new=new
+        )
+        total = await session.scalar(
+            select(func.count())
+            .select_from(table)
+            .where(table.c.tenant_id == tenant_id, _matches(table.c[column_name], old))
+        )
+        moving = await session.scalar(select(func.count()).select_from(table).where(*movable))
+        if (total or 0) - (moving or 0):
+            found[f"{table_name}.{column_name}"] = (total or 0) - (moving or 0)
+    policy = await session.scalar(
+        select(TenantAccessPolicyRecord.policy).where(
+            TenantAccessPolicyRecord.tenant_id == tenant_id
+        )
+    )
+    legacy, current = normalize_agent_name(old), normalize_agent_name(new)
+    for key in _POLICY_NAME_KEYS:
+        rules = cast("dict[str, object] | None", (policy or {}).get(key)) or {}
+        names = {normalize_agent_name(name) for name in rules}
+        if legacy in names and current in names:
+            found[f"access policy {key}"] = 1
+    return found
+
+
 def _moved_policy(
     policy: dict[str, Any], *, old: str, new: str
 ) -> tuple[dict[str, Any], list[str]]:

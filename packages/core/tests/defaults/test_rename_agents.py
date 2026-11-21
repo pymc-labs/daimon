@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 from anthropic import APIStatusError, AsyncAnthropic
+from daimon.core import agent_rename
 from daimon.core._models import TenantAccessPolicyRecord
 from daimon.core.agent_rename import AgentRenameRefused, AgentRenameResult, rename_user_agent
 from daimon.core.defaults import _reconcile, apply_defaults
@@ -37,8 +38,9 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import bindparam, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from ..stores.test_selfhosted_resources import agent_spec, scope
 
@@ -561,6 +563,7 @@ def _fake_client(
     refuse_update: str | None = None,
     requests: list[str] | None = None,
     archived: dict[str, dict[str, object]] | None = None,
+    fail_after_apply: str | None = None,
 ) -> AsyncAnthropic:
     """The fake provider; its fake list ignores `archived_at`, so an archive removes the agent."""
     handler = make_fake_ma_handler(state)
@@ -571,6 +574,9 @@ def _fake_client(
             requests.append(f"{request.method} {request.url.path}")
         if request.method == "POST" and request.url.path == f"/v1/agents/{refuse_update}":
             return httpx.Response(400, json={"type": "error", "error": {"message": "refused"}})
+        if request.method == "POST" and request.url.path == f"/v1/agents/{fail_after_apply}":
+            handler(request)  # the update lands, then the caller sees an error
+            return httpx.Response(400, json={"type": "error", "error": {"message": "timeout"}})
         match = re.fullmatch(r"/v1/agents/(?P<id>[^/]+)/archive", request.url.path)
         if request.method == "POST" and match:
             agent = state.agents.pop(match["id"])
@@ -591,9 +597,16 @@ async def _rename_own(
     refuse_update: str | None = None,
     requests: list[str] | None = None,
     archived: dict[str, dict[str, object]] | None = None,
+    fail_after_apply: str | None = None,
 ) -> AgentRenameResult:
     return await rename_user_agent(
-        _fake_client(state, refuse_update=refuse_update, requests=requests, archived=archived),
+        _fake_client(
+            state,
+            refuse_update=refuse_update,
+            requests=requests,
+            archived=archived,
+            fail_after_apply=fail_after_apply,
+        ),
         factory,
         tenant_id=_TENANT,
         old=_OWN,
@@ -678,7 +691,7 @@ async def test_rename_user_agent_when_replacing_seeded_then_keeps_id_and_retires
 ) -> None:
     ids = await _tenant_with_routines(db_session, _OWN, "default")
     reader = {MA_METADATA_KEY_READER_OF: "x", MA_METADATA_KEY_READER_SOURCE: _OWN}
-    seeded_reader = {**_MANAGED, MA_METADATA_KEY_READER_SOURCE: "default"}
+    seeded_reader = {MA_METADATA_KEY_READER_OF: "y", MA_METADATA_KEY_READER_SOURCE: "default"}
     state = FakeMAState()
     _seed(
         state,
@@ -693,17 +706,25 @@ async def test_rename_user_agent_when_replacing_seeded_then_keeps_id_and_retires
 
     assert result.unarchived == (), "the retired agents archived cleanly"
     live = _live(state)
-    assert set(live) == {"default", "default-reader"}, f"only the renamed pair is live: {live}"
+    retired = "default-seeded-retired-20261121"
+    assert set(live) == {"default", "default-reader", f"{retired}-reader"}, (
+        f"the renamed pair and the seeded reader are live: {live}"
+    )
     assert live["default"]["id"] == "ag_internal", "the agent keeps its id"
     metadata = live["default"]["metadata"]
     assert isinstance(metadata, dict)
     assert metadata[MA_METADATA_KEY_NAME] == "default", "the tag follows the name"
     assert MA_METADATA_KEY_MANAGED not in metadata, "the agent stays unmanaged"
     assert live["default-reader"]["id"] == "ag_r", "its reader moves with it"
-    assert {str(a["name"]) for a in archived.values()} == {
-        "default-seeded-retired-20261121",
-        "default-seeded-retired-20261121-reader",
-    }, "the seeded agent and its reader are retired under a dated name"
+    kept = live[f"{retired}-reader"]
+    assert kept["id"] == "ag_sr", "the seeded reader keeps its id, so published reports still work"
+    kept_metadata = kept["metadata"]
+    assert isinstance(kept_metadata, dict)
+    assert kept_metadata[MA_METADATA_KEY_NAME] == f"{retired}-reader", "its tag follows its name"
+    assert kept_metadata[MA_METADATA_KEY_READER_SOURCE] == retired, "and names the retired source"
+    assert {a["id"] for a in archived.values()} == {"ag_seeded"}, (
+        "only the seeded source is archived"
+    )
     rows = dict(
         (await db_session.execute(text("SELECT id, agent_name FROM routines"))).tuples().all()
     )
@@ -765,3 +786,82 @@ async def test_rename_user_agent_when_plain_rename_then_moves_name_only(
     assert _live(state)["helper"]["id"] == "ag_internal"
     names = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert names == ["helper"]
+
+
+async def test_rename_user_agent_when_update_lands_but_errors_then_undo_still_restores_it(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _tenant_with_routines(db_session, _OWN)
+    state = FakeMAState()
+    _seed(state, _own_agent())
+
+    with pytest.raises(APIStatusError):
+        await _rename_own(db_session_factory, state, fail_after_apply="ag_internal")
+
+    assert list(_live(state)) == [_OWN], "the rename that landed server-side was undone"
+    names = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
+    assert names == [_OWN], "the database rolled back"
+
+
+async def test_rename_user_agent_when_undoing_then_still_holds_the_tenant_lock(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _tenant_with_routines(db_session, _OWN)
+    state = FakeMAState()
+    _seed(state, _own_agent())
+    free: list[bool] = []
+    real = agent_rename._move_back  # pyright: ignore[reportPrivateUsage]
+    key = {"k": _reconcile.reconcile_lock_key(_TENANT)}
+
+    async def probe(*args: object, **kwargs: object) -> None:
+        # The test factory shares one connection, so ask from another one.
+        async with db_engine.connect() as other:
+            got = await other.scalar(
+                text("SELECT pg_try_advisory_lock(hashtextextended(:k, 0))"), key
+            )
+            if got:
+                await other.execute(text("SELECT pg_advisory_unlock(hashtextextended(:k, 0))"), key)
+        free.append(bool(got))
+        await real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_rename, "_move_back", probe)
+
+    with pytest.raises(APIStatusError):
+        await _rename_own(db_session_factory, state, refuse_update="ag_internal")
+
+    assert free == [False], "an apply cannot take the lock while the undo runs"
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real"])
+async def test_rename_user_agent_when_both_names_have_entries_then_refuses_naming_them(
+    dry_run: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _tenant_with_routines(db_session, _OWN)
+    for name in (_OWN, "helper"):
+        await get_or_create_avatar(db_session, tenant_id=_TENANT, agent_name=name)
+    await db_session.execute(
+        text("UPDATE tenant_access_policies SET policy = :p WHERE tenant_id = :t").bindparams(
+            bindparam("p", type_=JSONB)
+        ),
+        {"p": {"agent_rules": {_OWN: {}, "helper": {}}}, "t": _TENANT},
+    )
+    await db_session.commit()
+    state = FakeMAState()
+    _seed(state, _own_agent())
+    requests: list[str] = []
+
+    with pytest.raises(AgentRenameRefused) as raised:
+        await _rename_own(
+            db_session_factory, state, new="helper", dry_run=dry_run, requests=requests
+        )
+
+    assert "agent_avatars.agent_name: 1" in str(raised.value), "the table and count are named"
+    assert "access policy agent_rules" in str(raised.value), "the policy key is named"
+    assert not [r for r in requests if r.startswith("POST")], "nothing was written"
+    names = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
+    assert names == [_OWN], "the database is unchanged"

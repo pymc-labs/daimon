@@ -14,12 +14,22 @@ scope rows that named the seeded agent now name the renamed one. This never
 calls `forget_archived_agent`, which would clear those rows.
 
 Order, all under the tenant's defaults reconcile lock, so no `defaults apply`
-runs between the steps (it would create a second `default`): plan again from
-a fresh listing, write the database references, retire the seeded agent, rename
-the agent, commit. A failure before the commit rolls the database back and
-renames the provider agents back. The archive of the retired agents comes
-last; if it fails, the next `defaults apply` sweeps them, as they are
-managed and no longer in the tree.
+runs between the steps (it would create a second `default`). The lock is the
+same transaction-level advisory lock `defaults apply` takes, held by the
+rename's own transaction. The undo runs inside that transaction, before it
+rolls back, so the lock covers it (a separate session lock would need a second
+connection, which single-connection pools lack). Under it: plan again from a
+fresh listing and refuse on collisions, write the database references, retire
+the seeded agent, rename the agent, commit. A failure before the commit rolls
+the database back and renames the provider agents back (each rename is noted
+before its call, and an undo of one that never happened does nothing). The
+archive of the retired seeded agent comes after the commit, because it cannot
+be undone; if it fails, the next `defaults apply` sweeps it, as it is managed
+and no longer in the tree.
+
+The seeded agent's report readers are renamed to the retired name but not
+archived: published reports hold tokens bound to the reader's agent id. They
+are not managed, so `defaults apply` never touches them.
 """
 
 from __future__ import annotations
@@ -47,6 +57,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
 from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.agent_rename import (
+    agent_name_collisions,
     count_agent_references,
     policy_keys_to_move,
     rename_agent_references,
@@ -71,9 +82,11 @@ class AgentRenamePlan:
     new: str
     agent: BetaManagedAgentsAgent
     readers: tuple[BetaManagedAgentsAgent, ...]
-    # The seeded agent and its readers that `replace_seeded` retires; empty otherwise.
+    # The seeded agent that `replace_seeded` renames and archives; empty otherwise.
     seeded: tuple[BetaManagedAgentsAgent, ...]
     retired_name: str | None
+    # Its report readers: renamed with it, kept live.
+    seeded_readers: tuple[BetaManagedAgentsAgent, ...] = ()
     # Rows that would move, per `table.column`, and the policy keys that would move.
     references: dict[str, int] = field(default_factory=lambda: dict[str, int]())
     policy_keys: tuple[str, ...] = ()
@@ -120,6 +133,7 @@ def plan_from_listing(
             f"This workspace already has its own agent named {new!r}. Rename or archive it first."
         )
     seeded: list[BetaManagedAgentsAgent] = []
+    seeded_readers: list[BetaManagedAgentsAgent] = []
     retired_name = None
     if holders:
         if not replace_seeded:
@@ -130,10 +144,13 @@ def plan_from_listing(
         retired_name = _retired_name(new, today)
         if agents_named(agents, retired_name):
             raise AgentRenameRefused(f"An agent named {retired_name!r} already exists.")
-        seeded = [*holders, *source_readers(agents, new)]
+        seeded = list(holders)
+        seeded_readers = source_readers(agents, new)
     readers = source_readers(agents, old)
     leftover = [
-        a for a in agents_named(agents, f"{new}-reader") if not any(a.id == s.id for s in seeded)
+        a
+        for a in agents_named(agents, f"{new}-reader")
+        if not any(a.id == s.id for s in seeded_readers)
     ]
     if readers and leftover:
         raise AgentRenameRefused(
@@ -146,8 +163,21 @@ def plan_from_listing(
         agent=agent,
         readers=tuple(readers),
         seeded=tuple(seeded),
+        seeded_readers=tuple(seeded_readers),
         retired_name=retired_name,
     )
+
+
+async def _refuse_collisions(session: AsyncSession, plan: AgentRenamePlan) -> None:
+    found = await agent_name_collisions(
+        session, tenant_id=plan.tenant_id, old=plan.old, new=plan.new
+    )
+    if found:
+        listing = "; ".join(f"{label}: {count}" for label, count in found.items())
+        raise AgentRenameRefused(
+            f"Both {plan.old!r} and {plan.new!r} have entries in: {listing}. "
+            "Remove one side's entries first; the rename does not merge them."
+        )
 
 
 async def _list(client: AsyncAnthropic, tenant_id: uuid.UUID) -> list[BetaManagedAgentsAgent]:
@@ -174,6 +204,7 @@ async def plan_agent_rename(
         today=today or dt.datetime.now(dt.UTC).date(),
     )
     async with session_factory() as session:
+        await _refuse_collisions(session, plan)
         references = await count_agent_references(session, tenant_id=tenant_id, old=old, new=new)
         keys = await policy_keys_to_move(session, tenant_id=tenant_id, old=old, new=new)
     return replace(plan, references=references, policy_keys=tuple(keys))
@@ -212,15 +243,15 @@ async def rename_user_agent(
     done: list[tuple[BetaManagedAgentsAgent, str, str]] = []
 
     async def _move(agent: BetaManagedAgentsAgent, *, src: str, dst: str) -> None:
+        done.append((agent, src, dst))  # before the call: one that lands but times out is undone
         await rename_on_provider(client, agent, tenant_id=tenant_id, old=src, new=dst)
-        done.append((agent, src, dst))
 
-    try:
-        async with session_factory() as session, session.begin():
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                {"key": reconcile_lock_key(tenant_id)},
-            )
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": reconcile_lock_key(tenant_id)},
+        )
+        try:
             plan = plan_from_listing(
                 await _list(client, tenant_id),
                 tenant_id=tenant_id,
@@ -229,16 +260,18 @@ async def rename_user_agent(
                 replace_seeded=replace_seeded,
                 today=day,
             )
+            await _refuse_collisions(session, plan)
             await rename_agent_references(session, tenant_id=tenant_id, old=old, new=new)
             await rename_policy_keys(session, tenant_id=tenant_id, old=old, new=new)
             if plan.retired_name is not None:
-                for agent in plan.seeded:
+                for agent in (*plan.seeded, *plan.seeded_readers):
                     await _move(agent, src=new, dst=plan.retired_name)
             for agent in (plan.agent, *plan.readers):
                 await _move(agent, src=old, dst=new)
-    except BaseException:
-        await _move_back(client, done, tenant_id=tenant_id)
-        raise
+        except BaseException:
+            # Still inside the transaction, so the lock is held until the undo is done.
+            await _move_back(client, done, tenant_id=tenant_id)
+            raise
     _log.info("agents.renamed", tenant_id=str(tenant_id), old=old, new=new, agent_id=plan.agent.id)
     unarchived = await _archive_retired(client, plan)
     return AgentRenameResult(plan, tuple(unarchived))
