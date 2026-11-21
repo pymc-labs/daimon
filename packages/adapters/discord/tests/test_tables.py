@@ -60,7 +60,7 @@ async def test_unsupported_header_preserves_table_but_supported_neighbor_renders
     raw = "| 中文 |\n| --- |\n| 123 |\n"
     supported = "| Value |\n| --- |\n| 456 |\n"
     text, files = await render_discord_tables(raw + "\n" + supported, enabled=True)
-    assert raw in text
+    assert raw.rstrip("\n") in text
     assert len(files) == 1
 
 

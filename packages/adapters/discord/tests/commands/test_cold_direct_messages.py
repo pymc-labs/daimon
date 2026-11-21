@@ -113,6 +113,8 @@ async def setup(db_session_factory, monkeypatch, count=1):
     fetch = AsyncMock(return_value=Membership(is_member=True, role_ids=("123",)))
     resolver = CachedMembershipResolver(fetch)
     bot = MagicMock()
+    bot.working_mark = AsyncMock(return_value="👀")
+    bot.turn_model_marks = AsyncMock(return_value=())
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.settings = SimpleNamespace(
