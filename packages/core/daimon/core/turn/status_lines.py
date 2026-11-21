@@ -187,10 +187,19 @@ def format_headline(
     elapsed_seconds: float | None,
     bold: Callable[[str], str],
     waiting: bool = False,
+    timed: bool = False,
 ) -> str:
-    """One short working label; timing belongs in card details."""
-    del is_working, elapsed_seconds
-    return bold("Waiting for the AI service…" if waiting else "Working on it…")
+    """One short working label; timing belongs in card details.
+
+    With ``timed`` (Discord's `card_timer`) the label says Working while a tool
+    runs, else Thinking, followed by the time so far.
+    """
+    if not timed:
+        return bold("Waiting for the AI service…" if waiting else "Working on it…")
+    word = "Waiting for the AI service" if waiting else "Working" if is_working else "Thinking"
+    if elapsed_seconds is None:
+        return bold(word)
+    return f"{bold(word)}{SUMMARY_GAP}{format_duration(elapsed_seconds)}"
 
 
 def format_draft(text: str) -> str:

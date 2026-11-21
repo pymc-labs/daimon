@@ -320,3 +320,15 @@ class TestHeadline:
     def test_in_progress_without_now_has_no_elapsed(self) -> None:
         data = to_embed_data(_make_state(started_at=100.0))
         assert data.title == "Working on it…"
+
+
+def test_card_timer_puts_the_time_in_the_headline_and_the_model_in_the_footer() -> None:
+    """`card_timer` on: Thinking or Working with the time so far, and how to change the model."""
+    state = dataclasses.replace(_make_state(started_at=100.0), timed=True, model_label="Opus 5.5")
+    data = to_embed_data(state, now=112.0)
+    assert data.title == "Thinking  12s", "no tool runs yet"
+    assert data.footer == "Opus 5.5  /model to change", "the time moved to the headline"
+    running = dataclasses.replace(state, phase=TurnPhase.TOOL_RUNNING, waiting=False)
+    assert to_embed_data(running, now=165.0).title == "Working  1m 5s"
+    waiting = dataclasses.replace(state, waiting=True)
+    assert to_embed_data(waiting, now=112.0).title == "Waiting for the AI service  12s"
