@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import importlib.util
 import json
 import tempfile
 import time
@@ -18,6 +19,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping, Seq
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import IO, Final, Literal
 
 from anthropic import AsyncAnthropic
@@ -25,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.config import Settings
 from daimon.core.evals import bundle as bundles
+from daimon.core.evals import dedupe
 from daimon.core.evals.access import (
     Action,
     Share,
@@ -36,6 +39,14 @@ from daimon.core.evals.access import (
 )
 from daimon.core.evals.agents import AgentLookup, agent_lookup
 from daimon.core.evals.blobs import ObjectStore, blob_path, blob_refs, object_key
+from daimon.core.evals.draft import (
+    Complete,
+    DraftError,
+    DraftEstimate,
+    draft_case,
+    draft_model,
+    estimate_draft,
+)
 from daimon.core.evals.format import (
     Arm,
     BlobEntry,
@@ -57,6 +68,15 @@ from daimon.core.evals.format import (
     sha256_hex,
     to_document,
 )
+from daimon.core.evals.from_thread import ThreadNotFound, ThreadSource, build_cases
+from daimon.core.evals.scrub.engine import Scrubber
+from daimon.core.evals.scrub.entities import (
+    KnownEntities,
+    PersonEntry,
+    load_entities,
+    merge_entities,
+)
+from daimon.core.evals.scrub.offline import MIN_KEY
 from daimon.core.evals.validate import (
     MANIFEST_PATH,
     InvalidDocument,
@@ -69,6 +89,7 @@ from daimon.core.evals.validate import (
     validate_bundle,
 )
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
+from daimon.core.stores import eval_scrub
 from daimon.core.stores import evals as store
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from sqlalchemy.exc import IntegrityError
@@ -187,6 +208,17 @@ class ImportReport(_Out):
     blobs: int
     signature: bundles.SignatureState
     warnings: list[str]
+
+
+class DraftResult(_Out):
+    estimate: DraftEstimate
+    drafted: list[CaseRef]
+    """Empty until the estimate is confirmed."""
+
+
+class DedupeReport(_Out):
+    groups: list[list[str]]
+    dropped: list[str]
 
 
 def _worst(statuses: Iterable[str | None]) -> ScrubStatus:
@@ -593,9 +625,157 @@ class EvalService:
                 session, suite=suite, key=key, revision=model.revision, document=document,
                 sha256=str(document["hash"]), fidelity=model.fidelity.level,
                 flags=[f.reason for f in model.review_flags or []], blob_shas=shas,
-                scrub_status=_case_scrub(model), created_by=actor.key,
+                scrub_status=await _with_blobs(session, actor.tenant_id, model, shas),
+                created_by=actor.key,
             )  # fmt: skip
         return CaseRef(id=key, revision=model.revision, hash=str(document["hash"]))
+
+    # ---------- cases from threads ----------
+
+    async def _scrubber(self, tenant_id: uuid.UUID, known: KnownEntities) -> Scrubber:
+        settings = self._settings.evals
+        key = settings.scrub_key.get_secret_value() if settings.scrub_key else ""
+        if len(key) < MIN_KEY:
+            raise EvalRefused(
+                f"Scrubbing needs DAIMON_EVALS__SCRUB_KEY, at least {MIN_KEY} characters."
+            )
+        if importlib.util.find_spec("faker") is None:
+            raise EvalRefused(
+                "Scrubbing needs the evals extra installed here. Ask an admin or an owner."
+            )
+        file = (
+            [load_entities(Path(settings.scrub_entities_file))]
+            if settings.scrub_entities_file
+            else []
+        )
+        async with self._sessions() as session:
+            fakes = await eval_scrub.load_map(session, tenant_id=tenant_id)
+            names = await eval_scrub.deployment_names(session, tenant_id=tenant_id)
+        return Scrubber(
+            merge_entities(known, _deployment_entities(names), *file), key.encode(),
+            salt=str(tenant_id), ner_model=settings.scrub_ner_model or None, known=fakes,
+        )  # fmt: skip
+
+    async def _pin(
+        self, actor: Subject, suite_id: str, refs: Sequence[CaseRef], drop: Iterable[str] = ()
+    ) -> None:
+        """Save the suite's next version pinning `refs` (added or moved to that revision)."""
+        current = await self.suite(actor, suite_id)
+        moved = {r.id: r.revision for r in refs}
+        gone = set(drop)
+        picks = [
+            SuiteCasePick(
+                id=c.id, revision=moved.pop(c.id, c.revision), weight=c.weight, split=c.split
+            )
+            for c in current.cases
+            if c.id not in gone
+        ]
+        picks += [SuiteCasePick(id=key, revision=rev) for key, rev in moved.items()]
+        await self.save_suite(
+            actor,
+            SuiteDraft(
+                id=current.id, name=current.name, description=current.description,
+                tags=current.tags, tool_aliases=current.tool_aliases, defaults=current.defaults,
+                cases=picks,
+            ),
+            new=False,
+        )  # fmt: skip
+
+    async def cases_from_thread(
+        self, actor: Subject, source: ThreadSource, ref: str, suite_id: str
+    ) -> list[CaseRef]:
+        """Scrubbed cases, one per answered turn of the thread, added to the suite."""
+        await self._check_on(actor)
+        async with self._sessions() as session:
+            await self._suite(session, actor, suite_id, "edit")
+        try:
+            record = await source.thread(ref)
+        except ThreadNotFound:
+            raise EvalNotFound("No such thread here, or you can't read it.") from None
+        scrubber = await self._scrubber(actor.tenant_id, record.entities())
+        built = await asyncio.to_thread(build_cases, record, scrubber)
+        if not built:
+            raise EvalRefused("That thread has no turn the agent answered.")
+        async with self._sessions() as session, session.begin():
+            await eval_scrub.save_map(session, tenant_id=actor.tenant_id, rows=scrubber.fakes.added)
+        refs = [
+            await self.put_case(
+                actor, suite_id, item.case,
+                blobs={
+                    BlobEntry(
+                        sha256=sha, size=len(b.data), media_type=b.media_type,
+                        scrub=b.scrub, needs_human_check=b.needs_human_check,  # pyright: ignore[reportArgumentType]
+                    ): b.data
+                    for sha, b in item.blobs.items()
+                },
+            )
+            for item in built
+        ]  # fmt: skip
+        await self._pin(actor, suite_id, refs)
+        return refs
+
+    async def draft_expectations(
+        self,
+        actor: Subject,
+        suite_id: str,
+        case_ids: Sequence[str],
+        *,
+        complete: Complete | None,
+        confirm: bool,
+    ) -> DraftResult:
+        """Draft expectations for cases with a model. Without `confirm` only the cost estimate."""
+        await self._check_on(actor)
+        async with self._sessions() as session:
+            await self._suite(session, actor, suite_id, "edit")  # before any paid call
+        documents = [await self.case(actor, suite_id, key) for key in case_ids]
+        for document in documents:
+            scrub = _case_model(document).provenance.scrub
+            if scrub is None or scrub.status != "scrubbed":
+                raise EvalRefused("Drafting sends a case to a model: only scrubbed cases can go.")
+        try:
+            estimate = estimate_draft(documents, draft_model(self._settings.evals.draft_model))
+            if not confirm:
+                return DraftResult(estimate=estimate, drafted=[])
+            if complete is None:
+                raise EvalRefused("No model is available to draft with here.")
+            refs: list[CaseRef] = []
+            for document in documents:
+                drafted, _ = await draft_case(complete, document)
+                refs.append(await self.put_case(actor, suite_id, drafted))
+        except DraftError as exc:
+            raise EvalRefused(str(exc)) from None
+        await self._pin(actor, suite_id, refs)
+        return DraftResult(estimate=estimate, drafted=refs)
+
+    async def dedupe(
+        self,
+        actor: Subject,
+        suite_id: str,
+        *,
+        threshold: float = dedupe.THRESHOLD,
+        keep: int | None = None,
+    ) -> DedupeReport:
+        """Mark near-duplicate cases with a `dedupe_group`; with `keep`, drop all but that many
+        of each group from the suite's next version."""
+        await self._check_on(actor)
+        async with self._sessions() as session:
+            suite, _ = await self._suite(session, actor, suite_id, "edit")
+            rows = await store.version_cases(
+                session, suite_id=suite.id, version=suite.current_version
+            )
+        found = await asyncio.to_thread(dedupe.groups, [r.document for r in rows], threshold)
+        by_key = {r.key: r.document for r in rows}
+        marked = [
+            await self.put_case(actor, suite_id, {**by_key[key], "dedupe_group": name})
+            for ids in found
+            for name in [dedupe.group_id(ids)]
+            for key in ids
+            if by_key[key].get("dedupe_group") != name
+        ]
+        dropped = dedupe.thin(found, keep) if keep is not None else []
+        if marked or dropped:
+            await self._pin(actor, suite_id, marked, dropped)  # one new version for all of it
+        return DedupeReport(groups=found, dropped=dropped)
 
     async def share(self, actor: Subject, suite_id: str, shares: Sequence[Share]) -> None:
         """Replace who the suite is shared with."""
@@ -1021,11 +1201,13 @@ class EvalService:
             model = _case_model(case)
             if (model.id, model.revision) in stored:
                 continue
+            shas = blob_refs(case)
             await store.add_case_revision(
                 session, suite=suite, key=model.id, revision=model.revision, document=case,
                 sha256=str(case["hash"]), fidelity=model.fidelity.level,
-                flags=[f.reason for f in model.review_flags or []], blob_shas=blob_refs(case),
-                scrub_status=_case_scrub(model), created_by=actor.key,
+                flags=[f.reason for f in model.review_flags or []], blob_shas=shas,
+                scrub_status=await _with_blobs(session, actor.tenant_id, model, shas),
+                created_by=actor.key,
             )  # fmt: skip
 
     async def _import_run(
@@ -1092,6 +1274,27 @@ def eval_service(
     )
 
 
+# Default channel names are everyday words: faking them would rewrite ordinary text.
+_COMMON_PLACES: Final = frozenset(
+    {"general", "random", "announcements", "help", "support", "dev", "test", "chat", "team",
+     "off-topic", "introductions", "welcome", "rules", "news", "questions", "feedback"}
+)  # fmt: skip
+
+
+def _deployment_entities(names: eval_scrub.DeploymentNames) -> KnownEntities:
+    return KnownEntities(
+        people=[
+            PersonEntry(
+                name=name, handles=[handle] if handle else [], ids=[uid] if uid else [],
+                emails=[email] if email else [],
+            )
+            for name, handle, uid, email in names.people
+        ],
+        channels=[p for p in names.places if p.casefold().lstrip("#") not in _COMMON_PLACES],
+        repos=names.repos,
+    )  # fmt: skip
+
+
 def _matches(entry: BlobEntry, data: bytes) -> bool:
     return sha256_hex(data) == entry.sha256 and len(data) == entry.size
 
@@ -1121,6 +1324,18 @@ def _case_model(document: JsonObject) -> Case:
 
 def _case_scrub(case: Case) -> str | None:
     return case.provenance.scrub.status if case.provenance.scrub else None
+
+
+async def _with_blobs(
+    session: AsyncSession, tenant_id: uuid.UUID, case: Case, shas: Iterable[str]
+) -> str | None:
+    """How scrubbed a case is, files included: one that holds a raw file is at best `partial`,
+    so it can be neither shared nor exported as scrubbed."""
+    status = _case_scrub(case)
+    if status != "scrubbed":
+        return status
+    rows = await store.blob_rows(session, tenant_id=tenant_id, shas=shas)
+    return "partial" if any(r.scrub == "unscrubbed" for r in rows.values()) else status
 
 
 def _labelled(

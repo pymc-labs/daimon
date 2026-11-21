@@ -9,21 +9,28 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, TENANT_OPTION
-from daimon.adapters.cli.runtime import build_runtime
+from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError
 from daimon.core.evals.access import Share, Subject
 from daimon.core.evals.bundle import DirSource, open_path, to_zip
+from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.format import Arm, JsonObject, to_document
+from daimon.core.evals.from_thread import ThreadRecord, ThreadSource
+from daimon.core.evals.scrub.engine import Scrubber
+from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, scrub_path
+from daimon.core.evals.scrub.sweep import Leftover
 from daimon.core.evals.service import (
+    CaseRef,
+    DraftResult,
     EvalRefused,
     EvalService,
     ExportRequest,
@@ -32,8 +39,9 @@ from daimon.core.evals.service import (
     eval_service,
 )
 from daimon.core.evals.validate import InvalidDocument, validate_bundle
+from daimon.core.evals.web_thread import WebChatSource
 from daimon.core.stores.tenants import get_tenant
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 
 evals_app = typer.Typer(help="Eval suites, cases, arms, run items and bundles.")
@@ -56,6 +64,30 @@ _PASSPHRASE = typer.Option(
     "--passphrase", envvar="DAIMON_EVAL_PASSPHRASE", help="Passphrase of an encrypted bundle."
 )
 _SHARES = TypeAdapter(list[Share])
+_ENTITIES = typer.Option(
+    "--entities",
+    envvar="DAIMON_EVALS__SCRUB_ENTITIES_FILE",
+    help="JSON or YAML file of the private names to replace.",
+)
+_KEY = typer.Option(
+    "--key",
+    envvar="DAIMON_EVALS__SCRUB_KEY",
+    help="Scrub key, at least 16 characters. Prefer the environment variable.",
+)
+_MAP = typer.Option(
+    "--map", help="Fake map file, kept between runs (private; read and written). Required."
+)
+_LEARNED = typer.Option(
+    "--learned",
+    help="Names found in earlier runs (private, plain text, mode 600): read first, added to at the"
+    " end. Use the same file for batches run one after another.",
+)
+_SALT = typer.Option(
+    "--salt",
+    help="Tenant or suite name mixed into the key; use the same one on every run. Required.",
+)
+_NER = typer.Option("--ner-model", help="spaCy model for names; empty to use known names only.")
+_JOBS = typer.Option("--jobs", min=1, help="Processes that run the names model, each loading it.")
 
 
 class _Failed(DaimonError):
@@ -87,6 +119,13 @@ def _read_json(path: Path) -> JsonObject:
 
 
 def _run(ctx: typer.Context, work: Callable[[EvalService, Subject], Awaitable[object]]) -> None:
+    _run_rt(ctx, lambda s, a, _rt: work(s, a))
+
+
+def _run_rt(
+    ctx: typer.Context,
+    work: Callable[[EvalService, Subject, CliRuntime], Awaitable[object]],
+) -> None:
     selector: TenantSelector | None = ctx.obj
 
     async def go() -> None:
@@ -106,7 +145,7 @@ def _run(ctx: typer.Context, work: Callable[[EvalService, Subject], Awaitable[ob
             )
             try:
                 service = eval_service(rt.sessionmaker, rt.settings, rt.anthropic)
-                _print(await work(service, actor))
+                _print(await work(service, actor, rt))
             except EvalRefused as exc:
                 raise _Failed("; ".join((exc.message, *exc.problems))) from None
 
@@ -168,6 +207,79 @@ def cases_put(ctx: typer.Context, suite_id: str, case: Path) -> None:
     _run(ctx, lambda s, a: s.put_case(a, suite_id, document))
 
 
+class _RecordFile:
+    """A thread record read from a JSON file (a `ThreadRecord`), for threads from anywhere."""
+
+    def __init__(self, path: Path) -> None:
+        self._record = ThreadRecord.model_validate_json(path.read_bytes())
+
+    async def thread(self, ref: str) -> ThreadRecord:
+        return self._record
+
+
+@cases_app.command("from-thread")
+def cases_from_thread(
+    ctx: typer.Context,
+    suite_id: str,
+    link: Annotated[str | None, typer.Argument(help="Link or id of a web chat.")] = None,
+    record: Annotated[Path | None, typer.Option(help="A thread record file instead.")] = None,
+) -> None:
+    """Scrubbed cases from a thread, one per answered turn. Needs DAIMON_EVALS__SCRUB_KEY."""
+    if (link is None) == (record is None):
+        raise typer.BadParameter("Give a web chat link, or --record FILE.")
+
+    async def work(s: EvalService, a: Subject, rt: CliRuntime) -> list[CaseRef]:
+        source: ThreadSource = (
+            WebChatSource(rt.sessionmaker, tenant_id=a.tenant_id)
+            if record is None
+            else _RecordFile(record)
+        )
+        return await s.cases_from_thread(a, source, link or str(record), suite_id)
+
+    _run_rt(ctx, work)
+
+
+@cases_app.command("draft")
+def cases_draft(
+    ctx: typer.Context,
+    suite_id: str,
+    case_ids: Annotated[list[str], typer.Argument(help="Case ids.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Draft now and bill the workspace.")] = False,
+) -> None:
+    """Draft expectations with a model. Without --yes only the cost estimate is shown."""
+
+    async def work(s: EvalService, a: Subject, rt: CliRuntime) -> DraftResult:
+        complete = (
+            auxiliary_completer(
+                rt.anthropic,
+                rt.sessionmaker,
+                tenant_id=a.tenant_id,
+                platform=a.platform,
+                user_id=None,
+                model=rt.settings.evals.draft_model,
+                markup=rt.settings.billing.markup,
+            )  # fmt: skip
+            if yes
+            else None
+        )
+        return await s.draft_expectations(a, suite_id, case_ids, complete=complete, confirm=yes)
+
+    _run_rt(ctx, work)
+
+
+@cases_app.command("dedupe")
+def cases_dedupe(
+    ctx: typer.Context,
+    suite_id: str,
+    keep: Annotated[
+        int | None, typer.Option(help="Keep this many per group; drop the rest.")
+    ] = None,
+    threshold: float = 0.8,
+) -> None:
+    """Mark near-duplicate cases with a group; with --keep, thin each group."""
+    _run(ctx, lambda s, a: s.dedupe(a, suite_id, threshold=threshold, keep=keep))
+
+
 @cases_app.command("validate")
 def cases_validate(case: Path) -> None:
     """Check a case file against the format, offline."""
@@ -218,6 +330,98 @@ def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] =
         }
     _print({"ok": not problems, **counts, "problems": problems, "warnings": warnings})
     if problems:
+        raise typer.Exit(code=1)
+
+
+def _scrubber(
+    entities: Path | None,
+    key: str | None,
+    salt: str,
+    map_path: Path,
+    learned: Path | None,
+    ner: str,
+    jobs: int,
+) -> Scrubber:
+    if entities is None or not key:
+        raise typer.BadParameter("--entities and a scrub key (DAIMON_EVALS__SCRUB_KEY) are needed.")
+    try:
+        return load_scrubber(
+            entities, key, salt=salt, map_path=map_path, learned_path=learned,
+            ner_model=ner or None, jobs=jobs,
+        )  # fmt: skip
+    except ValidationError as failed:
+        # Only where and what kind: the message would quote the private names.
+        bad = [f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in failed.errors()]
+        raise _Failed("the entities file is not valid: " + "; ".join(bad)) from None
+    except (InvalidDocument, OSError, ValueError) as failed:
+        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
+        raise _Failed("; ".join(problems)) from None
+
+
+def _leftover_rows(found: Sequence[Leftover]) -> list[JsonObject]:
+    return [{"where": x.where, "kind": x.kind, "count": x.count} for x in found]
+
+
+@bundle_app.command("scrub")
+def bundle_scrub(
+    path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
+    entities: Annotated[Path | None, _ENTITIES] = None,
+    key: Annotated[str | None, _KEY] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="Write here, not in place.")] = None,
+    learned: Annotated[Path | None, _LEARNED] = None,
+    ner_model: Annotated[str, _NER] = "en_core_web_sm",
+    jobs: Annotated[int, _JOBS] = 1,
+    passphrase: Annotated[str | None, _PASSPHRASE] = None,
+) -> None:
+    """Scrub a bundle folder, zip or encrypted file offline, in place or into --out.
+
+    Prints counts and places only, never the text found. Exits 1 unless fully scrubbed.
+    """
+    scrubber = _scrubber(entities, key, salt, map_path, learned, ner_model, jobs)
+    try:
+        report = scrub_path(
+            path, out, scrubber, passphrase=passphrase, map_path=map_path, learned_path=learned
+        )
+    except (InvalidDocument, OSError) as failed:
+        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
+        raise _Failed("; ".join(problems)) from None
+    _print(
+        {
+            "status": report.status,
+            "cases": report.cases,
+            "replaced": report.replaced,
+            "blobs": report.blobs,
+            "names_checked": report.names_checked,
+            "leftovers": _leftover_rows(report.leftovers),
+        }
+    )
+    if report.leftovers or report.status != "scrubbed":
+        raise typer.Exit(code=1)
+
+
+@bundle_app.command("leftovers")
+def bundle_leftovers(
+    path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
+    entities: Annotated[Path | None, _ENTITIES] = None,
+    key: Annotated[str | None, _KEY] = None,
+    learned: Annotated[Path | None, _LEARNED] = None,
+    ner_model: Annotated[str, _NER] = "en_core_web_sm",
+    jobs: Annotated[int, _JOBS] = 1,
+    passphrase: Annotated[str | None, _PASSPHRASE] = None,
+) -> None:
+    """List what a scrub would still change in a bundle, by place and kind. Exits 1 if any."""
+    scrubber = _scrubber(entities, key, salt, map_path, learned, ner_model, jobs)
+    try:
+        found = leftovers_of(path, scrubber, passphrase=passphrase)
+    except (InvalidDocument, OSError) as failed:
+        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
+        raise _Failed("; ".join(problems)) from None
+    _print({"leftovers": _leftover_rows(found)})
+    if found:
         raise typer.Exit(code=1)
 
 

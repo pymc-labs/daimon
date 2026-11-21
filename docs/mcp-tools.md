@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 249 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 252 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -282,9 +282,12 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_arms_list` | all callers | List the arms (agent setups to compare) in this workspace. |
 | `eval_bundle_export` | all callers | Export suites and runs as a bundle. |
 | `eval_bundle_import` | all callers | Import a bundle uploaded with create_file_upload_url. |
+| `eval_case_from_thread` | all callers | Make scrubbed eval cases from a thread you can read, given its link: one case per turn the agent answered. |
 | `eval_case_get` | all callers | Read one eval case as JSON. |
 | `eval_case_put` | all callers | Add a case to an eval suite, or save its next revision; eval_suite_update pins it. |
 | `eval_case_validate` | all callers | Check an eval case against the format without saving it: problems and warnings. |
+| `eval_cases_dedupe` | all callers | Mark near-duplicate cases of a suite with a group. |
+| `eval_cases_draft_estimate` | all callers | Estimate what it costs to draft expectations for cases with a model. |
 | `eval_cases_list` | all callers | List the cases of an eval suite version. |
 | `eval_item_get` | all callers | Read one eval run item: its transcript, calls and outcome. |
 | `eval_items_list` | all callers | List the items of an eval run, a page at a time (at most 500). |
