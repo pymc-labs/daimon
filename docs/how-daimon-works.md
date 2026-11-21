@@ -100,7 +100,7 @@ above, and an admin may lock a value so lower levels cannot change it.
 Set features with `/settings` in chat, the `change_setting` tool or the CLI:
 
 ```bash
-daimon features set watches off --tier workspace --reason "paused for a freeze"
+daimon features set watches off --tier workspace
 ```
 
 See [Features](features.md) for every feature, its levels and its page.
@@ -117,11 +117,11 @@ itself. It gives the agent four read-only tools, `read_daimon_docs`,
 pages and the source of the running release. The agent then answers "how does Daimon
 work" and "how do I do this" from the release it runs on, not from memory.
 
-It is off by default and is set per agent. Turn it on in an agent's settings, with
+It is off by default and can be set at any level. Turn it on in an agent's settings, with
 `/settings`, or from the CLI:
 
 ```bash
-daimon features set self_knowledge on --tier agent --agent NAME --reason "answers Daimon questions"
+daimon features set self_knowledge on --tier agent --agent NAME
 ```
 
 <!-- knowledge: web -->
