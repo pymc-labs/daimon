@@ -39,6 +39,7 @@ from daimon.core.workflows.spec import (
     slug,
 )
 from daimon.core.workflows.validate import validate_spec
+from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GATE_REASONS: Final = frozenset(
@@ -126,7 +127,7 @@ async def check(
             provider = await channel_provider(
                 session, tenant_id=tenant.id, platform=tenant.platform, channel_id=channel
             )
-            if provider not in (None, "anthropic"):
+            if provider not in (None, DEFAULT_BACKEND):
                 return Refusal(
                     "backend_unsupported",
                     "Workflows run only on Anthropic. Switch the home channel back to Anthropic.",
