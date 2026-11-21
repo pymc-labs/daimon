@@ -661,7 +661,7 @@ A reply in a direct message can read the agent's memory but not change it.
 
 ## Approvals in direct messages
 
-Direct messages follow Approvals as set for the agent, or for everyone.
+Direct messages follow the agent's Approvals.
 
 | | |
 | --- | --- |

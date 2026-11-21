@@ -198,7 +198,7 @@ async def test_get_settings_reads_the_origin_place_and_no_tool_names_a_place(
         "only unavailable features are hidden"
     )
     by_key = {s["key"]: [t["tier"] for t in s["tiers"]] for s in result.settings}
-    assert by_key["approvals"] == ["workspace", "channel", "thread"]
+    assert by_key["approvals"] == ["workspace", "agent", "channel", "thread"]
     assert by_key["progress_plans"] == ["deployment", "workspace", "agent", "channel", "thread"]
     world["origin"] = None
     with pytest.raises(ToolError):

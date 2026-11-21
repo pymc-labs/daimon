@@ -662,7 +662,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc="Direct messages follow Approvals as set for the agent, or for everyone.",
+        doc="Direct messages follow the agent's Approvals.",
         platforms=_DM_PLATFORMS | {"teams"},
         authority=Authority(native=True),
     ),
