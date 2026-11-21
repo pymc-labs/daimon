@@ -55,6 +55,7 @@ from daimon.core.routine_service import (
     UnknownAgent,
 )
 from daimon.core.routines import (
+    MOVED_TO_WORKFLOWS,
     can_manage_routine,
     can_read_routine_output,
     panel_rows,
@@ -196,6 +197,8 @@ class RoutinesPanel:
                     return toast(NOT_OWNER)
                 except RoutineNotFound:
                     return toast(GONE)
+                except RoutineRefused as refused:  # moved to Workflows after the card was shown
+                    return toast(str(refused))
                 notice = "🗑️ Routine deleted."
             else:
                 async with self._runtime.sessionmaker.begin() as session:
@@ -222,6 +225,8 @@ class RoutinesPanel:
                         if result != "changed":
                             if result == "already_running":
                                 return toast("This routine is already on.")
+                            if result == "moved":
+                                return toast(MOVED_TO_WORKFLOWS)
                             return toast(GONE if result == "gone" else NOT_OWNER)
                     else:
                         row = await store.get_routine(session, routine_id, tenant_id=tenant_id)
