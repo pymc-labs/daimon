@@ -92,6 +92,19 @@ every later one. It holds real names in plain text (created mode 600): keep it p
 delete it with the raw bundles. The map and that file are saved before the bundle is
 written, under a lock; run batches one at a time, not side by side.
 
+Only what looks like a name is learned: no code or JSON fragments, and at most 5 words. One
+word must not be an everyday word (the spaCy model's dictionary, when installed), an acronym of
+up to 4 letters, a number or a kept name. Values under identity keys (`company`,
+`owner`, `user`...) are learned unless they are code, kept or one lowercase everyday word. Put
+acronym-only clients in the dictionary. The model reads one line at a time, so a name split
+across lines is missed.
+
+A `keep` list in the dictionary holds public names (the platforms and products you use, your
+suites' own ids). They are never faked, learned or reported as leftovers, in any field, ids,
+tool names and effect verbs included; a private name next to one is still faked
+(`acme` in `notion_acme_sync`). Daimon's own name, its effect verbs and the services they
+name are always kept.
+
 A one-word name that is also an everyday word ("Will", "Hope", "Young") is replaced only when
 it is written as in the dictionary, capitalized; the sweep cannot see the lowercase form. Add
 such handles to the dictionary as they appear.
