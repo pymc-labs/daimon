@@ -3016,6 +3016,31 @@ class ProviderLimitsSettings(BaseModel):
     )
 
 
+class SelfKnowledgeSettings(BaseModel):
+    """Where the `self_knowledge` tools read this release's docs and source, and the public
+    addresses their results name."""
+
+    docs_url: str = Field(
+        default="https://pymc-labs.github.io/daimon/",
+        description="The public docs site that results name as the place to read more.",
+    )
+    repo_url: str = Field(
+        default="https://github.com/pymc-labs/daimon",
+        description="The source repository that results name, to clone for tests and history.",
+    )
+    docs_root: Path = Field(
+        default_factory=lambda: Path("docs"),
+        description="The docs/ directory in the image, relative to the working directory.",
+    )
+    source_root: Path = Field(
+        default_factory=lambda: Path("."),
+        description=(
+            "The directory holding packages/ and defaults/, relative to the working "
+            "directory. Only those two are read."
+        ),
+    )
+
+
 class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -3159,6 +3184,7 @@ class Settings(BaseSettings):
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
     repo_memory: RepoMemorySettings = Field(default_factory=RepoMemorySettings)
+    self_knowledge: SelfKnowledgeSettings = Field(default_factory=SelfKnowledgeSettings)
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
