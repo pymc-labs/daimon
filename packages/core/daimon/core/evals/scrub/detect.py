@@ -419,12 +419,9 @@ _PUBLIC_SERVICES: Final = frozenset(
      "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
      "pypi.org", "npmjs.com", "cloudflare.com"}
 )  # fmt: skip
-# Daimon, its chat platforms, its effect verbs, the services they name and public hosts, less
-# everyday words ("Drive Capital" is a name).
-_EVERYDAY: Final = frozenset(
-    {"calendar", "chat", "docs", "drive", "git", "office", "python", "sheets", "slides", "teams",
-     "web"}
-)  # fmt: skip
+# Daimon, its chat platforms, its effect verbs, the services they name (and Google's products:
+# tool names start with them) and public hosts, less hosts that are everyday words.
+_EVERYDAY: Final = frozenset({"office", "python"})
 PUBLIC_NAMES: Final = frozenset(
     name
     for name in (
