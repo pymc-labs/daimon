@@ -3,23 +3,34 @@ step's tool call, an Action, and the send of an approved proposal.
 
 `decide_unattended_call` is the only place that says whether such a call goes out, is
 recorded as a proposal for a person to review, or is refused. A contract test holds every
-Action call and proposal send to it.
+Action call and proposal send to it. `scope_allows` is the pure matcher for `writes_to`.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import Literal
+import re
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Final, Literal
 
 from daimon.core.tool_safety import ToolSafetyPolicy, classify_tool
-from daimon.core.workflows.spec import AgentNode, ApprovalNode, ForEachNode, Spec
+from daimon.core.workflows.spec import (
+    AgentNode,
+    ApprovalNode,
+    ArgRule,
+    ForEachNode,
+    Spec,
+    WriteScope,
+)
 from daimon.core.workflows.taint import Catalog, tainted_steps
 from pydantic import JsonValue
 
 Writes = Literal["refuse", "propose", "allow"]
 Verdict = Literal["allow", "propose", "refuse"]
+#: One plain address: no display name, quotes, comments, routes or second address.
+_ADDRESS: Final = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+)")
 
 
 @dataclass(frozen=True)
@@ -29,7 +40,9 @@ class Call:
     `writes` is what the step may do with writes (an Action under its grant is `allow`);
     `exposed` says untrusted data can steer it in this run (the Rule of Two at run time);
     `approved` says a person approved exactly this call (a bound approval whose hash still
-    matches, or a reviewed proposal).
+    matches, or a reviewed proposal). `scopes` are the step's granted `writes_to` (empty
+    while `workflow_scoped_writes` is off) and `created` the ids this run's earlier allowed
+    calls returned, by `server/tool`.
     """
 
     server: str
@@ -38,6 +51,9 @@ class Call:
     test: bool = False
     exposed: bool = False
     approved: bool = False
+    args: Mapping[str, JsonValue] = field(default_factory=dict[str, JsonValue])
+    scopes: Sequence[WriteScope] = ()
+    created: Mapping[str, Collection[str]] = field(default_factory=dict[str, Collection[str]])
 
 
 @dataclass(frozen=True)
@@ -58,7 +74,7 @@ def decide_unattended_call(policy: ToolSafetyPolicy, call: Call) -> Decision:
         return Decision("allow")
     if call.test:
         return Decision("refuse", "test_run", "A test run never writes.")
-    if call.approved:
+    if call.approved or scope_allows(call.scopes, key, call.args, call.created):
         return Decision("allow")
     if call.writes == "propose" or (call.writes == "allow" and call.exposed):
         reason = "untrusted" if call.exposed else None
@@ -66,6 +82,72 @@ def decide_unattended_call(policy: ToolSafetyPolicy, call: Call) -> Decision:
     if call.writes == "allow":
         return Decision("allow")
     return Decision("refuse", "writes_refused", "This step may not write.")
+
+
+def scope_allows(
+    scopes: Sequence[WriteScope],
+    tool: str,
+    args: Mapping[str, JsonValue],
+    created: Mapping[str, Collection[str]],
+) -> bool:
+    """Some scope for `tool` covers the call: each argument is named in `free` or passes its
+    `where` rule, and every `where` argument is there. A list passes when each item does."""
+    return any(s.tool == tool and s.where and _fits(s, args, created) for s in scopes)
+
+
+def _fits(
+    scope: WriteScope, args: Mapping[str, JsonValue], created: Mapping[str, Collection[str]]
+) -> bool:
+    free = frozenset(scope.free or ())
+    return all(_present(args, path) for path in scope.where) and all(
+        _covered(scope, free, name, value, created) for name, value in args.items()
+    )
+
+
+def _present(args: Mapping[str, JsonValue], path: str) -> bool:
+    value: JsonValue = dict(args)
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False
+        value = value[part]
+    return True
+
+
+def _covered(
+    scope: WriteScope,
+    free: frozenset[str],
+    path: str,
+    value: JsonValue,
+    created: Mapping[str, Collection[str]],
+) -> bool:
+    """`path` is free, passes its rule, or is an object whose every key is covered."""
+    if path in free:
+        return True
+    if path in scope.where:
+        return _passes(scope.where[path], value, created)
+    deeper = any(p.startswith(f"{path}.") for p in (*scope.where, *free))
+    return (
+        deeper
+        and isinstance(value, dict)
+        and all(_covered(scope, free, f"{path}.{k}", v, created) for k, v in value.items())
+    )
+
+
+def _passes(rule: ArgRule, value: JsonValue, created: Mapping[str, Collection[str]]) -> bool:
+    if isinstance(value, list):
+        return bool(value) and all(_passes(rule, v, created) for v in value)
+    # `type is` keeps True from matching 1.
+    if any(type(value) is type(x) and value == x for x in rule.in_ or ()):
+        return True
+    if not isinstance(value, str):
+        return False
+    if any(value.startswith(p) for p in rule.prefix or ()):
+        return True
+    address = _ADDRESS.fullmatch(value)
+    domains = {d.lower() for d in rule.domains or ()}
+    if address and address.group(1).lower() in domains:
+        return True
+    return rule.created_by is not None and value in created.get(rule.created_by.tool, ())
 
 
 def exposed_at_run(
