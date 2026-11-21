@@ -8,7 +8,8 @@ speaker's own (`destination_refusal`, the routine rule), and a thread
 as agent replies are (people may be tagged, never `<!channel>`), then files. A DM opens
 the person's conversation with the app. An ask carries its buttons and records where it
 landed (a thread under it answers it); a reminder replies in that thread and an update
-rewrites the ask without its buttons.
+rewrites the ask without its buttons. A titled post goes under the top-level post of that
+title this workflow made before (by record only), else under a new one.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from daimon.core.workflows.delivery import (
     post_refusal,
     post_text,
     reach_limits,
+    titled_thread,
 )
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -48,6 +50,14 @@ __all__ = ["make_slack_workflow_poster"]
 
 def _skipped(note: str) -> DeliveryOutcome:
     return DeliveryOutcome(status="skipped", note=note)
+
+
+async def _permalink(client: AsyncWebClient, channel: str, ts: str) -> str | None:
+    """A missing link only hides "open in Slack" on the run page; the post stands."""
+    with suppress(SlackApiError):
+        found = await client.chat_getPermalink(channel=channel, message_ts=ts)  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
+        return str(found.get("permalink") or "") or None  # pyright: ignore[reportUnknownMemberType]
+    return None
 
 
 def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
@@ -96,6 +106,17 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
         thread = None if post.thread_id is None else post.thread_id.rsplit(":", 1)[-1]
         if row.kind == "reminder" and thread is None:
             thread = post.message_id
+        titled = post.title is not None and thread is None and post.dm_to is None
+        if titled:
+
+            async def create(title: str) -> str:
+                made = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel, text=escape_mrkdwn_preserving_mentions(title)
+                )
+                return f"{channel}:{made.get('ts')}"  # pyright: ignore[reportUnknownMemberType]
+
+            made = await titled_thread(runtime.sessionmaker, post, platform="slack", create=create)
+            thread = made.rsplit(":", 1)[-1]
         place: dict[str, Any] = {"channel": channel}
         if thread is not None:
             place["thread_ts"] = thread
@@ -115,31 +136,40 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
             return DeliveryOutcome(status="delivered")
         ask = asks.ask_of(row.payload) if row.kind == "ask" else None
         chunks = split_fenced(text, 3000 if ask else 11800, word_boundary=True)
+        first: str | None = None
         for index, chunk in enumerate(chunks):
             if ask is None or index < len(chunks) - 1:
-                await client.chat_postMessage(text=chunk, **place)  # pyright: ignore[reportUnknownMemberType]
+                sent = await client.chat_postMessage(text=chunk, **place)  # pyright: ignore[reportUnknownMemberType]
+                first = first or str(sent.get("ts"))  # pyright: ignore[reportUnknownMemberType]
                 continue
             sent = await client.chat_postMessage(text=chunk, blocks=ask_blocks(chunk, ask), **place)  # pyright: ignore[reportUnknownMemberType]
             ts = str(sent.get("ts"))  # pyright: ignore[reportUnknownMemberType]
-            link: str | None = None
-            with suppress(SlackApiError):
-                # A missing link only hides "open in Slack" on the run page; the ask stands.
-                found = await client.chat_getPermalink(channel=channel, message_ts=ts)  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
-                link = str(found.get("permalink") or "") or None  # pyright: ignore[reportUnknownMemberType]
             async with runtime.sessionmaker.begin() as session:
                 await asks.record_post(
                     session,
                     row,
                     platform="slack",
                     channel_id=channel,
-                    # A thread under the ask answers it, unless it went into a thread already.
-                    thread_id=None if thread is not None else f"{channel}:{ts}",
+                    # A reply in the ask's thread, or under the ask, answers it.
+                    thread_id=f"{channel}:{thread or ts}",
                     message_id=ts,
-                    link=link,
+                    link=await _permalink(client, channel, ts),
                     at=datetime.now(UTC),
                 )
+        done = DeliveryOutcome(status="delivered")
+        if first is not None and ask is None:
+            done = DeliveryOutcome(
+                status="delivered",
+                placed={
+                    "channel": channel,
+                    "thread": None if thread is None else f"{channel}:{thread}",
+                    "message": first,
+                    "link": await _permalink(client, channel, first),
+                    "opened": titled,
+                },
+            )
         if not job_payload(row).files:
-            return DeliveryOutcome(status="delivered")
+            return done
 
         async def may_post() -> bool:
             again = await cleared(row)
@@ -158,6 +188,6 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
             notice=notice,
             may_post=may_post,
         )
-        return DeliveryOutcome(status="delivered")
+        return done
 
     return _post

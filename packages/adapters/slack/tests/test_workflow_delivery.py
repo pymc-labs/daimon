@@ -11,7 +11,7 @@ import pytest
 from daimon.adapters.slack import workflow_delivery
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
-from daimon.core.stores import accounts, tenants
+from daimon.core.stores import accounts, tenants, workflow_deliveries
 from daimon.core.stores.domain import RoutineRow
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.platform_surface import SurfaceRecorder
@@ -29,13 +29,22 @@ FAILS: dict[str, Any] = {"f": {"kind": "finish", "outcome": "failed"}}
 
 
 class ChannelClient(OfflineSlackClient):
-    """The offline surface, plus the reads the channel check makes."""
+    """The offline surface, plus the reads the channel check makes; thread replies are kept."""
+
+    def __init__(self, recorder: SurfaceRecorder) -> None:
+        super().__init__(recorder)
+        self.replies: list[dict[str, Any]] = []
 
     async def api_call(self, api_method: str, **kwargs: Any) -> AsyncSlackResponse:
+        body = cast("dict[str, Any]", kwargs.get("json") or kwargs.get("data") or {})
         reads: dict[str, dict[str, Any]] = {
             "conversations.info": {"channel": {"id": "C0HOME", "is_member": True}},
             "users.info": {"user": {"id": "U1"}},
+            "chat.getPermalink": {"permalink": "https://slack.example/p"},
         }
+        if api_method == "chat.postMessage" and body.get("thread_ts"):
+            self.replies.append(body)
+            reads[api_method] = {"ts": f"9.{len(self.replies)}"}
         if api_method not in reads:
             return await super().api_call(api_method, **kwargs)
         data = {"ok": True} | reads[api_method]
@@ -62,7 +71,7 @@ async def _world(db_session: AsyncSession, nodes: dict[str, Any]) -> World:
     return world
 
 
-async def _deliver(world: World, monkeypatch: pytest.MonkeyPatch) -> SurfaceRecorder:
+def _client() -> ChannelClient:
     recorder = SurfaceRecorder(
         evidence_id="wf",
         destination_id="C0HOME",
@@ -70,7 +79,13 @@ async def _deliver(world: World, monkeypatch: pytest.MonkeyPatch) -> SurfaceReco
         clock=time.monotonic,
         decode=decode,
     )
-    client = ChannelClient(recorder)
+    return ChannelClient(recorder)
+
+
+async def _deliver(
+    world: World, monkeypatch: pytest.MonkeyPatch, client: ChannelClient | None = None
+) -> SurfaceRecorder:
+    client = client or _client()
 
     async def resolve(runtime: object, *, team_id: str) -> object:
         return client
@@ -92,7 +107,7 @@ async def _deliver(world: World, monkeypatch: pytest.MonkeyPatch) -> SurfaceReco
 
     poster = JobPoster(no_routine, workflow_delivery.make_slack_workflow_poster(runtime))
     assert await poll_once(world.sm, platform="slack", post=poster, now=NOW) == 1
-    return recorder
+    return client.recorder
 
 
 async def test_a_finish_posts_to_home_without_broadcasting(
@@ -112,3 +127,24 @@ async def test_a_failed_run_sends_the_owner_an_error_card(
     [message] = (await _deliver(world, monkeypatch)).surviving_messages()
     assert "Workflow run failed" in message.card_texts[0], message
     assert message.card_texts[1].startswith('Run 1 of "T" failed.'), message
+
+
+async def test_a_titled_post_goes_under_one_title_post_and_says_where(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deliver = {"to": "home", "thread": "Weekly", "message": "Run ${{ run.number }}"}
+    world = await _world(db_session, {"f": {"kind": "finish", "deliver": deliver}})
+    client = _client()
+    run = await world.run()
+    await _deliver(world, monkeypatch, client)
+    await world.run()
+    [title] = (await _deliver(world, monkeypatch, client)).surviving_messages()
+    assert title.body_texts == ("Weekly",), title
+    replies = [(r["thread_ts"], str(r["text"]).split("\n")[0]) for r in client.replies]
+    assert replies == [(title.message_id, "Run 1"), (title.message_id, "Run 2")], (
+        "both runs post under the one title post"
+    )
+    async with world.sm() as s:
+        assert await workflow_deliveries.opened_threads(s, run.id) == {
+            f"C0HOME:{title.message_id}"
+        }, "the post says which thread it went to"
