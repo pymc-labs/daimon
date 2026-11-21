@@ -148,17 +148,22 @@ def test_slash_commands_in_docs_exist() -> None:
 def test_env_vars_and_feature_keys_in_docs_exist() -> None:
     config = (DOCS / "configuration.md").read_text()
     tokens = set(re.findall(r"DAIMON_[A-Z0-9_]+", _corpus() + config))
-    prefixes = tuple(t for t in tokens if t.endswith("_"))
     keys = {k.upper().replace(".", "_") for k in FEATURES}
     bad = []
     for path, text in _hand_written():
         for chunk in _code(text):
             for var in re.findall(r"DAIMON_[A-Z0-9_]+", chunk):
-                var = var.rstrip("_")
-                if var.startswith("DAIMON_FEATURES__"):
+                if var.removeprefix("DAIMON_FEATURES__") not in (var, ""):
                     ok = var.removeprefix("DAIMON_FEATURES__") in keys
-                else:
-                    ok = var.startswith(prefixes) or any(t.startswith(var) for t in tokens)
+                else:  # an exact name, a trailing-underscore prefix, or a name built from one
+                    ok = (
+                        var in tokens
+                        or (var.endswith("_") and any(t.startswith(var) for t in tokens))
+                        or any(
+                            t.endswith("_") and not t.endswith("__") and var.startswith(t)
+                            for t in tokens
+                        )
+                    )
                 if not ok:
                     bad.append(f"{path.name}: {var}")
             for key in re.findall(r"daimon features set ([a-z][\w.]*)", chunk):
