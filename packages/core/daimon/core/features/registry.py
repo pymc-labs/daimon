@@ -990,6 +990,23 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         authority=_SERVER_ADMIN,
     ),
+    FeatureSpec(
+        key="secret_sharing",
+        name="Secret sharing",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="session_mutable",
+        doc=(
+            "/share-secret sends a secret to one person's DMs, and the agent can send one of its "
+            "keys to whoever asked. They reveal it once within a day. Off until an admin turns "
+            "it on."
+        ),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
     _capability(
         "compute",
         "Cloud computers",

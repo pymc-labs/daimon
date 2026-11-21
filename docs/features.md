@@ -75,6 +75,7 @@ Where each feature can be set, and its default.
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Secret sharing | `secret_sharing` | Capability | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -802,6 +803,18 @@ The agent can start a long job that keeps working after the chat moves on. Off u
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+
+## Secret sharing
+
+/share-secret sends a secret to one person's DMs, and the agent can send one of its keys to whoever asked. They reveal it once within a day. Off until an admin turns it on.
+
+| | |
+| --- | --- |
+| Key | `secret_sharing` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
 ## Cloud computers

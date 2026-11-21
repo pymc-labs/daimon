@@ -1965,6 +1965,33 @@ class CredentialRequest(Base):
     used_at: Mapped[datetime | None]
 
 
+class SecretShare(Base):
+    """One secret a person shared with another (`daimon.core.secret_shares`).
+
+    `content` is Fernet ciphertext, cleared on reveal or expiry; the row stays as the audit
+    record. Person-scoped like `credential_requests`: erased by platform user, no account FK.
+    """
+
+    __tablename__ = "secret_shares"
+    __table_args__ = (
+        Index("secret_shares_sender_idx", "tenant_id", "platform", "sender_platform_user_id"),
+        Index("secret_shares_recipient_idx", "tenant_id", "platform", "recipient_platform_user_id"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    sender_platform_user_id: Mapped[str]
+    recipient_platform_user_id: Mapped[str]
+    label: Mapped[str]
+    content: Mapped[bytes | None]
+    channel_id: Mapped[str | None]
+    message_id: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    revealed_at: Mapped[datetime | None]
+
+
 class McpOAuthFlow(Base):
     """One in-flight MCP OAuth authorization, keyed by its `state`.
 
