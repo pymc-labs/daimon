@@ -58,6 +58,7 @@ from daimon.core.features.snapshot import (
 from daimon.core.permissions import SEALED_REFUSAL, any_own_readers, sealed_outside
 from daimon.core.platform_words import NEUTRAL_ADMIN, space_for, words_for
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.agent_avatars import avatar_names, normalize_agent_name
 from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
@@ -389,7 +390,7 @@ def feature_refusal(
         (
             value != DEFAULT and not spec.accepts(value, "agent"),
             f"{spec.name} can be {spec.label(spec.default)}, Default, or one line of up to "
-            f"{spec.max_length} characters with no colon.",
+            f"{spec.max_length} characters of plain words, with no marks like @ # : or *.",
             "bad_value",
         ),
         (
@@ -726,6 +727,8 @@ async def change_feature(
     if refusal is not None:
         raise refusal
     spec = FEATURES[key]
+    if key == "display_name" and value not in spec.values:
+        await _refuse_taken_name(sessions, actor, place, value)
     await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)
     if key == "approvals":  # the one native feature kept in the approval gate, not feature storage
@@ -750,6 +753,37 @@ async def change_feature(
     )
     (view,) = await read_features(sessions, settings, place, keys=(key,), agent_builtins=builtins)
     return FeatureChange(key, tier, before, after, view)
+
+
+NAME_TAKEN = "That name belongs to Daimon or another agent. Pick another one."
+
+
+async def _refuse_taken_name(
+    sessions: Sessions, actor: FeatureActor, place: FeaturePlace, value: str
+) -> None:
+    """A display name may not pass for another agent (its slug or display name), nor for
+    Daimon itself unless the operator gives it, so one agent can show as the bot."""
+    wanted = normalize_agent_name(value)
+    if wanted == "daimon":
+        if actor.operator:
+            return
+        raise _refused(NAME_TAKEN, "name_taken")
+    own = (
+        await actor.agent_names(place.agent_id)
+        if place.agent_id and actor.agent_names is not None
+        else ()
+    )
+    mine = {normalize_agent_name(name) for name in own if name}
+    async with sessions() as session:
+        slugs = await avatar_names(session, tenant_id=place.tenant_id)
+        rows = await list_feature_values(
+            session, tenant_id=place.tenant_id, keys=("display_name",), tier="agent"
+        )
+    names = {slug for slug in slugs if slug not in mine} | {
+        normalize_agent_name(row.value) for row in rows if row.agent_id != place.agent_id
+    }
+    if wanted in names:
+        raise _refused(NAME_TAKEN, "name_taken")
 
 
 async def _require_inside(

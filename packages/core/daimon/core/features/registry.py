@@ -99,14 +99,21 @@ class Authority:
     agent_owner: bool = True
 
 
+_MARKUP = frozenset("<>@#*_~|`[]\\:")
+"""Mention and markdown marks on any platform, and the `:` the tier text and choice use."""
+_PLATFORM_RESERVED = ("discord", "clyde")
+"""Words Discord refuses in a webhook name."""
+
+
 def is_feature_text(value: str, max_length: int) -> bool:
-    """A free-text value: one trimmed printable line, never `default` or a `:` (the tier text
-    and choice formats use it)."""
+    """A free-text value: one trimmed printable line of plain words, never `default`."""
+    folded = value.casefold()
     return (
         0 < len(value) <= max_length
         and value == value.strip()
         and value.isprintable()
-        and ":" not in value
+        and not _MARKUP.intersection(value)
+        and not any(word in folded for word in _PLATFORM_RESERVED)
         and value != DEFAULT
     )
 
@@ -485,6 +492,8 @@ _TIME_LIMITS: Final[Mapping[str, str]] = {
 }
 """Choices of both time limits, loosest first: the one set keeps them in step."""
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
+_AGENT_CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
+"""A Discord display choice an agent may differ in from the others in its server."""
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
@@ -545,7 +554,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="id",
         tiers=("agent",),
         binds="turn",
-        doc="The name people see for an agent, up to 40 characters. Its id stays the identifier.",
+        doc="The name people see for an agent: up to 40 plain characters, never another agent's.",
         max_length=40,
     ),
     FeatureSpec(
@@ -555,7 +564,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         effect="display",
         values={"sentence": "Sentence case", "title": "Title Case"},
         default="sentence",
-        tiers=_CHANNELS,
+        tiers=_AGENT_CHANNELS,
         binds="turn",
         doc="Sentence case up to 50 characters, or Title Case up to 100, for a thread opened "
         "to answer a mention.",
@@ -569,7 +578,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         effect="display",
         values={"10080": "1 week", "1440": "1 day"},
         default="10080",
-        tiers=_CHANNELS,
+        tiers=_AGENT_CHANNELS,
         binds="turn",
         doc="How long an idle thread opened to answer a mention stays open.",
         platforms=_DISCORD,
@@ -580,7 +589,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "Status reactions",
         "⏳ while the agent works, then ✅ first however it ended, and 📨 instead of a notice on a "
         "queued message. Off shows 👀, and ✅ only with Completion pings.",
-        tiers=_CHANNELS,
+        tiers=_AGENT_CHANNELS,
         platforms=_DISCORD,
         authority=_ADMIN,
     ),
@@ -588,7 +597,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "protected_notice_reaction",
         "Lock reaction",
         "A 🔒 on a mention the agent may not answer, besides the direct message saying why.",
-        tiers=_CHANNELS,
+        tiers=_AGENT_CHANNELS,
         default="on",
         platforms=_DISCORD,
         authority=_ADMIN,
@@ -1079,15 +1088,15 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="off",
-        tiers=("deployment", "workspace"),
+        tiers=("deployment", "workspace", "agent"),
         binds="session_mutable",
         doc=(
-            "/share-secret sends a secret to one person's DMs, and the agent can send one of its "
-            "keys to whoever asked. They reveal it once within a day. Off until an admin turns "
-            "it on."
+            "/share-secret sends a secret to one person's DMs; the agent sends its keys to an "
+            "admin, its owner or its setter. They reveal it once, within a day. A server admin "
+            "turns it on."
         ),
         platforms=_DISCORD,
-        authority=_ADMIN,
+        authority=_SERVER_ADMIN,
     ),
     _capability(
         "compute",

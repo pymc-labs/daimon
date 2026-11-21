@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to their content. New settings, each defaulting to today's behaviour: Status
   reactions, Lock reaction, Text before tool calls, Thread title style, Thread
   archive time, and an agent's Display name, shown wherever people see its name.
+  The first five can also be set per agent. A display name is plain words, and
+  never another agent's name or Daimon's.
 
 - **Watches can poll a signed-identity relay server.** List a tool in
   `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its
@@ -25,11 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   watches could not be created before: no stored key matches a relay URL.
 
 - **Share a secret with one person on Discord.** With the new Secret sharing
-  feature on (off by default; an admin turns it on), `/share-secret` sends a
-  secret to a person's DMs, and the `share_secret_with` tool sends one of the
-  agent's keys to whoever asked, or to anyone an admin names. The person
-  reveals it once within a day; the value is encrypted, never in chat or the
-  tool's result, and deleted on reveal or expiry.
+  feature on (off by default; a server admin turns it on, for the server or one
+  agent), `/share-secret` sends a secret to a person's DMs. The
+  `share_secret_with` tool sends one of the agent's keys to an admin, the
+  agent's owner or whoever saved the key, while they are in the conversation;
+  a key an admin names for someone else goes once the admin clicks Send. The
+  person reveals it once within a day; the value is encrypted, never in chat or
+  the tool's result, and deleted on reveal or expiry.
 
 - **A relay server's requester fields come from the turn that made the call.**
   Each call is stamped from the turn holding its session, so concurrent or
