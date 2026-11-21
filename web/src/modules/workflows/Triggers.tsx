@@ -68,6 +68,7 @@ function TriggerBlock({ t, c }: { t: Trigger; c: Ctx }) {
       {t.kind === "manual" && <Manual c={c} />}
       {t.kind === "event" && <Event t={t} />}
       {t.kind === "poll" && <Poll t={t} c={c} />}
+      {t.kind === "mention" && <Mention t={t} c={c} />}
       {t.kind === "call" && <Part><Facts rows={[["Called by", "Other workflows"]]} /></Part>}
     </section>
   )
@@ -364,6 +365,24 @@ function Event({ t }: { t: Trigger }) {
   return <Part><Facts rows={[["Source", t.source ? <Mono key="s">{t.source}</Mono> : "–"], ["Filter", t.match ? <Mono key="m" className="text-xs">{t.match}</Mono> : "–"], ["Last match", <span key="l" className="text-faint">None</span>]]} /></Part>
 }
 
+// ---------- mention ----------
+
+function Mention({ t, c }: { t: Trigger; c: Ctx }) {
+  return (
+    <Part>
+      <div className="space-y-2.5">
+        <SettingRow label="Channels">
+          <Input aria-label="Channels" className="h-8 font-mono text-xs" disabled={c.ro} placeholder="Any channel" defaultValue={(t.channels ?? []).join(", ")}
+            onChange={(e) => c.set(t.id, (x) => { const ids = e.target.value.split(",").map((v) => v.trim()).filter(Boolean); if (ids.length) x.channels = ids; else delete x.channels }, 400)} />
+        </SettingRow>
+        <SettingRow label="Only when">
+          <Input aria-label="Only when" className="h-8 font-mono text-xs" disabled={c.ro} placeholder="message.text.contains('help')" value={t.match ?? ""}
+            onChange={(e) => c.set(t.id, (x) => { if (e.target.value) x.match = e.target.value; else delete x.match }, 400)} />
+        </SettingRow>
+      </div>
+    </Part>
+  )
+}
 
 // ---------- poll ----------
 

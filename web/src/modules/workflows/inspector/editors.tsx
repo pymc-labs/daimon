@@ -192,7 +192,16 @@ export function ApprovalEditor(p: EditorProps) {
         <Section title="Routes">
           <RouteRows rows={routeRows(n)} spec={spec} self={p.id} ro={ro} onTo={(name, to) => set((x) => setRoute(x, name, to))} />
         </Section>
-      ) : (
+      ) : null}
+      {(shape === "approve" || shape === "choice") && (
+        <Section title="Other replies">
+          <div className="flex items-center gap-1.5">
+            <TargetSelect spec={spec} self={p.id} value={n.otherwise} ro={ro} onChange={(to) => set((x) => { x.otherwise = to })} />
+            {!ro && n.otherwise && <RemoveButton onClick={() => set((x) => { x.otherwise = undefined })} />}
+          </div>
+        </Section>
+      )}
+      {shape === "approve" || shape === "choice" ? null : (
         <Section title="Then">
           <TargetSelect spec={spec} self={p.id} value={typeof n.next === "string" ? n.next : undefined} ro={ro} onChange={(to) => set((x) => { x.next = to })} />
         </Section>

@@ -281,6 +281,8 @@ export type InboxProposal = { id: string; tool: string; title: string; detail: s
 export type InboxDetail = InboxItem & {
   show: string | null; bound: Bound[]; proposals: InboxProposal[]; question: string | null
   form: ObjectSchema | null; values: Record<string, unknown>; routes: InboxRoute[]; publish: PublishRequest | null
+  /** Takes a free reply besides its routes, sent as route `otherwise`. */
+  reply?: boolean
   /** Where the ask went, what came with it, and the answer once given. */
   sent: Sent[]; attachments: FileRef[]; answer: Answer | null
 }

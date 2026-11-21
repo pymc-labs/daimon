@@ -150,6 +150,8 @@ function ItemSheet({ id }: { id: string }) {
   )
 }
 
+const REPLY = { name: "otherwise", label: "Send reply", primary: true, comment: true }
+
 function Detail({ d }: { d: InboxDetail }) {
   const [, setItem] = useParam("item")
   const K = KIND[d.kind]
@@ -160,10 +162,10 @@ function Detail({ d }: { d: InboxDetail }) {
   const [asking, setAsking] = useState<string | null>(null)
   const [comment, setComment] = useState("")
   const decide = useDecide(d.id)
-  const send = (route: string, withComment?: boolean) => decide.mutate({
+  const send = (route: string, withComment?: boolean) => decide.mutate(route === REPLY.name ? { route, values: { text: comment.trim() } } : {
     route, comment: withComment ? comment.trim() : undefined, selected: d.kind === "proposals" ? [...picked] : undefined, values: d.form ? vals : undefined,
   })
-  const ask = d.routes.find((r) => r.name === asking)
+  const ask = asking === REPLY.name ? REPLY : d.routes.find((r) => r.name === asking)
   const pick = (pid: string) => setPicked((s) => { const n = new Set(s); if (n.has(pid)) n.delete(pid); else n.add(pid); return n })
   const req = d.publish
   return (
@@ -239,7 +241,7 @@ function Detail({ d }: { d: InboxDetail }) {
         <div className="sticky bottom-0 mt-auto space-y-3 border-t bg-popover px-5 py-3">
           {ask && (
             <div className="space-y-1.5">
-              <Label htmlFor="ib-comment">Comment</Label>
+              <Label htmlFor="ib-comment">{ask === REPLY ? "Reply" : "Comment"}</Label>
               <Textarea id="ib-comment" autoFocus value={comment} rows={3} onChange={(e) => setComment(e.target.value)} />
             </div>
           )}
@@ -252,6 +254,7 @@ function Detail({ d }: { d: InboxDetail }) {
             ) : (
               <>
                 <Button variant="ghost" onClick={() => setItem(null)}>Later</Button>
+                {d.reply && <Button variant="outline" disabled={decide.isPending} onClick={() => setAsking(REPLY.name)}>Reply</Button>}
                 {d.routes.map((r) => (
                   <Button key={r.name} variant={r.primary ? "default" : "outline"} disabled={decide.isPending || (r.primary && d.kind === "proposals" && !picked.size)} onClick={() => (r.comment ? setAsking(r.name) : send(r.name))}>{r.label}</Button>
                 ))}

@@ -378,7 +378,7 @@ export function setAnswer(n: Node, shape: AnswerShape) {
   const to = (i: number) => routes[i] ?? first
   const pair = (a: string, b: string) => Object.fromEntries([[a, to(0)], [b, to(1)]].filter(([, t]) => t))
   n.answer = shape === "approve" ? undefined : shape
-  if (shape === "text" || shape === "form") { n.routes = undefined; n.next = first; return }
+  if (shape === "text" || shape === "form") { n.routes = undefined; n.otherwise = undefined; n.next = first; return }
   n.next = undefined
   if (shape === "approve") n.routes = pair("approve", "reject")
   else if (Object.keys(n.routes ?? {}).length < 2 || (n.routes && "approve" in n.routes)) n.routes = pair("option_1", "option_2")
