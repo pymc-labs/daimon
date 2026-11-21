@@ -13,6 +13,7 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Final
 
@@ -34,8 +35,19 @@ def controls_hint(*, on: bool, held: bool) -> str | None:
 OVERVIEW_PAGE: Final = "how-daimon-works.md"
 PAGE_INDEX: Final = "llms.txt"
 SOURCE_DIR: Final = "packages"
-WEB_SOURCE: Final = PurePosixPath("packages/adapters/web")
-"""The web app's adapter: hidden with the web pages where `web_awareness` is Off."""
+_CORE, _MCP_TOOLS = "packages/core/daimon/core", "packages/adapters/mcp/daimon/adapters/mcp/tools"
+WEB_SOURCE: Final = (
+    "packages/adapters/web",
+    "packages/adapters/web/*",
+    f"{_CORE}/web_*.py",
+    f"{_CORE}/stores/web_*.py",
+    f"{_MCP_TOOLS}/web_*.py",
+    f"{_MCP_TOOLS}/_web_*.py",
+)
+"""fnmatch patterns of the web app's own code (its adapter, core modules and stores, and its
+chat tools): hidden with the web pages where `web_awareness` is Off."""
+WEB_SOURCE_KEPT: Final = (f"{_CORE}/stores/web_search_usage.py",)
+"""Matched above but not the web app's: the model's web search allowance."""
 TEXT_SUFFIXES: Final = frozenset(
     {".py", ".md", ".txt", ".yaml", ".yml", ".toml", ".json", ".ini", ".cfg", ".sh", ".sql",
      ".mako", ".html", ".css", ".csv", ".typ"}
@@ -258,7 +270,12 @@ class Library:
         return target, relative.parts
 
     def _shown(self, relative: PurePosixPath) -> bool:
-        return self.web or not (relative == WEB_SOURCE or relative.is_relative_to(WEB_SOURCE))
+        path = relative.as_posix()
+        return (
+            self.web
+            or path in WEB_SOURCE_KEPT
+            or not any(fnmatchcase(path, pattern) for pattern in WEB_SOURCE)
+        )
 
     def read_source(self, path: str = "", start_line: int = 1) -> str:
         """A text file from `start_line`, or a directory's entries."""

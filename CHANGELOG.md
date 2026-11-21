@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `search_daimon_docs`, `read_daimon_source`, `search_daimon_source`) read and
   search the pages and the `packages/` code in the image, and
   each result names the source repository and commit. Where Web app is Off,
-  pages and code about the web app are left out. The image ships `docs/`;
+  the web app's pages and code (its adapter, core modules and chat tools) are left out. The image ships `docs/`;
   `DAIMON_SELF_KNOWLEDGE__*` sets where they are read. New pages cover
   [how Daimon works](docs/how-daimon-works.md), [approvals](docs/approvals.md)
   and [helpers and handoffs](docs/helpers.md); every feature names the page

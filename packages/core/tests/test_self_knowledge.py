@@ -49,6 +49,8 @@ def _library(tmp_path: Path, *, web: bool) -> Library:
         docs,
         source / "packages/core",
         source / "packages/adapters/web",
+        source / "packages/core/daimon/core/stores",
+        source / "packages/adapters/mcp/daimon/adapters/mcp/tools",
         source / "defaults",  # an operator's own, never served
     ):
         folder.mkdir(parents=True)
@@ -61,6 +63,13 @@ def _library(tmp_path: Path, *, web: bool) -> Library:
     (source / "packages/core/.env").write_text("SECRET=1\n")
     (source / "defaults/agents.yaml").write_text("prompt: needle\n")
     (source / "packages/adapters/web/app.py").write_text("needle = 2\n")
+    for name in (
+        "packages/core/daimon/core/web_links.py",
+        "packages/core/daimon/core/stores/web_people.py",
+        "packages/adapters/mcp/daimon/adapters/mcp/tools/web_people.py",
+    ):
+        (source / name).write_text("needle = 3\n")
+    (source / "packages/core/daimon/core/stores/web_search_usage.py").write_text("needle = 4\n")
     (source / "pyproject.toml").write_text("needle\n")
     (tmp_path / "secret.py").write_text("needle\n")
     (source / "packages/core/link.py").symlink_to(tmp_path / "secret.py")
@@ -102,9 +111,16 @@ def test_pages_and_search_follow_web_awareness(tmp_path: Path) -> None:
     assert "slack.md:4: Invite the bot." in library.search_docs("INVITE"), "case-insensitive"
     with pytest.raises(SelfKnowledgeError):
         library.read_source("packages/adapters/web/app.py")
-    assert "adapters/web" not in library.search_source("needle"), "web source hidden"
+    found = library.search_source("needle")
+    assert "adapters/web" not in found, "web source hidden"
+    assert "web_links" not in found and "web_people" not in found, "web modules and tools hidden"
+    assert "stores/web_search_usage.py:1" in found, "web search's allowance is not the web app"
+    with pytest.raises(SelfKnowledgeError):
+        library.read_source("packages/core/daimon/core/web_links.py")
     on = _library(tmp_path / "on", web=True)
-    assert "packages/adapters/web/app.py:1" in on.search_source("needle"), "shown with web on"
+    shown = on.search_source("needle")
+    assert "packages/adapters/web/app.py:1" in shown, "shown with web on"
+    assert "core/web_links.py:1" in shown and "tools/web_people.py:1" in shown, "and its modules"
 
 
 @pytest.mark.parametrize(
