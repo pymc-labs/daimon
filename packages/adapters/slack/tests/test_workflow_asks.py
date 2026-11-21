@@ -41,6 +41,7 @@ class AskClient(OfflineSlackClient):
             "conversations.info": {"channel": {"id": HOME, "is_member": True}},
             "conversations.open": {"channel": {"id": HOME}},
             "users.info": {"user": {"id": "U1"}},
+            "chat.getPermalink": {"permalink": "https://example.slack.com/archives/C1/p1"},
         }
         if api_method == "chat.postMessage" and body.get("thread_ts"):
             self.replies.append(body)
@@ -127,6 +128,7 @@ async def test_ask_derick_by_dm_resolves_in_the_thread_under_it(
     env = Env(world.sm, world.settings, Who(world.tenant_id, derick), NOW)
     [sent] = (await inbox.item(env, wait_id)).sent
     assert (sent["platform"], sent["where"][:18]) == ("slack", "Direct message to "), sent
+    assert sent["link"] == "https://example.slack.com/archives/C1/p1", "the run links the ask"
 
     assert not await _claims(runtime, world, "U2", "approve", ""), "no thread, no answer"
     assert await _claims(runtime, world, "U2", "approve", post.message_id)

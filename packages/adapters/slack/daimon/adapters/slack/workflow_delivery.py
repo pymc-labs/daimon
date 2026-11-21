@@ -13,6 +13,7 @@ rewrites the ask without its buttons.
 
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -38,6 +39,7 @@ from daimon.core.workflows.delivery import (
     post_text,
     reach_limits,
 )
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = ["make_slack_workflow_poster"]
@@ -114,6 +116,11 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
                 continue
             sent = await client.chat_postMessage(text=chunk, blocks=ask_blocks(chunk, ask), **place)  # pyright: ignore[reportUnknownMemberType]
             ts = str(sent.get("ts"))  # pyright: ignore[reportUnknownMemberType]
+            link: str | None = None
+            with suppress(SlackApiError):
+                # A missing link only hides "open in Slack" on the run page; the ask stands.
+                found = await client.chat_getPermalink(channel=channel, message_ts=ts)  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
+                link = str(found.get("permalink") or "") or None  # pyright: ignore[reportUnknownMemberType]
             async with runtime.sessionmaker.begin() as session:
                 await asks.record_post(
                     session,
@@ -123,6 +130,7 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
                     # A thread under the ask answers it, unless it went into a thread already.
                     thread_id=None if thread is not None else f"{channel}:{ts}",
                     message_id=ts,
+                    link=link,
                     at=datetime.now(UTC),
                 )
         if not job_payload(row).files:
