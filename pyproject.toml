@@ -155,6 +155,7 @@ type = "forbidden"
 # drifts from the directory.
 source_modules = [
     "daimon.core._erasure_guards",
+    "daimon.core._workflow_ledger_guard",
     "daimon.core.compute_fly",
     "daimon.core.compute_models",
     "daimon.core.compute_provider",
@@ -205,6 +206,7 @@ source_modules = [
     "daimon.core.channel_budget_notice",
     "daimon.core.channel_copies",
     "daimon.core.channel_ids",
+    "daimon.core.channel_member_check",
     "daimon.core.channel_post_check",
     "daimon.core.channel_environments",
     "daimon.core.channel_overview",
@@ -231,6 +233,7 @@ source_modules = [
     "daimon.core.cron_words",
     "daimon.core.cursor",
     "daimon.core.db",
+    "daimon.core.delivery",
     "daimon.core.env_file",
     "daimon.core.erasure",
     "daimon.core.direct_messages",
