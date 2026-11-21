@@ -41,6 +41,7 @@ from daimon.adapters.cli.commands.tags import tags_app
 from daimon.adapters.cli.commands.tenants import tenants_app
 from daimon.adapters.cli.commands.usage import usage_app
 from daimon.adapters.cli.commands.watches import watches_app
+from daimon.adapters.cli.commands.workflows import workflows_app
 from daimon.adapters.cli.logging import configure_bootstrap_logging
 from daimon.adapters.cli.run.command import run_command
 from daimon.core.observability import install_log_redaction, redact_text
@@ -75,6 +76,7 @@ app.add_typer(promo_app, name="promo")
 app.add_typer(github_app, name="github")
 app.add_typer(routines_app, name="routines")
 app.add_typer(watches_app, name="watches")
+app.add_typer(workflows_app, name="workflows")
 app.add_typer(tags_app, name="tags")
 app.add_typer(features_app, name="features")
 app.add_typer(dm_app, name="dm")
