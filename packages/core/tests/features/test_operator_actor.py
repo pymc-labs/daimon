@@ -66,7 +66,12 @@ async def _set(
         key="approvals",
         tier=tier,  # pyright: ignore[reportArgumentType]
         value="off",
-        place=FeaturePlace.of(actor.tenant_id, "discord", "c1" if tier == "channel" else None),
+        place=FeaturePlace.of(
+            actor.tenant_id,
+            "discord",
+            "c1" if tier == "channel" else None,
+            agent_id="a1" if tier == "agent" else None,
+        ),
     )
 
 
@@ -77,9 +82,11 @@ async def test_the_operator_sets_approvals_and_the_audit_row_names_who_and_why(
     await db_session.commit()
     await _set(db_session_factory, _operator(tenant.id))
     await _set(db_session_factory, _operator(tenant.id, "external channel"), tier="channel")
+    await _set(db_session_factory, _operator(tenant.id, "one agent"), tier="agent")
     assert [(e.platform_user_id, e.reason) for e in await _audit_rows(db_session, tenant.id)] == [
         ("operator:ops", "server:inherit->off (unattended integration)"),
         ("operator:ops", "c1:inherit->off (external channel)"),
+        ("operator:ops", "agent:a1:inherit->off (one agent)"),
     ], "each operator change is audited with operator, old and new value and the reason"
 
 

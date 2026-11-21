@@ -330,12 +330,17 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
         return principal.external_id if principal.platform == platform else None
 
     async def approvals_json(
-        caller: WebCaller, tenant_id: uuid.UUID, platform: str, channel_id: str | None
+        caller: WebCaller,
+        tenant_id: uuid.UUID,
+        platform: str,
+        channel_id: str | None,
+        agent_id: str | None = None,
     ) -> ApprovalsJson:
+        """The channel's own value, and the one that applies to the agent answering there."""
         (view,) = await read_features(
             runtime.sessionmaker,
             settings,
-            FeaturePlace(tenant_id, platform, channel_id),
+            FeaturePlace.of(tenant_id, platform, channel_id, agent_id=agent_id),
             keys=("approvals",),
         )
         own = view.own("channel" if channel_id is not None else "workspace")
@@ -477,7 +482,8 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             )
         participation = await switch_json("participation", tenant_id, platform, channel_id)
         plans = await switch_json("progress_plans", tenant_id, platform, channel_id)
-        approvals = await approvals_json(caller, tenant_id, platform, channel_id)
+        answering = next((a.id for a in listed if a.name == row.agent.value), None)
+        approvals = await approvals_json(caller, tenant_id, platform, channel_id, answering)
         pin_choices = await pin_choices_of(tenant_id) if is_admin(caller.role) else []
         copy = next(
             (a for a in listed if a.metadata.get(MA_METADATA_KEY_CHANNEL_COPY) == channel_id),
