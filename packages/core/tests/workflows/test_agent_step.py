@@ -13,12 +13,17 @@ import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
+    BetaManagedAgentsTextBlock,
+)
 from daimon.core import usage_recording
 from daimon.core.headless_runner import StepTurn
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
+from daimon.core.turn.approvals import unattended_decider
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
+from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.workflows import answers, brief, inbox, run_views, runs, step_tools, waits
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.agent_step import (
@@ -26,10 +31,11 @@ from daimon.core.workflows.agent_step import (
     CollectFiles,
     Writes,
     step_decider,
+    step_policy,
 )
 from daimon.core.workflows.runs import StepWork
 from daimon.core.workflows.service import Env
-from daimon.core.workflows.spec import AgentNode, SchemaField, parse_spec
+from daimon.core.workflows.spec import AgentNode, SchemaField, WriteScope, parse_spec
 from daimon.testing.workflows import NOW, World, make_world
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import JsonValue
@@ -56,7 +62,7 @@ class Lane:
         message: str,
         session_id: str | None,
         step: StepTurn,
-        writes: Writes,
+        policy: ToolSafetyPolicy,
     ) -> None:
         self.sessions.append(session_id)
         self.resumes.append(step.resume)
@@ -431,6 +437,53 @@ async def test_daimons_own_writes_follow_the_unattended_decision_and_its_reads_s
     for name, (decide, _) in steps.items():
         assert (await decide(read)).allow, f"a Daimon-own read stays trusted on a {name} step"
         assert (await decide(plan)).allow, f"the plan tool stays open on a {name} step"
+
+
+async def test_a_scoped_call_goes_out_unwatched_only_when_its_arguments_fit() -> None:
+    """`writes_to` lets a `writes: refuse` step update a page an earlier call created."""
+    scopes = [
+        WriteScope.model_validate(
+            {
+                "tool": "notes/update_page",
+                "where": {"page_id": {"created_by": {"tool": "notes/create_page", "id": ".id"}}},
+                "free": ["text"],
+            }
+        )
+    ]
+    policy = step_policy(ToolSafetyPolicy(enabled=True), "refuse", scopes)
+    node = AgentNode.model_validate({"kind": "agent", "instructions": "x"})
+    approval = step_decider(
+        node,
+        attempt_id=uuid.uuid4(),
+        policy=policy,
+        writes="refuse",
+        propose=None,
+        scopes=scopes,
+        paths={"notes/create_page": {".id"}},
+        created={"notes/create_page": {"p0"}},
+    )(PolicyApproval(decide=unattended_decider(policy)))
+
+    async def sends(tool: str, **args: object) -> bool:
+        call = ToolCall(tool_use_id="t", server_name="notes", tool_name=tool, input=args)
+        return (await approval.decide(call)).allow
+
+    assert await sends("update_page", page_id="p0", text="hi"), "an earlier step's page"
+    assert not await sends("update_page", page_id="p1", text="hi"), "a page nobody made here"
+    made = ToolUseBlock(
+        kind="tool_use",
+        id="c1",
+        type="agent.mcp_tool_use",
+        name="create_page",
+        input={},
+        mcp_server_name="notes",
+        status="complete",
+        result_content=[BetaManagedAgentsTextBlock(type="text", text='{"id": "p1"}')],
+    )
+    assert approval.observe is not None
+    approval.observe(TurnState(content=[made]))
+    assert await sends("update_page", page_id="p1", text="hi"), "a page this turn created"
+    assert not await sends("update_page", page_id="p1", text="hi", title="x"), "an extra arg"
+    assert not await sends("create_page", title="x"), "an unscoped write stays refused"
 
 
 def test_the_brief_carries_the_contract_and_untrusted_inputs() -> None:

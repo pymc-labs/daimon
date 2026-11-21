@@ -13,8 +13,9 @@ with the brief.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, Literal, Protocol, cast
@@ -50,18 +51,26 @@ from daimon.core.turn.unattended_capabilities import (
 from daimon.core.workflows import engine, step_tools, waits
 from daimon.core.workflows.action_step import (
     ToolClient,
+    created_so_far,
     exposed,
     review_proposals,
     reviewed,
     send_proposals,
+    step_scopes,
 )
 from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
 from daimon.core.workflows.lanes import FRESH, OWNER_DM, agent_of, lane_key
 from daimon.core.workflows.preflight import Refusal, check
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
-from daimon.core.workflows.spec import AgentNode
-from daimon.core.workflows.unattended import Call, decide_unattended_call
+from daimon.core.workflows.spec import AgentNode, WriteScope
+from daimon.core.workflows.unattended import (
+    CREATED,
+    Call,
+    created_ids,
+    created_paths,
+    decide_unattended_call,
+)
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -130,7 +139,7 @@ class LaneTurn(Protocol):
         message: str,
         session_id: str | None,
         step: StepTurn,
-        writes: Writes,
+        policy: ToolSafetyPolicy,
     ) -> None: ...
 
 
@@ -142,10 +151,14 @@ OwnerDm = Callable[[StepWork], Awaitable[engine.Outcome]]
 Propose = Callable[[ToolCall, str | None], Awaitable[ToolConfirmationResult]]
 
 
-def step_policy(policy: ToolSafetyPolicy, writes: Writes) -> ToolSafetyPolicy:
+def step_policy(
+    policy: ToolSafetyPolicy, writes: Writes, scopes: Sequence[WriteScope] = ()
+) -> ToolSafetyPolicy:
     """The tool policy a step runs under: `allow` lets third-party writes through (rules still
-    deny); `refuse` and `propose` let none through unattended."""
-    return policy.model_copy(update={"unattended_writes": ("*",) if writes == "allow" else ()})
+    deny); `refuse` and `propose` let none through unattended but its scoped tools, whose
+    arguments `decide_unattended_call` checks first."""
+    allowed = ("*",) if writes == "allow" else tuple(dict.fromkeys(s.tool for s in scopes))
+    return policy.model_copy(update={"unattended_writes": allowed})
 
 
 def writes_of(work: StepWork) -> Writes:
@@ -166,6 +179,32 @@ def _key(work: StepWork) -> str:
     return key_of(work.step)
 
 
+def made_in(
+    state: TurnState, paths: Mapping[str, Collection[str]]
+) -> list[tuple[str, str, list[str]]]:
+    """(call id, `server/tool`, ids) for each finished call whose result a `created_by` rule
+    reads, from the result's JSON text."""
+    made: list[tuple[str, str, list[str]]] = []
+    for block in state.content:
+        if isinstance(block, TextBlock) or block.status != "complete" or block.is_error:
+            continue
+        tool = f"{block.mcp_server_name}/{_tool_name(block)}"
+        if block.mcp_server_name is None or tool not in paths:
+            continue
+        ids: list[str] = []
+        for item in block.result_content or []:
+            if item.type != "text":
+                continue
+            try:
+                value: JsonValue = json.loads(item.text)
+            except ValueError:
+                continue
+            ids += [i for i in created_ids(paths[tool], value) if i not in ids]
+        if ids:
+            made.append((block.id, tool, ids))
+    return made
+
+
 def _deny(message: str) -> ToolConfirmationResult:
     return ToolConfirmationResult(allow=False, deny_message=f"{message} The tool call did not run.")
 
@@ -179,11 +218,22 @@ def step_decider(
     propose: Propose | None,
     exposed: bool = False,
     test: bool = False,
+    scopes: Sequence[WriteScope] = (),
+    paths: Mapping[str, Collection[str]] | None = None,
+    created: Mapping[str, Collection[str]] | None = None,
 ) -> Callable[[PolicyApproval], PolicyApproval]:
     """Wrap the unattended decider with the step's grant, its `tools` list and its `writes`;
     every other call, Daimon's own included, goes through `decide_unattended_call` (`exposed`:
-    untrusted data can steer this step in this run); Daimon's own step tools and plan stay open."""
+    untrusted data can steer this step in this run); Daimon's own step tools and plan stay open.
+    `scopes` are the step's granted `writes_to`; their `created_by` ids are `created` (earlier
+    steps) plus what this turn's calls returned at `paths`."""
     listed = {k for k in node.tools} if isinstance(node.tools, list) else None
+    scoped = {s.tool for s in scopes}
+    made: dict[str, set[str]] = {k: set(v) for k, v in (created or {}).items()}
+
+    def observe(state: TurnState) -> None:
+        for _, tool, ids in made_in(state, paths or {}):
+            made.setdefault(tool, set()).update(ids)
 
     def wrap(base: PolicyApproval) -> PolicyApproval:
         async def decide(call: ToolCall) -> ToolConfirmationResult:
@@ -207,11 +257,23 @@ def step_decider(
             if inner.server_name is not None and not (own and inner.tool_name in OWN_TOOLS):
                 decision = decide_unattended_call(
                     policy,
-                    Call(inner.server_name, inner.tool_name, writes, test=test, exposed=exposed),
+                    Call(
+                        inner.server_name,
+                        inner.tool_name,
+                        writes,
+                        test=test,
+                        exposed=exposed,
+                        args=cast("dict[str, JsonValue]", dict(inner.input)),
+                        scopes=scopes,
+                        created=made,
+                    ),
                 )
-                # Daimon's server is trusted by the base decider, so it cannot refuse a
-                # `writes: refuse` step for us; reads of its own stay allowed above.
-                if decision.verdict == "refuse" and (own or decision.reason != "writes_refused"):
+                # Daimon's server is trusted by the base decider, and a scoped tool is allowed
+                # by it, so neither can refuse a `writes: refuse` step for us; other refusals
+                # of that kind are the base's, which knows a read by its listing.
+                if decision.verdict == "refuse" and (
+                    own or inner.key in scoped or decision.reason != "writes_refused"
+                ):
                     return _deny(f"Refused {inner.key}: {decision.message}")
                 if decision.verdict == "propose":
                     if own:
@@ -223,7 +285,7 @@ def step_decider(
                     return await propose(inner, decision.reason)
             return await base.decide(call)
 
-        return PolicyApproval(decide=decide)
+        return PolicyApproval(decide=decide, observe=observe if paths else None)
 
     return wrap
 
@@ -250,10 +312,11 @@ class _Activity:
     """Activity lines from the turn as it renders: each tool call once, each plan as a note."""
 
     sm: Sessions
-    tenant_id: uuid.UUID
-    step_id: uuid.UUID
+    work: StepWork
     clock: Callable[[], datetime]
     seen: set[str]
+    #: Where `created_by` rules find ids in a result, by `server/tool` (live runs).
+    paths: Mapping[str, Collection[str]]
 
     async def __call__(self, state: TurnState) -> None:
         lines: list[tuple[str, Literal["tool", "note", "message"], str, str | None]] = []
@@ -271,19 +334,25 @@ class _Activity:
                 self.seen.add(key)
                 if text := _plan_text(plan):
                     lines.append((key, "note", text, None))
-        if not lines:
+        made = [m for m in made_in(state, self.paths) if f"{m[0]}:made" not in self.seen]
+        if not lines and not made:
             return
+        self.seen.update(f"{m[0]}:made" for m in made)
+        work = self.work
         async with self.sm.begin() as s:
             for _, kind, text, tool in lines:
                 await workflow_runs.add_activity(
                     s,
-                    tenant_id=self.tenant_id,
-                    step_id=self.step_id,
+                    tenant_id=work.run.tenant_id,
+                    step_id=work.step.id,
                     kind=kind,
                     text=text,
                     tool=tool,
                     now=self.clock(),
                 )
+            # Kept at call time, so a later step's `created_by` rule can name them.
+            events = [NewEvent(CREATED, _key(work), {"tool": t, "ids": i}) for _, t, i in made]
+            await append_events(s, run_id=work.run.id, events=events, actor=ENGINE, at=self.clock())
 
 
 @dataclass(frozen=True)
@@ -360,26 +429,32 @@ class AgentStepExecutor:
                     await self._event(s, work, key, step_tools.BRIEF_SENT, data)
 
         writes = writes_of(work)
+        scopes = await step_scopes(self.sm, self.settings, work, node)
+        policy = step_policy(self.settings.tool_safety, writes, scopes)
+        paths = created_paths(work.spec) if work.run.mode == "live" else {}
         step = StepTurn(
             tools=tools_of(node),
             decide=step_decider(
                 node,
                 attempt_id=attempt.id,
-                policy=step_policy(self.settings.tool_safety, writes),
+                policy=policy,
                 writes=writes,
                 propose=self._proposer(work),
                 exposed=exposed(work),
                 test=work.run.mode == "test",
+                scopes=scopes,
+                paths=paths,
+                created=await created_so_far(self.sm, work.run.id) if scopes else None,
             ),
             workflow_run_id=work.run.id,
             workflow_step_id=work.step.id,
             on_session=on_session,
             resume=resume and asked is None,
-            on_render=_Activity(self.sm, work.run.tenant_id, work.step.id, self.clock, set()),
+            on_render=_Activity(self.sm, work, self.clock, set(), paths),
         )
         result: step_tools.Recorded | None = None
         for _ in range(waits.MAX_QUESTIONS + 1):
-            failed = await self._drive(work, lane, message, session_id, step, writes)
+            failed = await self._drive(work, lane, message, session_id, step, policy)
             if failed is not None:
                 return failed
             result = await self._recorded(work, attempt.id)
@@ -400,7 +475,7 @@ class AgentStepExecutor:
                 await self._event(s, work, key, "step.nudged", {"attempt": str(attempt.id)})
                 lane_session = await workflow_runs.get_lane(s, run_id=work.run.id, lane=lane)
             nudge = replace(step, resume=False)
-            failed = await self._drive(work, lane, NUDGE, lane_session, nudge, writes)
+            failed = await self._drive(work, lane, NUDGE, lane_session, nudge, policy)
             if failed is not None:
                 return failed
             result = await self._recorded(work, attempt.id)
@@ -466,10 +541,10 @@ class AgentStepExecutor:
         message: str,
         session_id: str | None,
         step: StepTurn,
-        writes: Writes,
+        policy: ToolSafetyPolicy,
     ) -> engine.Failed | None:
         try:
-            await self.turn(work, message=message, session_id=session_id, step=step, writes=writes)
+            await self.turn(work, message=message, session_id=session_id, step=step, policy=policy)
         except Exception as err:  # a stopped turn's pending calls are never answered
             await self._close_lane(work, lane)
             return engine.Failed("retryable", f"{type(err).__name__}: {err}"[:500])

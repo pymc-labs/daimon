@@ -49,7 +49,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
@@ -57,6 +57,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from daimon.core.tool_safety import ToolCall
 from daimon.core.usage_billing import ObservationBilled
 from daimon.core.usage_recording import WebSearchCall
+
+if TYPE_CHECKING:
+    from daimon.core.turn.state import TurnState
 
 ExemptReason = Literal["cli-operator-run", "headless-unrecorded", "mcp-internal-caller"]
 
@@ -115,6 +118,8 @@ class PolicyApproval:
     as a person needs to press a button; the session sits idle meanwhile."""
 
     decide: ToolCallDecider
+    #: Sees the turn so far before each batch is decided (e.g. ids earlier calls returned).
+    observe: Callable[[TurnState], None] | None = None
 
 
 ToolConfirmation = RequireApproval | AutoApprove | PolicyApproval

@@ -249,7 +249,9 @@ async def _decide_blocked(
     match tool_confirmation:
         case AutoApprove():
             return build_confirmation_events(fresh)
-        case PolicyApproval(decide=decide):
+        case PolicyApproval(decide=decide, observe=observe):
+            if observe is not None:
+                observe(state)
             calls = tool_calls_for(state, fresh)
 
             async def decide_one(call: ToolCall) -> ToolConfirmationResult:

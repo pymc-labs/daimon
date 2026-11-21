@@ -92,13 +92,18 @@ async def append_events(
 
 
 async def list_events(
-    session: AsyncSession, run_id: uuid.UUID, *, after_seq: int = 0
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    *,
+    after_seq: int = 0,
+    types: Sequence[str] | None = None,
 ) -> list[EventRow]:
-    rows = await session.scalars(
-        select(WorkflowRunEvent)
-        .where(WorkflowRunEvent.run_id == run_id, WorkflowRunEvent.seq > after_seq)
-        .order_by(WorkflowRunEvent.seq)
+    query = select(WorkflowRunEvent).where(
+        WorkflowRunEvent.run_id == run_id, WorkflowRunEvent.seq > after_seq
     )
+    if types is not None:
+        query = query.where(WorkflowRunEvent.type.in_(types))
+    rows = await session.scalars(query.order_by(WorkflowRunEvent.seq))
     return [EventRow.model_validate(orm) for orm in rows]
 
 

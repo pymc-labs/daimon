@@ -189,6 +189,7 @@ _DETAIL: dict[str, str] = {
     "step.succeeded": "Succeeded",
     "step.failed": "Failed",
     "step.cancelled": "Cancelled",
+    "write.created": "Made",
     "step.unknown": "Outcome unknown",
     "step.resolved_by": "Settled by its owner",
     "step.retry_scheduled": "Will retry",

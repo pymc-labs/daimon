@@ -23,8 +23,8 @@ from daimon.core.pricing import MODEL_PRICING
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.spend_gate import spend_person_of_account
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.usage_recording import record_turn_usage
-from daimon.core.workflows.agent_step import Writes, step_policy
 from daimon.core.workflows.lanes import agent_of
 from daimon.core.workflows.preflight import spend_user_id
 from daimon.core.workflows.runs import StepWork
@@ -47,7 +47,7 @@ class HeadlessLaneTurn:
         message: str,
         session_id: str | None,
         step: StepTurn,
-        writes: Writes,
+        policy: ToolSafetyPolicy,
     ) -> None:
         node, run, settings = work.node, work.run, self.settings
         assert isinstance(node, AgentNode), "a lane runs agent steps"
@@ -95,7 +95,7 @@ class HeadlessLaneTurn:
             github_app_private_key=key.get_secret_value() if key is not None else None,
             agent_github_app=settings.github_app,
             github_mcp_router=settings.github.mcp_router,
-            tool_safety=step_policy(settings.tool_safety, writes),
+            tool_safety=policy,
             budget_channel_id=channel,
             model_override=node.model,
             feature_settings=settings,

@@ -18,9 +18,18 @@ from daimon.core.stores import (
     workflow_waits,
     workflows,
 )
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolCall, ToolSafetyPolicy
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, OPEN_TOOL_SAFETY, ToolCall, ToolSafetyPolicy
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
-from daimon.core.workflows import engine, inbox, runs, service, views, waits
+from daimon.core.workflows import (
+    action_step,
+    agent_step,
+    engine,
+    inbox,
+    runs,
+    service,
+    views,
+    waits,
+)
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.action_step import (
     ActionStepExecutor,
@@ -31,7 +40,7 @@ from daimon.core.workflows.action_step import (
 from daimon.core.workflows.agent_step import step_decider
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AgentNode
-from daimon.core.workflows.unattended import Call, decide_unattended_call
+from daimon.core.workflows.unattended import Call, Decision, decide_unattended_call
 from daimon.testing.workflows import NOW, World, agents_with, make_world
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -351,6 +360,96 @@ async def test_an_exposed_step_with_allow_proposes_its_writes() -> None:
     write = await decide(ToolCall(tool_use_id="t", server_name="crm", tool_name="create_deal"))
     read = await decide(ToolCall(tool_use_id="t", server_name="crm", tool_name="search"))
     assert (write.allow, read.allow, proposed) == (False, True, [("crm/create_deal", "untrusted")])
+
+
+@pytest.mark.parametrize(
+    ("page", "scoped", "sent"), [("made", "on", True), ("p9", "on", False), ("made", "off", False)]
+)
+async def test_a_scoped_action_edits_only_what_this_run_made(
+    db_session: AsyncSession, page: str, scoped: str, sent: bool
+) -> None:
+    """`created_by` lets an Action update the page an earlier step created, with no grant
+    beyond its scope; another page, or scoped writes Off, is refused."""
+    target = "${{ steps.create.output.result.id }}" if page == "made" else page
+    nodes: dict[str, Any] = {
+        "create": {"kind": "action", "tool": "notes/create_page", "args": {}, "next": "edit"},
+        "edit": {
+            "kind": "action",
+            "tool": "notes/update_page",
+            "args": {"page_id": target, "text": "hi"},
+            "writes_to": [
+                {
+                    "tool": "notes/update_page",
+                    "where": {
+                        "page_id": {"created_by": {"tool": "notes/create_page", "id": ".id"}}
+                    },
+                    "free": ["text"],
+                }
+            ],
+            "next": "done",
+        },
+        "done": {"kind": "finish"},
+    }
+    world = await make_world(db_session, nodes, "create")
+    features = {"workflows": "on", "workflow_scoped_writes": scoped}
+    world.settings = world.settings.model_copy(update={"features": features})
+    assert await world.grant_all() == ["unattended_write", "scoped_write"]
+
+    @dataclass
+    class Pages(FakeTools):
+        async def call(
+            self, work: runs.StepWork, url: str, tool: str, args: dict[str, JsonValue]
+        ) -> JsonValue:
+            self.calls.append((url, tool, args))
+            return {"id": "p1"}
+
+    tools = Pages()
+    run = await world.run()
+    await drive(world, run.id, {}, tools)
+    want = ["create_page", "update_page"] if sent else ["create_page"]
+    assert [t for _, t, _ in tools.calls] == want, tools.calls
+
+
+async def test_every_write_path_consults_decide_unattended_call(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent's third-party and Daimon-own writes and an Action all stop where the one
+    decision refuses them, under a base decider that would allow anything."""
+    asked: list[str] = []
+
+    def refuse(policy: ToolSafetyPolicy, call: Call) -> Decision:
+        asked.append(f"{call.server}/{call.tool}")
+        return Decision("refuse", "denied", "No.")
+
+    monkeypatch.setattr(agent_step, "decide_unattended_call", refuse)
+    monkeypatch.setattr(action_step, "decide_unattended_call", refuse)
+    node = AgentNode.model_validate({"kind": "agent", "instructions": "x", "writes": "allow"})
+
+    async def allow(call: ToolCall) -> ToolConfirmationResult:
+        return ToolConfirmationResult(allow=True)
+
+    decide = step_decider(
+        node, attempt_id=uuid.uuid4(), policy=ToolSafetyPolicy(), writes="allow", propose=None
+    )(PolicyApproval(decide=allow)).decide
+    post = ToolCall(
+        tool_use_id="t",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="call_tool",
+        input={"name": "send_message", "arguments": {}},
+    )
+    deal = ToolCall(tool_use_id="t", server_name="crm", tool_name="create_deal")
+    assert not (await decide(deal)).allow, "an agent's third-party write"
+    assert not (await decide(post)).allow, "an agent's Daimon-own write"
+    nodes: dict[str, Any] = {
+        "send": {"kind": "action", "tool": "crm/create_deal", "args": {}, "next": "done"},
+        "done": {"kind": "finish"},
+    }
+    world = await make_world(db_session, nodes, "send")
+    await world.grant_all()
+    tools = FakeTools()
+    await drive(world, (await world.run()).id, {}, tools)
+    assert tools.calls == [], "an Action"
+    assert asked == ["crm/create_deal", f"{DAIMON_SERVER_NAME}/send_message", "crm/create_deal"]
 
 
 # Every module that calls a third-party tool for a workflow decides it first.

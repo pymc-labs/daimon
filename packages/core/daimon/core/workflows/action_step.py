@@ -13,14 +13,19 @@ from typing import Any, Final, Protocol
 
 from daimon.core.config import Settings
 from daimon.core.stores import workflow_proposals, workflow_runs, workflow_waits
-from daimon.core.workflows import asks, engine
+from daimon.core.stores.workflow_run_events import NewEvent, append_events, list_events
+from daimon.core.workflows import asks, engine, gate
 from daimon.core.workflows.expressions import ExpressionError, render
-from daimon.core.workflows.runs import Park, Sessions, StepWork
-from daimon.core.workflows.spec import ActionNode, AgentNode, parse_duration
+from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
+from daimon.core.workflows.spec import ActionNode, AgentNode, WriteScope, parse_duration
 from daimon.core.workflows.unattended import (
+    CREATED,
     Call,
     bound_by,
     call_hash,
+    created_by_tool,
+    created_ids,
+    created_paths,
     decide_unattended_call,
     exposed_at_run,
 )
@@ -64,6 +69,33 @@ def exposed(work: StepWork) -> bool:
         untrusted_inputs=work.run.untrusted_inputs,
         catalog=work.catalog,
     )
+
+
+async def step_scopes(
+    sm: Sessions, settings: Settings, work: StepWork, node: ActionNode | AgentNode
+) -> list[WriteScope]:
+    """The step's `writes_to`, granted at publish; none while scoped writes are off."""
+    if not node.writes_to:
+        return []
+    features = await gate.features_at(sm, settings, work.run.tenant_id)
+    return list(node.writes_to) if features is not None and features.scoped_writes else []
+
+
+async def created_so_far(sm: Sessions, run_id: uuid.UUID) -> dict[str, set[str]]:
+    """The ids this run's allowed calls returned, from its ledger."""
+    async with sm() as s:
+        events = await list_events(s, run_id, types=[CREATED])
+    return created_by_tool(e.data for e in events)
+
+
+async def record_created(
+    sm: Sessions, work: StepWork, tool: str, ids: list[str], now: datetime
+) -> None:
+    """Keep the ids a call made in the ledger, for a later `created_by` rule."""
+    if ids:
+        event = NewEvent(CREATED, key_of(work.step), {"tool": tool, "ids": ids})
+        async with sm.begin() as s:
+            await append_events(s, run_id=work.run.id, events=[event], actor=ENGINE, at=now)
 
 
 async def _approved_calls(
@@ -115,15 +147,20 @@ class ActionStepExecutor:
                     reason="approval_mismatch",
                 )
             approved = True
+        scopes = await step_scopes(self.sm, self.settings, work, node)
         decision = decide_unattended_call(
             self.settings.tool_safety,
             Call(
                 server,
                 tool,
-                "allow",
+                # A scoped-only Action has no write grant beyond its scopes.
+                "refuse" if any(s.tool == node.tool for s in node.writes_to or []) else "allow",
                 test=work.run.mode == "test",
                 exposed=exposed(work),
                 approved=approved,
+                args=args,
+                scopes=scopes,
+                created=await created_so_far(self.sm, work.run.id) if scopes else {},
             ),
         )
         if decision.reason == "test_run":
@@ -153,6 +190,8 @@ class ActionStepExecutor:
             if node.idempotent:
                 return engine.Failed("retryable", message)
             return engine.Unknown(f"{message}. It may have gone out; check before running again.")
+        ids = created_ids(created_paths(work.spec).get(node.tool, ()), result)
+        await record_created(self.sm, work, node.tool, ids, self.clock())
         return engine.Succeeded({"sent": True, "result": result})
 
 

@@ -11,10 +11,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
+from daimon.core.continuity.watch_projection import project
 from daimon.core.tool_safety import ToolAnnotations, ToolSafetyPolicy, classify_tool
 from daimon.core.workflows.spec import (
     AgentNode,
@@ -24,11 +25,13 @@ from daimon.core.workflows.spec import (
     Spec,
     WriteScope,
 )
-from daimon.core.workflows.taint import Catalog, tainted_steps
+from daimon.core.workflows.taint import Catalog, node_scopes, tainted_steps
 from pydantic import JsonValue
 
 Writes = Literal["refuse", "propose", "allow"]
 Verdict = Literal["allow", "propose", "refuse"]
+#: Ledger event: ids an allowed call returned that a `created_by` rule may name later.
+CREATED: Final = "write.created"
 #: One plain address: no display name, quotes, comments, routes or second address.
 _ADDRESS: Final = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+)")
 
@@ -153,6 +156,40 @@ def _passes(rule: ArgRule, value: JsonValue, created: Mapping[str, Collection[st
     if address and address.group(1).lower() in domains:
         return True
     return rule.created_by is not None and value in created.get(rule.created_by.tool, ())
+
+
+def created_paths(spec: Spec) -> dict[str, frozenset[str]]:
+    """By `server/tool`, where in its result each `created_by` rule of the spec finds an id."""
+    paths: dict[str, set[str]] = {}
+    for node in spec.nodes.values():
+        for scope in node_scopes(node):
+            for rule in scope.where.values():
+                if rule.created_by is not None:
+                    paths.setdefault(rule.created_by.tool, set()).add(rule.created_by.id)
+    return {tool: frozenset(p) for tool, p in paths.items()}
+
+
+def created_by_tool(events: Iterable[Mapping[str, JsonValue]]) -> dict[str, set[str]]:
+    """The run's `CREATED` events' data as the ids each `server/tool` returned."""
+    created: dict[str, set[str]] = {}
+    for data in events:
+        tool, ids = data.get("tool"), data.get("ids")
+        if isinstance(tool, str) and isinstance(ids, list):
+            created.setdefault(tool, set()).update(i for i in ids if isinstance(i, str))
+    return created
+
+
+def created_ids(paths: Collection[str], result: JsonValue) -> list[str]:
+    """The ids at `paths` in a call's result; a path that finds no text finds nothing."""
+    ids: list[str] = []
+    for path in sorted(paths):
+        try:
+            found = project(result, path)
+        except ValueError:
+            continue
+        if isinstance(found, str) and found not in ids:
+            ids.append(found)
+    return ids
 
 
 def exposed_at_run(
