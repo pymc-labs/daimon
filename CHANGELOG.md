@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image that cannot be read still falls back to a link rather than ending the
   turn.
 
+- **A relay server's long jobs can wake the conversation when they end.** List the
+  tools that start them in `"wake_tools"` on a `requester_meta` entry of
+  `DAIMON_MCP_IDENTITY__SERVERS`: a person's call then carries a private callback
+  watch link in `_meta.wake_url`, and the server posts the outcome to it. See
+  `docs/mcp-servers.md`.
+
 - **Watch instructions can be up to 4000 characters.** Creating, editing and
   importing a watch all allowed 2000, so longer imported instructions were cut.
 
