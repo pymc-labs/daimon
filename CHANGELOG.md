@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Discord answers read the same in DMs and threads, and agents can have a
+  display name.** DM turns now get the working, done and model reactions, 👍/👎
+  feedback, voice messages and the card's model footer. Pings are joined with a
+  space and never repeat a mention the model wrote; stop and error cards say
+  what happened and for how long. Tables drop their placeholder and size columns
+  to their content. New settings, each defaulting to today's behaviour: Status
+  reactions, Lock reaction, Text before tool calls, Thread title style, Thread
+  archive time, and an agent's Display name, shown wherever people see its name.
+  The first five can also be set per agent. A display name is plain words, and
+  never another agent's name or Daimon's.
+
 - **Watches can poll a signed-identity relay server.** List a tool in
   `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its
   `<root>/mcp-identity/<name>` URL. Each poll mints the watch owner a
@@ -14,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server sees the owner, `requester_kind` `"routine"` and the place the watch
   reports to. A paused or deleted watch's credential names nobody. Such
   watches could not be created before: no stored key matches a relay URL.
+
+- **Share a secret with one person on Discord.** With the new Secret sharing
+  feature on (off by default; a server admin turns it on, for the server or one
+  agent), `/share-secret` sends a secret to a person's DMs. The
+  `share_secret_with` tool sends one of the agent's keys to an admin, the
+  agent's owner or whoever saved the key, while they are in the conversation;
+  a key an admin names for someone else goes once the admin clicks Send. The
+  person reveals it once within a day; the value is encrypted, never in chat or
+  the tool's result, and deleted on reveal or expiry.
+
+- **A relay server's requester fields come from the turn that made the call.**
+  Each call is stamped from the turn holding its session, so concurrent or
+  queued turns in one thread never lend it their person or message; a call
+  made while no turn holds the session names nobody.
 
 - **Images over 5 MiB, or over 8000 px on an edge, are resized instead of sent
   as a link.** In Discord, Slack, Teams and the web app, an image of up to 25

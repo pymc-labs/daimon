@@ -177,9 +177,20 @@ def test_relay_server_name_is_only_this_relays_one_segment_url(url: str, name: s
 
 def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
     key = uuid.uuid4()
-    for binding in (RelayBinding("Helper", key), RelayBinding("Helper")):
+    for binding in (
+        RelayBinding("Helper", key),
+        RelayBinding("Helper"),
+        RelayBinding("Helper", key, grant="grant-1"),
+    ):
         assert parse_relay_claim(binding.claim()) == binding, "a binding reads back"
-    for bad in ("x", {}, {"agent_name": "Helper", "extra": "1"}, {"agent_name": ""}):
+    for bad in (
+        "x",
+        {},
+        {"agent_name": "Helper", "extra": "1"},
+        {"agent_name": ""},
+        {"agent_name": "Helper", "grant": "grant-1"},  # a grant only with its session
+        {"agent_name": "Helper", "session": str(key), "grant": ""},
+    ):
         with pytest.raises(ValueError):
             parse_relay_claim(bad)
 

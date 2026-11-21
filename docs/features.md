@@ -48,6 +48,12 @@ Where each feature can be set, and its default.
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |  |
 | Answer messages | `answer_messages` | Chat | 5 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
 | Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  |  | Only Discord |
+| Display name | `display_name` | Chat | The agent's id |  |  | ✓ |  |  |  |  |
+| Thread title style | `thread_title_style` | Chat | Sentence case | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
+| Thread archive time | `thread_auto_archive` | Chat | 1 week | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
+| Status reactions | `status_reactions` | Chat | Off | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
+| Lock reaction | `protected_notice_reaction` | Chat | On | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
+| Text before tool calls | `pre_tool_messages` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
@@ -75,6 +81,7 @@ Where each feature can be set, and its default.
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Secret sharing | `secret_sharing` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
 | Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -511,6 +518,78 @@ A thread Daimon starts is titled from its opening message by a short model call.
 | Combines | Off above is a ceiling |
 | Deprecated | `DAIMON_THREAD_NAMING__ENABLED` |
 
+## Display name
+
+The name people see for an agent: up to 40 plain characters, never another agent's.
+
+| | |
+| --- | --- |
+| Key | `display_name` |
+| Values | `id` (The agent's id), or any name up to 40 characters |
+| Default | `id` |
+| Levels | Agent |
+| Combines | Most specific wins |
+
+## Thread title style
+
+Sentence case up to 50 characters, or Title Case up to 100, for a thread opened to answer a mention.
+
+| | |
+| --- | --- |
+| Key | `thread_title_style` |
+| Values | `sentence` (Sentence case), `title` (Title Case) |
+| Default | `sentence` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Most specific wins |
+
+## Thread archive time
+
+How long an idle thread opened to answer a mention stays open.
+
+| | |
+| --- | --- |
+| Key | `thread_auto_archive` |
+| Values | `10080` (1 week), `1440` (1 day) |
+| Default | `10080` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Most specific wins |
+
+## Status reactions
+
+⏳ while the agent works, then ✅ first however it ended, and 📨 instead of a notice on a queued message. Off shows 👀, and ✅ only with Completion pings.
+
+| | |
+| --- | --- |
+| Key | `status_reactions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Most specific wins |
+
+## Lock reaction
+
+A 🔒 on a mention the agent may not answer, besides the direct message saying why.
+
+| | |
+| --- | --- |
+| Key | `protected_notice_reaction` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Most specific wins |
+
+## Text before tool calls
+
+Text written before a tool call is posted as its own message. Off keeps it on the working card.
+
+| | |
+| --- | --- |
+| Key | `pre_tool_messages` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
 ## Typed mentions
 
 A message with "@" and the agent's name typed as plain text is answered like a real mention. Direct messages and bots are unchanged.
@@ -802,6 +881,18 @@ The agent can start a long job that keeps working after the chat moves on. Off u
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+
+## Secret sharing
+
+/share-secret sends a secret to one person's DMs; the agent sends its keys to an admin, its owner or its setter. They reveal it once, within a day. A server admin turns it on.
+
+| | |
+| --- | --- |
+| Key | `secret_sharing` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
 
 ## Cloud computers

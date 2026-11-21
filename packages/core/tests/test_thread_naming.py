@@ -15,7 +15,6 @@ import httpx
 import pytest
 from anthropic.types import Message, StopReason, TextBlock, Usage
 from daimon.core.thread_naming import (
-    _SYSTEM_PROMPT,  # pyright: ignore[reportPrivateUsage]
     THREAD_NAME_MAX_CHARS,
     THREAD_NAMING_MODEL,
     fallback_thread_name,
@@ -24,6 +23,7 @@ from daimon.core.thread_naming import (
     parse_thread_name,
     strip_mentions,
     suggest_thread_name,
+    system_prompt,
 )
 from mux.errors import ProviderError
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
@@ -69,10 +69,21 @@ def test_naming_text_names_a_file_only_mention_and_leaves_plain_text_alone() -> 
 
 
 def test_prompt_asks_for_short_sentence_case_titles() -> None:
-    assert "sentence case" in _SYSTEM_PROMPT and "title case" not in _SYSTEM_PROMPT, (
+    prompt = system_prompt()
+    assert "sentence case" in prompt and "Title Case" not in prompt, (
         "titles read like something a person would type, not a headline"
     )
     assert THREAD_NAME_MAX_CHARS == 50, "short enough to scan in the thread list"
+
+
+def test_title_style_asks_for_title_case_up_to_100_characters() -> None:
+    prompt = system_prompt("title")
+    assert "Title Case" in prompt and "max 100 characters" in prompt, (
+        "the title style asks for headline capitals and room for 100 characters"
+    )
+    assert parse_thread_name("x " * 60, 100) == ("x " * 50).strip(), (
+        "a title style title is cut at a word within 100 characters"
+    )
 
 
 # ---------------------------------------------------------------------------

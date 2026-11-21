@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from io import StringIO
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -21,6 +22,7 @@ from daimon.adapters.cli.commands.features import (
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.adapters.cli.tenant import TenantSelector
 from daimon.core.access_policy import AgentApprovals, TenantAccessPolicy
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.errors import StoreError
 from daimon.core.features.registry import FEATURES
@@ -186,6 +188,30 @@ async def test_an_agent_tool_is_written_to_the_agents_own_tool_config(
     assert store["ag_helper"]["bash"] is False
     row = _row(await _rows(rt, selector, agent="helper"), "tool.bash")
     assert row["value"] in ("off", False)
+
+
+async def test_an_agents_own_name_is_not_taken_for_its_cli_change(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selector = await _tenant(db_session_factory)
+    tenant_id = uuid.UUID(str(selector.tenant_id))
+    agents = [_agent_json(agent_id="ag_helper", name="helper", tenant_id=tenant_id)]
+    change = AsyncMock(side_effect=ChannelChangeRefused("stop", kind="invalid"))
+    monkeypatch.setattr(features_cmd, "change_feature", change)
+    console, _ = _console()
+    with pytest.raises(StoreError, match="stop"):
+        await features_set(
+            rt=_runtime(db_session_factory, agents),
+            console=console,
+            selector=selector,
+            key="display_name",
+            value="Helper",
+            tier=None,
+            agent="helper",
+            channel=None,
+            thread=None,
+        )
+    assert change.await_args.args[2].agent_names is not None, "its own slug is not another's"
 
 
 async def test_diff_lists_only_the_features_two_agents_differ_on(

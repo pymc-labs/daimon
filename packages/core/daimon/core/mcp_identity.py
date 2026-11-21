@@ -164,11 +164,17 @@ class RelayBinding:
     owner: str | None = None
     #: The watch a poll reads for; at most one of `session_key`, `routine_id` and this.
     watch_id: uuid.UUID | None = None
+    #: The session's execution grant (`chat_session_id`), only with `session_key`. The
+    #: turn holding it (`bind_origin_session`) is the one making the call, so the relay
+    #: names that turn even beside a queued one or after the session row was replaced.
+    grant: str | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
         if self.session_key is not None:
             value["session"] = str(self.session_key)
+        if self.grant is not None:
+            value["grant"] = self.grant
         if self.routine_id is not None:
             value["routine"] = str(self.routine_id)
         if self.watch_id is not None:
@@ -184,11 +190,12 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         raise ValueError("relay claim is not an object")
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
-    owner, watch = claim.get("owner"), claim.get("watch")
+    owner, watch, grant = claim.get("owner"), claim.get("watch"), claim.get("grant")
     unattended = routine is not None or watch is not None
     if (
-        not set(claim) <= {"agent_name", "session", "routine", "watch", "owner"}
+        not set(claim) <= {"agent_name", "session", "routine", "watch", "owner", "grant"}
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
+        or not (grant is None or (isinstance(grant, str) and grant and key is not None))
         or not isinstance(name, str)
         or not name
         or not (key is None or isinstance(key, str))
@@ -203,6 +210,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         routine_id=None if routine is None else uuid.UUID(routine),
         owner=owner,
         watch_id=None if watch is None else uuid.UUID(watch),
+        grant=grant,
     )
 
 

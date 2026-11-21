@@ -55,7 +55,7 @@ from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, WatchRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
-from daimon.core.stores.turn_origins import list_active_origins
+from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -183,23 +183,38 @@ async def _session_turn(
 ) -> TurnOriginRow | None:
     """The person's turn the calling session is running now, or None.
 
-    The binding names the session's `thread_sessions` row. Only while that row is
-    still the caller's live session in its thread does a turn there count: a
-    replaced or stopped session calling on names nobody.
+    The binding names the session's `thread_sessions` row. With the session's
+    execution grant, the turn is the one holding it now (`bind_origin_session`),
+    so each call names the turn that made it, beside a queued turn or after the
+    row was replaced. Without one (a session with no grant) a turn counts only
+    while that row is the caller's live session and runs one turn in its thread.
     """
     if binding.session_key is None:
         return None
     async with sessionmaker() as session:
         row = await get_thread_session_by_id(session, id=binding.session_key)
-        if (
-            row is None
-            or row.status != "live"
-            or (row.tenant_id, row.account_id, row.platform) != (tenant_id, account_id, platform)
+        if row is None or (row.tenant_id, row.account_id, row.platform) != (
+            tenant_id,
+            account_id,
+            platform,
         ):
             return None
-        origins = await list_active_origins(
-            session, tenant_id=tenant_id, account_id=account_id, platform=platform, now=now
-        )
+        if binding.grant is not None:
+            held = await get_session_origin(
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                platform=platform,
+                chat_session_id=binding.grant,
+                now=now,
+            )
+            origins = [] if held is None else [held]
+        elif row.status != "live":
+            return None
+        else:
+            origins = await list_active_origins(
+                session, tenant_id=tenant_id, account_id=account_id, platform=platform, now=now
+            )
     return matching_turn(origins, tenant_id=tenant_id, agent_id=agent_id, thread_id=row.thread_id)
 
 
@@ -483,8 +498,9 @@ def build_identity_relay_route(
             # A turn a person started names that person. An unattended run names who
             # it acts for, as kind "routine": a routine's owner and delivery place, a
             # watch poll's owner and report place, or the person and place of a wake
-            # (watch, timer, continuation). A foreign sender, a replaced session and
-            # two turns at once match none and carry no requester fields.
+            # (watch, timer, continuation). A foreign sender, or a session whose calling
+            # turn is unknown (`_session_turn`), matches none and carries no requester
+            # fields.
             named: str | None = None
             conversation: dict[str, str | None] | None = None
             kind: RequesterKind | None = None

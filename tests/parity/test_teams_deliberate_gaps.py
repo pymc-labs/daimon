@@ -421,6 +421,7 @@ async def test_a_teams_connect_github_link_goes_to_the_requesters_one_to_one_cha
             channel_id="19:c@thread.tacv2",
             url="https://mcp.example.test/oauth/github/connect/secret",
             agent_name="Agent",
+            agent_ma_id="ma_agent",
         )
     assert posts == ["conversations", "conversations/a:dm-1/activities"], (
         "the link goes to a 1:1 chat, never the channel; if it moves to a private reply "

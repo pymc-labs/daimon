@@ -549,7 +549,7 @@
               "color": 3447003,
               "flags": 0,
               "footer": {
-                "text": "0s"
+                "text": "0s\u2003\u2003Sonnet 4.6"
               },
               "title": "Working on it\u2026",
               "type": "rich"
@@ -1085,7 +1085,7 @@
               "color": 3447003,
               "flags": 0,
               "footer": {
-                "text": "0s"
+                "text": "0s\u2003\u2003Sonnet 4.6"
               },
               "title": "Working on it\u2026",
               "type": "rich"
@@ -1413,7 +1413,7 @@
               "color": 3447003,
               "flags": 0,
               "footer": {
-                "text": "0s"
+                "text": "0s\u2003\u2003Sonnet 4.6"
               },
               "title": "Working on it\u2026",
               "type": "rich"

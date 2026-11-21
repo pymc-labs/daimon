@@ -20,7 +20,8 @@ def test_escalate_emoji_is_not_a_vote_and_thumbs_are_not_escalations() -> None:
     # classifier grew to match the other's emoji, an escalation would land in
     # message_feedback or a thumbs-down would spend a support credit.
     common = dict(emoji_is_custom=False, reactor_id=2, bot_user_id=1, guild_id=99)
-    assert vote_for_reaction(emoji_name=ESCALATE, **common) is None
+    vote = {k: v for k, v in common.items() if k != "guild_id"}
+    assert vote_for_reaction(emoji_name=ESCALATE, **vote) is None
     assert is_escalation_reaction(emoji_name=THUMBS_UP, **common) is False
     assert is_escalation_reaction(emoji_name=THUMBS_DOWN, **common) is False
     assert is_escalation_reaction(emoji_name=ESCALATE, **common) is True

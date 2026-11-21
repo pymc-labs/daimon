@@ -48,6 +48,7 @@ from daimon.core.routine_delivery import (
     delivery_target,
     render_fallback_dm,
     render_fallback_post,
+    routine_agent_name,
     routine_requester_name,
     teams_thread_id,
 )
@@ -129,7 +130,8 @@ def make_teams_routine_poster(
             chat = await teams.open_chat(member)
             delivery = uuid.uuid4()
             for chunk in split_fenced(
-                render_fallback_dm(row, reason) + unsupported_files_note(payload_for(row)),
+                render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row))
+                + unsupported_files_note(payload_for(row)),
                 TEAMS_LIMIT,
                 word_boundary=True,
             ):
@@ -181,7 +183,10 @@ def make_teams_routine_poster(
             return await fallback("creator_cannot_post")
         name = await routine_requester_name(sessionmaker, row, "teams")
         text = render_fallback_post(
-            row, platform="teams", requester_name=name
+            row,
+            platform="teams",
+            requester_name=name,
+            agent_name=await routine_agent_name(sessionmaker, row),
         ) + unsupported_files_note(payload_for(row))
         conversation = teams_thread_id(target)
         ids: list[str] = []

@@ -18,14 +18,14 @@ level, the same shape `credential_button.py` and `feedback_button.py` use.
 
 Pipeline, cheapest and most certain gates first: (1) bot not connected yet
 -- bail; (2) `vote_for_reaction`, one pure call covering the bot-self-
-reaction, direct-message, custom-emoji, and emoji-match gates with zero
+reaction, custom-emoji, and emoji-match gates with zero
 I/O; (3) `is_bot_authored` accepts the bot id immediately; an absent author
 id or a webhook author falls back to one bounded message fetch, memoized per
 message id (see `_AUTHOR_CACHE_MAX_ENTRIES`),
 logging its use since the gateway field could stop arriving without notice, where
 a failure means the author is unverifiable and records NOTHING -- never
-"assume ours"; (4) derive the tenant id (pure)
-and open one transaction to read the tenant, resolve a best-effort
+"assume ours"; (4) derive the tenant id (from the guild, or from the
+reactor's DM conversation) and open one transaction to read the tenant, resolve a best-effort
 session/account attribution, and upsert the vote; (5) on a genuinely new
 down-vote, open the private follow-up (`_send_feedback_prompt`).
 """
@@ -62,6 +62,7 @@ from daimon.core.message_feedback import (
     vote_for_reaction,
 )
 from daimon.core.stores.agent_posts import get_post
+from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.message_feedback import record_vote
 from daimon.core.stores.support_escalation import asked_options, resolve_limit
@@ -210,7 +211,6 @@ class FeedbackReactionCog(commands.Cog):
             emoji_is_custom=payload.emoji.id is not None,
             reactor_id=payload.user_id,
             bot_user_id=bot_user_id,
-            guild_id=payload.guild_id,
         )
         if candidate_vote is None:
             return
@@ -224,11 +224,23 @@ class FeedbackReactionCog(commands.Cog):
         ):
             return
 
-        # guild_id is guaranteed non-None: vote_for_reaction already returned
-        # None above for any reaction with no guild (a DM reaction).
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
-
         async with self._bot.runtime.sessionmaker() as session, session.begin():
+            thread_id = str(payload.channel_id)
+            if payload.guild_id is not None:
+                tenant_id = derive_tenant_uuid(
+                    platform="discord", workspace_id=str(payload.guild_id)
+                )
+            else:
+                # A DM answer belongs to the reactor's current conversation there.
+                conversation = await get_conversation(
+                    session,
+                    platform="discord",
+                    route_key=thread_id,
+                    external_user_id=str(payload.user_id),
+                )
+                if conversation is None:
+                    return
+                tenant_id, thread_id = conversation.tenant_id, conversation.scope_id
             tenant = await get_tenant(session, tenant_id)
             if tenant is None:
                 log.info("feedback.tenant_missing", tenant_id=str(tenant_id))
@@ -240,7 +252,7 @@ class FeedbackReactionCog(commands.Cog):
                 session,
                 tenant_id=tenant_id,
                 platform="discord",
-                thread_id=str(payload.channel_id),
+                thread_id=thread_id,
             )
             ma_session_id = thread_row.ma_session_id if thread_row is not None else None
 
@@ -279,7 +291,9 @@ class FeedbackReactionCog(commands.Cog):
         )
 
         if should_trigger_feedback_dm(previous_vote=previous_vote, new_vote=candidate_vote):
-            await self._send_feedback_prompt(payload, feedback_id=result.row.id)
+            await self._send_feedback_prompt(
+                payload, feedback_id=result.row.id, tenant_id=tenant_id
+            )
 
     async def _possible_own_author(self, payload: discord.RawReactionActionEvent) -> bool:
         author_id = payload.message_author_id
@@ -493,7 +507,11 @@ class FeedbackReactionCog(commands.Cog):
             )
 
     async def _send_feedback_prompt(
-        self, payload: discord.RawReactionActionEvent, *, feedback_id: uuid.UUID
+        self,
+        payload: discord.RawReactionActionEvent,
+        *,
+        feedback_id: uuid.UUID,
+        tenant_id: uuid.UUID,
     ) -> None:
         """Open the private free-text path for a genuinely new down-vote.
 
@@ -504,10 +522,8 @@ class FeedbackReactionCog(commands.Cog):
         here (most commonly `discord.Forbidden` -- direct messages closed)
         costs the reactor nothing but the follow-up prompt.
         """
-        # guild_id is guaranteed non-None: the pure gate in vote_for_reaction
-        # already dropped any reaction lacking a guild.
         link = (
-            f"https://discord.com/channels/{payload.guild_id}"
+            f"https://discord.com/channels/{payload.guild_id or '@me'}"
             f"/{payload.channel_id}/{payload.message_id}"
         )
         # A live View exists only to carry the item onto the wire -- dispatch
@@ -518,14 +534,16 @@ class FeedbackReactionCog(commands.Cog):
             user = self._bot.get_user(payload.user_id)
             if user is None:
                 user = await self._bot.fetch_user(payload.user_id)
-            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
-            channel = await support_channel_for(
-                self._bot.runtime,
-                self._bot,
-                tenant_id=tenant_id,
-                channel_id=str(payload.channel_id),
+            shared = (
+                payload.guild_id is not None
+                and await support_channel_for(
+                    self._bot.runtime,
+                    self._bot,
+                    tenant_id=tenant_id,
+                    channel_id=str(payload.channel_id),
+                )
+                is not None
             )
-            shared = channel is not None
             await user.send(embed=feedback_prompt_embed(link, shared=shared), view=view)
         except discord.HTTPException as exc:
             # discord.Forbidden (closed DMs) is the common case -- there is no
