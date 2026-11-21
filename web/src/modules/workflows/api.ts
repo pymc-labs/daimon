@@ -117,7 +117,8 @@ export function useLiveRun(run: RunDetail | undefined) {
     return () => ac.abort()
   }, [id, epoch])
   const state = useMemo(() => (events ? project(events) : null), [events])
-  const merged = useMemo(() => run && (state ? { ...run, ...state, events: events!.length, head_hash: events!.at(-1)?.hash ?? run.head_hash } : run), [run, state, events])
+  // The run row also counts spend the ledger has not closed yet (a running attempt).
+  const merged = useMemo(() => run && (state ? { ...run, ...state, cost_usd: Math.max(run.cost_usd, state.cost_usd), events: events!.length, head_hash: events!.at(-1)?.hash ?? run.head_hash } : run), [run, state, events])
   const follow = useCallback(() => setEpoch((n) => n + 1), [])
   return { run: merged, events: events ?? [], fresh, follow }
 }
