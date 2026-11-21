@@ -55,6 +55,7 @@ class Lane:
     resumes: list[bool] = field(default_factory=list[bool])
     attempt: uuid.UUID | None = None
     step: StepTurn | None = None
+    steps: list[StepTurn] = field(default_factory=list[StepTurn])
 
     async def __call__(
         self,
@@ -68,6 +69,7 @@ class Lane:
         self.sessions.append(session_id)
         self.resumes.append(step.resume)
         self.step = step
+        self.steps.append(step)
         sid = session_id or f"ses_{len(self.sessions)}"
         await step.on_session(sid)
         if found := re.search(r'step="([0-9a-f-]{36})"', message):
@@ -491,6 +493,7 @@ async def test_a_step_loads_its_skills_as_published_until_republished(
     db_session: AsyncSession,
 ) -> None:
     nodes = {
+        "read": {"kind": "agent", "agent": "daimon", "instructions": "Read", "next": "a"},
         "a": {
             "kind": "agent",
             "agent": "daimon",
@@ -500,7 +503,7 @@ async def test_a_step_loads_its_skills_as_published_until_republished(
         },
         "f": {"kind": "finish"},
     }
-    world = await make_world(db_session, nodes, "a")
+    world = await make_world(db_session, nodes, "read")
     library = {"triage": SkillPin(id="skill_1", version="1")}
 
     async def skills() -> dict[str, SkillPin]:
@@ -516,10 +519,11 @@ async def test_a_step_loads_its_skills_as_published_until_republished(
             await service.publish(env, world.workflow_id, "No library")
 
     async def loaded() -> list[str]:
-        lane = Lane(world, [completes({})])
+        lane = Lane(world, [completes({}), completes({})])
         await drive(world, (await world.run()).id, lane)
-        assert lane.step is not None
-        return [f"{s.skill_id}@{s.version}" for s in lane.step.skills]
+        first, then = ([f"{s.skill_id}@{s.version}" for s in t.skills] for t in lane.steps)
+        assert first == then, "the lane's session gets a later step's skills when created"
+        return then
 
     await service.publish(owner, world.workflow_id, "Pin")
     library["triage"] = SkillPin(id="skill_1", version="2")
