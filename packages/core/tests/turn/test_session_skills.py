@@ -235,15 +235,21 @@ def test_every_skill_version_daimon_publishes_forgets_its_remembered_latest() ->
     """Each production call that publishes or deletes a skill version sits in a
     function that drops the remembered latest version."""
     root = Path(__file__).resolve().parents[4]
-    # A workflow store's `publish_version` is a database write, not a skill version.
-    publishing = re.compile(
-        r"(?<!store)(?<!workflows)\.(publish_version|versions\.create|delete_version)\("
-    )
+    publishing = re.compile(r"\.(publish_version|versions\.create|delete_version)\(")
+    store = re.compile(r"^from daimon\.core\.stores import .*\bworkflows\b(?: as (\w+))?", re.M)
+
+    def calls(text: str) -> list[str]:
+        # The workflow store's `publish_version` is a database write, not a skill version.
+        if found := store.search(text):
+            alias = re.escape(found[1] or "workflows")
+            text = re.sub(rf"(?<![\w.]){alias}\.publish_version\(", "", text)
+        return publishing.findall(text)
+
     callers = {
         path.relative_to(root).as_posix()
         for package in ("packages/core/daimon", "packages/adapters")
         for path in (root / package).rglob("*.py")
-        if publishing.search(path.read_text())
+        if calls(path.read_text())
     }
     assert callers == {
         "packages/core/daimon/core/mux_compat.py",
@@ -251,7 +257,7 @@ def test_every_skill_version_daimon_publishes_forgets_its_remembered_latest() ->
     }, f"a new publish path must forget the remembered latest version: {callers}"
     for caller in callers:
         text = (root / caller).read_text()
-        assert text.count("LATEST_VERSIONS.forget(") >= len(publishing.findall(text)), caller
+        assert text.count("LATEST_VERSIONS.forget(") >= len(calls(text)), caller
 
 
 async def test_a_cold_preview_of_the_default_agents_skills_fits_its_budget(
