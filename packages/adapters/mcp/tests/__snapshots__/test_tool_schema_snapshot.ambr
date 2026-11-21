@@ -10376,7 +10376,7 @@
               }),
             ]),
             'default': None,
-            'description': 'Discord user ID; omit to send it to the person who asked.',
+            'description': 'Their user ID; omit to send it to the person who asked.',
           }),
         }),
         'required': list([

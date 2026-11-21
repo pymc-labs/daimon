@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace as NS
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,9 +34,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(tool, "env_dm_policy", MagicMock())
     monkeypatch.setattr(tool, "_require_bot_token", MagicMock(return_value="token"))
     member = MagicMock(bot=False)
-    member.create_dm = AsyncMock(
-        return_value=MagicMock(id=9, send=AsyncMock(return_value=MagicMock(id=8)))
-    )
+    member.create_dm = AsyncMock(return_value=NS(id=9, send=AsyncMock(return_value=NS(id=8))))
     guild = MagicMock(fetch_member=AsyncMock(return_value=member))
     client = MagicMock(fetch_guild=AsyncMock(return_value=guild))
     monkeypatch.setattr(tool, "rest_client", MagicMock(return_value=_cm(client)))

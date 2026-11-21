@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace as NS
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -59,7 +60,7 @@ async def test_a_closed_dm_rolls_the_share_back(monkeypatch: pytest.MonkeyPatch)
     set_card = AsyncMock()
     monkeypatch.setattr(store, "set_share_card", set_card)
     forbidden = discord.Forbidden(MagicMock(status=403, reason="x"), "closed")
-    recipient = MagicMock(id=2, send=AsyncMock(side_effect=forbidden))
+    recipient = NS(id=2, send=AsyncMock(side_effect=forbidden))
     tx = _Tx()
     assert await _share(tx, recipient) == (words.dm_closed_text("2"), False)
     assert isinstance(tx.failed[-1], discord.Forbidden), "the transaction rolled back"
@@ -73,9 +74,7 @@ async def test_the_card_names_the_secret_but_never_holds_it(
     monkeypatch.setattr(store, "create_share", AsyncMock(return_value=SHARE))
     set_card = AsyncMock()
     monkeypatch.setattr(store, "set_share_card", set_card)
-    recipient = MagicMock(
-        id=2, send=AsyncMock(return_value=MagicMock(id=8, channel=MagicMock(id=9)))
-    )
+    recipient = NS(id=2, send=AsyncMock(return_value=NS(id=8, channel=NS(id=9))))
     text, ok = await _share(_Tx(), recipient)
     assert ok and text == words.shared_text(recipient="2", label="Prod DB")
     embed = recipient.send.await_args.kwargs["embed"]
@@ -88,7 +87,7 @@ async def test_sharing_off_stores_nothing(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(cmd, "_sharing_on", AsyncMock(return_value=False))
     create = AsyncMock()
     monkeypatch.setattr(store, "create_share", create)
-    assert await _share(_Tx(), MagicMock(id=2)) == (words.OFF, False)
+    assert await _share(_Tx(), NS(id=2)) == (words.OFF, False)
     create.assert_not_awaited()
 
 
