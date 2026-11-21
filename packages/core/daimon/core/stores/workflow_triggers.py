@@ -28,7 +28,7 @@ from daimon.core._models import (
 )
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -355,6 +355,7 @@ async def record_event(
     status: EventStatus,
     received_at: datetime,
     delivery_id: str | None = None,
+    payload_hash: str | None = None,
     test: bool = False,
     verified: bool = False,
     http_status: int | None = None,
@@ -363,12 +364,13 @@ async def record_event(
     payload: dict[str, Any] | None = None,
     inputs: dict[str, Any] | None = None,
 ) -> tuple[EventRow, EventRow | None]:
-    """The event, and the first one with its delivery id when it is a repeat (recorded as a
-    duplicate, with no payload)."""
+    """The event, and the first one with its delivery id or payload hash when it is a repeat
+    (recorded as a duplicate, with no payload)."""
     values: dict[str, Any] = {
         "tenant_id": trigger.tenant_id,
         "trigger_id": trigger.id,
         "delivery_id": delivery_id,
+        "payload_hash": payload_hash,
         "test": test,
         "verified": verified,
         "status": status,
@@ -382,24 +384,37 @@ async def record_event(
     inserted = await session.scalar(
         insert(WorkflowTriggerEvent)
         .values(**values)
-        .on_conflict_do_nothing(
-            index_elements=["trigger_id", "delivery_id"],
-            # Literal, not bound: Postgres matches the partial index by its predicate.
-            index_where=text("delivery_id IS NOT NULL AND status <> 'duplicate'"),
-        )
+        # Either dedupe index: a repeated delivery id or payload hash.
+        .on_conflict_do_nothing()
         .returning(WorkflowTriggerEvent)
     )
     if inserted is not None:
         return EventRow.model_validate(inserted), None
+    keys = [
+        column == value
+        for column, value in (
+            (WorkflowTriggerEvent.delivery_id, delivery_id),
+            (WorkflowTriggerEvent.payload_hash, payload_hash),
+        )
+        if value is not None
+    ]
     first = await session.scalar(
-        select(WorkflowTriggerEvent).where(
+        select(WorkflowTriggerEvent)
+        .where(
             WorkflowTriggerEvent.trigger_id == trigger.id,
-            WorkflowTriggerEvent.delivery_id == delivery_id,
+            or_(*keys),
             WorkflowTriggerEvent.status != "duplicate",
         )
+        .limit(1)
     )
     assert first is not None, "a conflict means the first one is there"
-    values |= {"status": "duplicate", "payload": None, "inputs": None, "http_status": 200}
+    values |= {
+        "status": "duplicate",
+        "payload": None,
+        "payload_hash": None,
+        "inputs": None,
+        "http_status": 200,
+    }
     dup = await session.scalar(
         insert(WorkflowTriggerEvent).values(**values).returning(WorkflowTriggerEvent)
     )
@@ -496,11 +511,20 @@ async def mark_event(
 
 
 async def delete_events_before(session: AsyncSession, *, before: datetime) -> int:
-    """The deliveries log keeps the payload retention's days; older events go."""
+    """The deliveries log keeps the payload retention's days. Older events go, but a first
+    delivery with a dedupe key stays, cleared, so a replay of it stays a duplicate."""
+    old = WorkflowTriggerEvent.received_at < before
+    keyed = (WorkflowTriggerEvent.status != "duplicate") & (
+        WorkflowTriggerEvent.delivery_id.is_not(None)
+        | WorkflowTriggerEvent.payload_hash.is_not(None)
+    )
     gone = await session.scalars(
-        delete(WorkflowTriggerEvent)
-        .where(WorkflowTriggerEvent.received_at < before)
-        .returning(WorkflowTriggerEvent.id)
+        delete(WorkflowTriggerEvent).where(old, ~keyed).returning(WorkflowTriggerEvent.id)
+    )
+    await session.execute(
+        update(WorkflowTriggerEvent)
+        .where(old, keyed, WorkflowTriggerEvent.payload.is_not(None))
+        .values(payload=None, headers=None, inputs=None)
     )
     return len(gone.all())
 

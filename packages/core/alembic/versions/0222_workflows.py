@@ -699,6 +699,13 @@ def create_tables() -> None:
         unique=True,
         postgresql_where=sa.text("delivery_id IS NOT NULL AND status <> 'duplicate'"),
     )
+    op.create_index(
+        "uq_workflow_trigger_events_payload",
+        "workflow_trigger_events",
+        ["trigger_id", "payload_hash"],
+        unique=True,
+        postgresql_where=sa.text("payload_hash IS NOT NULL AND status <> 'duplicate'"),
+    )
     op.create_table(
         "workflow_trigger_secrets",
         sa.Column("id", sa.UUID(), server_default=sa.text("gen_random_uuid()"), nullable=False),

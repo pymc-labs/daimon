@@ -6113,6 +6113,13 @@ class WorkflowTriggerEvent(Base):
             postgresql_where=text("delivery_id IS NOT NULL AND status <> 'duplicate'"),
         ),
         Index(
+            "uq_workflow_trigger_events_payload",
+            "trigger_id",
+            "payload_hash",
+            unique=True,
+            postgresql_where=text("payload_hash IS NOT NULL AND status <> 'duplicate'"),
+        ),
+        Index(
             "ix_workflow_trigger_events_accepted",
             "received_at",
             postgresql_where=text("status = 'accepted'"),

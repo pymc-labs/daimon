@@ -79,7 +79,7 @@ class Hook:
         )
 
 
-async def make_hook(db: AsyncSession) -> Hook:
+async def make_hook(db: AsyncSession, verify: str = "standard-webhooks") -> Hook:
     tenant = await make_tenant(db)
     owner = await make_account(db, tenant=tenant)
     await db.execute(
@@ -91,7 +91,7 @@ async def make_hook(db: AsyncSession) -> Hook:
         "start": "b",
         "nodes": INLINE,
         "inputs": {"type": "object", "required": ["n"], "properties": {"n": {"type": "integer"}}},
-        "triggers": [HOOK],
+        "triggers": [HOOK | {"verify": verify}],
     }
     flow = await workflows.create_workflow(
         db, tenant_id=tenant.id, owner_account_id=owner.id, name="T", spec=spec
@@ -226,6 +226,26 @@ async def test_a_listening_test_url_captures_one_delivery_as_a_test_run(
     assert await triggers.start_from_events(hook.sm, settings(), now=NOW) == 1, "a test run"
     mode = await db_session.scalar(select(WorkflowRun.mode))
     assert mode == "test", mode
+
+
+async def test_a_replayed_bearer_body_is_a_duplicate_even_past_retention(
+    db_session: AsyncSession,
+) -> None:
+    """Bearer signs no timestamp: the same body again, kept past the log's retention, is a
+    duplicate, while a different body starts."""
+    hook = await make_hook(db_session, verify="bearer")
+    auth = {"content-type": "application/json", "authorization": f"Bearer {hook.secret}"}
+    body = json.dumps(GOOD).encode()
+    first = await hook.post(headers=auth, body=body)
+    assert first.status == 202, first
+    async with hook.sm.begin() as s:
+        await store.delete_events_before(s, before=NOW + timedelta(days=365))
+    kept = await db_session.scalar(select(WorkflowTriggerEvent))
+    assert kept is not None and kept.payload is None, "retention clears the payload"
+    again = await hook.post(headers=auth, body=body)
+    assert again.body.get("duplicate") is True, f"a replay is a duplicate: {again}"
+    other = await hook.post(headers=auth, body=json.dumps(GOOD | {"x": 1}).encode())
+    assert other.status == 202, f"a new body is a new delivery: {other}"
 
 
 async def test_a_body_nested_too_deep_is_refused_before_it_is_stored(

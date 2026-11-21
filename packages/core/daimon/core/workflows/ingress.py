@@ -11,6 +11,7 @@ through `runs.start_run`, so every trigger path meets the same preflight.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import Mapping
@@ -41,6 +42,8 @@ _MAX_DELIVERY_ID: Final = 200
 _MINUTE: Final = timedelta(minutes=1)
 #: Deeper bodies are refused: evaluating one would overflow the interpreter's stack.
 MAX_DEPTH: Final = 64
+#: Schemes that sign no timestamp: a captured request replays unless its body is deduped.
+_UNTIMED: Final = frozenset({"github", "bearer"})
 
 
 @dataclass(frozen=True)
@@ -266,6 +269,12 @@ async def receive(
             return Reply(200, {"challenge": payload.get("challenge")})
         context: dict[str, JsonValue] = {"payload": payload, "headers": kept}
         delivery = _delivery_id(scheme, config, headers, context, now)
+        # No timestamp is signed, so a replayed body is caught by its hash.
+        digest = (
+            f"{'test:' if test else ''}{hashlib.sha256(body).hexdigest()}"
+            if scheme in _UNTIMED
+            else None
+        )
         try:
             wanted = passes(config.get("start_when"), context, now=now)
             inputs = map_inputs(config.get("inputs"), context, now=now) if wanted else {}
@@ -282,6 +291,7 @@ async def receive(
             status="accepted" if wanted else "skipped",
             received_at=now,
             delivery_id=delivery,
+            payload_hash=digest,
             test=test,
             verified=signed,
             http_status=202 if wanted else 200,
