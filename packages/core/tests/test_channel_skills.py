@@ -344,6 +344,17 @@ def test_the_default_agents_office_skills_are_added_on_teams_only(
     ), "an agent the defaults pipeline does not manage never gets them, whatever its name"
 
 
+def test_only_the_web_chat_adds_workflow_authoring() -> None:
+    limited = load_platform_skills(_DEFAULTS, features=frozenset())
+    platforms = ("discord", "slack", "teams", "web")
+    on = {
+        p: [r.skill_id for r in platform_skill_refs(_default_agent(), p, limited)]
+        for p in platforms
+    }
+    assert on["web"] == ["workflow-authoring"], on
+    assert all("workflow-authoring" not in on[p] for p in ("discord", "slack", "teams")), on
+
+
 async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

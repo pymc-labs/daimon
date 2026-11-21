@@ -69,7 +69,7 @@ class SkillRef(BaseModel):
     `extra="forbid"` enforces a STRIDE threat mitigation: unknown
     fields from YAML are rejected at parse time.
 
-    `platforms` limits the skill to turns on those chat platforms. Such a skill
+    `platforms` limits the skill to turns on those chat platforms or the web app. Such a skill
     stays off the agent at the provider and is added per session at admission
     (`daimon.core.channel_skills.platform_skill_refs`); only `defaults/` agents
     may set it. `requires` further limits it to deployments that have set up
@@ -80,7 +80,7 @@ class SkillRef(BaseModel):
 
     type: Literal["custom", "anthropic"]
     skill_id: str
-    platforms: tuple[ChatPlatform, ...] | None = None
+    platforms: tuple[ChatPlatform | Literal["web"], ...] | None = None
     requires: SettingsFeature | None = None
 
     @model_validator(mode="after")
