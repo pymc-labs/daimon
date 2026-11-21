@@ -7341,8 +7341,9 @@
         Read Daimon's own documentation, for the release that is running.
         <blank line>
         With no page: how Daimon works and the list of pages. With a page from that list
-        (`slack.md`): its text from `start_line`. Use it to answer how Daimon works, how to set
-        it up or why it behaves as it does.
+        (`quickstart.md`): its text from `start_line`; `quickstart.md#heading-anchor` reads
+        only that section. Use it to answer how Daimon works, how to set it up or why it
+        behaves as it does.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -7363,7 +7364,7 @@
       'description': '''
         Read Daimon's own source code, for the release that is running.
         <blank line>
-        `path` is under `packages/` or `defaults/` (`packages/core/daimon/core/config.py`).
+        `path` is under `packages/` (`packages/core/daimon/core/config.py`).
         A file comes back with line numbers from `start_line`; a folder, or no path, lists
         what is in it.
       ''',
@@ -8924,7 +8925,7 @@
       'description': '''
         Search Daimon's own source code for some plain text, ignoring case.
         <blank line>
-        Searches `packages/` and `defaults/`, or only the file or folder `path` names.
+        Searches `packages/`, or only the file or folder `path` names.
         Returns each matching line as `path:line: text`.
       ''',
       'parameters': dict({
