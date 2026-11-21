@@ -935,9 +935,12 @@ async def decide(
     decision: Literal["retry", "skip", "fail"],
     output: JsonValue = None,
 ) -> run_views.RunSummary:
-    run, _, _ = await _control(env, run_id)
+    run, _, rights = await _control(env, run_id)
     if env.who.external:
         raise Forbidden("Deciding a step needs a person.")
+    if decision == "skip" and not rights.edit:
+        # A skip's output feeds the steps after it: only someone who can edit writes it.
+        raise Forbidden("Only the owner or an editor can skip a step with an output.")
     async with env.sm() as session:
         steps = await runs_store.list_steps(session, run.id)
     unknown = next((s for s in steps if s.status == "unknown"), None)

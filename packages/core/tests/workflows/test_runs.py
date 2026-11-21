@@ -30,7 +30,7 @@ from daimon.core.workflows.access import Who
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import parse_spec
-from daimon.testing.workflows import NOW, make_settings, make_world
+from daimon.testing.workflows import NOW, World, make_settings, make_world
 from mux.contracts.config import BackendConfig
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import delete, select, update
@@ -276,6 +276,24 @@ async def test_lost_worker_after_a_send_is_unknown_until_the_owner_decides(
     assert {"step.unknown", "step.resolved_by", "run.waiting"} <= set(types), types
 
 
+async def test_only_an_editor_skips_an_unknown_step_with_an_output(
+    db_session: AsyncSession,
+) -> None:
+    """The skip's output feeds later steps, so a runner may retry or fail but not skip."""
+    world = await make_world(db_session, AGENT, "a")
+    env = await _runner(db_session, world)
+    run = await world.run(triggered_by={"kind": "person", "account_id": str(env.who.account_id)})
+    claimed = await world.claim(run.id, "a")
+    async with world.sm.begin() as s:
+        await workflow_runs.mark_send_intent(s, step_id=claimed.step.id, now=NOW)
+    late = NOW + timedelta(minutes=10)
+    await runs.reclaim(world.sm, world.settings, step_id=claimed.step.id, now=late)
+    with pytest.raises(service.Forbidden, match="skip"):
+        await service.decide(env, run.id, "skip", {"x": 3})
+    failed = await service.decide(env, run.id, "fail")
+    assert failed.status == "failed", f"a runner can fail their own run's step: {failed}"
+
+
 async def test_lost_worker_before_a_send_runs_again(db_session: AsyncSession) -> None:
     world = await make_world(db_session, AGENT, "a")
     run = await world.run()
@@ -493,9 +511,8 @@ async def test_a_fork_onto_the_live_version_runs_the_live_version(
     assert (forked.version, live.version) == (1, 2), "a fork keeps its source's unless told"
 
 
-async def test_a_runner_reruns_only_the_live_version(db_session: AsyncSession) -> None:
-    """Rerunning in test mode needs edit rights, as starting a test run does."""
-    world = await make_world(db_session, {"f": {"kind": "finish"}}, "f")
+async def _runner(db_session: AsyncSession, world: World) -> Env:
+    """A person with the runner role on the shared workflow."""
     runner = Account(tenant_id=world.tenant_id)
     db_session.add(runner)
     await db_session.commit()
@@ -511,8 +528,14 @@ async def test_a_runner_reruns_only_the_live_version(db_session: AsyncSession) -
             granted_by=world.owner,
             account_id=runner.id,
         )
-    source = await world.run(triggered_by={"kind": "person", "account_id": str(runner.id)})
-    env = Env(world.sm, world.settings, Who(world.tenant_id, runner.id), NOW)
+    return Env(world.sm, world.settings, Who(world.tenant_id, runner.id), NOW)
+
+
+async def test_a_runner_reruns_only_the_live_version(db_session: AsyncSession) -> None:
+    """Rerunning in test mode needs edit rights, as starting a test run does."""
+    world = await make_world(db_session, {"f": {"kind": "finish"}}, "f")
+    env = await _runner(db_session, world)
+    source = await world.run(triggered_by={"kind": "person", "account_id": str(env.who.account_id)})
     with pytest.raises(service.Forbidden, match="owner or an editor"):
         await service.rerun(env, source.id, version="draft")
     again = await service.rerun(env, source.id)
