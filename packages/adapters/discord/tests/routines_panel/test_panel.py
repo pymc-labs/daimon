@@ -94,6 +94,19 @@ def _empty_policy_for_mock_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(panel_mod, "load_access_policy", policy)
 
 
+@pytest.fixture(autouse=True)
+def _no_moved_routines_for_mock_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mock session has no workflow moves; a database session gets the real lookup."""
+    from daimon.core.posted_controls import routines as controls
+
+    real = controls.migrated_workflows
+
+    async def moved(session: Any, routine_ids: Any) -> Any:
+        return await real(session, routine_ids) if isinstance(session, AsyncSession) else {}
+
+    monkeypatch.setattr(controls, "migrated_workflows", moved)
+
+
 def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any]:
     """Walk all nested children of a LayoutView to find a button by label."""
     for child in view.walk_children():
