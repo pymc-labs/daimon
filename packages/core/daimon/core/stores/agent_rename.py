@@ -223,7 +223,7 @@ async def agent_name_collisions(
         rules = cast("dict[str, object] | None", (policy or {}).get(key)) or {}
         names = {normalize_agent_name(name) for name in rules}
         if legacy in names and current in names:
-            found[f"access policy {key}"] = 1
+            found[f"rules {key}"] = 1
     return found
 
 

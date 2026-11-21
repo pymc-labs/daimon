@@ -861,7 +861,7 @@ async def test_rename_user_agent_when_both_names_have_entries_then_refuses_namin
         )
 
     assert "agent_avatars.agent_name: 1" in str(raised.value), "the table and count are named"
-    assert "access policy agent_rules" in str(raised.value), "the policy key is named"
+    assert "rules agent_rules" in str(raised.value), "the policy key is named"
     assert not [r for r in requests if r.startswith("POST")], "nothing was written"
     names = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert names == [_OWN], "the database is unchanged"
