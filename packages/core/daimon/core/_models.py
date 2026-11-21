@@ -15,6 +15,7 @@ from typing import Annotated, Any, ClassVar, Final
 from daimon.core import _erasure_guards, _workflow_ledger_guard
 from sqlalchemy import (
     DDL,
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -5917,7 +5918,8 @@ class Workflow(Base):
     status: Mapped[str] = mapped_column(server_default="active")
     owner_account_id: Mapped[AccountSetNull]
     live_version: Mapped[int | None]
-    draft_spec: Mapped[dict[str, Any]]
+    # Specs are `json`, not `jsonb`: jsonb reorders keys, and the author's order shows.
+    draft_spec: Mapped[dict[str, Any]] = mapped_column(JSON)
     draft_revision: Mapped[int] = mapped_column(server_default=text("1"))
     draft_base_version: Mapped[int | None]
     draft_updated_by_account_id: Mapped[AccountSetNull]
@@ -5941,7 +5943,7 @@ class WorkflowVersion(Base):
     workflow_id: Mapped[WorkflowFK]
     number: Mapped[int]
     tenant_id: Mapped[TenantFK]
-    spec: Mapped[dict[str, Any]]
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON)
     spec_hash: Mapped[str]
     note: Mapped[str] = mapped_column(server_default="")
     source: Mapped[str]
@@ -6030,7 +6032,7 @@ class WorkflowPublishRequest(Base):
     tenant_id: Mapped[TenantFK]
     workflow_id: Mapped[WorkflowFK]
     revision: Mapped[int]
-    spec: Mapped[dict[str, Any]]
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON)
     note: Mapped[str] = mapped_column(server_default="")
     grants: Mapped[JsonList]
     status: Mapped[str] = mapped_column(server_default="pending")
