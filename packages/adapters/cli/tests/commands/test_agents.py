@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -1788,8 +1789,11 @@ async def test_agents_rename_when_seeded_holds_name_without_flag_then_refuses(
 
 
 def test_agents_rename_is_listed_with_its_flags() -> None:
-    result = CliRunner().invoke(main_mod.app, ["agents", "rename", "--help"])
+    # Rich styles each dash of a flag and wraps at the terminal width, so fix both.
+    env = {"COLUMNS": "200", "NO_COLOR": "1", "TERM": "dumb"}
+    result = CliRunner().invoke(main_mod.app, ["agents", "rename", "--help"], env=env)
 
     assert result.exit_code == 0, result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     for flag in ("--replace-seeded", "--dry-run", "--yes", "--tenant", "--guild"):
-        assert flag in result.output, f"{flag} is documented"
+        assert flag in plain, f"{flag} is documented: {plain}"

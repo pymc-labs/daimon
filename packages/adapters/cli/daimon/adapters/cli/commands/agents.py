@@ -90,7 +90,7 @@ class AgentCommands(TyperGroup):
 
 
 agents_app = typer.Typer(
-    help="Agents: create, list, get, update, rename, archive, fork, rule.", cls=AgentCommands
+    help="Agents: create, list, get, update, archive, fork, rule.", cls=AgentCommands
 )
 agents_app.add_typer(agent_rule_app, name="rule")
 backend_app = typer.Typer(help="Set or clear an agent's model backend.")
