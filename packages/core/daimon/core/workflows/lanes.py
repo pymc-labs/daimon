@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from daimon.core.workflows.spec import AgentNode, Spec
+from daimon.core.workflows.spec import AgentNode, ForEachNode, Spec
 
 MAIN: Final = "main"
 FRESH: Final = "fresh"
@@ -28,3 +28,15 @@ def lane_key(spec: Spec, node_id: str, node: AgentNode, visit: int) -> str:
     if lane == FRESH:
         return f"{FRESH}:{node_id}#{visit}"
     return f"{lane}:{agent_of(spec, node) or ''}"
+
+
+def lane_skills(spec: Spec, node_id: str, node: AgentNode) -> list[str]:
+    """The skills a step's session is created with: its own, then (outside `fresh`) every
+    lane-mate's, since a reused session cannot add any."""
+    names = [*(node.skills or [])]
+    lane = lane_key(spec, node_id, node, 0)
+    if not lane.startswith(f"{FRESH}:"):
+        for mate in (n.do if isinstance(n, ForEachNode) else n for n in spec.nodes.values()):
+            if isinstance(mate, AgentNode) and lane_key(spec, "", mate, 0) == lane:
+                names += mate.skills or []
+    return list(dict.fromkeys(names))

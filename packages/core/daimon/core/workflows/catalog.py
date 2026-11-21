@@ -94,7 +94,8 @@ async def tool_catalog(
     """The catalog every validation reads; no lister means no agents or skills (fails closed)."""
     listed: Sequence[BetaManagedAgentsAgent] = await agents() if agents is not None else ()
     pins: Mapping[str, SkillPin] = await skills() if skills is not None else {}
-    return catalog_of(policy, {agent_key(a): agent_tool_ids(a) for a in listed}, pins)
+    held = {agent_key(a): frozenset(s.skill_id for s in a.skills) for a in listed}
+    return catalog_of(policy, {agent_key(a): agent_tool_ids(a) for a in listed}, pins, held)
 
 
 def tenant_skills(client: AsyncAnthropic | None, tenant_id: uuid.UUID) -> SkillLister | None:

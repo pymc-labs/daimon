@@ -74,12 +74,15 @@ class Catalog(BaseModel):
     skills: frozenset[str] | None = None
     #: Those skills by name, at their versions (the library's now, or as published).
     skill_pins: dict[str, SkillPin] = Field(default_factory=dict[str, SkillPin])
+    #: The skill ids each listed agent already holds, against the session's skill cap.
+    agent_skills: dict[str, frozenset[str]] = Field(default_factory=dict[str, frozenset[str]])
 
 
 def catalog_of(
     policy: ToolSafetyPolicy,
     agent_tools: Mapping[str, Sequence[str]],
     skills: Mapping[str, SkillPin] | None = None,
+    agent_skills: Mapping[str, frozenset[str]] | None = None,
 ) -> Catalog:
     """Agents' tools, each classed by the operator's policy as the run-time calls are."""
     return Catalog(
@@ -88,6 +91,7 @@ def catalog_of(
         policy=policy,
         skills=frozenset(skills) if skills is not None else None,
         skill_pins=dict(skills or {}),
+        agent_skills=dict(agent_skills or {}),
     )
 
 

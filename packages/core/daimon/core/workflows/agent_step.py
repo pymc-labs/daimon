@@ -61,10 +61,10 @@ from daimon.core.workflows.action_step import (
 )
 from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
-from daimon.core.workflows.lanes import FRESH, OWNER_DM, agent_of, lane_key
+from daimon.core.workflows.lanes import FRESH, OWNER_DM, agent_of, lane_key, lane_skills
 from daimon.core.workflows.preflight import Refusal, check
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
-from daimon.core.workflows.spec import AgentNode, ForEachNode, WriteScope
+from daimon.core.workflows.spec import AgentNode, WriteScope
 from daimon.core.workflows.unattended import (
     CREATED,
     Call,
@@ -179,19 +179,11 @@ def tools_of(node: AgentNode) -> StepTools:
 
 
 def pinned_skills(work: StepWork, node: AgentNode) -> list[BetaManagedAgentsCustomSkill]:
-    """The step's `skills`, then its lane-mates', at the versions its version (or test run)
-    pinned: a reused session cannot add skills, so the session gets them all when created."""
+    """The lane's skills (`lane_skills`) at the versions its version (or test run) pinned."""
     pins = work.catalog.skill_pins if work.catalog is not None else {}
-    lane = lane_key(work.spec, work.step.node_id, node, work.step.visit)
-    mates = [n.do if isinstance(n, ForEachNode) else n for n in work.spec.nodes.values()]
-    names = [*(node.skills or [])]
-    if not lane.startswith(f"{FRESH}:"):
-        for mate in mates:
-            if isinstance(mate, AgentNode) and lane_key(work.spec, "", mate, 0) == lane:
-                names += mate.skills or []
     return [
         BetaManagedAgentsCustomSkill(type="custom", skill_id=p.id, version=p.version)
-        for p in (pins.get(name) for name in dict.fromkeys(names))
+        for p in (pins.get(name) for name in lane_skills(work.spec, work.step.node_id, node))
         if p is not None
     ]
 

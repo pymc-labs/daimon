@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.workflows import service
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import spec_agent_tools, tool_catalog
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import parse_spec
-from daimon.core.workflows.taint import Catalog, catalog_of, tainted_steps, tool_facts
+from daimon.core.workflows.taint import Catalog, SkillPin, catalog_of, tainted_steps, tool_facts
 from daimon.core.workflows.unattended import exposed_at_run
 from daimon.core.workflows.validate import validate_document, validate_spec
 from daimon.testing.ma_models import ma_agent
@@ -164,3 +165,27 @@ def test_an_agent_reading_what_earlier_runs_saved_is_exposed(root: str) -> None:
     }
     spec = parse_spec({"schema": "daimon.workflow/v1", "name": "T", "start": "a", "nodes": nodes})
     assert tainted_steps(spec, untrusted_inputs=False) == {"a"}, f"only the reader of {root}"
+
+
+def test_skills_past_the_sessions_room_are_a_warning() -> None:
+    """A lane's session holds every lane step's skills; past the cap the rest would drop."""
+
+    def step(skill: str, then: str) -> dict[str, Any]:
+        return {"kind": "agent", "instructions": "x", "skills": [skill], "next": then}
+
+    spec: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "skills",
+        "defaults": {"agent": "daimon"},
+        "start": "a",
+        "nodes": {"a": step("one", "b"), "b": step("two", "done"), "done": {"kind": "finish"}},
+    }
+    pins = {n: SkillPin(id=f"skill_{n}", version="1") for n in ("one", "two")}
+
+    def warned(held: int) -> list[str]:
+        owned = frozenset(f"own_{i}" for i in range(held))
+        catalog = catalog_of(OPEN_TOOL_SAFETY, {"daimon": []}, pins, {"daimon": owned})
+        return [f"{p.code}:{p.node}" for p in validate_document(spec, catalog).warnings]
+
+    assert warned(AGENT_SKILL_CAP - 2) == [], "both fit"
+    assert warned(AGENT_SKILL_CAP - 1) == ["skill_room:a", "skill_room:b"], "one would drop"

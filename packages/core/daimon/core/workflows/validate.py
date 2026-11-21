@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.continuity.watch_projection import projection_path
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.workflows.expressions import (
@@ -33,6 +34,7 @@ from daimon.core.workflows.graph import (
     spec_templates,
     templates_of,
 )
+from daimon.core.workflows.lanes import lane_skills
 from daimon.core.workflows.spec import (
     MAX_AGENT_TIMEOUT,
     MAX_CODE_TIMEOUT,
@@ -426,6 +428,12 @@ def _check_agent(
                 report.error("unknown_skill", f"Unknown skill: {skill}", node_id)
     if catalog is None or agent is None:
         return
+    if node.skills and (held := catalog.agent_skills.get(agent)) is not None:
+        pins = catalog.skill_pins
+        new = {pins[n].id for n in lane_skills(spec, node_id, node) if n in pins} - held
+        if len(new) > (room := max(0, AGENT_SKILL_CAP - len(held))):
+            message = f"{agent} can load {room} more skills here, so some of these won't load"
+            report.warn("skill_room", message, node_id)
     if agent not in catalog.agents:
         report.error("unknown_agent", f"Unknown agent: {agent}", node_id)
         return
