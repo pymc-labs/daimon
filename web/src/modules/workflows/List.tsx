@@ -39,9 +39,11 @@ export function WorkflowList() {
       actions={can("workflows.run") && <Button size="sm" asChild><Link to="/workflows/new"><Plus />New workflow</Link></Button>}
     >
       <FilterBar>
-        <ToggleGroup type="single" value={view ?? "all"} onValueChange={(x) => x && setView(x === "all" ? null : x)} variant="segmented" size="sm">
-          {Object.entries(VIEWS).map(([k, x]) => <ToggleGroupItem key={k} value={k} className="px-3 text-xs">{x.label}</ToggleGroupItem>)}
-        </ToggleGroup>
+        <div className="max-w-full overflow-x-auto">
+          <ToggleGroup type="single" value={view ?? "all"} onValueChange={(x) => x && setView(x === "all" ? null : x)} variant="segmented" size="sm">
+            {Object.entries(VIEWS).map(([k, x]) => <ToggleGroupItem key={k} value={k} className="px-3 text-xs">{x.label}</ToggleGroupItem>)}
+          </ToggleGroup>
+        </div>
         <SearchInput value={q} onChange={(x) => setQ(x || null)} className="w-56" />
         <span className="ml-auto text-xs text-muted-foreground tabular">{plural(rows.length, "workflow")}</span>
       </FilterBar>

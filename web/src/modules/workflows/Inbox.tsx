@@ -17,7 +17,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { rowProps, useParam } from "@/lib/filters"
 import { plural } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { useDecide, useInbox, useInboxItem, useNow } from "./api"
+import { useCatalog, useDecide, useInbox, useInboxItem, useNow } from "./api"
 import { GRANT } from "./kinds"
 import { choice, until } from "./run/lib"
 import { FileList, JsonTree } from "./run/parts"
@@ -31,11 +31,18 @@ const KIND: Record<InboxKind, { icon: typeof ShieldCheck; label: string }> = {
   publish: { icon: Rocket, label: "Publish" },
 }
 
+/** Who asks: an agent's key as its name, else the name the server gave. */
+const useAsker = () => {
+  const { data: catalog } = useCatalog()
+  return (by: string) => catalog?.agents.find((a) => a.key === by)?.name ?? by
+}
+
 const soon = (iso: string, now: number) => new Date(iso).getTime() - now < 30 * 60_000
 
 /** Everything waiting on you, and what was decided. */
 export function InboxPage() {
   const query = useInbox()
+  const asker = useAsker()
   const [view, setView] = useParam("view")
   const decided = view === "decided"
   const [, setItem] = useParam("item")
@@ -73,7 +80,7 @@ export function InboxPage() {
                   </TableCell>
                   <TableCell className="whitespace-nowrap text-muted-foreground max-md:hidden">{i.step_title ?? i.step ?? "–"}</TableCell>
                   <TableCell className="tabular max-sm:hidden">{i.run?.number ?? "–"}</TableCell>
-                  <TableCell className="whitespace-nowrap text-muted-foreground max-lg:hidden">{i.asked_by}</TableCell>
+                  <TableCell className="whitespace-nowrap text-muted-foreground max-lg:hidden">{asker(i.asked_by)}</TableCell>
                   <TableCell className="whitespace-nowrap max-sm:hidden"><Ago iso={i.decision?.at ?? i.since} /></TableCell>
                   <TableCell className="whitespace-nowrap pr-4 text-right tabular lg:pr-6">
                     {i.decision ? <Outcome i={i} /> : i.expires_at ? <span className={cn(soon(i.expires_at, now) ? "text-warning" : "text-muted-foreground")}>{until(i.expires_at, now)}</span> : <span className="text-faint">–</span>}
@@ -107,11 +114,11 @@ function FormFields({ d, vals, set, off }: { d: InboxDetail; vals: Record<string
   return (
     <div className="space-y-4">
       {props.map(([k, f]) => {
-        const label = f.title ?? k
+        const label = f.title ?? "Answer"
         const v = vals[k]
         if (f.enum) return (
           <div key={k} className="space-y-1.5">
-            <Label>{label}</Label>
+            {f.title && <Label>{label}</Label>}
             <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label={label}>
               {f.enum.map((o) => (
                 <button key={o} type="button" role="radio" aria-checked={v === o} disabled={off} onClick={() => set(k, o)} className={cn(choice(v === o), "relative min-h-11 justify-center pr-9 disabled:opacity-60")}>
@@ -124,10 +131,10 @@ function FormFields({ d, vals, set, off }: { d: InboxDetail; vals: Record<string
         )
         return (
           <div key={k} className="space-y-1.5">
-            <Label htmlFor={`f-${k}`}>{label}</Label>
+            {f.title ? <Label htmlFor={`f-${k}`}>{label}</Label> : null}
             {multiline(f, d.values[k]) || k === "body"
-              ? <Textarea id={`f-${k}`} value={String(v ?? "")} disabled={off} rows={8} onChange={(e) => set(k, e.target.value)} />
-              : <Input id={`f-${k}`} value={String(v ?? "")} disabled={off} onChange={(e) => set(k, e.target.value)} />}
+              ? <Textarea id={`f-${k}`} aria-label={f.title ? undefined : label} value={String(v ?? "")} disabled={off} rows={8} onChange={(e) => set(k, e.target.value)} />
+              : <Input id={`f-${k}`} aria-label={f.title ? undefined : label} value={String(v ?? "")} disabled={off} onChange={(e) => set(k, e.target.value)} />}
           </div>
         )
       })}
@@ -146,6 +153,7 @@ function ItemSheet({ id }: { id: string }) {
 function Detail({ d }: { d: InboxDetail }) {
   const [, setItem] = useParam("item")
   const K = KIND[d.kind]
+  const asker = useAsker()
   const done = !!d.decision
   const [vals, setVals] = useState<Record<string, unknown>>(d.values)
   const [picked, setPicked] = useState(() => new Set(d.proposals.map((p) => p.id)))
@@ -172,20 +180,20 @@ function Detail({ d }: { d: InboxDetail }) {
           </div>
         </PanelSection>
       )}
-      {d.question && <PanelSection title="Question"><p className="text-sm">{d.question}</p></PanelSection>}
       <PanelSection>
         <Facts rows={[
           ["Workflow", <Link key="w" to={`/workflows/${d.workflow.id}`} className="text-link hover:underline">{d.workflow.name}</Link>],
           ["Run", d.run && <Link key="r" to={`/workflows/${d.workflow.id}/runs/${d.run.number}${d.step ? `?step=${encodeURIComponent(d.step)}` : ""}`} className="text-link hover:underline tabular">{d.run.number}</Link>],
           ["Step", d.step_title ?? d.step],
-          ["Asked by", d.asked_by],
+          ["Asked by", asker(d.asked_by)],
           [done ? "Asked" : "Waiting since", <Ago key="s" iso={d.since} />],
           ["Expires", d.expires_at && !done && `In ${until(d.expires_at)}`],
           ...sentRows(d.sent),
           ["Attached", d.attachments.length > 0 && <div key="a" className="-my-1"><FileList files={d.attachments} /></div>],
-          ...answerRows(d.answer),
+          ...(d.answer?.text || d.answer?.files.length ? answerRows(d.answer) : []),
         ]} />
       </PanelSection>
+      {d.question && <PanelSection title="Question"><p className="text-sm">{d.question}</p></PanelSection>}
       {req && (
         <PanelSection title="Publish request">
           <Facts rows={[["Version", `v${req.version}`], ["Note", req.note || "–"], ["Requested by", req.by.name]]} />
@@ -228,7 +236,7 @@ function Detail({ d }: { d: InboxDetail }) {
       )}
       {d.form && !done && <PanelSection title={d.kind === "question" ? "Answer" : "Edit before sending"}><FormFields d={d} vals={vals} set={(k, v) => setVals((x) => ({ ...x, [k]: v }))} off={decide.isPending} /></PanelSection>}
       {!done && (
-        <div className="sticky bottom-0 mt-auto space-y-3 border-t bg-popover px-5 py-4">
+        <div className="sticky bottom-0 mt-auto space-y-3 border-t bg-popover px-5 py-3">
           {ask && (
             <div className="space-y-1.5">
               <Label htmlFor="ib-comment">Comment</Label>

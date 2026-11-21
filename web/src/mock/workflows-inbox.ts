@@ -2,7 +2,7 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import { project } from "@/modules/workflows/runs"
-import { clone } from "@/modules/workflows/spec"
+import { clone, titleOf } from "@/modules/workflows/spec"
 import type {
   Decision, Draft, InboxDecide, InboxDetail, InboxItem, InboxRoute, Person, RunWait, Spec, StepRun, Version, VersionSpec,
 } from "@/modules/workflows/types"
@@ -113,9 +113,10 @@ function fromWait(run: Run, s: StepRun): Rec | null {
     : n.answer === "choice" ? Object.keys(n.routes ?? {}).map((name, i, all) => ({ name, label: name[0]!.toUpperCase() + name.slice(1), primary: i === all.length - 1, comment: false }))
     : approve
   return {
-    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, step_title: n.title ?? s.key, asked_by: "Daimon",
+    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, step_title: titleOf(s.node, n), asked_by: "Daimon",
     since: w.opened_at, expires_at: w.expires_at, to: w.addressees.map((p) => p.id), decision: null, routes, sent: w.sent, attachments: w.attachments,
-    ...(typed ? { question: n.title ?? s.key, form: n.answer === "form" ? { type: "object" as const, properties: n.form ?? {} } : { type: "object" as const, properties: { text: { type: "string" as const, title: "Answer" } } } } : {}),
+    ...(!typed && n.form ? { form: { type: "object" as const, properties: n.form } } : {}),
+    ...(typed ? { question: n.title ?? s.key, form: n.answer === "form" ? { type: "object" as const, properties: n.form ?? {} } : { type: "object" as const, properties: { text: { type: "string" as const } } } } : {}),
   }
 }
 
