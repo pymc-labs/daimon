@@ -174,6 +174,24 @@ def test_loop_enters_new_visits_until_max_visits() -> None:
     )
 
 
+def test_on_max_visits_target_reads_the_last_visit_that_ran() -> None:
+    """The refused visit is skipped with no output; `steps.a` stays the visit that ran."""
+    spec = spec_of(
+        {
+            **LOOP,
+            "a": agent(next="r", max_visits=1, on_max_visits="f"),
+            "f": {"kind": "finish", "output": "${{ steps.a.output.text }}"},
+        }
+    )
+    run = Run(spec)
+    run.settle("a", Succeeded({"again": True, "text": "draft"}))
+    assert run.end is not None and run.end.status == "succeeded", (
+        f"the Finish reads the draft, not the skipped visit: {run.end}"
+    )
+    finish = next(s for s in run.steps if s.node_id == "f")
+    assert finish.output == "draft", f"output of the visit that ran: {finish.output}"
+
+
 def test_visits_and_loop_carried_refs() -> None:
     spec = spec_of(
         {

@@ -227,16 +227,22 @@ def expression_context(
 ) -> dict[str, JsonValue]:
     """What `node_id`'s templates read. `steps.<id>` is that node's latest settled visit.
 
-    A step that has not run is absent, so `has()` guards hold, except a loop-carried one
-    (upstream and downstream of `node_id` at once), which reads as null on the first pass.
+    A skipped visit counts only when no visit ran: a visit refused by `max_visits` must not
+    hide the output of the one before it, which the `on_max_visits` target reads. A step that
+    has not run is absent, so `has()` guards hold, except a loop-carried one (upstream and
+    downstream of `node_id` at once), which reads as null on the first pass.
     """
     latest: dict[str, StepView] = {}
     counts: dict[str, int] = {}
+
+    def rank(s: StepView) -> tuple[bool, int]:
+        return s.status != "skipped", s.visit
+
     for s in steps:
         if s.status not in ("pending", "skipped"):
             counts[s.node_id] = counts.get(s.node_id, 0) + 1
         if s.status not in ACTIVE and (
-            s.node_id not in latest or s.visit > latest[s.node_id].visit
+            s.node_id not in latest or rank(s) > rank(latest[s.node_id])
         ):
             latest[s.node_id] = s
     view: dict[str, JsonValue] = {}
