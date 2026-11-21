@@ -68,6 +68,8 @@ class RunRow(_Row):
     forked_from_step: str | None
     redrive_count: int
     test_options: dict[str, Any] | None
+    origin: dict[str, Any] | None
+    card: dict[str, Any] | None
     budget_usd: Decimal
     cost_usd: Decimal
     deadline_at: datetime | None
@@ -129,6 +131,7 @@ class WaitRow(_Row):
     status: str
     expires_at: datetime | None
     remind_at: datetime | None
+    next_check_at: datetime | None
     shown: dict[str, Any] | None
     opened_at: datetime
 

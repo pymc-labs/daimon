@@ -61,6 +61,8 @@ class WorkflowRow(_Row):
     draft_updated_at: datetime
     run_counter: int
     monthly_cap_usd: Decimal | None
+    state: dict[str, Any]
+    state_updated_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

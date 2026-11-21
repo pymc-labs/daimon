@@ -3,12 +3,13 @@
 A workflow keeps its draft and owner (`workflows`), published versions, access, grants
 and publish requests. Triggers keep their secrets and received events. A run projects its
 ledger (`workflow_run_events`, hash-chained, append-only by trigger) onto steps, attempts, lanes,
-waits with their answers and posts, proposals, activity lines and deliveries. Every table
-cascades with its tenant. `web_threads.subject` names what a thread is about (one per
-person and subject). `usage_events` gains the run and step that spent it: nullable,
-foreign keys added NOT VALID (every existing row is NULL) and ON DELETE SET NULL, with
-partial indexes built concurrently, outside the migration transaction, so turns keep
-writing usage meanwhile. Downgrading drops the workflow tables and their data.
+waits with their answers and posts, proposals, activity lines and deliveries; the threads
+its posts opened are kept by title. Every table cascades with its tenant.
+`web_threads.subject` names what a thread is about (one per person and subject).
+`usage_events` gains the run and step that spent it: nullable, foreign keys added NOT VALID
+(every existing row is NULL) and ON DELETE SET NULL, with partial indexes built
+concurrently, outside the migration transaction, so turns keep writing usage meanwhile.
+Downgrading drops the workflow tables and their data.
 
 downgrade: destructive
 """
@@ -43,6 +44,7 @@ TABLES = (
     "workflow_deliveries",
     "workflow_wait_answers",
     "workflow_wait_posts",
+    "workflow_threads",
 )
 USAGE_INDEXES = {
     "ix_usage_events_workflow_run": "workflow_run_id",
@@ -138,6 +140,13 @@ def create_tables() -> None:
         sa.Column("run_counter", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("monthly_cap_usd", sa.Numeric(precision=12, scale=2), nullable=True),
         sa.Column(
+            "state",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column("state_updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -224,7 +233,7 @@ def create_tables() -> None:
         sa.Column("revoked_reason", sa.Text(), nullable=True),
         sa.CheckConstraint(
             "kind IN ('unattended_write', 'builtins', 'code_network', 'untrusted_waiver', "
-            "'unverified_webhook', 'budget_over_default')",
+            "'unverified_webhook', 'budget_over_default', 'scoped_write')",
             name="ck_workflow_grants_kind",
         ),
         sa.ForeignKeyConstraint(["approved_by_account_id"], ["accounts.id"], ondelete="SET NULL"),
@@ -324,6 +333,8 @@ def create_tables() -> None:
         sa.Column("forked_from_step", sa.Text(), nullable=True),
         sa.Column("redrive_count", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("test_options", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("origin", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("card", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("budget_usd", sa.Numeric(precision=12, scale=6), nullable=False),
         sa.Column(
             "cost_usd",
@@ -432,6 +443,8 @@ def create_tables() -> None:
         sa.Column("seeded_after", sa.DateTime(timezone=True), nullable=True),
         sa.Column("listening_until", sa.DateTime(timezone=True), nullable=True),
         sa.Column("from_routine_id", sa.UUID(), nullable=True),
+        sa.Column("places", postgresql.ARRAY(sa.Text()), nullable=True),
+        sa.Column("state", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -445,7 +458,7 @@ def create_tables() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "kind IN ('manual', 'schedule', 'webhook', 'event', 'call')",
+            "kind IN ('manual', 'schedule', 'webhook', 'event', 'call', 'mention', 'poll')",
             name="ck_workflow_triggers_kind",
         ),
         sa.ForeignKeyConstraint(["from_routine_id"], ["routines.id"], ondelete="SET NULL"),
@@ -467,6 +480,13 @@ def create_tables() -> None:
         ["from_routine_id"],
         unique=False,
         postgresql_where=sa.text("from_routine_id IS NOT NULL"),
+    )
+    op.create_index(
+        "ix_workflow_triggers_places",
+        "workflow_triggers",
+        ["places"],
+        unique=False,
+        postgresql_using="gin",
     )
     op.create_table(
         "workflow_versions",
@@ -854,6 +874,7 @@ def create_tables() -> None:
         sa.Column("event_key", sa.Text(), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("remind_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("next_check_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("decision", sa.Text(), nullable=True),
         sa.Column("decided_by_account_id", sa.UUID(), nullable=True),
         sa.Column("decided_via", sa.Text(), nullable=True),
@@ -896,6 +917,13 @@ def create_tables() -> None:
         unique=False,
         postgresql_where=sa.text("status = 'waiting'"),
     )
+    op.create_index(
+        "ix_workflow_waits_next_check",
+        "workflow_waits",
+        ["next_check_at"],
+        unique=False,
+        postgresql_where=sa.text("next_check_at IS NOT NULL"),
+    )
     op.create_index("ix_workflow_waits_run", "workflow_waits", ["run_id"], unique=False)
     op.create_index("ix_workflow_waits_step", "workflow_waits", ["step_id"], unique=False)
     op.create_table(
@@ -905,6 +933,7 @@ def create_tables() -> None:
         sa.Column("workflow_id", sa.UUID(), nullable=False),
         sa.Column("run_id", sa.UUID(), nullable=True),
         sa.Column("wait_id", sa.UUID(), nullable=True),
+        sa.Column("step_id", sa.UUID(), nullable=True),
         sa.Column("kind", sa.Text(), nullable=False),
         sa.Column("target", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -921,7 +950,7 @@ def create_tables() -> None:
         ),
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
-            "kind IN ('finish', 'ask', 'reminder', 'ask_update', 'notice')",
+            "kind IN ('finish', 'ask', 'reminder', 'ask_update', 'notice', 'post')",
             name="ck_workflow_deliveries_kind",
         ),
         sa.CheckConstraint(
@@ -930,9 +959,17 @@ def create_tables() -> None:
         ),
         sa.ForeignKeyConstraint(["run_id"], ["workflow_runs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["step_id"], ["workflow_steps.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["wait_id"], ["workflow_waits.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["workflow_id"], ["workflows.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_workflow_deliveries_step",
+        "workflow_deliveries",
+        ["step_id"],
+        unique=False,
+        postgresql_where=sa.text("step_id IS NOT NULL"),
     )
     op.create_index(
         "ix_workflow_deliveries_due",
@@ -1011,6 +1048,31 @@ def create_tables() -> None:
         unique=False,
     )
     op.create_index("ix_workflow_wait_posts_wait", "workflow_wait_posts", ["wait_id"], unique=False)
+    op.create_table(
+        "workflow_threads",
+        sa.Column("id", sa.UUID(), server_default=sa.text("gen_random_uuid()"), nullable=False),
+        sa.Column("tenant_id", sa.UUID(), nullable=False),
+        sa.Column("workflow_id", sa.UUID(), nullable=False),
+        sa.Column("platform", sa.Text(), nullable=False),
+        sa.Column("channel_id", sa.Text(), nullable=False),
+        sa.Column("title", sa.Text(), nullable=False),
+        sa.Column("thread_id", sa.Text(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams')", name="ck_workflow_threads_platform"
+        ),
+        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["workflow_id"], ["workflows.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "workflow_id", "platform", "channel_id", "title", name="uq_workflow_threads_title"
+        ),
+    )
 
     op.add_column(
         "web_threads",

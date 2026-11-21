@@ -5926,6 +5926,9 @@ class Workflow(Base):
     draft_updated_at: Mapped[TsNow]
     run_counter: Mapped[int] = mapped_column(server_default=text("0"))
     monthly_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    #: What a Finish's `state` saved for the next runs.
+    state: Mapped[JsonObject]
+    state_updated_at: Mapped[datetime | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNowOnUpdate]
 
@@ -5995,6 +5998,7 @@ class WorkflowGrant(Base):
                 "untrusted_waiver",
                 "unverified_webhook",
                 "budget_over_default",
+                "scoped_write",
             ),
             "workflow_grants",
         ),
@@ -6062,7 +6066,12 @@ class WorkflowTrigger(Base):
             "next_fire_at",
             postgresql_where=text("enabled AND next_fire_at IS NOT NULL"),
         ),
-        _one_of("kind", ("manual", "schedule", "webhook", "event", "call"), "workflow_triggers"),
+        Index("ix_workflow_triggers_places", "places", postgresql_using="gin"),
+        _one_of(
+            "kind",
+            ("manual", "schedule", "webhook", "event", "call", "mention", "poll"),
+            "workflow_triggers",
+        ),
     )
 
     id: Mapped[UuidPk]
@@ -6079,6 +6088,10 @@ class WorkflowTrigger(Base):
     from_routine_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("routines.id", ondelete="SET NULL")
     )
+    #: Channels a mention trigger listens in.
+    places: Mapped[list[str] | None]
+    #: A poll's seen items, by key.
+    state: Mapped[dict[str, Any] | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNowOnUpdate]
 
@@ -6230,6 +6243,10 @@ class WorkflowRun(Base):
     forked_from_step: Mapped[str | None]
     redrive_count: Mapped[int] = mapped_column(server_default=text("0"))
     test_options: Mapped[dict[str, Any] | None]
+    #: The thread a mention or chat-card run started from (`deliver.to: origin`).
+    origin: Mapped[dict[str, Any] | None]
+    #: The board card's fields, as the spec's `card` resolved them.
+    card: Mapped[dict[str, Any] | None]
     budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     cost_usd: Mapped[Usd]
     deadline_at: Mapped[datetime | None]
@@ -6368,6 +6385,11 @@ class WorkflowWait(Base):
             postgresql_where=text("status = 'waiting' AND kind = 'event'"),
         ),
         Index("ix_workflow_waits_decider", "decided_by_account_id"),
+        Index(
+            "ix_workflow_waits_next_check",
+            "next_check_at",
+            postgresql_where=text("next_check_at IS NOT NULL"),
+        ),
         _one_of("kind", WORKFLOW_WAITING_REASONS, "workflow_waits"),
         _one_of("status", ("waiting", "completed", "timed_out", "cancelled"), "workflow_waits"),
     )
@@ -6387,6 +6409,8 @@ class WorkflowWait(Base):
     event_key: Mapped[str | None]
     expires_at: Mapped[datetime | None]
     remind_at: Mapped[datetime | None]
+    #: When a poll wait next calls its tool.
+    next_check_at: Mapped[datetime | None]
     decision: Mapped[str | None]
     decided_by_account_id: Mapped[AccountSetNull]
     decided_via: Mapped[str | None]
@@ -6509,8 +6533,8 @@ class WorkflowEventBuffer(Base):
 
 
 class WorkflowDelivery(Base):
-    """A post the delivery loop sends: a Finish result, an ask, a reminder, an ask's
-    update or an owner notice. Policy runs at post time."""
+    """A post the delivery loop sends: a Finish result, a post step's message, an ask, a
+    reminder, an ask's update or an owner notice. Policy runs at post time."""
 
     __tablename__ = "workflow_deliveries"
     __table_args__ = (
@@ -6522,8 +6546,13 @@ class WorkflowDelivery(Base):
         Index("ix_workflow_deliveries_workflow", "workflow_id"),
         Index("ix_workflow_deliveries_run", "run_id"),
         Index("ix_workflow_deliveries_wait", "wait_id"),
+        Index(
+            "ix_workflow_deliveries_step", "step_id", postgresql_where=text("step_id IS NOT NULL")
+        ),
         _one_of(
-            "kind", ("finish", "ask", "reminder", "ask_update", "notice"), "workflow_deliveries"
+            "kind",
+            ("finish", "ask", "reminder", "ask_update", "notice", "post"),
+            "workflow_deliveries",
         ),
         _one_of(
             "status",
@@ -6540,6 +6569,9 @@ class WorkflowDelivery(Base):
     )
     wait_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("workflow_waits.id", ondelete="CASCADE")
+    )
+    step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_steps.id", ondelete="CASCADE")
     )
     kind: Mapped[str]
     target: Mapped[dict[str, Any]]
@@ -6572,6 +6604,27 @@ class WorkflowWaitPost(Base):
     thread_id: Mapped[str | None]
     message_id: Mapped[str]
     addressee_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+
+
+class WorkflowThread(Base):
+    """A thread a workflow's posts opened, found again by its exact title."""
+
+    __tablename__ = "workflow_threads"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_id", "platform", "channel_id", "title", name="uq_workflow_threads_title"
+        ),
+        _one_of("platform", ("discord", "slack", "teams"), "workflow_threads"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    workflow_id: Mapped[WorkflowFK]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    title: Mapped[str]
+    thread_id: Mapped[str]
     created_at: Mapped[TsNow]
 
 

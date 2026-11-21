@@ -52,6 +52,8 @@ class TriggerRow(_Row):
     seeded_after: datetime | None
     listening_until: datetime | None
     from_routine_id: uuid.UUID | None
+    places: list[str] | None
+    state: dict[str, Any] | None
 
     @property
     def live(self) -> dict[str, Any] | None:

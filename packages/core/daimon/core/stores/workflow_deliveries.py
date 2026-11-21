@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-DeliveryKind = Literal["finish", "ask", "reminder", "ask_update", "notice"]
+DeliveryKind = Literal["finish", "post", "ask", "reminder", "ask_update", "notice"]
 SettledStatus = Literal["sent", "skipped", "refused", "failed"]
 
 
@@ -28,6 +28,8 @@ class DeliveryRow(BaseModel):
     workflow_id: uuid.UUID
     run_id: uuid.UUID | None
     wait_id: uuid.UUID | None
+    #: The post step that queued it.
+    step_id: uuid.UUID | None
     kind: str
     target: dict[str, Any]
     payload: dict[str, Any]
@@ -49,12 +51,14 @@ async def queue_delivery(
     target: dict[str, Any],
     payload: dict[str, Any],
     wait_id: uuid.UUID | None = None,
+    step_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     orm = WorkflowDelivery(
         tenant_id=tenant_id,
         workflow_id=workflow_id,
         run_id=run_id,
         wait_id=wait_id,
+        step_id=step_id,
         kind=kind,
         target=target,
         payload=payload,
