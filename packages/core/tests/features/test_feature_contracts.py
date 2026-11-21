@@ -115,6 +115,11 @@ _NARROWED: dict[str, str] = {
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
+    "workflows": "a run has no thread; its agent and home channel decide",
+    "workflow_webhooks": "a server admin's choice, checked when a webhook call arrives",
+    "workflow_code": "a server admin's choice, checked when a code step starts",
+    "workflow_run_budget": "checked when a run starts, from its workspace",
+    "workflow_retention_days": "the purge reads it per workspace",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 

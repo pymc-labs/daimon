@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readOnlyHint` runs without a card. The chat worker needs that server's key in
   `DAIMON_MCP_IDENTITY__BEARERS`; a signed server is read without one.
 
+- **Workflows, off by default.** A workflow is a graph of steps that runs on its
+  own: agents, conditions, code, tool calls, questions to people and waits. Build
+  one on a canvas in the web app, from a starter or with Ask Daimon, then test
+  and publish it. Runs start by hand, on a schedule, from a signed webhook or
+  after another workflow. Approval steps ask people in chat by direct message or
+  in a thread, or in the web app's inbox. `/workflows` on Discord, Slack and
+  Teams lists them, and chat cards publish, run and follow runs. Admins can move
+  routines to workflows and back, and `daimon workflows` lists, exports, imports
+  and controls them. Workflows, their webhooks and code steps each stay off until
+  an admin turns them on; see [Workflows](docs/workflows.md).
+
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.

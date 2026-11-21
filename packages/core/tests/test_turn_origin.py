@@ -28,6 +28,7 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from daimon.core.web_links import TenantLinks, WebLinks
+from daimon.core.workflows.context import SelectedNode, WorkflowContext
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -730,3 +731,25 @@ def test_web_awareness_off_drops_the_web_links() -> None:
     )
     assert "web" not in _controls(rendered), "no web block with web_awareness Off"
     assert "Web links:" not in rendered, "no web sentence either"
+
+
+def test_render_turn_origin_when_a_workflow_is_open_names_it_and_the_selected_node() -> None:
+    opened = WorkflowContext(
+        id="wf-1",
+        name='Weekly "digest"',
+        revision=7,
+        live_version=2,
+        status="live",
+        errors=1,
+        warnings=0,
+        selected_node=SelectedNode(id="draft", kind="agent", title="Write it"),
+    )
+
+    rendered = render_turn_origin(_origin(), effective_is_admin=False, workflow=opened)
+    controls = _controls(rendered)
+
+    assert controls["workflow"] == opened.model_dump(), "the open workflow rides in the controls"
+    assert "edit_workflow_draft" in rendered, "the prose says how to change it"
+    assert "workflow" not in render_turn_origin(_origin(), effective_is_admin=False).replace(
+        "workflow-authoring", ""
+    ), "an ordinary turn says nothing about workflows"

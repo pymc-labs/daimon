@@ -68,10 +68,13 @@ async def record(
     channel_id: str | None = None,
     agent_id: str | None = None,
     paid_web_searches: int = 0,
+    workflow_run_id: uuid.UUID | None = None,
+    workflow_step_id: uuid.UUID | None = None,
 ) -> bool:
     """Insert one usage row idempotently on (managed_session_id, event_id); True if new.
 
     `agent_id` is the agent whose turn or tool call spent it; None when unknown.
+    `workflow_run_id`/`workflow_step_id` tag a workflow lane's model call.
     `paid_web_searches` is the row's billed searches, none of them free."""
     if observation is not None:
         if model_usage is not None:
@@ -95,6 +98,8 @@ async def record(
             agent_id=agent_id,
             web_searches=paid_web_searches,
             paid_web_searches=paid_web_searches,
+            workflow_run_id=workflow_run_id,
+            workflow_step_id=workflow_step_id,
         )
         .on_conflict_do_nothing(
             index_elements=["managed_session_id", "event_id"],

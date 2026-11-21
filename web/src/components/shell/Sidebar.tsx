@@ -56,6 +56,7 @@ export function Sidebar() {
           <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => itemCls(isActive || (item.to === "/chat" && chatOpen))}>
             <item.icon className="size-4" strokeWidth={1.75} />
             {item.label}
+            {item.badge && <item.badge />}
           </NavLink>
         ))}
       </nav>

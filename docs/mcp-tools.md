@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 234 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 252 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -768,6 +768,39 @@ post_wizard: the agent-facing tool that posts a multi-step form.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `post_wizard` | Discord callers, Teams callers | Post a multi-step form in the channel instead of asking in prose. |
+
+## `workflow_step`
+
+The tools a workflow step's agent finishes its step with
+(`daimon.core.workflows.step_tools`).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `ask_human` | all callers | Ask a person a question from your workflow step, then end your turn. |
+| `complete_step` | all callers | Finish your workflow step with its output, a markdown summary and its route if any. |
+| `fail_step` | all callers | End your workflow step as failed, with why. |
+| `finish_early` | all callers | End the whole workflow run early as done, because there is nothing to do. |
+| `step_context` | all callers | Read your workflow step's brief again, with the outputs of the steps before it. |
+
+## `workflows`
+
+Workflow tools: read, draft, validate, publish and run workflows from chat.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `cancel_workflow_run` | all callers | Stop a run that has not ended. |
+| `create_workflow` | all callers | Create a workflow as a private draft owned by this person. |
+| `edit_workflow_draft` | all callers | Change a workflow's draft from the revision you read; nothing goes live. |
+| `fork_workflow_run` | all callers | Start a new run from an earlier one: with `step`, from that step on with the earlier steps' results reused; without, the whole run again. |
+| `get_workflow` | all callers | Read a workflow: its draft spec and revision, its problems, and its live version. |
+| `get_workflow_run` | all callers | Read one run: its status, failure, inputs and each step's status. |
+| `list_workflow_runs` | all callers | List recent runs, newest first: all you can see, or one workflow's. |
+| `list_workflows` | all callers | List the workflows this person can see: their own and those shared with the team. |
+| `publish_workflow` | all callers | Publish the draft as the next live version. |
+| `retry_workflow_run` | all callers | Retry a failed or stopped run from where it stopped. |
+| `run_workflow` | all callers | Run the live version once, or with test=true the draft as a test run. |
+| `set_workflow_paused` | all callers | Pause a live workflow so triggers stop starting runs, or resume it. |
+| `validate_workflow` | all callers | Check a workflow's draft, or a spec you pass, and list errors, warnings and grants. |
 
 ## Hub login mounts: `hub`
 

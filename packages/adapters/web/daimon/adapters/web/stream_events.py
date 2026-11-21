@@ -37,6 +37,7 @@ def step_of(call: ToolUseBlock, ms: int | None) -> WebStep:
         detail=detail,
         status=status,
         ms=None if status == "running" else ms,
+        tool=call.name,
     )
 
 

@@ -72,6 +72,7 @@ Where each feature can be set, and its default.
 | Web app: routines | `web.routines` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: credits | `web.credits` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: integrations | `web.integrations` | Capability | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: workflows | `web.workflows` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -85,7 +86,12 @@ Where each feature can be set, and its default.
 | Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Workflows | `workflows` | Capability | Off | ✓ | ✓ | ✓ | ✓ |  |  |  |
+| Workflow webhooks | `workflow_webhooks` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
+| Workflow code steps | `workflow_code` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Workflow run budget | `workflow_run_budget` | Limit | $5 | ✓ | ✓ |  |  |  |  |  |
+| Workflow run history | `workflow_retention_days` | Limit | 90 days | ✓ | ✓ |  |  |  |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |
 | Callback watch lifetime | `callback_watch_lifetime` | Limit | 30 days | ✓ | ✓ |  |  |  |  |  |
@@ -361,7 +367,7 @@ The agent can search the web. Off removes it here; On never gives more than the 
 
 ## Web app
 
-The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
+The agent knows about the web app: messages, routine runs and tool results carry its address and linkable pages, its invite and access tools are offered, and cards show buttons into it. Off leaves that out here.
 
 | | |
 | --- | --- |
@@ -697,7 +703,7 @@ Report only changes nothing.
 
 ## Web app: chat
 
-The chat pages of the web app. Off hides them for everyone on the team.
+The chat pages of the web app. Off hides them for the whole team.
 
 | | |
 | --- | --- |
@@ -709,7 +715,7 @@ The chat pages of the web app. Off hides them for everyone on the team.
 
 ## Web app: agents
 
-The agents pages of the web app. Off hides them for everyone on the team.
+The agents pages of the web app. Off hides them for the whole team.
 
 | | |
 | --- | --- |
@@ -721,7 +727,7 @@ The agents pages of the web app. Off hides them for everyone on the team.
 
 ## Web app: channels
 
-The channels pages of the web app. Off hides them for everyone on the team.
+The channels pages of the web app. Off hides them for the whole team.
 
 | | |
 | --- | --- |
@@ -733,7 +739,7 @@ The channels pages of the web app. Off hides them for everyone on the team.
 
 ## Web app: routines
 
-The routines pages of the web app. Off hides them for everyone on the team.
+The routines pages of the web app. Off hides them for the whole team.
 
 | | |
 | --- | --- |
@@ -745,7 +751,7 @@ The routines pages of the web app. Off hides them for everyone on the team.
 
 ## Web app: credits
 
-The credits pages of the web app. Off hides them for everyone on the team.
+The credits pages of the web app. Off hides them for the whole team.
 
 | | |
 | --- | --- |
@@ -757,13 +763,25 @@ The credits pages of the web app. Off hides them for everyone on the team.
 
 ## Web app: integrations
 
-The integrations pages of the web app. Off hides them for everyone on the team.
+The integrations pages of the web app. Off hides them for the whole team.
 
 | | |
 | --- | --- |
 | Key | `web.integrations` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Web app: workflows
+
+The workflows pages of the web app. Off hides them for the whole team.
+
+| | |
+| --- | --- |
+| Key | `web.workflows` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
@@ -878,7 +896,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; an admin can set limits, a menu and their own channel.
+Answers offer a button to ask a person for help, posting the request in the support channel. Off removes the button and form. Whoever runs Daimon sets the default channel and credits; an admin sets limits, a menu and their own channel.
 
 | | |
 | --- | --- |
@@ -890,7 +908,7 @@ Answers offer a way to ask a person for help, which posts the request in the sup
 
 ## Feedback to support
 
-A submitted thumbs-down form (the reasons, the text, the person, the agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
+A submitted thumbs-down form (reasons, text, person, agent and a link to the answer) is also posted where Ask a person requests go, as the form says first. It spends no credits. Off keeps the form in the database only.
 
 | | |
 | --- | --- |
@@ -937,6 +955,66 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
 
+## Workflows
+
+Lets people run workflows. Off stops runs here.
+
+| | |
+| --- | --- |
+| Key | `workflows` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Workflow webhooks
+
+Workflows can start from a webhook. Off refuses those calls.
+
+| | |
+| --- | --- |
+| Key | `workflow_webhooks` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Workflow code steps
+
+Workflows can run code steps. Off fails them.
+
+| | |
+| --- | --- |
+| Key | `workflow_code` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Workflow run budget
+
+The most one workflow run may spend.
+
+| | |
+| --- | --- |
+| Key | `workflow_run_budget` |
+| Values | `50` ($50), `20` ($20), `10` ($10), `5` ($5), `2` ($2), `1` ($1) |
+| Default | `5` |
+| Levels | Deployment, Workspace |
+| Combines | Lowest wins |
+
+## Workflow run history
+
+How long finished workflow runs keep their steps.
+
+| | |
+| --- | --- |
+| Key | `workflow_retention_days` |
+| Values | `400` (400 days), `180` (180 days), `90` (90 days), `30` (30 days) |
+| Default | `90` |
+| Levels | Deployment, Workspace |
+| Combines | Lowest wins |
+
 ## Long job dollar cap
 
 The most one long job may spend. The smallest setting wins.
@@ -977,7 +1055,7 @@ How long a callback watch lasts, new or moved in, before it must be renewed. The
 
 ## Answer time limit
 
-The longest one answer may take before it is stopped when someone is talking to the agent in a chat, a direct message or the web app: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
+The longest one chat, direct message or web app answer may take before it stops: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
 
 | | |
 | --- | --- |
@@ -1151,7 +1229,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before the agent makes or resumes a watch. Skip makes it without the card, reporting in the same thread for the default duration. Editing a watch, long jobs, watch key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows the destination and duration on a card before the agent makes or resumes a watch; Skip reports in the thread instead. Editing a watch, long jobs, key rotation and Fly launches always ask. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1188,7 +1266,7 @@ Keeps what people ask this agent in direct messages and web chat, and what it an
 
 ## Monitor coding tools
 
-Keeps what people ask this agent from their coding tools and what it answers, and the name, time and outcome of each other tool they call on it, never what the call sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
+Keeps what people ask this agent from their coding tools, its answers, and the name, time and outcome of other tool calls, never their content. People are told in the conversation or first tool result. Kept from when it is on, for the retention period.
 
 | | |
 | --- | --- |

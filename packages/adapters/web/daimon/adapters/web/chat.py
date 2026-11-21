@@ -71,10 +71,17 @@ class PickModel(BaseModel):
     value: str = Field(min_length=1, max_length=200)
 
 
+class MessageContext(BaseModel):
+    """What the person had open when they wrote: a workflow's selected node."""
+
+    selected_node: str | None = Field(default=None, max_length=200)
+
+
 class NewMessage(BaseModel):
     id: uuid.UUID
     content: str = Field(max_length=100_000)
     attachments: list[WebAttachment] = Field(default_factory=list[WebAttachment], max_length=10)
+    context: MessageContext | None = None
 
 
 class CardAnswer(BaseModel):
@@ -117,6 +124,33 @@ def _live_message(reply_id: uuid.UUID, events: list[Event], created_at: str) -> 
     }
 
 
+async def chattable_agents(
+    runtime: WebRuntime, caller: WebCaller, *, only: str | None = None
+) -> list[BetaManagedAgentsAgent]:
+    """The agents this person may chat with on the web, the workspace's default first;
+    with `only`, just that agent if they may."""
+    if runtime.turns is None:
+        raise HTTPException(status_code=503, detail="Chat is not available right now.")
+    deps, tenant_id = runtime.turns.deps, caller.person.tenant_id
+    listed = await runtime.agents.agents(deps.anthropic, tenant_id)
+    if only is not None:
+        listed = [a for a in listed if a.id == only]
+    async with runtime.sessionmaker() as db:
+        principal = await caller.principal(db)
+        allowed = await directory.chattable(
+            db, listed, person=caller.person, role=caller.role, principal=principal
+        )
+        chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
+    name = deps.deployment_default.agent_name
+
+    def first(agent: BetaManagedAgentsAgent) -> bool:
+        if chosen.default_agent is not None:
+            return agent.id == chosen.default_agent
+        return agent.name == name
+
+    return sorted(allowed, key=lambda a: (not first(a), a.name.lower()))
+
+
 def chat_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/chat")
 
@@ -128,26 +162,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
     async def chattable(
         caller: WebCaller, *, only: str | None = None
     ) -> list[BetaManagedAgentsAgent]:
-        """The agents this person may chat with on the web, the workspace's default first;
-        with `only`, just that agent if they may."""
-        deps, tenant_id = turns().deps, caller.person.tenant_id
-        listed = await runtime.agents.agents(deps.anthropic, tenant_id)
-        if only is not None:
-            listed = [a for a in listed if a.id == only]
-        async with runtime.sessionmaker() as db:
-            principal = await caller.principal(db)
-            allowed = await directory.chattable(
-                db, listed, person=caller.person, role=caller.role, principal=principal
-            )
-            chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
-        name = deps.deployment_default.agent_name
-
-        def first(agent: BetaManagedAgentsAgent) -> bool:
-            if chosen.default_agent is not None:
-                return agent.id == chosen.default_agent
-            return agent.name == name
-
-        return sorted(allowed, key=lambda a: (not first(a), a.name.lower()))
+        return await chattable_agents(runtime, caller, only=only)
 
     async def thread_of(db: AsyncSession, caller: WebCaller, session_id: uuid.UUID) -> WebThreadRow:
         thread = await chat_store.get_thread(db, person_id=caller.person.id, thread_id=session_id)
@@ -409,7 +424,11 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             principal = await caller.principal(db)
         try:
             stream = live.start(
-                person=caller.person, principal=principal, thread=thread, message=message
+                person=caller.person,
+                principal=principal,
+                thread=thread,
+                message=message,
+                selected_node=body.context.selected_node if body.context else None,
             )
         except RuntimeError:
             raise HTTPException(status_code=409, detail="Wait for the answer to finish.") from None

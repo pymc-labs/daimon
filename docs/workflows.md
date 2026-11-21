@@ -1,0 +1,159 @@
+# Workflows
+
+How workflows run, how people take part in them from chat, and what an admin
+turns on and limits.
+
+A workflow is a graph of steps that runs on its own: agents, conditions, code,
+tool calls, questions to people and waits. You edit a draft and publish it as a
+numbered version. Every run keeps a tamper-evident record of its steps.
+
+## Turn workflows on
+
+Workflows are Off by default. An admin turns on [`workflows`](features.md#workflows)
+and, for the pages, [`web.workflows`](features.md#web-app-workflows). Webhook
+triggers and code steps are separate features, also Off by default.
+
+```bash
+DAIMON_FEATURES__WORKFLOWS=on
+DAIMON_FEATURES__WEB_WORKFLOWS=on
+```
+
+While `workflows` is Off, every path refuses: the web pages, the workflow
+tools, `/workflows` in chat, webhooks and the `daimon workflows` commands.
+Runs already started stop at their next step without spending.
+
+| Feature | Key | Default |
+| --- | --- | --- |
+| Workflows | `workflows` | Off |
+| Web pages | `web.workflows` | Off |
+| Webhook triggers | `workflow_webhooks` | Off |
+| Code steps | `workflow_code` | Off |
+| Run budget | `workflow_run_budget` | $5 |
+| Run history | `workflow_retention_days` | 90 days |
+
+Deployment caps on steps, runs, items and webhooks are under
+[Workflows settings](configuration.md#workflows).
+
+## Steps
+
+| Kind | Does |
+| --- | --- |
+| Agent | An agent does the work and returns named fields |
+| Branch | Picks the next step by a condition |
+| Transform | Computes values from earlier results |
+| Code | Runs a Python script |
+| Action | Calls one tool with fixed arguments |
+| Approval | Asks people to approve, choose, or answer |
+| Wait | Waits for a time, a date or an event |
+| For each | Runs one step for each item of a list |
+| Workflow | Runs another workflow and takes its output |
+| Finish | Ends the run and can post the result |
+
+Values come from `${{ }}` expressions, such as `${{ steps.draft.output.text }}`.
+A step reads only the inputs and the steps before it. A loop needs a most-visits
+limit. Validation names each problem, and a draft with errors cannot be published.
+
+## Triggers
+
+A workflow starts by hand, on a schedule, from a webhook, or when another
+workflow finishes. Another workflow can also call it as a step.
+
+A schedule fires each slot once. A missed slot is skipped, unless the trigger
+catches up with one run.
+
+A webhook trigger checks the sender's signature: Standard Webhooks, GitHub,
+Stripe, Slack or a bearer token. Each delivery starts at most one run. The trigger
+has a test URL that captures one delivery as a test run.
+
+## Asks in chat
+
+An Approval step asks people by direct message, in a thread, or in the web app's
+inbox. On Discord, the person answers by reply; on Slack, in the thread under
+the message; on Teams, with the card's button. In a thread, an answer from
+someone who was not asked is refused.
+
+An answer can be approve or reject, a choice, or text. Several approvers
+count as distinct people, and the person who started the run cannot approve it
+unless the step allows it. An unanswered ask times out to its own route.
+
+An agent step can also ask a question. The step waits, and the answer resumes the
+agent's session.
+
+## In chat and the web app
+
+In the web app, you build a workflow on a canvas from a blank draft or a
+starter. Ask Daimon, beside the canvas, edits the draft with you through the
+workflow tools. A private workflow is hidden from other members until you share it.
+
+`/workflows` opens the workflows panel on Discord, Slack and Teams. In chat, the
+agent does not publish or start a live run itself. It posts a card for you to
+press: the draft with Publish, or the inputs with Run. A run started from a card
+shows on a run card that follows it.
+
+A Finish step can post the result to the workflow's home channel, a thread, its
+owner or the person it runs as. When runs fail, the owner gets one card for each
+streak of failures.
+
+## Grants and the Rule of Two
+
+A step that sees outside input must not also write. Outside input is a webhook
+body, an answer from someone who cannot edit the workflow, or a page from the web.
+Validation refuses such a step unless an Approval before it binds the write.
+
+A bound write sends exactly what was approved. An agent step set to propose
+its writes sends only the ones a person approves. A test run never writes to
+real systems.
+
+Some settings need an admin's approval before a version goes live: writes
+without asking, built-in tools, code with network access, an unsigned webhook,
+a budget over the default, or a step that trusts outside input. The admin approves from the inbox, and the grant
+carries over to later versions.
+
+## Runs
+
+You can cancel a run, retry it from the step that failed, or rerun it from any
+step with the earlier results reused. Runs past a workflow's active limit queue.
+A run ends when it passes its deadline or spends its budget.
+
+Each step's spend counts against the allowance of the person the run is for.
+
+## Routines and workflows
+
+An admin can move a routine to a workflow and back, from the web app or the CLI.
+The workflow takes over the routine's schedule, and a paused routine moves
+paused. A routine that posts to its owner's direct messages becomes a step in
+that conversation, which is skipped while the owner is busy. A routine that is
+running, or already moved, stays.
+
+## CLI
+
+The `daimon workflows` commands act as a workspace admin. Name the workspace with
+`--tenant`.
+
+```bash
+daimon workflows list --tenant <id>
+daimon workflows show <workflow> --tenant <id>
+daimon workflows export <workflow> --tenant <id> --out flows/
+daimon workflows import flow.yaml --tenant <id> --owner <account>
+daimon workflows runs --tenant <id> --workflow <workflow>
+daimon workflows cancel <run> --tenant <id>
+daimon workflows redrive <run> --tenant <id>
+daimon workflows verify <run> --tenant <id>
+daimon workflows from-routine --tenant <id>
+daimon workflows from-routine --tenant <id> --routine <routine> --apply
+daimon workflows to-routine <workflow> --tenant <id>
+```
+
+An import arrives as a draft owned by `--owner`, who must be a member. `verify`
+checks a run's record. `from-routine` only previews until you add `--apply` and
+name each routine.
+
+## Limits
+
+- Workflows run only on the Anthropic backend.
+- A run form in chat holds 5 fields on Discord and 10 on Slack and Teams.
+  Longer forms open in the web app.
+- A draft card does not refresh: an older card's Test run and Publish are refused.
+- Publishing from chat records no note.
+- On Teams, a run confirmation card cannot start a run. Teams also replaces the
+  pressed card with the run card, the run form or the result.

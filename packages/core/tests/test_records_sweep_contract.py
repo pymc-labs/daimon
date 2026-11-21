@@ -39,6 +39,7 @@ WRAPPER_ALLOWED = {
     "core/daimon/core/server_skills/": SKILLS,
     "core/daimon/core/reader_agent.py": "the reader agent is an Anthropic-hosted helper",
     "core/daimon/core/long_jobs_ma.py": "long jobs run as Anthropic sessions; Daimon ids refused",
+    "core/daimon/core/workflows/code_worker.py": "a code step's worker is a long-job Anthropic session",
     "core/daimon/core/agent_fork.py": "forking an Anthropic agent; Daimon-owned forks use records",
     "core/daimon/core/agent_rename.py": "renames Anthropic agents through the provider-only "
     "defaults rename helpers; a Daimon-owned agent is not renamed",
@@ -59,6 +60,7 @@ PORT_ALLOWED = {
     "core/daimon/core/long_jobs_ma.py": SESSIONS,
     "core/daimon/core/pending_file_sweeper.py": SESSIONS,
     "core/daimon/core/usage_sweep.py": SESSIONS,
+    "core/daimon/core/workflows/answers.py": "answer files upload to the Anthropic Files API",
     "core/daimon/core/workspace_transfer.py": "workspace files are Anthropic session resources",
     "core/daimon/core/agent_convert.py": "reads the Anthropic source agent it converts",
     "core/daimon/core/defaults/platform_export.py": "exports platform seed agents from Anthropic",

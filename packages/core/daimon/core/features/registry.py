@@ -263,8 +263,8 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "The agent knows about the web app: messages, routine runs and tool results carry "
-            "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+            "its address and linkable pages, its invite and access tools are offered, and cards "
+            "show buttons into it. Off leaves that out here."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -472,8 +472,11 @@ _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
 WEB_MODULES: Final[tuple[str, ...]] = (
-    "chat", "agents", "channels", "routines", "credits", "integrations",
+    "chat", "agents", "channels", "routines", "credits", "integrations", "workflows",
 )  # fmt: skip
+#: Web modules Off until an admin turns them on.
+_WEB_MODULES_OFF: Final = frozenset({"workflows"})
+_WORKFLOW_TIERS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
 
 
 def _shown(
@@ -701,10 +704,10 @@ _WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="on",
+        default="off" if module in _WEB_MODULES_OFF else "on",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc=f"The {module} pages of the web app. Off hides them for everyone on the team.",
+        doc=f"The {module} pages of the web app. Off hides them for the whole team.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     )
@@ -827,10 +830,9 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card with the destination and duration before the agent makes "
-            "or resumes a watch. Skip makes it without the card, reporting in the same "
-            "thread for the default duration. Editing a watch, long jobs, watch key "
-            "rotation and Fly launches keep asking. Only a server admin can change it."
+            "Ask shows the destination and duration on a card before the agent makes or "
+            "resumes a watch; Skip reports in the thread instead. Editing a watch, long jobs, "
+            "key rotation and Fly launches always ask. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -882,10 +884,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             (
                 "monitor_mcp",
                 "Monitor coding tools",
-                "Keeps what people ask this agent from their coding tools and what it answers, "
-                "and the name, time and outcome of each other tool they call on it, never what "
-                "the call sent or returned. People are told in the conversation or their first "
-                "tool result. Kept from when it is turned on, for the retention period.",
+                "Keeps what people ask this agent from their coding tools, its answers, and the "
+                "name, time and outcome of other tool calls, never their content. People are "
+                "told in the conversation or first tool result. Kept from when it is on, for "
+                "the retention period.",
             ),
         )
     ),
@@ -1049,9 +1051,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "Answers offer a way to ask a person for help, which posts the request in the "
-            "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "default channel and credits; an admin can set limits, a menu and their own channel."
+            "Answers offer a button to ask a person for help, posting the request in the "
+            "support channel. Off removes the button and form. Whoever runs Daimon sets the "
+            "default channel and credits; an admin sets limits, a menu and their own channel."
         ),
         requires=("support_channel", "support_credits"),
         authority=_SETTINGS,
@@ -1066,9 +1068,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "A submitted thumbs-down form (the reasons, the text, the person, the agent and a "
-            "link to the answer) is also posted where Ask a person requests go, and the form "
-            "says so first. It spends no credits. Off keeps the form in the database only."
+            "A submitted thumbs-down form (reasons, text, person, agent and a link to the "
+            "answer) is also posted where Ask a person requests go, as the form says first. It "
+            "spends no credits. Off keeps the form in the database only."
         ),
         requires=("support_channel",),
         authority=_SETTINGS,
@@ -1102,6 +1104,52 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "lead_intake",
         "Lead intake",
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
+    ),
+    _capability(
+        "workflows",
+        "Workflows",
+        "Lets people run workflows. Off stops runs here.",
+        tiers=_WORKFLOW_TIERS,
+        default="off",
+        authority=_ADMIN,
+    ),
+    _capability(
+        "workflow_webhooks",
+        "Workflow webhooks",
+        "Workflows can start from a webhook. Off refuses those calls.",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        default="off",
+        authority=_SERVER_ADMIN,
+    ),
+    _capability(
+        "workflow_code",
+        "Workflow code steps",
+        "Workflows can run code steps. Off fails them.",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        default="off",
+        authority=_SERVER_ADMIN,
+    ),
+    _limit(
+        "workflow_run_budget",
+        "Workflow run budget",
+        "The most one workflow run may spend.",
+        {"50": "$50", "20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
+        default="5",
+        tiers=("deployment", "workspace"),
+        authority=_SERVER_ADMIN,
+        minimum=0.01,
+    ),
+    _limit(
+        "workflow_retention_days",
+        "Workflow run history",
+        "How long finished workflow runs keep their steps.",
+        {"400": "400 days", "180": "180 days", "90": "90 days", "30": "30 days"},
+        default="90",
+        tiers=("deployment", "workspace"),
+        authority=_ADMIN,
+        minimum=1,
     ),
     _limit(
         "long_jobs_max_usd",
@@ -1140,10 +1188,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "turn_time_limit",
         "Answer time limit",
         (
-            "The longest one answer may take before it is stopped when someone is talking to "
-            "the agent in a chat, a direct message or the web app: the standard 45 minutes, "
-            "or shorter. The smallest setting wins. Routines and watches use "
-            "the unattended run limit."
+            "The longest one chat, direct message or web app answer may take before it "
+            "stops: the standard 45 minutes, or shorter. The smallest setting wins. Routines "
+            "and watches use the unattended run limit."
         ),
         _TIME_LIMITS,
         default="45",

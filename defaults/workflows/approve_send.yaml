@@ -1,0 +1,51 @@
+schema: daimon.workflow/v1
+name: Approve then send
+goal: Draft a message, let a person approve it, then send it.
+inputs:
+  type: object
+  required: [topic]
+  properties:
+    topic: { type: string, title: What the message is about }
+triggers:
+  - id: manual
+    kind: manual
+defaults:
+  agent: default
+start: draft
+nodes:
+  draft:
+    kind: agent
+    title: Draft the message
+    instructions: Write a short, friendly message about the topic.
+    inputs:
+      topic: ${{ inputs.topic }}
+    output:
+      subject: { type: string }
+      body: { type: string }
+    next: review
+  review:
+    kind: approval
+    title: Check the draft
+    approvers: [owner]
+    show: ${{ steps.draft.output.body }}
+    binds: send
+    routes:
+      approve: send
+      reject: stopped
+  send:
+    kind: action
+    title: Send the email
+    tool: gmail/send_message
+    args:
+      subject: ${{ steps.draft.output.subject }}
+      body: ${{ steps.draft.output.body }}
+    next: done
+  done:
+    kind: finish
+    title: Sent
+    deliver:
+      to: run_as
+      message: 'Sent: ${{ steps.draft.output.subject }}'
+  stopped:
+    kind: finish
+    title: Not sent

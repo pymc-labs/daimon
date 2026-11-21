@@ -42,7 +42,7 @@ from daimon.core.pricing import (
     side_call_rates,
     usage_tokens,
 )
-from daimon.core.stores import tenant_ledger, usage_events
+from daimon.core.stores import tenant_ledger, usage_events, workflow_runs
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_compat import event_observation
 from mux.contracts.ids import ModelRef, Provider, ResourceRef
@@ -122,6 +122,7 @@ async def record_turn_usage(
     reason: TurnLedgerReason = "turn_debit",
     channel_id: str | None = None,
     agent_id: str | None = None,
+    workflow_run_id: uuid.UUID | None = None,
 ) -> Decimal | None:
     """Write one usage_events row and one debit ledger row.
 
@@ -145,6 +146,8 @@ async def record_turn_usage(
     `channel_id` is the turn's parent channel, stamped on both rows so the
     channel's budget counts the debit; None leaves the spend unattributed.
     `agent_id` stamps the usage row with the agent that answered, for per-agent spend.
+    `workflow_run_id` (a lane session's stamp) tags the row with the run and the step its
+    session was working on, and rolls the debit up to both in the same transaction.
 
     A `WebSearchCall` writes a token-free row for that one search, charged at
     the list price per search.
@@ -167,6 +170,7 @@ async def record_turn_usage(
             reason=reason,
             channel_id=channel_id,
             agent_id=agent_id,
+            workflow_run_id=workflow_run_id,
         )
     if observation is None:
         if event is None or managed_session_id is None or model_id is None:
@@ -206,6 +210,7 @@ async def record_turn_usage(
         raise ValueError("usage rows require all four reported token stages")
     event_time = _UsageEventTime(processed_at=observation.observed_at)
     async with sessionmaker() as s, s.begin():
+        work = await _workflow_work(s, workflow_run_id, managed_session_id, event_time.processed_at)
         await usage_events.record(
             s,
             tenant_id=tenant_id,
@@ -216,6 +221,8 @@ async def record_turn_usage(
             event_id=observation.id,
             channel_id=channel_id,
             agent_id=agent_id,
+            workflow_run_id=workflow_run_id,
+            workflow_step_id=work[0] if work else None,
         )
         cost = cost_of(observation, pricing)
         debit = debit_amount(cost, markup=markup)
@@ -230,8 +237,31 @@ async def record_turn_usage(
             # lands inside the timed promo window the call was made in.
             occurred_at=event_time.processed_at,
         )
-
+        if inserted:
+            await _roll_up(s, workflow_run_id, work, debit)
     return debit if inserted else None
+
+
+async def _workflow_work(
+    s: AsyncSession, run_id: uuid.UUID | None, session_id: str, at: datetime
+) -> tuple[uuid.UUID, uuid.UUID] | None:
+    """The workflow step and attempt a lane session was working on when it made a call."""
+    if run_id is None:
+        return None
+    return await workflow_runs.attempt_of_session(s, run_id=run_id, session_id=session_id, at=at)
+
+
+async def _roll_up(
+    s: AsyncSession,
+    run_id: uuid.UUID | None,
+    work: tuple[uuid.UUID, uuid.UUID] | None,
+    debit: Decimal,
+) -> None:
+    if run_id is not None:
+        step_id, attempt_id = work or (None, None)
+        await workflow_runs.add_cost(
+            s, run_id=run_id, step_id=step_id, attempt_id=attempt_id, cost_usd=debit
+        )
 
 
 async def _record_web_search(
@@ -246,9 +276,11 @@ async def _record_web_search(
     reason: TurnLedgerReason,
     channel_id: str | None,
     agent_id: str | None,
+    workflow_run_id: uuid.UUID | None = None,
 ) -> Decimal | None:
     debit = debit_amount(float(AGENT_WEB_SEARCH_USD), markup=markup)
     async with sessionmaker() as s, s.begin():
+        work = await _workflow_work(s, workflow_run_id, managed_session_id, call.processed_at)
         if not await usage_events.record(
             s,
             tenant_id=tenant_id,
@@ -265,6 +297,8 @@ async def _record_web_search(
             channel_id=channel_id,
             agent_id=agent_id,
             paid_web_searches=1,
+            workflow_run_id=workflow_run_id,
+            workflow_step_id=work[0] if work else None,
         ):
             return None  # a replay of a search already billed
         inserted = await tenant_ledger.insert_entry(
@@ -276,6 +310,8 @@ async def _record_web_search(
             channel_id=channel_id,
             occurred_at=call.processed_at,
         )
+        if inserted:
+            await _roll_up(s, workflow_run_id, work, debit)
     return debit if inserted else None
 
 

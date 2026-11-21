@@ -24,6 +24,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
+from unittest.mock import AsyncMock
 
 import anthropic
 import httpx
@@ -63,12 +64,17 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
 from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
     BetaManagedAgentsUnknownError,
 )
-from daimon.core import headless_runner
+from daimon.core import headless_runner, usage_sweep
 from daimon.core.config import McpSettings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_BILLING_EXEMPT,
+    MA_METADATA_KEY_WORKFLOW_RUN,
+    MA_METADATA_KEY_WORKFLOW_STEP,
+)
 from daimon.core.errors import TurnError
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn.unattended_capabilities import StepTools
 from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -1919,3 +1925,52 @@ async def test_a_held_fire_mounts_no_identity_server_only_in_mode_on(
     names = {server.name for server in seen["agent"].mcp_servers}
     assert ("grove" in names) is kept
     assert "daimon-mcp" in names
+
+
+async def test_a_workflow_step_session_is_stamped_and_settles_through_usage_recording(
+    run_turn: RunTurn,
+    headless_identity: HeadlessIdentity,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every workflow session (a `StepTurn`) carries its run and step stamps, its model
+    calls go to the bound usage recorder, and the sweep bills it to the same run."""
+    run_id, step_id = uuid.uuid4(), uuid.uuid4()
+    created: list[dict[str, Any]] = []
+    span = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_span_1",
+        type="span.model_request_end",
+        processed_at=_NOW,
+        model_request_start_id="evt_span_start_1",
+        model_usage=ma_model_usage(input_tokens=10, output_tokens=5),
+    )
+    client = _build_client([span, *_idle_events()], session_create_capture=created)
+    record = AsyncMock(return_value=None)
+    sessions: list[str] = []
+
+    async def on_session(sid: str) -> None:
+        sessions.append(sid)
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="brief",
+        usage_record_factory=lambda _sid, _model: record,  # pyright: ignore[reportUnknownLambdaType]
+        step=headless_runner.StepTurn(
+            tools=StepTools(),
+            decide=lambda base: base,
+            workflow_run_id=run_id,
+            workflow_step_id=step_id,
+            on_session=on_session,
+        ),
+    )
+
+    metadata = created[0]["metadata"]
+    stamps = (metadata[MA_METADATA_KEY_WORKFLOW_RUN], metadata[MA_METADATA_KEY_WORKFLOW_STEP])
+    assert stamps == (str(run_id), str(step_id)), f"the session is stamped: {metadata!r}"
+    assert MA_METADATA_KEY_BILLING_EXEMPT not in metadata, "a step session is billed"
+    assert sessions == [_SESSION_ID] and record.await_count == 1, "its call is recorded"
+    billing = await usage_sweep.session_billing(
+        db_session_factory, ma_session(id=_SESSION_ID, metadata=metadata)
+    )
+    assert billing is not None and billing.workflow_run_id == run_id, "the sweep bills the run"

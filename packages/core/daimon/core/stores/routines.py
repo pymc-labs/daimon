@@ -22,9 +22,11 @@ import structlog
 from daimon.core._models import (
     Routine,
     Tenant,
+    Workflow,
+    WorkflowTrigger,
 )
 from daimon.core.cron import next_slot_at_or_after
-from daimon.core.errors import RoutineAlreadyRunning, StoreError
+from daimon.core.errors import RoutineAlreadyRunning, RoutineMoved, StoreError
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
 from daimon.core.routine_move import routine_never_fired
@@ -403,6 +405,8 @@ async def _save_routine_edit(
     transaction, so the owner cannot carry an opt-in over to a new agent,
     prompt or destination.
     """
+    if await migrated_workflows(session, [current.id]):
+        raise RoutineMoved()
     if "enabled" in values:
         values.update(
             handback_paused_at=None,
@@ -547,6 +551,8 @@ async def update_routine_agent_id(
 async def delete_routine(
     session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
 ) -> bool:
+    if await migrated_workflows(session, [routine_id]):
+        raise RoutineMoved()
     result = await session.execute(
         delete(Routine).where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
     )
@@ -724,6 +730,8 @@ async def mark_due(
     carries on. ``updated_at`` stays, so a run in flight is not treated as edited and
     still skips this mark. Returns ``None`` for a missing, other-tenant or paused routine.
     """
+    if await migrated_workflows(session, [routine_id]):
+        raise RoutineMoved()
     stmt = (
         update(Routine)
         .where(Routine.id == routine_id, Routine.tenant_id == tenant_id, Routine.enabled.is_(True))
@@ -1298,3 +1306,62 @@ async def erase_sandbox_setter(
                 ),
                 {"erased": SANDBOX_SETTER_ERASED, "setter": setter, "only_in": tenant_id},
             )
+
+
+# --- conversion to workflows ---
+
+
+async def migrated_workflows(
+    session: AsyncSession, routine_ids: Collection[_uuid.UUID]
+) -> dict[_uuid.UUID, tuple[_uuid.UUID, str]]:
+    """The workflow (id, name) each of `routine_ids` runs as now; absent ones never moved
+    or converted back. A moved routine claims no slots and refuses every change."""
+    if not routine_ids:
+        return {}
+    rows = await session.execute(
+        select(WorkflowTrigger.from_routine_id, Workflow.id, Workflow.name)
+        .join(Workflow, Workflow.id == WorkflowTrigger.workflow_id)
+        .where(WorkflowTrigger.from_routine_id.in_(routine_ids))
+    )
+    return {r: (w, name) for r, w, name in rows.tuples() if r is not None}
+
+
+async def get_routine_for_move(
+    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+) -> RoutineRow | None:
+    """The routine, locked until the transaction ends, so no slot claim races the move."""
+    orm = await session.scalar(
+        select(Routine)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    return None if orm is None else RoutineRow.model_validate(orm)
+
+
+async def stop_for_workflow(session: AsyncSession, row: RoutineRow) -> None:
+    """Stop a routine claiming slots: its workflow's trigger holds the cursor now."""
+    await session.execute(
+        update(Routine).where(Routine.id == row.id).values(enabled=False, next_fire_at=None)
+    )
+
+
+async def resume_from_workflow(
+    session: AsyncSession,
+    row: RoutineRow,
+    *,
+    enabled: bool,
+    next_fire_at: datetime | None,
+    last_fired_slot: datetime | None,
+    seeded_after: datetime | None,
+) -> None:
+    """Give a routine back the cursor its workflow's trigger kept; it claims from there."""
+    await session.execute(
+        update(Routine)
+        .where(Routine.id == row.id)
+        .values(
+            enabled=enabled,
+            next_fire_at=next_fire_at if enabled else None,
+            last_fired_slot=last_fired_slot,
+            seeded_after=seeded_after,
+        )
+    )

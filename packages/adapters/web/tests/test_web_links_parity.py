@@ -25,9 +25,8 @@ def test_table_equals_the_web_apps_route_table() -> None:
 @pytest.mark.parametrize("role", ["member", "admin"])
 def test_member_capabilities_match_the_web_role_table(role: str) -> None:
     """The bot's idea of what a member may open is the web app's."""
-    caps = access.capabilities_for(
-        role, ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
-    )  # type: ignore[arg-type]
+    modules = ["chat", "agents", "channels", "routines", "workflows", "credits", "integrations"]
+    caps = access.capabilities_for(role, [*modules, "admin"])  # type: ignore[arg-type]
     paged = {link.cap for link in DEEP_LINKS.values()}
     expected = {c for c in paged if c in caps}
     ours = {c for c in paged if role == "admin" or c in MEMBER_CAPS}

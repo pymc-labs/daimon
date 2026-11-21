@@ -44,8 +44,8 @@ id. Use `{type: anthropic, skill_id: ...}` for a built-in.
 The seeded `default` agent always carries `team-etiquette`, with no `platforms`
 limit. It guides posts that reach other people.
 
-An entry may add `platforms: [teams]`, any of `discord`, `slack` and `teams`,
-each once, to limit the skill to turns on those platforms. Such a skill is left
+An entry may add `platforms: [teams]`, any of `discord`, `slack`, `teams` and
+`web` (the web app's chat), each once, to limit the skill to turns there. Such a skill is left
 off the agent at the provider and out of its fingerprint, so `apply` and
 `verify` read the agent as if the entry were absent. Each turn on a listed
 platform adds it to the session instead.

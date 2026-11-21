@@ -1199,7 +1199,7 @@ async def test_reconcile_agent_non_isolated_spec_still_gets_full_mcp_wiring() ->
 
 
 async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_hash() -> None:
-    """The shipped default agent seeds exactly as it would without its Teams-only skills.
+    """The shipped default agent seeds exactly as it would without its platform-limited skills.
 
     `platforms` skills are added per session on their platforms, so the agent at
     the provider, its skills and `daimon_spec_hash` match a spec that never
@@ -1216,7 +1216,8 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
     assert [(ref.type, ref.skill_id, ref.platforms) for ref in limited] == [
         *(("anthropic", name, ("teams",)) for name in ("docx", "pptx", "xlsx")),
         ("custom", "microsoft-365", ("teams",)),
-    ], "the Office built-ins and microsoft-365 are the default agent's Teams-only skills"
+        ("custom", "workflow-authoring", ("web",)),
+    ], "the default agent's platform-limited skills"
     without = shipped.model_copy(
         update={"skills": [ref for ref in shipped.skills if ref.platforms is None]}
     )

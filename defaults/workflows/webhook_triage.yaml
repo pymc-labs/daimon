@@ -1,0 +1,35 @@
+schema: daimon.workflow/v1
+name: Webhook triage
+goal: Read each incoming event, decide how urgent it is and post a one-line summary.
+inputs:
+  type: object
+  required: [title]
+  properties:
+    title: { type: string }
+    details: { type: string }
+triggers:
+  - id: events
+    kind: webhook
+    inputs: '${{ {"title": payload.title, "details": payload.details} }}'
+defaults:
+  agent: default
+start: triage
+nodes:
+  triage:
+    kind: agent
+    title: Triage the event
+    instructions: Read the event and say what happened, who it affects and how urgent it is.
+    inputs:
+      title: ${{ inputs.title }}
+      details: ${{ inputs.details }}
+    output:
+      summary: { type: string }
+      urgent: { type: boolean }
+    next: done
+  done:
+    kind: finish
+    title: Summary
+    output: ${{ steps.triage.output.summary }}
+    deliver:
+      to: run_as
+      message: ${{ steps.triage.output.summary }}

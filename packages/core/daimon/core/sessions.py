@@ -65,6 +65,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
+    MA_METADATA_KEY_WORKFLOW_RUN,
+    MA_METADATA_KEY_WORKFLOW_STEP,
 )
 from daimon.core.errors import StoreError
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
@@ -730,8 +732,12 @@ async def create_session(
     relay_owner: str | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
+    workflow_run_id: uuid.UUID | None = None,
+    workflow_step_id: uuid.UUID | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
+
+    ``workflow_run_id`` and ``workflow_step_id`` stamp a workflow lane's session.
 
     When ``mcp_settings`` has both ``public_url`` and ``jwt_secret``,
     ``ensure_agent_mcp_vault()`` runs first (refreshing its registered credential
@@ -1337,6 +1343,10 @@ async def create_session(
             budget_channel_id=budget_channel_id,
             agent_chat=agent_chat,
         )
+        if workflow_run_id is not None:
+            metadata[MA_METADATA_KEY_WORKFLOW_RUN] = str(workflow_run_id)
+        if workflow_step_id is not None:
+            metadata[MA_METADATA_KEY_WORKFLOW_STEP] = str(workflow_step_id)
         if chat_session_id is not None:
             metadata["daimon_chat_session_id"] = chat_session_id
         if github_transport == "router":

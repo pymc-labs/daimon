@@ -18,6 +18,8 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.routines_panel.state import RoutineEntry, RoutinesPanelState
 from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core.cron_words import schedule_words
+from daimon.core.routines import MOVED_TO_WORKFLOWS
+from daimon.core.web_links import TenantLinks
 
 __all__ = [
     "build_content_view",
@@ -62,12 +64,13 @@ def build_loading_view(*, channel_id: str = "") -> dict[str, Any]:
     }
 
 
-def _routine_row_block(entry: RoutineEntry) -> dict[str, Any]:
+def _routine_row_block(entry: RoutineEntry, links: TenantLinks | None) -> dict[str, Any]:
     """Build one section block with an overflow (⋯) accessory for a single entry.
 
     The accessory ``action_id`` is ``routine_action:{routine_id}`` so the
     dispatcher can parse the routine UUID directly from the action_id string.
-    Options: pause / resume / "View last output" (output).
+    Options: pause / resume / "View last output" (output) / delete; a routine moved to
+    Workflows is read-only here, with a link to its workflow.
     """
     schedule = schedule_words(entry.routine.cron_expr, entry.routine.timezone)
     status = {
@@ -80,21 +83,24 @@ def _routine_row_block(entry: RoutineEntry) -> dict[str, Any]:
         f"{entry.glyph} *{escape_mrkdwn(entry.label)}*\n\n"
         f"{escape_mrkdwn(entry.agent_name)}, {escape_mrkdwn(schedule)}\n\n{status}"
     )
+    output = {"text": {"type": "plain_text", "text": "View last output"}, "value": "output"}
+    options = [
+        {"text": {"type": "plain_text", "text": "Pause"}, "value": "pause"},
+        {"text": {"type": "plain_text", "text": "Resume"}, "value": "resume"},
+        output,
+        {"text": {"type": "plain_text", "text": "Delete"}, "value": "delete"},
+    ]
+    if entry.workflow_id is not None:
+        url = None if links is None else links.workflow(entry.workflow_id)
+        moved = MOVED_TO_WORKFLOWS if url is None else f"<{url}|{MOVED_TO_WORKFLOWS}>"
+        text, options = f"{text}\n\n{moved}", [output]
     return {
         "type": "section",
         "text": {"type": "mrkdwn", "text": text},
         "accessory": {
             "type": "overflow",
             "action_id": f"routine_action:{entry.routine.id}",
-            "options": [
-                {"text": {"type": "plain_text", "text": "Pause"}, "value": "pause"},
-                {"text": {"type": "plain_text", "text": "Resume"}, "value": "resume"},
-                {
-                    "text": {"type": "plain_text", "text": "View last output"},
-                    "value": "output",
-                },
-                {"text": {"type": "plain_text", "text": "Delete"}, "value": "delete"},
-            ],
+            "options": options,
         },
     }
 
@@ -120,7 +126,7 @@ def build_content_view(state: RoutinesPanelState, *, channel_id: str = "") -> di
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _EMPTY_HINT}})
     else:
         for entry in state.rows:
-            blocks.append(_routine_row_block(entry))
+            blocks.append(_routine_row_block(entry, state.links))
 
     if state.over_cap_count > 0:
         blocks.append(

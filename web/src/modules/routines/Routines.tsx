@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CalendarClock, Pause, Play, Plus, Trash2 } from "lucide-react"
+import { CalendarClock, Pause, Play, Plus, Trash2, Workflow } from "lucide-react"
+import { Link, useNavigate } from "react-router"
 import { toast } from "sonner"
 
 import { AgentAvatar, Ago, Prose } from "@/components/common"
@@ -15,7 +16,7 @@ import { api } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { rowProps, useListParam, useParam } from "@/lib/filters"
 import { absolute, channelLabel, plural } from "@/lib/format"
-import { useCan } from "@/lib/hooks"
+import { useCan, useMe } from "@/lib/hooks"
 import { Pill } from "../agents/bits"
 import { Editor } from "./Editor"
 import { RunNow } from "./RunNow"
@@ -100,7 +101,7 @@ function RoutineTable({ rows: all, choices }: { rows: Routine[]; choices: Choice
                 <TableRow key={r.id} {...rowProps(() => setRoutine(r.id))}>
                   <TableCell className="max-w-72">
                     <span className="block min-w-0">
-                      <span className="flex items-center gap-2"><span className="truncate font-medium">{r.title}</span>{!r.enabled && <Pill>Paused</Pill>}</span>
+                      <span className="flex items-center gap-2"><span className="truncate font-medium">{r.title}</span>{r.workflow ? <Pill>Workflow</Pill> : !r.enabled && <Pill>Paused</Pill>}</span>
                       <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground"><AgentAvatar name={r.agent.name} className="size-4 text-[8px]" /><span className="truncate">{r.agent.name}</span></span>
                     </span>
                   </TableCell>
@@ -131,11 +132,19 @@ function Detail({ routine: r, choices }: { routine: Routine; choices: Choices })
   const confirm = useConfirm()
   const can = useCan()
   const [, setRoutine] = useParam("routine")
-  const manage = can("routines.manage")
+  const { data: me } = useMe()
+  const navigate = useNavigate()
+  const moved = r.workflow
+  const manage = can("routines.manage") && !moved
+  const movable = manage && can("workflows.view") && (me?.role === "owner" || me?.role === "admin")
   const refresh = () => qc.invalidateQueries({ queryKey: ["routines"] })
   const toggle = useMutation({
     mutationFn: () => api.post<Routine>(`/api/routines/${r.id}/${r.enabled ? "pause" : "resume"}`),
     onSuccess: () => { void refresh(); toast(r.enabled ? "Paused" : "Resumed") },
+  })
+  const move = useMutation({
+    mutationFn: () => api.post<{ id: string }>(`/api/workflows/from-routine/${r.id}`),
+    onSuccess: (w) => { void refresh(); navigate(`/workflows/${w.id}`) },
   })
   const del = useMutation({
     mutationFn: () => api.del(`/api/routines/${r.id}`),
@@ -156,7 +165,10 @@ function Detail({ routine: r, choices }: { routine: Routine; choices: Choices })
             </Button>
           </>
         )}
-        menu={manage ? [{
+        menu={manage ? [...(movable ? [{
+          label: "Move to Workflows", icon: <Workflow />, disabled: move.isPending,
+          onSelect: async () => { if (await confirm({ title: "Move to Workflows?", body: `${r.title}, ${r.schedule}`, action: "Move" })) move.mutate() },
+        }] : []), {
           label: "Delete", icon: <Trash2 />, destructive: true, disabled: del.isPending,
           onSelect: async () => { if (await confirm({ title: "Delete routine?", body: `${r.title}, ${r.schedule}`, action: "Delete", destructive: true })) del.mutate() },
         }] : []}
@@ -168,6 +180,7 @@ function Detail({ routine: r, choices }: { routine: Routine; choices: Choices })
           ["Next run", r.next_run ? absolute(r.next_run) : "Paused"],
           ["Last run", r.last_run ? <span key="last" className="flex items-center gap-2">{absolute(r.last_run)}{r.failed && <Pill className="text-destructive">Failed</Pill>}</span> : "Never"],
           ["Owner", r.owner && !r.mine ? r.owner : null],
+          ["Runs as", moved ? <Link key="wf" to={`/workflows/${moved.id}`} className="text-link hover:underline">{moved.name}</Link> : null],
         ]} />
       </PanelSection>
       {r.last_output && <PanelSection title="Last result"><Prose text={r.last_output} breaks /></PanelSection>}

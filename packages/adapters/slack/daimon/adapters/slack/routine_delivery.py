@@ -144,8 +144,8 @@ async def _is_member(client: AsyncWebClient, *, channel_id: str, user_id: str) -
             return False
 
 
-async def _destination_refusal(
-    client: AsyncWebClient, row: RoutineRow, target: DeliveryTarget
+async def destination_refusal(
+    client: AsyncWebClient, creator: str | None, target: DeliveryTarget
 ) -> str | None:
     """Why the destination cannot take this post now, or None.
 
@@ -157,7 +157,6 @@ async def _destination_refusal(
     Slack accepts a missing `thread_ts` and posts at the channel root, so the
     ordinary `send_message` checks `conversations.replies` first, and so does this.
     """
-    creator = row.created_by_user_id
     if creator is None:
         return "creator_cannot_post"
     try:
@@ -301,7 +300,7 @@ def make_slack_routine_poster(
         ):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await fallback("protected_channel")
-        refusal = await _destination_refusal(client, row, target)
+        refusal = await destination_refusal(client, row.created_by_user_id, target)
         if refusal is not None:
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=refusal)
             return await fallback(refusal)
@@ -358,7 +357,7 @@ def make_slack_routine_poster(
                     surface=Surface.ROUTINE,
                     place=Place(channel_id=target.channel_id),
                 )
-                and await _destination_refusal(client, row, target) is None
+                and await destination_refusal(client, row.created_by_user_id, target) is None
             )
 
         async def notice(text: str) -> None:

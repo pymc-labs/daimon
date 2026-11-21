@@ -26,6 +26,8 @@ from daimon.adapters.teams import (
     thread_handoff,
     tool_confirmation,
     wizard,
+    workflow_asks,
+    workflow_cards,
 )
 from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
 from daimon.adapters.teams.app import DRAIN_GRACE_S, TeamsApp
@@ -74,6 +76,7 @@ from daimon.adapters.teams.thread_model import VERB as THREAD_MODEL_VERB
 from daimon.adapters.teams.thread_model import ThreadModelActions, show_model
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
+from daimon.adapters.teams.workflow_delivery import make_teams_workflow_poster
 from daimon.core.config import TeamsSettings
 from daimon.core.features.snapshot import deployment_on
 from daimon.core.logging_setup import mark_shutting_down
@@ -86,6 +89,7 @@ from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
+from daimon.core.workflows import chat_cards
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import UninstalledActivity
@@ -331,6 +335,7 @@ def create_teams_http_service(
         "settings": show_settings,
         "model": show_model,
         "routines": routines.command,
+        "workflows": functools.partial(workflow_cards.command, runtime),
         "memory": show_memory,
         "privacy": privacy.command,
         "billing": billing.command,
@@ -436,6 +441,19 @@ def create_teams_http_service(
             feed=feed,
             team_members=team_member_lookup(runtime),
         ),
+        workflow_poster=make_teams_workflow_poster(
+            runtime.sessionmaker,
+            direct,
+            tenant_id=installs.tenant_id,
+            settings=runtime.settings,
+            links=workflow_cards.web_at(runtime),
+        ),
+        run_cards=chat_cards.follower(
+            runtime.sessionmaker,
+            platform="teams",
+            links=workflow_cards.web_at(runtime),
+            edit=workflow_cards.card_editor(TimedSender(teams_app)),
+        ),
     )
 
     feedback = TeamsFeedback(runtime, direct, spawn=spawn)
@@ -465,6 +483,9 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
     teams_app.on_card_action_execute(provider_actions.VERB, turns.provider_actions.on_action)
     teams_app.on_card_action_execute(own_cards.VERB, own_cards.TeamsOwnCards(runtime).on_action)
+    teams_app.on_card_action_execute(
+        workflow_asks.VERB, workflow_asks.AskActions(runtime).on_action
+    )
     handover = TeamsThreadHandoff(
         runtime,
         dispatch=turns._dispatch_inbound,  # pyright: ignore[reportPrivateUsage]  # verified message ingress

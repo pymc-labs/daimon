@@ -175,7 +175,10 @@ export function resume(qc: QueryClient, sid: string, from: string) {
   if (!ctrls.has(sid)) void run(qc, sid, `/api/chat/sessions/${sid}/stream`, { from })
 }
 
-export function send(qc: QueryClient, sid: string, content: string, files: File[] = []) {
+/** `prepare` runs before the post (a page saving its pending edits); `context` is read after it and sent with the message. */
+export type SendOpts = { prepare?: () => Promise<void>; context?: () => Record<string, unknown> }
+
+export function send(qc: QueryClient, sid: string, content: string, files: File[] = [], opts: SendOpts = {}) {
   const id = crypto.randomUUID()
   const shown = files.map((f) => ({ name: f.name, size: f.size }))
   set(sid, (t) => ({
@@ -183,7 +186,10 @@ export function send(qc: QueryClient, sid: string, content: string, files: File[
     messages: [...t.messages, { id, role: "user", content, created_at: new Date().toISOString(), attachments: shown.length ? shown : undefined }, placeholder()],
   }))
   // Files upload first; the message names them by id. The message id makes a retried post safe.
-  const body = async () => ({ id, content, attachments: await Promise.all(files.map(upload)) })
+  const body = async () => {
+    await opts.prepare?.()
+    return { id, content, attachments: await Promise.all(files.map(upload)), ...(opts.context && { context: opts.context() }) }
+  }
   return run(qc, sid, `/api/chat/sessions/${sid}/messages`, { body, retry: true })
 }
 

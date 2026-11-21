@@ -84,6 +84,10 @@ MA_METADATA_KEY_BILLING_EXEMPT = "daimon_billing_exempt"
 # which drives the seal: a DM is budgeted to a channel it never runs in.
 # Absent on MCP sessions and sessions with no channel.
 MA_METADATA_KEY_BUDGET_CHANNEL = "daimon_budget_channel"
+# The workflow run (and the lane's first step) a session works for: the usage sweep tags
+# what it replays with them and rolls the cost up to the run.
+MA_METADATA_KEY_WORKFLOW_RUN = "daimon_workflow_run"
+MA_METADATA_KEY_WORKFLOW_STEP = "daimon_workflow_step"
 
 # Marks a whole MA workspace as a throwaway one that the test-only workspace
 # nuke is allowed to empty. Stamped on a single sentinel agent, never on a

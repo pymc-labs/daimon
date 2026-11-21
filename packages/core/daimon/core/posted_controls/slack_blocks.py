@@ -31,7 +31,7 @@ __all__ = [
 MAX_CONTEXT_ELEMENTS: Final[int] = 10
 #: Cards whose buttons are answered in place: the click routes by the button's
 #: own `custom_id` (a call or switch card id), not by a form token.
-CONTROL_KINDS: Final[frozenset[str]] = frozenset({"call", "switch"})
+CONTROL_KINDS: Final[frozenset[str]] = frozenset({"call", "switch", "workflow"})
 
 
 def _mrkdwn(text: str) -> dict[str, Any]:

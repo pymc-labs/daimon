@@ -18,6 +18,7 @@ logic, and `on` counts it as unheld.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,7 +109,7 @@ def stored_delivery_hold(row: RoutineRow, *, platform: str) -> StoredHold:
 
 @dataclass(frozen=True)
 class DeliveryGate:
-    """How `audience_hold` shapes the delivery of one routine result.
+    """How `audience_hold` shapes the delivery of one routine result or workflow post.
 
     `off`: nothing changes. `shadow`: what `on` would refuse is logged. `on`: a result is
     held to its destination when its fire was, and a contained destination takes only a
@@ -117,7 +118,9 @@ class DeliveryGate:
     """
 
     sessionmaker: async_sessionmaker[AsyncSession]
-    row: RoutineRow
+    tenant_id: uuid.UUID
+    agent: str
+    routine_id: uuid.UUID | None
     platform: str
     mode: AudienceMode
     stored: StoredHold
@@ -137,9 +140,9 @@ class DeliveryGate:
             return False
         if self.mode == "shadow" and not held_today:
             log_shadow_refusal(
-                tenant_id=self.row.tenant_id,
+                tenant_id=self.tenant_id,
                 channel_id=self.stored.hold.channel_id,
-                agent=self.row.agent_name,
+                agent=self.agent,
                 reason="held_result_no_direct_message",
                 kind="dm_refused",
             )
@@ -154,13 +157,13 @@ class DeliveryGate:
             return None
         return await audience_fact(
             self.sessionmaker,
-            tenant_id=self.row.tenant_id,
+            tenant_id=self.tenant_id,
             platform=self.platform,
             channel_id=channel_id,
             parent_id=parent_id,
             hold=self.stored.hold,
-            agent=self.row.agent_name,
-            routine_id=self.row.id,
+            agent=self.agent,
+            routine_id=self.routine_id,
             mode=self.mode,
         )
 
@@ -187,5 +190,38 @@ async def delivery_gate(
         # as unheld, so a contained or unknown destination refuses it.
         stored = StoredHold(recorded=True)
     return DeliveryGate(
-        sessionmaker=sessionmaker, row=row, platform=platform, mode=mode, stored=stored
+        sessionmaker=sessionmaker,
+        tenant_id=row.tenant_id,
+        agent=row.agent_name,
+        routine_id=row.id,
+        platform=platform,
+        mode=mode,
+        stored=stored,
+    )
+
+
+async def workflow_delivery_gate(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    agent: str,
+) -> DeliveryGate:
+    """The gate for a workflow post into `channel_id`. A failed mode read raises.
+
+    Workflow steps run unheld, so the post is recorded unheld: with `audience_hold` on, a
+    channel shared with another organisation refuses it.
+    """
+    mode = await read_audience_mode(
+        sessionmaker, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    )
+    return DeliveryGate(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        agent=agent,
+        routine_id=None,
+        platform=platform,
+        mode=mode,
+        stored=StoredHold(recorded=True),
     )

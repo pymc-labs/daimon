@@ -1,6 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Loader2, MoreHorizontal, Plus } from "lucide-react"
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { MoreHorizontal, Plus } from "lucide-react"
+import { useState } from "react"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router"
 
 import { AgentAvatar } from "@/components/common"
@@ -10,7 +10,7 @@ import { Page } from "@/components/shell/Page"
 import { RenameDialog } from "@/components/shell/RenameDialog"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { ErrorState, QueryState } from "@/components/QueryState"
+import { QueryState } from "@/components/QueryState"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, ApiError } from "@/lib/api"
 import { usd } from "@/lib/format"
@@ -19,27 +19,12 @@ import { useCan, useChatAgents, useMe, useSessions } from "@/lib/hooks"
 import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
 import { Pill } from "../agents/bits"
 import { AgentPicker } from "./AgentPicker"
-import { MonitoringNotice, Refusal } from "./Cards"
 import { ThreadModel } from "./ThreadModel"
 import { Composer } from "./Composer"
-import { AssistantMessage, UserMessage } from "./Message"
-import type { SessionDetail } from "./types"
-import { answer, evict, hydrate, loadEarlier, resume, send, stop, switchBack, useThread } from "./turns"
+import { Thread } from "./Thread"
+import { useCredit, useSessionDetail } from "./threadHooks"
+import { evict, hydrate, send } from "./turns"
 
-
-/** Credit left, and the card that replaces the composer's promise when it is gone. */
-function useCredit() {
-  const { data: me } = useMe()
-  const out = !!me?.credit && me.credit.left_usd <= 0
-  const card = me?.credit && (
-    <Refusal card={{
-      id: "out", kind: "refusal", title: "Your credit has run out.",
-      body: `${usd(me.credit.total_usd)} used${me.credit.window === "month" ? " this month" : ""}.`,
-      help: me.invited_by ? `Ask ${me.invited_by} to add more.` : "Ask an admin to add credit.",
-    }} />
-  )
-  return { me, out, card, meter: me?.role === "visitor" && me.credit ? me.credit : null }
-}
 
 /** Credit left, in one line for the header. */
 function HeaderMeter({ meter }: { meter: CreditMeter }) {
@@ -118,54 +103,14 @@ export function ChatView() {
   const { id } = useParams()
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { messages, busy, reconnecting, next, loadingEarlier, monitoring } = useThread(id)
-  const { out, card, meter } = useCredit()
-  const bottom = useRef<HTMLDivElement>(null)
-  const scroller = useRef<HTMLDivElement>(null)
-  const stick = useRef(true)
-  // Where the view stood when earlier messages were asked for: the height and the message then first.
-  const anchor = useRef<{ height: number; first?: string } | null>(null)
-
-  // Always fetched, and again on focus: another tab or a restart may have saved a newer reply.
-  const detail = useQuery({
-    queryKey: ["chat", "session", id],
-    queryFn: () => api.get<SessionDetail>(`/api/chat/sessions/${id}`),
-    enabled: !!id,
-    refetchOnWindowFocus: () => !busy,
-    retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2,
-  })
+  const { meter, out } = useCredit()
+  const detail = useSessionDetail(id)
   const { data } = detail
-  const [closed, setClosed] = useState<string | undefined>()
-  const notice = closed === id ? undefined : monitoring ?? data?.monitoring
-  // A notice streamed after a dismiss is a re-tell (monitoring switched on again): show it.
-  useEffect(() => setClosed(undefined), [monitoring])
-  // Gone for this person and agent until monitoring is switched on again; the server keeps it.
-  const closeNotice = () => {
-    setClosed(id)
-    api.post(`/api/chat/sessions/${id}/monitoring/dismiss`).catch(() => setClosed(undefined))
-  }
-  useEffect(() => {
-    if (!id || !data) return
-    hydrate(id, data)
-    if (data.resume_from !== undefined) resume(qc, id, data.resume_from)
-  }, [id, data, qc])
-  const first = messages[0]?.id
-  // Earlier messages arrive above the view: keep what was on screen where it was.
-  useLayoutEffect(() => {
-    const at = anchor.current, el = scroller.current
-    if (!at || !el || at.first === first) return
-    el.scrollTop += el.scrollHeight - at.height
-    anchor.current = null
-  }, [first])
-  useLayoutEffect(() => { if (!loadingEarlier) anchor.current = null }, [loadingEarlier])
-  useLayoutEffect(() => { if (stick.current && !anchor.current) bottom.current?.scrollIntoView({ block: "end" }) }, [messages, out])
-
   const { data: sessions } = useSessions()
   const session = sessions?.find((s) => s.id === id) ?? data?.session
   const agent = session?.agent
   const confirm = useConfirm()
   const { data: me } = useMe()
-  const can = useCan()
   const [renaming, setRenaming] = useState<ChatSession | null>(null)
   const del = useMutation({
     mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
@@ -191,8 +136,6 @@ export function ChatView() {
       </Page>
     )
   }
-  const last = messages[messages.length - 1]
-  const settledReply = last && last.role === "assistant" && !last.streaming ? last.content : ""
   return (
     <Page
       crumbs={[{ label: "Chat", to: "/chat" }, { label: session?.title ?? "" }]}
@@ -217,54 +160,7 @@ export function ChatView() {
       )}
     >
       <div className="flex h-full">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div
-            ref={scroller}
-            className="min-h-0 flex-1 overflow-y-auto"
-            onScroll={(e) => {
-              const t = e.currentTarget
-              stick.current = t.scrollHeight - t.scrollTop - t.clientHeight < 80
-              if (t.scrollTop < 200 && next !== undefined && !loadingEarlier && id) {
-                stick.current = false
-                anchor.current = { height: t.scrollHeight, first }
-                void loadEarlier(id).catch(() => { anchor.current = null })
-              }
-            }}
-          >
-            <div className="mx-auto max-w-[720px] space-y-7 px-4 pt-8 pb-10">
-              {loadingEarlier && <div className="flex justify-center py-1" role="status" aria-label="Loading earlier messages"><Loader2 className="size-4 animate-spin text-muted-foreground" /></div>}
-              {!messages.length && !busy && detail.isPending && (
-                <div className="space-y-8" role="status" aria-label="Loading">
-                  <Skeleton className="ml-auto h-11 w-72 rounded-xl" />
-                  <div className="space-y-2"><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-11/12" /><Skeleton className="h-4 w-2/3" /></div>
-                </div>
-              )}
-              {!messages.length && !busy && detail.isError && <ErrorState error={detail.error} onRetry={() => void detail.refetch()} />}
-              {agent && messages.map((m, i) => (m.role === "user" ? <UserMessage key={m.id} m={m} /> : (
-                <AssistantMessage
-                  key={m.id} m={m} agent={agent} first={messages[i - 1]?.role !== "assistant"} last={i === messages.length - 1} busy={busy}
-                  onAnswer={(c, a) => answer(qc, id!, c.id, a)} onSwitchBack={() => switchBack(qc, id!)}
-                />
-              )))}
-              <div ref={bottom} />
-            </div>
-          </div>
-          <div className="mx-auto w-full max-w-[720px] space-y-3 px-4 pb-4">
-            <div role="status" aria-live="polite" className="sr-only">{settledReply}</div>
-            {reconnecting && (
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" />Reconnecting</div>
-            )}
-            {out && card}
-            {!out && notice && <MonitoringNotice notice={notice} onDismiss={closeNotice} />}
-            {agent && (
-              <Composer
-                key={id} onSend={(t, f) => { stick.current = true; send(qc, id!, t, f) }} onStop={() => stop(id!)} busy={busy} disabled={out} canAttach={can("files.attach")} autoFocus
-                placeholder={out ? "Out of credit" : `Message ${agent.name}`}
-                picker={<AgentPicker agents={[agent]} value={agent} />}
-              />
-            )}
-          </div>
-        </div>
+        {id && agent && <Thread id={id} agent={agent} placeholder={out ? "Out of credit" : `Message ${agent.name}`} picker={<AgentPicker agents={[agent]} value={agent} />} />}
       </div>
       <RenameDialog session={renaming} onClose={() => setRenaming(null)} />
     </Page>

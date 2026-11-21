@@ -38,6 +38,8 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
+from daimon.adapters.scheduler import workflows
+from daimon.adapters.scheduler.boundary import scheduler_step
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.authz import (
@@ -62,7 +64,6 @@ from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
     Settings,
-    env_admits,
     get_repo_memory_settings,
     load_settings,
 )
@@ -73,7 +74,6 @@ from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver, send_discord_error_dm
-from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
     archive_app_vault,
@@ -151,7 +151,6 @@ from daimon.core.spend_gate import (
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
@@ -194,6 +193,13 @@ from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
+from daimon.core.workflows import waits as workflow_waits
+from daimon.core.workflows.action_step import ActionStepExecutor
+from daimon.core.workflows.agent_step import AgentStepExecutor, session_files
+from daimon.core.workflows.call_step import WorkflowStepExecutor
+from daimon.core.workflows.code_step import CodeStepExecutor
+from daimon.core.workflows.code_worker import ManagedCodeWorker
+from daimon.core.workflows.tool_client import McpToolClient
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 from mux.errors import ScopeViolation
@@ -204,28 +210,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
-
-
-def scheduler_step[**P](step: Callable[P, Awaitable[None]]) -> Callable[P, Awaitable[None]]:
-    """Mark a sweep or drain that `tick` awaits, and stop its transient failures.
-
-    `_run_loops` ends every loop when one loop raises. A database, Anthropic or
-    GitHub error in one step would stop routine dispatch until a restart. This
-    boundary logs such an error and returns; the next tick retries. A step may
-    keep a narrower catch for its own log event. A test requires every step
-    `tick` awaits to carry this decorator or sit in an allow-list.
-    """
-
-    @functools.wraps(step)
-    async def guarded(*args: P.args, **kwargs: P.kwargs) -> None:
-        try:
-            await step(*args, **kwargs)
-        except (SQLAlchemyError, anthropic.APIError, httpx.HTTPError) as error:
-            log.exception(
-                "scheduler.step.failed", step=step.__name__, causes=backend_refusal_causes(error)
-            )
-
-    return guarded
 
 
 @scheduler_step
@@ -434,11 +418,8 @@ async def _build_fire(
     async def _owner_dm_open(s: AsyncSession, row: RoutineRow, platform: str) -> bool:
         """Whether a routine may DM its owner: Discord, routine DMs on, owner allowed."""
         owner = row.created_by_user_id
-        return (
-            platform == "discord"
-            and owner is not None
-            and env_admits(settings.direct_message_policies, row.tenant_id, owner)
-            and await dm_enabled(s, tenant_id=row.tenant_id)
+        return owner is not None and await workflows.dm_open(
+            s, settings, tenant_id=row.tenant_id, platform=platform, owner=owner
         )
 
     async def _tell_lapsed_owner(row: RoutineRow, platform: str) -> None:
@@ -578,14 +559,8 @@ async def _build_fire(
         """
         async with sm() as s:
             tenant = await get_tenant(s, row.tenant_id)
-        return tenant is not None and await sender_admits(
-            sm,
-            tenant_id=row.tenant_id,
-            agent_name=row.agent_name,
-            user_id=owner,
-            groups=roles_by_membership(
-                membership_resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id
-            ),
+        return tenant is not None and await workflows.owner_granted(
+            sm, membership_resolver, tenant=tenant, agent_name=row.agent_name, owner=owner
         )
 
     async def _fire(row: RoutineRow) -> None:
@@ -2002,6 +1977,19 @@ async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None
     await sweep()
 
 
+@scheduler_step
+async def _workflow_loops(
+    engine: workflows.WorkflowEngine, *, stop_event: asyncio.Event, db: AsyncEngine
+) -> None:
+    """The workflow engine's own loops (`scheduler.workflows`), each step guarded there."""
+    await workflows.run_loops(engine, stop_event=stop_event, db=db)
+
+
+@scheduler_step
+async def _workflows_once(engine: workflows.WorkflowEngine) -> None:
+    await workflows.run_once(engine)
+
+
 async def _run_loops(
     *,
     tick: Callable[[], Awaitable[None]],
@@ -2011,6 +1999,7 @@ async def _run_loops(
     compute_task_poll: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
+    workflow_loops: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Run ticks and upstream sweeps on separate loops until stopped.
 
@@ -2025,6 +2014,7 @@ async def _run_loops(
     inline, routine claims waited for it. On stop the passes in flight are
     cancelled: each model call commits on its own and an unfinished session
     keeps its settle request. An uncaught error in any loop ends all loops.
+    `workflow_loops` runs until `stop_event` on its own intervals.
     """
     async with asyncio.TaskGroup() as loops:
         background = [
@@ -2040,6 +2030,13 @@ async def _run_loops(
                 )
             ),
         ]
+        if workflow_loops is not None:
+            run_workflows = workflow_loops
+
+            async def workflows_until_stopped() -> None:
+                await run_workflows()
+
+            background.append(loops.create_task(workflows_until_stopped()))
         if usage_sweep is not None:
             background.append(
                 loops.create_task(
@@ -2166,6 +2163,28 @@ async def run(
         markup=settings.billing.markup,
     )
     stop_event = asyncio.Event()
+    lane_turn = workflows.HeadlessLaneTurn(client, sm, settings, deployment_default, resolver_cache)
+    tool_client = McpToolClient(client, sm, settings, lane_turn.targets)
+    workflow_engine = workflows.WorkflowEngine(
+        sm,
+        settings,
+        {
+            "agent": AgentStepExecutor(
+                sm,
+                settings,
+                lane_turn,
+                tool_client,
+                owner_dm=workflows.OwnerDmTurn(sm, settings, dm_turn_deps),
+                collect_files=functools.partial(session_files, client),
+            ),
+            "action": ActionStepExecutor(sm, settings, tool_client),
+            "workflow": WorkflowStepExecutor(sm, settings),
+            "code": CodeStepExecutor(
+                sm, ManagedCodeWorker(client, sm, settings, lane_turn.targets)
+            ),
+            **workflow_waits.executors(sm),
+        },
+    )
     loop = asyncio.get_running_loop()
 
     def on_signal() -> None:
@@ -2229,6 +2248,7 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+            await _workflows_once(workflow_engine)
             return 0
 
         async def tick() -> None:
@@ -2290,6 +2310,9 @@ async def run(
                 compute_task_poll=lambda: _poll_compute_tasks(compute),
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
+                workflow_loops=lambda: _workflow_loops(
+                    workflow_engine, stop_event=stop_event, db=engine
+                ),
             )
 
         return 0

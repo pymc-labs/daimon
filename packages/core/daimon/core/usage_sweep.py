@@ -73,6 +73,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
+    MA_METADATA_KEY_WORKFLOW_RUN,
 )
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
@@ -357,6 +358,8 @@ class SessionBilling:
     exempt_reason: str | None
     # The agent the session runs, so settled spend counts toward it.
     agent_id: str | None = None
+    # A workflow lane's run, so settled spend rolls up to the run and its step.
+    workflow_run_id: uuid.UUID | None = None
 
     @property
     def pricing(self) -> ModelRates | None:
@@ -388,7 +391,15 @@ class SessionBilling:
             pricing=self.pricing,
             channel_id=self.channel_id,
             agent_id=self.agent_id,
+            workflow_run_id=self.workflow_run_id,
         )
+
+
+def _workflow_run(metadata: dict[str, str]) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(metadata[MA_METADATA_KEY_WORKFLOW_RUN])
+    except (KeyError, ValueError):
+        return None
 
 
 async def session_billing(
@@ -423,6 +434,7 @@ async def session_billing(
         channel_id=session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL),
         exempt_reason=session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT),
         agent_id=session.agent.id,
+        workflow_run_id=_workflow_run(session.metadata),
     )
 
 

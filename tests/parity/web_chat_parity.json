@@ -62,6 +62,15 @@
   "DELETE /api/routines/{routine_id}": {
    "tool": "delete_routine"
   },
+  "DELETE /api/workflows/{workflow_id}": {
+   "gap": "deleting a workflow; no chat tool yet"
+  },
+  "DELETE /api/workflows/{workflow_id}/draft": {
+   "gap": "discarding a draft back to the live version; no chat tool yet"
+  },
+  "DELETE /api/workflows/{workflow_id}/triggers/{key}/listen": {
+   "gap": "turning a trigger's webhook off; no chat tool yet"
+  },
   "DELETE /{path:path}": {
    "exempt": "serves the web app's own pages"
   },
@@ -97,6 +106,14 @@
   },
   "PATCH /api/routines/{routine_id}": {
    "tool": "update_routine"
+  },
+  "PATCH /api/workflows/{workflow_id}": {
+   "tool": "set_workflow_paused",
+   "panel": {
+    "discord": "daimon.adapters.discord.workflow_cards",
+    "slack": "daimon.adapters.slack.workflow_cards",
+    "teams": "daimon.adapters.teams.workflow_cards"
+   }
   },
   "PATCH /{path:path}": {
    "exempt": "serves the web app's own pages"
@@ -291,6 +308,73 @@
   "POST /api/support/requests/{request_id}/settle": {
    "tool": "support_requests_settle"
   },
+  "POST /api/workflows": {
+   "tool": "create_workflow"
+  },
+  "POST /api/workflows/from-routine/{routine_id}": {
+   "gap": "moving a routine to a workflow; no chat tool yet"
+  },
+  "POST /api/workflows/inbox/{item_id}/decide": {
+   "panel": {
+    "discord": "daimon.adapters.discord.workflow_asks",
+    "slack": "daimon.adapters.slack.workflow_asks",
+    "teams": "daimon.adapters.teams.workflow_asks"
+   }
+  },
+  "POST /api/workflows/runs/{run_id}/cancel": {
+   "tool": "cancel_workflow_run"
+  },
+  "POST /api/workflows/runs/{run_id}/decide": {
+   "panel": {
+    "discord": "daimon.adapters.discord.workflow_asks",
+    "slack": "daimon.adapters.slack.workflow_asks",
+    "teams": "daimon.adapters.teams.workflow_asks"
+   }
+  },
+  "POST /api/workflows/runs/{run_id}/fork": {
+   "tool": "fork_workflow_run"
+  },
+  "POST /api/workflows/runs/{run_id}/redrive": {
+   "tool": "retry_workflow_run"
+  },
+  "POST /api/workflows/runs/{run_id}/rerun": {
+   "tool": "fork_workflow_run"
+  },
+  "POST /api/workflows/{workflow_id}/draft/publish": {
+   "tool": "publish_workflow"
+  },
+  "POST /api/workflows/{workflow_id}/draft/request": {
+   "gap": "asking an editor to publish; no chat tool yet"
+  },
+  "POST /api/workflows/{workflow_id}/runs": {
+   "tool": "run_workflow",
+   "panel": {
+    "discord": "daimon.adapters.discord.workflow_cards",
+    "slack": "daimon.adapters.slack.workflow_cards",
+    "teams": "daimon.adapters.teams.workflow_cards"
+   }
+  },
+  "POST /api/workflows/{workflow_id}/to-routine": {
+   "gap": "converting a workflow back to a routine; no chat tool yet"
+  },
+  "POST /api/workflows/{workflow_id}/triggers/{key}/deliveries/{delivery}/replay": {
+   "gap": "replaying a webhook delivery; no chat tool yet"
+  },
+  "POST /api/workflows/{workflow_id}/triggers/{key}/listen": {
+   "gap": "turning a trigger's webhook on; no chat tool yet"
+  },
+  "POST /api/workflows/{workflow_id}/triggers/{key}/preview": {
+   "gap": "previewing a trigger's webhook payload; no chat tool yet"
+  },
+  "POST /api/workflows/{workflow_id}/triggers/{key}/rotate": {
+   "gap": "rotating a trigger's webhook secret; no chat tool yet"
+  },
+  "POST /api/workflows/{workflow_id}/validate": {
+   "tool": "validate_workflow"
+  },
+  "POST /api/workflows/{workflow_id}/versions/{number}/restore": {
+   "gap": "restoring an earlier version as the draft; no chat tool yet"
+  },
   "POST /api/workspaces/switch": {
    "exempt": "web workspace switch"
   },
@@ -299,6 +383,15 @@
   },
   "POST /auth/{provider_id}/connect": {
    "exempt": "web sign-in and session"
+  },
+  "POST /hooks/callback/{run_id}/{node_id}/{signature}": {
+   "exempt": "public workflow webhook ingress for external senders, signed, outside sign-in"
+  },
+  "POST /hooks/w/{trigger_id}": {
+   "exempt": "public workflow webhook ingress for external senders, signed, outside sign-in"
+  },
+  "POST /hooks/w/{trigger_id}/test": {
+   "exempt": "public workflow webhook ingress for external senders, signed, outside sign-in"
   },
   "POST /{path:path}": {
    "exempt": "serves the web app's own pages"
@@ -376,6 +469,9 @@
   },
   "PUT /api/support/menus/{key}": {
    "tool": "support_menu_set"
+  },
+  "PUT /api/workflows/{workflow_id}/draft": {
+   "tool": "edit_workflow_draft"
   },
   "PUT /{path:path}": {
    "exempt": "serves the web app's own pages"

@@ -21,6 +21,7 @@ import pytest
 import structlog.testing
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.scheduler import main as scheduler_main
+from daimon.adapters.scheduler.boundary import scheduler_step
 from daimon.adapters.scheduler.main import (
     _close_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     _refresh_github_app_sessions,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
@@ -28,8 +29,8 @@ from daimon.adapters.scheduler.main import (
     _run_one_tick_step,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     _sweep_github_app_tokens,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
     _sweep_pending_files,  # pyright: ignore[reportPrivateUsage]  # boundary behaviour test
-    scheduler_step,
 )
+from daimon.adapters.scheduler.workflows import loops as workflow_loops
 from daimon.core.config import Settings
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -118,6 +119,19 @@ def test_every_tick_step_is_behind_the_shared_boundary() -> None:
     assert len(steps) >= 20, f"the parser found too few steps: {sorted(steps)}"
     assert "_sweep_github_app_tokens" in steps
     assert unguarded_steps(_main_source()) == set()
+
+
+def test_every_workflow_loop_step_is_behind_the_shared_boundary() -> None:
+    tree = ast.parse(Path(inspect.getfile(workflow_loops)).read_text())
+    guarded = {
+        n.name
+        for n in tree.body
+        if isinstance(n, ast.AsyncFunctionDef)
+        and any(isinstance(d, ast.Name) and d.id == "scheduler_step" for d in n.decorator_list)
+    }
+    steps = {f.__name__ for f in workflow_loops.STEPS.values()}
+    assert len(steps) == 6 and steps <= guarded, f"unguarded loop steps: {steps - guarded}"
+    assert {"_workflow_loops", "_workflows_once"} <= tick_step_names(_main_source()), "registered"
 
 
 def test_allow_list_has_no_stale_entries() -> None:
