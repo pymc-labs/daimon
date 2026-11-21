@@ -7,14 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Agents can read Daimon's own docs and source.** Turn on "Knows Daimon"
-  (`self_knowledge`, Off by default) for a workspace, agent, channel or thread,
-  and the agent answers how Daimon works from the docs and source code of the
-  release it runs on, on every model backend and every path. Four read-only
-  tools list, read and search the pages and the `packages/` and `defaults/`
-  code in the image, and each result names the source repository and commit.
-  Where Web app is Off, pages and code about the web app are left out. The
-  image ships `docs/`; `DAIMON_SELF_KNOWLEDGE__*` sets where they are read.
+- **Agents can read Daimon's own docs and source, and the docs say how it
+  works.** Turn on "Knows Daimon" (`self_knowledge`, Off by default) for a
+  workspace, agent, channel or thread, and the agent answers how Daimon works
+  from the docs and source code of the release it runs on, on every model
+  backend and every path. Four read-only tools (`read_daimon_docs`,
+  `search_daimon_docs`, `read_daimon_source`, `search_daimon_source`) read and
+  search the pages and the `packages/` and `defaults/` code in the image, and
+  each result names the source repository and commit. Where Web app is Off,
+  pages and code about the web app are left out. The image ships `docs/`;
+  `DAIMON_SELF_KNOWLEDGE__*` sets where they are read. New pages cover
+  [how Daimon works](docs/how-daimon-works.md), [approvals](docs/approvals.md)
+  and [helpers and handoffs](docs/helpers.md); every feature names the page
+  that explains it, and `docs/llms.txt` indexes the site for language models.
+  CI fails on time words ("now", "new"), on names in the docs that no longer
+  exist in code, and on web text outside `<!-- knowledge: web -->` markers.
 
 - **Watches can poll a signed-identity relay server.** List a tool in
   `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its

@@ -77,12 +77,15 @@ and turn path; write it with `change_feature`.
 `packages/core/tests/features/test_feature_contracts.py` checks reads, writes and
 paths. A new feature, or a changed default, tier or platform, must update the "All
 features" table in `docs/features.md`: re-run `scripts/generate_feature_reference.py`
-(CI runs it with `--check`) and add a `CHANGELOG.md` line.
+(CI runs it with `--check`) and add a `CHANGELOG.md` line. Every spec sets `page=`
+(`"page.md#anchor"`), the docs page that explains it; a test checks it exists.
 
 ## Documentation
 
-`docs/` is the public site, written for people who scan it, not for agents.
-It grew to 120k words by every PR appending a paragraph; these rules stop that.
+`docs/` is the public site, written for people who scan it. It is also what a
+Daimon agent with "Knows Daimon" on reads to answer questions, so a fact the
+docs lack is a docs bug. It grew to 120k words by every PR appending a
+paragraph; these rules stop that.
 `scripts/check_docs.py` enforces the budgets in CI.
 
 **Generated pages.** Settings: `docs/configuration.md` and `.env.example`, from
@@ -113,6 +116,13 @@ docstrings and comments; history goes in `CHANGELOG.md` and the PR.
   for steps, tables for comparisons, a code block for every command.
 - At most 2,000 words of prose a page (quickstart 800, home 500). Over budget
   means cut or split into a new page, never raise the limit.
+- Text about the web app goes between `<!-- knowledge: web -->` and
+  `<!-- /knowledge -->` lines (whole paragraphs, list items or sections, never
+  inside a table); a page that is all web gets front matter `knowledge: web`.
+  An agent with the web app off is not shown it, and a test fails on web-app
+  text outside markers. Names in prose (`DAIMON_*`, `daimon ...`, slash
+  commands, tools, feature keys) must exist in code, and `docs/llms.txt` is
+  generated (`scripts/generate_llms_txt.py`, CI runs it with `--check`).
 - The site stands alone: never send a reader to the repo README. The README's
   quickstart mirrors `docs/quickstart.md`; change both together.
 - A new page needs a nav entry in `mkdocs.yml` and a line in `docs/README.md`.
