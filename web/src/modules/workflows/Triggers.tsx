@@ -12,13 +12,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea"
 import { absolute } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { useDebounced, useDeliveries, useDraft, useDraftEditor, useListen, usePatch, usePreviewMapping, useReplay, useWebhook } from "./api"
+import { useDebounced, useDeliveries, useDraft, useDraftEditor, useListen, useNow, usePatch, usePreviewMapping, useReplay, useWebhook } from "./api"
 import { cronWords, fromCron, KINDS, nextFires, toCron, WEEKDAYS, type Kind, type Spec as Sched } from "./cron"
 import { TRIGGER } from "./kinds"
 import { checkInputs, mappingText, parseMapping, suggestMapping, type Row } from "./mapping"
 import { RotateDialog } from "./RotateDialog"
 import { JsonTree } from "./run/parts"
-import { until } from "./run/lib"
+import { listeningAt, until } from "./run/lib"
 import { clone } from "./spec"
 import { ChoiceCards, EditStrip, Part } from "./tabparts"
 import type { DeliveryRow, Spec, Trigger, Workflow } from "./types"
@@ -194,7 +194,8 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
   const replay = useReplay(id, t.id)
   const w = info.data
   const rows = deliveries.data ?? []
-  const listening = !!w?.listening_until
+  const now = useNow(!!w?.listening_until, 5_000)
+  const listening = listeningAt(w?.listening_until, now)
   const captured = since != null ? rows.find((d) => isTest(d) && Date.parse(d.received_at) >= since) : undefined
   const last = rows.find((d) => d.outcome !== "rejected")
   const expr = useDebounced(t.inputs ?? "", 300)
@@ -219,7 +220,7 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
               <div role="status" className="flex items-center gap-2.5 text-sm">
                 <LoaderCircle className="size-4 animate-spin text-link" />
                 <span className="font-medium">Listening on the test URL</span>
-                {w?.listening_until && <span className="text-muted-foreground tabular">{until(w.listening_until)} left</span>}
+                {w?.listening_until && <span className="text-muted-foreground tabular">{until(w.listening_until, now)} left</span>}
                 <Button variant="outline" size="sm" className="ml-auto" onClick={stop}>Stop</Button>
               </div>
             )}

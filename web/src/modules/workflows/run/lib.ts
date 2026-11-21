@@ -45,6 +45,9 @@ export function until(iso: string, now = Date.now()) {
   return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`
 }
 
+/** Whether a test listen that ends at `iso` is still open; false once it ran out. */
+export const listeningAt = (iso: string | null | undefined, now = Date.now()) => !!iso && Date.parse(iso) > now
+
 /** A large clickable card for a single choice. */
 export const choice = (on: boolean) => cn(
   "flex flex-col items-start gap-1 rounded-xl border bg-card px-4 py-3 text-left transition-[border-color,box-shadow] hover:border-border-strong",

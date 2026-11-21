@@ -4,7 +4,7 @@ import { start, visible, type Run } from "@/mock/workflows-runs"
 import { SPECS } from "@/mock/workflows-specs"
 import { edgeStates, nodeRuns, project } from "../runs"
 import type { RunDetail } from "../types"
-import { nodeOf, pendingNodes, until } from "./lib"
+import { listeningAt, nodeOf, pendingNodes, until } from "./lib"
 
 const T = Date.parse("2026-11-13T09:00:00Z")
 const maya = { id: "p_maya", name: "Maya Lindqvist" }
@@ -18,6 +18,15 @@ function detail(now: number): RunDetail {
   return { ...project(visible(r, now)), spec: SPECS.lead } as unknown as RunDetail
 }
 const overlay = (d: RunDetail) => ({ nodes: nodeRuns(d.steps), edges: edgeStates(d.spec, d.steps, false), started: true })
+
+describe("listeningAt", () => {
+  it("is open until the listen ends, then closed without a refetch", () => {
+    const end = new Date(T + 60_000).toISOString()
+    expect(listeningAt(end, T)).toBe(true)
+    expect(listeningAt(end, T + 60_000)).toBe(false)
+    expect(listeningAt(null, T)).toBe(false)
+  })
+})
 
 describe("until", () => {
   it("formats minutes, hours and days left, never negative", () => {
