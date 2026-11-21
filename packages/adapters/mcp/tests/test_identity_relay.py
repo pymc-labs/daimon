@@ -24,7 +24,9 @@ from daimon.adapters.mcp.identity_relay import (
     build_identity_relay_route,
     build_relay_clients,
 )
+from daimon.adapters.mcp.tools import _session_gate
 from daimon.core.config import SignedIdentityServer
+from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.mcp_identity import (
@@ -33,6 +35,7 @@ from daimon.core.mcp_identity import (
     SigningKey,
     generate_signing_key,
 )
+from daimon.core.stores import watches
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
@@ -430,34 +433,140 @@ async def test_bearer_person_turn_is_stamped_and_the_key_replaces_the_credential
     }, "the live turn's asker and place are stamped"
 
 
-async def test_a_wake_tool_call_carries_the_sessions_one_wake_link(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
+WAKE_SERVER = BEARER_SERVER.model_copy(update={"wake_tools": frozenset({"send"})})
+
+
+@pytest.fixture
+def callbacks_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
     monkeypatch.setenv("DAIMON_WATCHES__CALLBACK_BASE_URL", "https://hooks.example.com")
+
+
+async def _wake_watches(factory: async_sessionmaker[AsyncSession]) -> list[tuple[str, object]]:
+    async with factory() as db:
+        rows = await db.execute(
+            text("SELECT thread_id, expires_at FROM watches WHERE source = 'callback'")
+        )
+        return [(str(thread), expires_at) for thread, expires_at in rows]
+
+
+async def _wake_urls(
+    factory: async_sessionmaker[AsyncSession], token: str, *bodies: str
+) -> list[object]:
+    upstream = _Upstream()
+    async with _relay(factory, upstream, None, WAKE_SERVER, bearers=_BEARERS) as client:
+        for body in bodies:
+            response = await _post(client, token, body)
+            assert response.status_code == 200, "the call runs, with or without a link"
+    return [_sent_meta(sent).get("wake_url") for sent in upstream.requests]
+
+
+async def test_wake_tool_calls_get_their_own_links_to_one_watch_per_conversation(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    """Each job gets a link that still works when the next one starts; they share one watch,
+    which lasts a day after the latest call."""
     person = await _person(db_session_factory)
     token, _ = await _chat_session(db_session_factory, person, "thread-1", channel="chan-1")
-    server = BEARER_SERVER.model_copy(update={"wake_tools": frozenset({"send"})})
     other = json.dumps(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "read"}}
     )
-    upstream = _Upstream()
-    async with _relay(db_session_factory, upstream, None, server, bearers=_BEARERS) as client:
-        for body in (_tool_call(wake_url="https://forged.example"), _tool_call(), other):
-            await _post(client, token, body)
-    first, second, third = (_sent_meta(sent) for sent in upstream.requests)
-    assert str(first["wake_url"]).startswith("https://hooks.example.com/callbacks/watches/"), (
+    before = dt.datetime.now(dt.UTC)
+    first, second, third = await _wake_urls(
+        db_session_factory,
+        token,
+        _tool_call(wake_url="https://forged.example"),
+        _tool_call(),
+        other,
+    )
+    assert str(first).startswith("https://hooks.example.com/callbacks/watches/"), (
         "a person's wake tool call carries Daimon's link, not the caller's"
     )
-    assert second["wake_url"] == first["wake_url"], "the session's next call reuses the link"
-    assert "wake_url" not in third, "another tool gets no link"
+    assert isinstance(second, str) and second != first, "the next job gets its own link"
+    assert second.rsplit("/", 2)[1] == str(first).rsplit("/", 2)[1], "to the same watch"
+    assert third is None, "another tool gets no link"
+    ((thread, expires_at),) = await _wake_watches(db_session_factory)
+    assert thread == "thread-1", "one callback watch, bound to the asking thread"
+    assert isinstance(expires_at, dt.datetime)
+    assert abs(expires_at - (before + dt.timedelta(days=1))) < dt.timedelta(minutes=1), (
+        "the watch lasts a day"
+    )
+
+
+async def test_a_wake_watch_follows_the_conversation_to_its_newest_session(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    """A relay-scoped thread gets a fresh session every turn: the link made in one turn
+    must still reach the thread after the person talks again."""
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1", channel="chan-1")
+    await _wake_urls(db_session_factory, token, _tool_call())
+    async with db_session_factory() as db, db.begin():
+        await create_thread_session(
+            db, tenant_id=person.tenant_id, platform="discord", thread_id="thread-1",
+            account_id=person.account_id, ma_session_id="sess_next", ma_agent_id="agent_a",
+            channel_id="chan-1", created_at=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
+        )  # fmt: skip
     async with db_session_factory() as db:
-        threads = (
-            (await db.execute(text("SELECT thread_id FROM watches WHERE source = 'callback'")))
-            .scalars()
-            .all()
-        )
-    assert threads == ["thread-1"], "one callback watch, bound to the asking thread"
+        bound = (await db.execute(text("SELECT session_id FROM watches"))).scalars().all()
+    assert bound == ["sess_next"], "the wake watch moved to the thread's newest session"
+
+
+@pytest.mark.parametrize("case", ["dm", "unattended", "owner limit", "helper"])
+async def test_a_wake_tool_call_that_cannot_have_a_link_still_runs_without_one(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None, case: str
+) -> None:
+    person = await _person(db_session_factory)
+    thread = "dm:scope-1" if case == "dm" else "thread-1"
+    channel = thread if case == "dm" else "chan-1"
+    token, _ = await _chat_session(
+        db_session_factory, person, thread, channel=channel, human=case != "unattended"
+    )
+    if case == "owner limit":
+        await _fill_owner_watches(db_session_factory, person)
+    if case == "helper":
+        async with db_session_factory() as db, db.begin():
+            await db.execute(text("UPDATE turn_origins SET helper_of = id"))
+    (wake_url,) = await _wake_urls(db_session_factory, token, _tool_call())
+    assert wake_url is None, f"{case}: no link"
+    made = len(await _wake_watches(db_session_factory))
+    assert made == (25 if case == "owner limit" else 0), f"{case}: no wake watch is made"
+
+
+async def _fill_owner_watches(factory: async_sessionmaker[AsyncSession], person: _Person) -> None:
+    """The owner already holds the most live watches one person may."""
+    binding = ContinuationRequest(
+        tenant_id=person.tenant_id, platform="discord", parent_channel_id="chan-1",
+        thread_id="thread-1", requester_account_id=person.account_id,
+        requester_external_user_id="user-1", target_ma_agent_id="agent_a",
+        target_name="Helper", requested_work=None, reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )  # fmt: skip
+    async with factory() as db, db.begin():
+        for _ in range(25):
+            await watches.register_callback_watch(
+                db, binding, instructions="Report.", lifetime=dt.timedelta(days=1),
+                now=dt.datetime.now(dt.UTC),
+            )  # fmt: skip
+
+
+async def test_a_wake_link_is_made_without_the_approval_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    callbacks_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberate: `create_watch` needs the owner's card, a wake link does not. The person's
+    own call started the job, the link goes only to the server they called and never to a
+    channel, and it can only wake their conversation to report."""
+
+    async def no_card(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a wake link never asks for the approval card")
+
+    monkeypatch.setattr(_session_gate, "session_card_gap", no_card)
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1", channel="chan-1")
+    (wake_url,) = await _wake_urls(db_session_factory, token, _tool_call())
+    assert wake_url is not None, "the link is made with no card"
 
 
 async def test_forged_requester_fields_are_replaced_on_a_person_turn(
