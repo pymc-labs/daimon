@@ -3,6 +3,7 @@ import {
   Minus, Pencil, Plus, Workflow as WorkflowIcon, Wrench, Zap, type LucideIcon,
 } from "lucide-react"
 
+import { absolute } from "@/lib/format"
 import { finishDeliver } from "./spec"
 import type { Effect } from "./review"
 import type { Catalog, GrantKind, Kind, Node, RunStatus, Spec, StepStatus, Trigger, TriggerKind } from "./types"
@@ -39,8 +40,10 @@ export function cronLabel(cron = "") {
   if (dom && /^\d+$/.test(dom)) return `Day ${dom} ${at}`
   return `Daily ${at}`
 }
+const scheduleText = (t: Trigger) =>
+  t.at ? `Once ${absolute(t.at)}` : t.every_weeks ? `${cronLabel(t.cron)}, every ${t.every_weeks} weeks` : cronLabel(t.cron)
 export const triggerText = (t: Trigger) =>
-  t.kind === "schedule" ? cronLabel(t.cron) : t.kind === "webhook" ? "Webhook" : t.kind === "event" ? t.source ?? "Event" : TRIGGER[t.kind].label
+  t.kind === "schedule" ? scheduleText(t) : t.kind === "webhook" ? "Webhook" : t.kind === "event" ? t.source ?? "Event" : TRIGGER[t.kind].label
 
 export const RUN: Record<RunStatus, { icon: LucideIcon; label: string; cls: string }> = {
   queued: { icon: CircleDashed, label: "Queued", cls: "text-muted-foreground" },

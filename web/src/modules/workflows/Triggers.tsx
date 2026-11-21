@@ -63,7 +63,7 @@ function TriggerBlock({ t, c }: { t: Trigger; c: Ctx }) {
   return (
     <section className="[&:not(:first-child)]:border-t [&:not(:first-child)]:pt-8">
       <h2 className="mb-5 flex items-center gap-2 text-base font-semibold"><K.icon className="size-4 text-muted-foreground" />{K.label}<Mono className="text-xs font-normal text-faint">{t.id}</Mono></h2>
-      {t.kind === "schedule" && <Schedule t={t} c={c} />}
+      {t.kind === "schedule" && (t.at ? <OneTime t={t} /> : <Schedule t={t} c={c} />)}
       {t.kind === "webhook" && <Webhook t={t} c={c} />}
       {t.kind === "manual" && <Manual c={c} />}
       {t.kind === "event" && <Event t={t} />}
@@ -74,6 +74,11 @@ function TriggerBlock({ t, c }: { t: Trigger; c: Ctx }) {
 }
 
 // ---------- schedule ----------
+
+/** A one-time schedule: it runs at its time, once, and is done. */
+function OneTime({ t }: { t: Trigger }) {
+  return <Part title="When"><Facts rows={[["Runs once at", <span key="a" className="font-medium">{absolute(t.at)}</span>], ["Time zone", t.timezone ?? "UTC"]]} /></Part>
+}
 
 function Schedule({ t, c }: { t: Trigger; c: Ctx }) {
   const cron = t.cron ?? "0 9 * * *"
@@ -136,13 +141,13 @@ function Schedule({ t, c }: { t: Trigger; c: Ctx }) {
             </Select>
           </SettingRow>
         </div>
-        <div className="mt-4"><Facts rows={[["In words", <span key="w" className="font-medium">{cronWords(cron)}</span>], ["Cron", <Mono key="c" className="text-xs">{cron}</Mono>]]} /></div>
+        <div className="mt-4"><Facts rows={[["In words", <span key="w" className="font-medium">{cronWords(cron)}</span>], ["Cron", <Mono key="c" className="text-xs">{cron}</Mono>], ["Every", t.every_weeks ? `${t.every_weeks} weeks, from the week of ${t.anchor ?? "the first run"}` : ""]]} /></div>
       </Part>
       <Part title="If a run is missed">
         <ChoiceCards label="If a run is missed" disabled={c.ro} value={t.catch_up ?? "skip"} onChange={(v) => c.set(t.id, (x) => { x.catch_up = v })}
           options={[{ value: "skip", label: "Skip", fact: "Wait for the next time" }, { value: "run-once", label: "Run once", fact: "One run when it is back" }]} />
       </Part>
-      <Part title="Next fires">
+      {!t.every_weeks && <Part title="Next fires">
         {paused ? (
           <p className="flex items-center gap-2 text-sm"><Pause className="size-4 text-muted-foreground" />Paused</p>
         ) : (
@@ -155,7 +160,7 @@ function Schedule({ t, c }: { t: Trigger; c: Ctx }) {
             ))}
           </ul>
         )}
-      </Part>
+      </Part>}
     </>
   )
 }

@@ -7,7 +7,7 @@ import { ACTIVE_RUN, project } from "./runs"
 import { diff, validate } from "./spec"
 import type {
   AttentionItem, Catalog, DeliveryRow, Draft, InboxDecide, InboxDetail, InboxItem, MappingPreview, NewWorkflow, RunDetail, RunEvent, RunSummary, RunTest, Secret, Spec,
-  StepDetail, Template, Version, VersionSpec, WebhookInfo, Workflow, WorkflowChat, WorkflowPatch, WorkflowSummary,
+  SavedState, StepDetail, Template, Version, VersionSpec, WebhookInfo, Workflow, WorkflowChat, WorkflowPatch, WorkflowSummary,
 } from "./types"
 
 const base = (id: string) => `/api/workflows/${id}`
@@ -16,6 +16,15 @@ export const useWorkflow = (id: string) => useQuery({ queryKey: ["workflows", id
 export const useDraft = (id: string, enabled = true) => useQuery({ queryKey: ["workflows", id, "draft"], queryFn: () => api.get<Draft>(`${base(id)}/draft`), enabled })
 export const getDraft = (id: string) => api.get<Draft>(`${base(id)}/draft`)
 export const useVersions = (id: string) => useQuery({ queryKey: ["workflows", id, "versions"], queryFn: () => api.get<Version[]>(`${base(id)}/versions`) })
+export const useSavedState = (id: string) => useQuery({ queryKey: ["workflows", id, "state"], queryFn: () => api.get<SavedState>(`${base(id)}/state`) })
+export function useClearState(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.del<SavedState>(`${base(id)}/state`),
+    onSuccess: (s) => qc.setQueryData(["workflows", id, "state"], s),
+    onError: (e) => toast.error(e.message),
+  })
+}
 export const useRuns = (id: string) => useQuery({ queryKey: ["workflows", id, "runs"], queryFn: () => api.get<RunSummary[]>(`${base(id)}/runs`) })
 export const useCatalog = () => useQuery({ queryKey: ["workflows", "catalog"], queryFn: () => api.get<Catalog>("/api/workflows/catalog"), staleTime: Infinity })
 export const useTemplates = () => useQuery({ queryKey: ["workflows", "templates"], queryFn: () => api.get<Template[]>("/api/workflows/templates"), staleTime: Infinity })

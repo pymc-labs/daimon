@@ -17,6 +17,7 @@ import { MigrationStrip, PublishStrip } from "./PublishStrip"
 import { RunDialog } from "./RunDialog"
 import { RunsTab } from "./run/RunsTable"
 import { AccessTab } from "./Access"
+import { StateTab } from "./State"
 import { TriggersTab } from "./Triggers"
 import { StatusBadge } from "./ui"
 import { VersionsTab, VersionView } from "./Versions"
@@ -59,7 +60,7 @@ export function WorkflowPage() {
       className={design ? "relative flex flex-col overflow-hidden bg-muted/40" : undefined}
       tabs={[
         { label: "Design", to: b, end: true }, { label: "Runs", to: `${b}/runs` }, { label: "Triggers", to: `${b}/triggers` },
-        { label: "Access", to: `${b}/access` }, { label: "Versions", to: `${b}/versions` },
+        { label: "State", to: `${b}/state` }, { label: "Access", to: `${b}/access` }, { label: "Versions", to: `${b}/versions` },
       ]}
       actions={(
         <>
@@ -88,6 +89,7 @@ export function WorkflowPage() {
         <Route index element={<ReactFlowProvider><Design wf={wf} /></ReactFlowProvider>} />
         <Route path="runs" element={<RunsTab wf={wf} />} />
         <Route path="triggers" element={<TriggersTab wf={wf} />} />
+        <Route path="state" element={<StateTab wf={wf} />} />
         <Route path="access" element={<AccessTab wf={wf} />} />
         <Route path="versions" element={<VersionsTab wf={wf} />} />
         <Route path="versions/:n" element={<ReactFlowProvider><VersionView wf={wf} /></ReactFlowProvider>} />

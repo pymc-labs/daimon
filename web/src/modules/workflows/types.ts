@@ -67,6 +67,9 @@ export type AskWhere = "inbox" | "dm" | "thread"
 export type AnswerShape = "approve" | "choice" | "text" | "form"
 export type Platform = "discord" | "slack" | "teams"
 
+/** What earlier runs saved with a Finish step (`workflow.state`). */
+export type SavedState = { state: Record<string, unknown>; updated_at: string | null }
+
 export type TriggerKind = "manual" | "schedule" | "webhook" | "event" | "call" | "mention" | "poll"
 export type Trigger = {
   id: string; kind: TriggerKind
