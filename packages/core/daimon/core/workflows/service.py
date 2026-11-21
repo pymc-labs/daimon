@@ -948,6 +948,7 @@ async def rerun(
     """Run again, or from `step`: a new run that reuses the finished steps upstream of it."""
     run, workflow = await _control(env, run_id)
     test = version == "draft" or run.mode == "test"
+    picked = version if isinstance(version, int) else None  # None: the fork's source version
     result = await runs.start_run(
         env.sm,
         env.settings,
@@ -962,6 +963,7 @@ async def rerun(
             fork_of=(run.id, step) if step else None,
             rerun_of=None if step else run.id,
             label=run.label,
+            version=workflow.live_version if version == "live" else picked,
         ),
         now=env.now,
     )

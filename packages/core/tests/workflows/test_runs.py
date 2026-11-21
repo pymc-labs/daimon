@@ -24,8 +24,10 @@ from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, workflow_runs
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.workflows import engine, preflight, run_views, runs
+from daimon.core.workflows import engine, preflight, run_views, runs, service
+from daimon.core.workflows.access import Who
 from daimon.core.workflows.preflight import Refusal
+from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import parse_spec
 from daimon.testing.workflows import NOW, make_settings, make_world
 from mux.contracts.config import BackendConfig
@@ -411,3 +413,33 @@ async def test_private_reach_follows_who_can_read_the_limited_channel(
     assert (reached, asked) == (None, ["C_PRIVATE"]), "a member may; open channels ask nothing"
     refused = await preflight.private_reach(db_session, place, world.owner, reads(False))
     assert refused == "C_PRIVATE", "someone who cannot read the channel is refused, admins too"
+
+
+async def test_a_fork_onto_the_live_version_runs_the_live_version(
+    db_session: AsyncSession,
+) -> None:
+    nodes = {
+        "a": {"kind": "agent", "instructions": "One", "next": "f"},
+        "f": {"kind": "finish"},
+    }
+    world = await make_world(db_session, nodes, "a")
+    source = await world.run()
+    await world.execute(await world.claim(source.id, "a"), engine.Succeeded({"x": 1}))
+    flow = await workflows_store.get_workflow(
+        db_session, tenant_id=world.tenant_id, workflow_id=world.workflow_id
+    )
+    assert flow is not None
+    await workflows_store.publish_version(
+        db_session,
+        tenant_id=world.tenant_id,
+        workflow_id=world.workflow_id,
+        spec=flow.draft_spec,
+        spec_hash="h2",
+        source="web",
+        published_by=world.owner,
+    )
+    await db_session.commit()
+    env = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW)
+    forked = await service.rerun(env, source.id, step="f")
+    live = await service.rerun(env, source.id, step="f", version="live")
+    assert (forked.version, live.version) == (1, 2), "a fork keeps its source's unless told"
