@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Discord can time the working card, pick the model from menus and answer
+  bots.** With the new Working card timer setting on, the card says Working or
+  Thinking with the time so far, and its footer names the model with /model to
+  change it. /model with no options shows a model menu and an effort menu, and
+  a pick swaps the model emoji on the message that last showed them. With the
+  new Answer bots setting on (off by default; set by an admin for the server or
+  one agent), a bot that mentions the agent is answered under the same access
+  rules as a person. The agent never answers itself or a bot's reply, and its
+  answers never ping a bot.
+
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎
   feedback, voice messages and the card's model footer. Pings are joined with a
