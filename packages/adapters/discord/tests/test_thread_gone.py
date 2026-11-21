@@ -43,6 +43,7 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.discord_builders import discord_runtime
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_router import build_turn_router, turn_events
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -196,7 +197,7 @@ async def _world(
     build_turn_router(str(tenant.id), router=router)
     anthropic = build_fake_anthropic(router.dispatch)
 
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")

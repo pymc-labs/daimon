@@ -31,6 +31,7 @@ from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,7 +117,7 @@ async def test_seed_is_a_no_op_for_a_channel_type_without_get_partial_message() 
 
 
 def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     settings.thread_naming = ThreadNamingSettings(enabled=False)
     settings.billing.markup = Decimal("1.0")

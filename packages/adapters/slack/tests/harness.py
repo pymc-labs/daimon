@@ -83,7 +83,7 @@ def make_orchestrate_app(
     ``app_root_url`` is None by default; pass the app root URL when a test needs the
     deployment to be able to mint links (a real signing secret is set alongside it).
     """
-    settings = MagicMock()
+    settings = mock_settings()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
     settings.slack.max_concurrent_turns_per_tenant = max_concurrent_turns_per_tenant
     settings.turn_queue = TurnQueueSettings()
