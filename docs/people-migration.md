@@ -142,3 +142,18 @@ paused in the old system; rerun `go-live` to schedule released timers.
 `rotate-link` replaces every link of a callback watch and shows the new
 one once, or writes it to `--urls-out` (mode 0600), keyed by the old id as
 `import --urls-out` is.
+
+## Repository memory
+
+`scripts/import_repo_memory.py` imports another system's repository memory; its
+docstring holds the input formats and steps. With `--tenant`, a creator with no
+account here gets a Discord identity in that tenant. The image has no `scripts/`,
+so copy the script and its inputs into a worker container and run it there:
+
+```bash
+docker cp scripts/import_repo_memory.py WORKER:/tmp/
+docker exec WORKER python /tmp/import_repo_memory.py --snapshot /tmp/export.json \
+  --repos /tmp/repos.json --tenant TENANT_UUID --manifest /tmp/manifest.json
+```
+
+It is a dry run until you add `--apply`.

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Moving people in is easier for repository memory and rotated links.**
+  `scripts/import_repo_memory.py` takes `--tenant`: a creator with no account on
+  this deployment gets a Discord identity there, so the accounts map is only for
+  people already here, and a dry run's manifest still matches the apply's. The
+  image has no `scripts/`, so the migration guide shows how to run it in a worker
+  container. `daimon watches rotate-link --urls-out` keys an imported watch's new
+  link by its old id, as `watches import --urls-out` does, so a forwarder that
+  looks links up by its own ids finds it.
+
 - **Callback watches and relay wake links work in Discord DMs.** A callback watch
   made in a DM, including the one behind a relay server's `_meta.wake_url`, was
   refused, so a job started from a DM never woke the conversation and the agent
