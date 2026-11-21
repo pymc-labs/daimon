@@ -339,6 +339,8 @@ def origin_turn_place(origin: TurnOriginRow) -> TurnPlace:
 REQUESTER_META_KEY: Final = "requester_platform_user_id"
 CONVERSATION_META_KEY: Final = "requester_conversation"
 KIND_META_KEY: Final = "requester_kind"
+#: A one-time callback watch link for a `wake_tools` call; only the relay writes it.
+WAKE_META_KEY: Final = "wake_url"
 #: Who a stamped call is for: a person's live turn, or a routine run on its owner's behalf.
 RequesterKind = Literal["person", "routine"]
 #: Platforms whose user and channel ids the requester fields may carry.
@@ -434,6 +436,7 @@ def _stamp_message(
     person: str | None,
     conversation: Mapping[str, str | None] | None,
     kind: RequesterKind | None,
+    wake_url: str | None,
 ) -> dict[str, object]:
     if not isinstance(message, dict):
         raise RequesterBodyError("a request body must be an object or an array of objects")
@@ -457,6 +460,7 @@ def _stamp_message(
     meta.pop(REQUESTER_META_KEY, None)
     meta.pop(CONVERSATION_META_KEY, None)
     meta.pop(KIND_META_KEY, None)
+    meta.pop(WAKE_META_KEY, None)
     # Only a tool call is stamped; any other method just loses what a caller put there.
     # A live turn is named only with its place; a routine's place may be unrecorded.
     if (
@@ -468,9 +472,27 @@ def _stamp_message(
         meta[KIND_META_KEY] = kind
         if conversation:
             meta[CONVERSATION_META_KEY] = dict(conversation)
+    if is_call and wake_url is not None:
+        meta[WAKE_META_KEY] = wake_url
     if is_call or existing is not None:
         call["_meta"] = meta
     return fields
+
+
+def read_request_body(body: bytes) -> object:
+    """A relayed body parsed strictly, once, for `called_tool` and `stamp_parsed`: one
+    that is not UTF-8 JSON, repeats a key or is an empty batch raises `RequesterBodyError`."""
+    try:
+        parsed: object = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_no_duplicate_keys,  # pyright: ignore[reportArgumentType]
+            parse_constant=_refuse_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as err:
+        raise RequesterBodyError("request body is not valid JSON") from err
+    if parsed == []:
+        raise RequesterBodyError("a batch must not be empty")
+    return parsed
 
 
 def stamp_requester(
@@ -480,6 +502,20 @@ def stamp_requester(
     conversation: Mapping[str, str | None] | None,
     kind: RequesterKind | None = "person",
 ) -> bytes:
+    """`stamp_parsed` of the body `read_request_body` parses."""
+    return stamp_parsed(
+        read_request_body(body), person=person, conversation=conversation, kind=kind
+    )
+
+
+def stamp_parsed(
+    parsed: object,
+    *,
+    person: str | None,
+    conversation: Mapping[str, str | None] | None,
+    kind: RequesterKind | None = "person",
+    wake_url: str | None = None,
+) -> bytes:
     """The request body with each `tools/call` stamped with who asked, where and for what.
 
     Whatever the caller put under `params._meta` for any requester key is
@@ -488,29 +524,40 @@ def stamp_requester(
     whose `conversation` is its delivery place (left out when it has none). With no
     `person` or `kind` (a foreign sender, two live turns) the keys are only removed.
     Requester keys are removed under `params._meta` of every method, not only tool calls.
-    Strict: a body that is not UTF-8 JSON, repeats a key, or holds a tool call without
-    object params raises `RequesterBodyError`. Other methods and responses pass through, but
-    the whole body is re-serialized so what was checked is what is sent.
+    `wake_url` is set on each tool call when given; a caller's own one is always removed.
+    A tool call without object params raises `RequesterBodyError`. Other methods and
+    responses pass through, but the whole body is re-serialized so what was checked is
+    what is sent. Modifies `parsed`.
     """
-    try:
-        parsed = json.loads(
-            body.decode("utf-8"),
-            object_pairs_hook=_no_duplicate_keys,  # pyright: ignore[reportArgumentType]
-            parse_constant=_refuse_constant,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as err:
-        raise RequesterBodyError("request body is not valid JSON") from err
     if isinstance(parsed, list):
-        batch = cast("list[object]", parsed)
-        if not batch:
-            raise RequesterBodyError("a batch must not be empty")
         out: object = [
-            _stamp_message(item, person=person, conversation=conversation, kind=kind)
-            for item in batch
+            _stamp_message(
+                item, person=person, conversation=conversation, kind=kind, wake_url=wake_url
+            )
+            for item in cast("list[object]", parsed)
         ]
     else:
-        out = _stamp_message(parsed, person=person, conversation=conversation, kind=kind)
+        out = _stamp_message(
+            parsed, person=person, conversation=conversation, kind=kind, wake_url=wake_url
+        )
     try:
         return json.dumps(out, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except (UnicodeEncodeError, RecursionError, ValueError) as err:
         raise RequesterBodyError("request body cannot be re-encoded") from err
+
+
+def called_tool(parsed: object) -> str | None:
+    """The tool a parsed body that is one `tools/call` names; None for a batch or another
+    method."""
+    if not isinstance(parsed, dict):
+        return None
+    fields = cast("dict[str, object]", parsed)
+    method, params = fields.get("method"), fields.get("params")
+    if not (
+        isinstance(method, str)
+        and method.strip().casefold() == "tools/call"
+        and isinstance(params, dict)
+    ):
+        return None
+    name = cast("dict[str, object]", params).get("name")
+    return name if isinstance(name, str) else None

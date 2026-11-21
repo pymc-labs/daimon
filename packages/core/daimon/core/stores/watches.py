@@ -35,6 +35,7 @@ from daimon.core.stores import watch_credentials
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import (
     TaskContinuationRow,
+    ThreadSessionRow,
     WatchDelivery,
     WatchEvidenceRow,
     WatchFiringRow,
@@ -183,6 +184,37 @@ async def set_watch_limits(
     )
 
 
+async def _exact_live_binding(
+    session: AsyncSession, binding: ContinuationRequest
+) -> ThreadSessionRow:
+    """The owner's newest live session in the binding's thread, with its agent and channel."""
+    principal = await find_platform_principal(
+        session,
+        tenant_id=binding.tenant_id,
+        platform=binding.platform,
+        external_id=binding.requester_external_user_id,
+    )
+    if principal is None or principal.account_id != binding.requester_account_id:
+        raise ValueError("Watch owner must match the registered platform principal")
+    account = await session.get(Account, binding.requester_account_id)
+    live = await get_live_thread_session(
+        session,
+        tenant_id=binding.tenant_id,
+        platform=binding.platform,
+        thread_id=binding.thread_id,
+        account_id=binding.requester_account_id,
+    )
+    if (
+        account is None
+        or account.tenant_id != binding.tenant_id
+        or live is None
+        or live.ma_agent_id != binding.target_ma_agent_id
+        or live.channel_id != binding.parent_channel_id
+    ):
+        raise ValueError("Watch requires the owner's exact live conversation binding")
+    return live
+
+
 async def register_page_watch(
     session: AsyncSession,
     binding: ContinuationRequest,
@@ -209,30 +241,7 @@ async def register_page_watch(
         raise ValueError("Instructions or watch lifetime out of bounds")
     if not 1 <= max_turns_per_day <= HARD_WATCH_CAP:
         raise ValueError("Invalid watch caps")
-    principal = await find_platform_principal(
-        session,
-        tenant_id=binding.tenant_id,
-        platform=binding.platform,
-        external_id=binding.requester_external_user_id,
-    )
-    if principal is None or principal.account_id != binding.requester_account_id:
-        raise ValueError("Watch owner must match the registered platform principal")
-    account = await session.get(Account, binding.requester_account_id)
-    live = await get_live_thread_session(
-        session,
-        tenant_id=binding.tenant_id,
-        platform=binding.platform,
-        thread_id=binding.thread_id,
-        account_id=binding.requester_account_id,
-    )
-    if (
-        account is None
-        or account.tenant_id != binding.tenant_id
-        or live is None
-        or live.ma_agent_id != binding.target_ma_agent_id
-        or live.channel_id != binding.parent_channel_id
-    ):
-        raise ValueError("Watch requires the owner's exact live conversation binding")
+    live = await _exact_live_binding(session, binding)
     await _lock_owner(session, binding.requester_account_id)
     count = await session.scalar(
         select(func.count())
@@ -659,6 +668,119 @@ async def register_callback_watch(
     result = await get_watch(session, watch.id)
     assert result is not None
     return result, token
+
+
+#: The `source_state` key naming the server a relay wake watch is for (`wake_link`).
+WAKE_STATE_KEY = "wake"
+#: Live links one wake watch keeps; each new link revokes the oldest beyond this.
+WAKE_LINKS = 20
+
+
+async def wake_link(
+    session: AsyncSession,
+    binding: ContinuationRequest,
+    *,
+    server: str,
+    lifetime: timedelta | None,
+    now: datetime,
+) -> tuple[uuid.UUID, str]:
+    """A new link to the conversation's one wake watch for `server`, made on first use.
+
+    Each call adds its own token (only its hash is stored), moves the watch onto the
+    conversation's newest session and gives it `lifetime` from now, so every job
+    started gets a link that lasts. Returns the watch id and the token.
+    """
+    await _lock_owner(session, binding.requester_account_id)
+    row = await session.scalar(
+        select(Watch)
+        .where(
+            Watch.tenant_id == binding.tenant_id,
+            Watch.owner_account_id == binding.requester_account_id,
+            Watch.platform == binding.platform,
+            Watch.thread_id == binding.thread_id,
+            Watch.parent_channel_id == binding.parent_channel_id,
+            Watch.agent_id == binding.target_ma_agent_id,
+            Watch.source == "callback",
+            Watch.delivery == "thread",
+            Watch.status == "active",
+            Watch.source_state[WAKE_STATE_KEY].astext == server,
+            _live_at(now),
+        )
+        .limit(1)
+        .with_for_update()
+    )
+    if row is None:
+        watch, token = await register_callback_watch(
+            session,
+            binding,
+            instructions=(
+                f"Work started through {server} in this conversation has ended. "
+                "Tell the person how it went, from the post below."
+            ),
+            lifetime=lifetime,
+            now=now,
+        )
+        await session.execute(
+            update(Watch).where(Watch.id == watch.id).values(source_state={WAKE_STATE_KEY: server})
+        )
+        return watch.id, token
+    live = await _exact_live_binding(session, binding)
+    row.session_id = live.ma_session_id
+    await _set_callback_expiry(session, row, callback_end(now, lifetime), now)
+    top = (
+        await session.scalar(
+            select(func.coalesce(func.max(WatchCapability.generation), 0)).where(
+                WatchCapability.watch_id == row.id, WatchCapability.operation == "callback"
+            )
+        )
+        or 0
+    )
+    await session.execute(
+        update(WatchCapability)
+        .where(
+            WatchCapability.watch_id == row.id,
+            WatchCapability.operation == "callback",
+            WatchCapability.revoked_at.is_(None),
+            WatchCapability.generation <= top + 1 - WAKE_LINKS,
+        )
+        .values(revoked_at=now)
+    )
+    token = new_callback_token()
+    _add_callback_capability(
+        session,
+        row.id,
+        digest=callback_digest(token),
+        key_id="wake",
+        generation=top + 1,
+        expires_at=row.expires_at,
+    )
+    await session.flush()
+    return row.id, token
+
+
+async def follow_live_session(session: AsyncSession, live: ThreadSessionRow) -> None:
+    """Move the conversation's wake watches (`wake_link`) onto `live`, its newest session.
+
+    A relay-scoped thread gets a fresh session every turn, and the job a wake link was
+    made for may end turns later. Every other thread watch stays on its own session.
+    """
+    if live.ma_agent_id is None or live.channel_id is None or live.account_id is None:
+        return
+    await session.execute(
+        update(Watch)
+        .where(
+            Watch.tenant_id == live.tenant_id,
+            Watch.owner_account_id == live.account_id,
+            Watch.platform == live.platform,
+            Watch.thread_id == live.thread_id,
+            Watch.parent_channel_id == live.channel_id,
+            Watch.agent_id == live.ma_agent_id,
+            Watch.source == "callback",
+            Watch.delivery == "thread",
+            Watch.source_state[WAKE_STATE_KEY].astext.is_not(None),
+        )
+        .values(session_id=live.ma_session_id)
+    )
 
 
 async def prune_evidence(session: AsyncSession) -> None:

@@ -566,9 +566,13 @@ a server stays in its channel with no long-term memory, a fresh session per chan
 and no handoffs, because the server answers with what the channel's readers can read.
 Set channel_scoped to false for a server that checks each call's asker and place itself:
 its agents then get their normal memory and sessions, so what they learn can surface in
-their other channels. The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any
-server is signed; chat workers use the same server policy without the signing key.
-Default: [] (off).
+their other channels. A requester_meta server may list wake_tools: a person's call to
+one carries params._meta.wake_url, a private callback watch link for that conversation;
+each POST of the work's outcome to it wakes the conversation once. Each call gets its
+own link to one watch per conversation, which lasts a day after the latest call. Needs
+the watches feature and DAIMON_WATCHES__CALLBACK_BASE_URL. The MCP service requires
+DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat workers use the same
+server policy without the signing key. Default: [] (off).
 
 ### `DAIMON_MCP_IDENTITY__BEARERS`
 
