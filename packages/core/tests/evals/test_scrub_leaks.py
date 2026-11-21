@@ -20,7 +20,7 @@ from daimon.core.evals.from_thread import ThreadRecord, build_cases
 from daimon.core.evals.scrub import detect, offline
 from daimon.core.evals.scrub.detect import PUBLIC_NAMES, Detector, Hit, Ner
 from daimon.core.evals.scrub.engine import Scrubber
-from daimon.core.evals.scrub.entities import KnownEntities, load_entities, terms_of
+from daimon.core.evals.scrub.entities import KnownEntities, Term, load_entities, terms_of
 from daimon.core.evals.scrub.fakes import adapt
 from daimon.core.evals.scrub.files import rebuild
 from daimon.core.evals.scrub.offline import (
@@ -688,7 +688,7 @@ def test_text_when_host_id_or_ip_is_glued_to_other_characters_then_replaced(
 
 
 def test_value_when_names_are_kept_then_unchanged_and_private_parts_still_faked() -> None:
-    keep = {"phrases": ["Core", "Linear", "Merge", "Daimon Acme"], "keep": ["core", "Linear"]}
+    keep = {"phrases": ["Core", "Linear", "Merge"], "keep": ["core", "Linear"]}
     scrubber = _scrubber(ENTITIES.model_copy(update=keep))
     case = {
         "schema": "daimon.eval.case/1",
@@ -730,3 +730,44 @@ def test_text_when_known_name_inside_a_hash_then_hash_unchanged() -> None:
     scrubber = _scrubber(ENTITIES.model_copy(update={"phrases": ["Bead"]}))
     out = scrubber.text("commit 3bead0f5a9c4e1d27b7c by Bead")
     assert out.startswith("commit 3bead0f5a9c4e1d27b7c by ") and "Bead" not in out, out
+
+
+KEEPS = ENTITIES.model_copy(
+    update={"companies": ["Drive Capital", "CoreAcme"], "keep": ["core", "zorvex_eval_suite"]}
+)
+
+
+def test_text_when_ner_name_is_beside_or_holds_a_kept_word_then_only_kept_word_stays() -> None:
+    scrubber = _scrubber(KEEPS)
+    keep = [*PUBLIC_NAMES, *KEEPS.keep]
+    scrubber.detector = Detector(terms_of(KEEPS), _Names("Hope Price", "Slack Okafor"), keep)
+    out = scrubber.text("Hope Price asked in Slack. Slack Okafor, Drive Capital and CoreAcme too.")
+    assert "Hope Price" not in out and "Okafor" not in out, out
+    assert out.count("Slack") == 2 and "Drive" not in out and "Core" not in out, out
+
+
+def test_learn_when_identity_values_are_dictionary_words_or_slugs_then_learned() -> None:
+    scrubber = _scrubber(KEEPS)
+    keyed = {"company": "Blue Harbor", "project": "zorvex_search", "user": "staff", "owner": "core"}
+    scrubber.learn(keyed)
+    scrubber.add_terms([Term("company", "Zorvex Industries")])
+    learned = sorted(t.text for t in scrubber.learned)
+    assert learned == ["Blue Harbor", "Zorvex Industries", "zorvex_search"], learned
+    again = Scrubber(KEEPS, KEY, salt="t1", ner_model=None, learned=scrubber.learned)
+    assert "Harbor" not in again.text("Blue Harbor shipped"), "a learned file is trusted"
+
+
+@pytest.mark.parametrize("name", ["José Muñoz García", "Иван Петров", "Łukasz Żółkiewski"])
+def test_text_when_base64_holds_a_non_ascii_name_then_decoded_and_replaced(name: str) -> None:
+    scrubber = _scrubber(KnownEntities.model_validate({"people": [{"name": name}]}))
+    word = base64.b64encode(name.encode()).decode()
+    out = scrubber.text(f"From: =?UTF-8?B?{word}?= <x>, id dc-3dc21cc202a4")
+    assert word not in out and out.endswith("id dc-3dc21cc202a4"), out
+
+
+def test_text_when_phone_numbers_in_other_formats_then_replaced_not_decimals_or_dates() -> None:
+    phones = ("07911 123456", "06 12 34 56 78", "+91 98765 43210")
+    text = f"call {', '.join(phones)}; pi 3.14159265, ratios 0.5 1.25 3.75 22 on 2024-01-15 10:30"
+    out = _scrubber().text(text)
+    assert not any(p in out for p in phones), out
+    assert out.endswith("pi 3.14159265, ratios 0.5 1.25 3.75 22 on 2024-01-15 10:30"), out

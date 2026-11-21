@@ -183,7 +183,7 @@ def english_words() -> frozenset[str]:
 
         names = {w.casefold() for w in [*Provider.first_names, *Provider.last_names]}
         return common_words() | (_dictionary() - names)
-    except ImportError:
+    except (ImportError, OSError, KeyError, ValueError):  # no or another kind of model
         return common_words()
 
 
@@ -393,6 +393,13 @@ _PHONE: Final = re.compile(
     r"(?<![\w+])(?:\+\d{8,14}"
     r"|(?:\+\d{1,3}[-. ]?)?(?:\(\d{2,4}\)[-. ]?|\d{2,4}[-. ])\d{3,4}[-. ]\d{3,5})(?![\w-])"
 )
+# What may be a phone number in another country's format ("06 12 34 56 78"), for `phonenumbers`
+# to check; not a decimal, a list of them, a date, an IP or bare digits.
+_PHONE_LIKE: Final = re.compile(r"(?<![\w.+])(?:\+|\(\d)?\d[\d ().-]{5,18}\d(?!\w)")
+_PHONE_DOTS: Final = re.compile(r"\d{2,}(?:\.\d{2,}){2,}")
+_PHONE_JOIN: Final = re.compile(r"[ ()+-]")
+_ISO_DATE: Final = re.compile(r"\d{4}-\d\d-\d\d")
+_PHONE_REGIONS: Final = ("US", "GB", "DE", "FR", "IL", "IN", "CA", "BR")
 _HOST: Final = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:internal|local|corp|lan|intranet|home\.arpa)\b", re.IGNORECASE
 )
@@ -412,8 +419,12 @@ _PUBLIC_SERVICES: Final = frozenset(
      "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
      "pypi.org", "npmjs.com", "cloudflare.com"}
 )  # fmt: skip
-# Daimon, its chat platforms, its effect verbs, the services they name (and Google's products:
-# "slides" in google.slides.*) and public hosts.
+# Daimon, its chat platforms, its effect verbs, the services they name and public hosts, less
+# everyday words ("Drive Capital" is a name).
+_EVERYDAY: Final = frozenset(
+    {"calendar", "chat", "docs", "drive", "git", "office", "python", "sheets", "slides", "teams",
+     "web"}
+)  # fmt: skip
 PUBLIC_NAMES: Final = frozenset(
     name
     for name in (
@@ -421,7 +432,7 @@ PUBLIC_NAMES: Final = frozenset(
         *(p for v in KNOWN_VERBS for p in v.split(".")[: 2 if v.startswith("google.") else 1]),
         *(h.split(".")[0] for h in _PUBLIC_SERVICES),
     )
-    if len(name) >= 3
+    if len(name) >= 3 and name not in _EVERYDAY
 )  # fmt: skip
 # A hash: hex with a letter, not starting or ending in an id ("123…789abc" is an id and "abc").
 _DIGEST: Final = re.compile(
@@ -473,7 +484,7 @@ _PROFILES: Final = [
         r"\byoutube\.com/(?:@|(?:c|user|channel)/)(?P<v>[\w%.-]+)",
     )
 ]
-# Phone numbers are `_PHONE`'s: Presidio's phone recognizer took half of a scrub's time.
+# Phone numbers are `_phones`': Presidio's phone recognizer took half of a scrub's time.
 _NER_KINDS: Final = {"PERSON": "person", "ORGANIZATION": "company", "LOCATION": "place"}
 _NER_CHUNK: Final = 50_000
 _NER_CACHE: Final = 100_000
@@ -692,9 +703,25 @@ def _past(view: str, mask: bytearray, start: int, stop: int, step: int) -> int:
     return i
 
 
+def _phones(text: str) -> Iterator[tuple[int, int]]:
+    import phonenumbers
+
+    for m in _PHONE_LIKE.finditer(text):
+        s = m.group()
+        if "." in s and not _PHONE_DOTS.fullmatch(s) or "." not in s and not _PHONE_JOIN.search(s):
+            continue
+        if _ISO_DATE.search(s):
+            continue
+        for region in _PHONE_REGIONS:
+            found = list(phonenumbers.PhoneNumberMatcher(s, region))  # valid numbers only
+            yield from ((m.start() + f.start, m.start() + f.end) for f in found)
+            if found:
+                break
+
+
 class Detector:
-    """`keep` names are no hit, nor part of one: a hit made only of them and joiners is
-    dropped, and so is a name the model finds that adds only common words to them."""
+    """`keep` names are no hit: a hit made only of them and joiners is dropped. A name the
+    model finds is cut to what it adds to them, or dropped if that is only everyday words."""
 
     def __init__(
         self, terms: Iterable[Term], ner: Ner | None = None, keep: Iterable[str] = ()
@@ -703,10 +730,11 @@ class Detector:
         self._index = TermIndex(strict=True)
         self._ner = ner
         self._kept = TermIndex()
-        self.kept_words: set[str] = set()
+        self.kept: set[str] = set()
+        """The kept names, normalized."""
         for name in keep:
             self._kept.add(Term("phrase", name))
-            self.kept_words.update(w for _, _, w in _words(fold(name).text))
+            self.kept.add(normalize(name))
         self._found: dict[tuple[bytes, bool, bool], tuple[Hit, ...]] = {}
         self.add(terms)
 
@@ -760,7 +788,7 @@ class Detector:
         for a, b in [m.span() for m in _SCHEME.finditer(view.text)] + _public_suffixes(view.text):
             fixed[a:b] = b"\1" * (b - a)
         hits += [h for h in found if fixed.find(1, h.start, h.end) < 0 and _outside(digests, h)]
-        if self.kept_words:
+        if self.kept:
             hits = self._unkept(view.text, hits)
         out: list[Hit] = []
         for hit in _resolve(hits):
@@ -775,16 +803,20 @@ class Detector:
         if not any(mask):
             return hits
         out: list[Hit] = []
+        everyday = english_words()
         for hit in hits:
+            if hit.kind == SECRET or mask.find(1, hit.start, hit.end) < 0:
+                out.append(hit)
+                continue
             rest = "".join(" " if mask[i] else view[i] for i in range(hit.start, hit.end))
             words = [w for _, _, w in _words(rest)]
-            common = hit.priority == _P_NER and all(w in common_words() for w in words)
-            if hit.kind == SECRET:
-                out.append(hit)
-            elif words and not common:
+            if not words or hit.priority == _P_NER and all(w in everyday for w in words):
+                continue
+            start, end = hit.start, hit.end
+            if hit.priority == _P_NER:
                 start = _past(view, mask, hit.start, hit.end, 1)
                 end = _past(view, mask, hit.end - 1, hit.start - 1, -1) + 1
-                out.append(replace(hit, start=start, end=end))
+            out.append(replace(hit, start=start, end=end))
         return out
 
     def term_for(self, text: str) -> Term | None:
@@ -811,6 +843,7 @@ class Detector:
         yield from (Hit(m.start(), m.end(), "id", _P_ID) for m in _IDS.finditer(text))
         yield from (_group(m, "id", _P_ID) for m in _DOC_IDS.finditer(text))
         yield from (Hit(m.start(), m.end(), "phone", _P_ID) for m in _PHONE.finditer(text))
+        yield from (Hit(a, b, "phone", _P_ID) for a, b in _phones(text))
         for p in _REPOS:
             yield from (_group(m, "repo", _P_HOST) for m in p.finditer(text))
         for p in _PROFILES:

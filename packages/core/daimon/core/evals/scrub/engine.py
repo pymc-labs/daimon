@@ -12,6 +12,7 @@ import base64
 import binascii
 import json
 import re
+import unicodedata
 import urllib.parse
 from bisect import bisect_right
 from collections import Counter
@@ -75,6 +76,7 @@ _BESIDE_FAKE: Final = frozenset(
 )  # fmt: skip
 _WORD: Final = re.compile(r"[^\W\d_]{2,}")
 _ASCII_SHARE: Final = 0.9
+_LETTER_SHARE: Final = 0.8
 _INLINE_B64: Final = re.compile(r"(?<![\w+/-])[A-Za-z0-9+/_-]{12,}={0,2}(?![\w+/=-])")
 # Keys whose short values name a person, an account, a company or a project.
 _IDENTITY: Final = {
@@ -107,6 +109,8 @@ _LEARNED: Final = frozenset({"person", "company"})
 # What a learned term may look like: words joined by single marks ("O'Neil", "AT&T", "St. Ives"),
 # an account, or an owner/name slug. Code, JSON and shell fragments are never a name.
 _NAME_TEXT: Final = re.compile(r"[^\W\d_](?:[^\W_]|\. |[ .'’&-](?![ .'’&-]))*(?<![ '’&-])")
+# A name under an identity key: plain signs only (`deploy={x}` is code).
+_KEY_NAME: Final = re.compile(r"[#@]?\w[\w .,'’&/@-]*")
 _LEARNED_TEXT: Final = {
     "handle": re.compile(r"(?=[\w.-]*[^\W\d_])[\w][\w.-]{1,38}"),
     "repo": re.compile(r"[\w.-]+/[\w.-]+"),
@@ -250,10 +254,24 @@ def _inline_b64(word: str) -> tuple[str, bool] | None:
     except (binascii.Error, ValueError):
         return None
     text = _as_text(data)
-    # Random bytes can be valid text ("dc-3dc21cc202a4" holds "uϷu͵q…"); real text is ASCII.
-    if not text or len(text.strip()) < 4 or sum(map(str.isascii, text)) < _ASCII_SHARE * len(text):
+    if not text or len(text.strip()) < 4 or not _language(text):
         return None
     return text, urlsafe
+
+
+def _language(text: str) -> bool:
+    """Whether decoded `text` reads as language. Random bytes can be valid text
+    ("dc-3dc21cc202a4" holds "uϷu͵q…"): mostly not ASCII, nor letters of one script."""
+    if sum(map(str.isascii, text)) >= _ASCII_SHARE * len(text):
+        return True
+    other = [c for c in text if not c.isascii()]
+    scripts = {unicodedata.name(c, "?").split()[0] for c in other if c.isalpha()}
+    body = text.replace(" ", "")
+    return (
+        len(scripts) <= 1
+        and all(unicodedata.category(c)[0] in "LMPZ" for c in other)
+        and sum(map(str.isalpha, body)) >= _LETTER_SHARE * len(body)
+    )
 
 
 def _in_marker(text: str, hit: Hit) -> bool:
@@ -290,7 +308,7 @@ class Scrubber:
         self.detector = Detector(
             [], Ner(ner_model, jobs=jobs) if ner_model else None, [*PUBLIC_NAMES, *entities.keep]
         )
-        terms = [*terms_of(entities), *filter(self._name_like, learned)]
+        terms = [*terms_of(entities), *learned]  # learned ones were checked when found
         self.detector.add(terms)
         self.key = scrub_key(key, salt)
         self.fakes = FakeMap(self.key, known=known, forbidden=[t.text for t in terms])
@@ -321,16 +339,30 @@ class Scrubber:
         pattern = _LEARNED_TEXT.get(term.kind, _NAME_TEXT)
         if len(text) < MIN_PART or len(text) > _MAX_NAME[0] or not pattern.fullmatch(text):
             return False
-        kept, common = self.detector.kept_words, english_words()
+        kept, common = self.detector.kept, english_words()
         named = (
             p for p in _NAME_PART.findall(fold(text).text)
             if len(p) > 1 and not p.isdigit() and not (p.isupper() and len(p) <= _ACRONYM)
-            and p.casefold() not in common and p.casefold() not in kept
+            and p.casefold() not in common and normalize(p) not in kept
         )  # fmt: skip
         return len(text.split()) <= _MAX_NAME[1] and next(named, None) is not None
 
-    def add_terms(self, terms: Iterable[Term]) -> None:
-        added = self.detector.add(t for t in terms if self._name_like(t))
+    def _key_name(self, term: Term) -> bool:
+        """Whether a value under an identity key may be a name: plain signs, not kept, and not
+        one lowercase everyday word ("staff"). Others are names here ("Blue Harbor")."""
+        text = term.text.strip()
+        return (
+            MIN_PART <= len(text) <= _MAX_NAME[0]
+            and _KEY_NAME.fullmatch(text) is not None
+            and normalize(text) not in self.detector.kept
+            and not (text.islower() and text in english_words())
+        )
+
+    def add_terms(self, terms: Iterable[Term], *, keyed: Iterable[Term] = ()) -> None:
+        """Learn the `terms` found that look like names and the `keyed` ones (identity values)
+        that may be."""
+        new = [*filter(self._key_name, keyed), *filter(self._name_like, terms)]
+        added = self.detector.add(new)
         self.fakes.forbid(t.text for t in added)
         self.learned += added
 
@@ -342,26 +374,31 @@ class Scrubber:
         """Add what `node` names to the dictionary: replaced everywhere from now on."""
         self.prefetch(node)
         terms: list[Term] = []
-        self._learn(node, key, terms, shape_of(node))
-        self.add_terms(terms)
+        keyed: list[Term] = []
+        self._learn(node, key, (terms, keyed), shape_of(node))
+        self.add_terms(terms, keyed=keyed)
 
-    def _learn(self, node: JsonValue, key: str, terms: list[Term], shape: Shape = None) -> None:
+    def _learn(
+        self, node: JsonValue, key: str, out: tuple[list[Term], list[Term]], shape: Shape = None
+    ) -> None:
+        """Terms found in `node` into `out[0]`, values under identity keys into `out[1]`."""
         if shape in (KEEP, NAME):
             return
         if isinstance(node, list):
             for item in node:
-                self._learn(item, key, terms, shape)
+                self._learn(item, key, out, shape)
         elif isinstance(node, dict):
             for k, v in node.items():
-                self._learn(v, k, terms, field_shape(shape, k))
+                self._learn(v, k, out, field_shape(shape, k))
         elif isinstance(node, str) and node != REDACTED:
             if (inner := _json_in(node)) is not None:
-                self._learn(inner, "", terms)
+                self._learn(inner, "", out)
                 return
+            terms, keyed = out
             kind = _IDENTITY.get(_snake(key))
             short = len(node) <= 80 and len(node.split()) <= 4 and "://" not in node
             if kind and short and not node.isdigit():
-                terms.append(Term("repo" if "/" in node else kind, node))  # type: ignore[arg-type]
+                keyed.append(Term("repo" if "/" in node else kind, node))  # type: ignore[arg-type]
             for hit in self.detector.find(node, names=namey(node)):
                 terms += self._from_hit(hit)
 

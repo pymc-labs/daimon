@@ -1388,6 +1388,7 @@ dependencies = [
 evals = [
     { name = "faker" },
     { name = "pdfplumber" },
+    { name = "phonenumbers" },
     { name = "presidio-analyzer" },
 ]
 
@@ -1411,6 +1412,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "numpy", specifier = ">=2,<3" },
     { name = "pdfplumber", marker = "extra == 'evals'", specifier = ">=0.11,<1" },
+    { name = "phonenumbers", marker = "extra == 'evals'", specifier = ">=8.13" },
     { name = "pillow", specifier = ">=11,<13" },
     { name = "presidio-analyzer", marker = "extra == 'evals'", specifier = ">=2.2,<3" },
     { name = "pydantic", specifier = ">=2.8" },

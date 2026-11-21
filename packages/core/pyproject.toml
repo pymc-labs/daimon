@@ -41,6 +41,7 @@ dependencies = [
 # (see docs/evals.md).
 evals = [
     "faker>=30",
+    "phonenumbers>=8.13",
     "presidio-analyzer>=2.2,<3",
     "pdfplumber>=0.11,<1",
 ]
