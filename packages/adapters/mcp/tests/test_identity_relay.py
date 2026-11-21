@@ -533,9 +533,7 @@ async def test_a_wake_link_made_in_a_dm_wakes_that_dm(
     """A DM's jobs get links too: each post runs a fresh private turn in the owner's DM,
     so the watch holds no session, and a later job's link shares its one watch."""
     person = await _person(db_session_factory)
-    token, _ = await _chat_session(
-        db_session_factory, person, "dm:scope-1", channel="chan-1", dm=True
-    )
+    token, _ = await _chat_session(db_session_factory, person, "dm:scope-1", channel="chan-1")
     first, second = await _wake_urls(db_session_factory, token, _tool_call(), _tool_call())
     assert isinstance(first, str) and isinstance(second, str), "a DM's job gets a wake link"
     assert first.rsplit("/", 2)[1] == second.rsplit("/", 2)[1], "both jobs share one watch"
