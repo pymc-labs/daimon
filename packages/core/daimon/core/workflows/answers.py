@@ -240,19 +240,20 @@ def _routes(ask: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _from_text(ask: dict[str, Any], text: str) -> waits.Answer | None:
-    """A typed answer: any text for a question, else a leading option word and a comment."""
+    """A typed answer: any text for a question, else a leading option word and a comment, else
+    (with `otherwise`) the reply itself."""
     shape = ask.get("shape")
     if shape in ("text", "question"):
         return waits.Answer(route=waits.ANSWER, values={"text": text}) if text.strip() else None
     if shape not in ("approve", "choice"):
         return None
     found = _WORD.match(text)
-    if found is None:
-        return None
-    word = found[1].casefold()
+    word = found[1].casefold() if found else None
     for name, label in _routes(ask):
-        if word in (name.casefold(), label.casefold(), label.split(" ")[0].casefold()):
+        if found and word in (name.casefold(), label.casefold(), label.split(" ")[0].casefold()):
             return waits.Answer(route=name, comment=found[2].strip() or None)
+    if ask.get("otherwise") and text.strip():
+        return waits.Answer(route=waits.OTHERWISE, values={"text": text.strip()})
     return None
 
 
@@ -314,11 +315,13 @@ class Button:
 
 
 def buttons(ask: dict[str, Any]) -> list[Button]:
-    """An ask's buttons in order, the primary last: its options, or Answer."""
+    """An ask's buttons in order, the primary last: Reply (with `otherwise`) and its options,
+    or Answer."""
     wait_id = str(ask.get("wait_id"))
     if ask.get("shape") in ("approve", "choice"):
         named = _routes(ask)
-        return [
+        reply = [Button(action_id(wait_id, waits.OTHERWISE), "Reply", False)]
+        return (reply if ask.get("otherwise") else []) + [
             Button(action_id(wait_id, name), label, i == len(named) - 1)
             for i, (name, label) in enumerate(named)
         ]
@@ -330,6 +333,8 @@ def form_of(ask: dict[str, Any], route: str) -> AskForm | None:
     title = str(ask.get("title") or "Answer")[:45]
     if ask.get("shape") == "approve" and route == waits.REJECT:
         return AskForm(title, (Box("comment", "Why are you rejecting it?"),))
+    if route == waits.OTHERWISE:
+        return AskForm(title, (Box("text", "Your reply"),))
     if route != waits.ANSWER:
         return None
     if ask.get("shape") == "form":

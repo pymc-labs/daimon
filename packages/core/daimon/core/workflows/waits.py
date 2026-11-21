@@ -46,6 +46,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 APPROVE: Final = "approve"
 REJECT: Final = "reject"
 ANSWER: Final = "answer"
+#: A reply that starts with no option word, to an approval with `otherwise`.
+OTHERWISE: Final = "otherwise"
 PROPOSALS: Final = "proposals"
 #: A proposals review has no spec fields of its own: it reminds daily and expires in a week.
 REVIEW_REMIND: Final = timedelta(days=1)
@@ -103,7 +105,14 @@ def _now() -> datetime:
 
 
 def _route(node: ApprovalNode | WaitNode, name: str) -> str | None:
+    if isinstance(node, ApprovalNode) and name == OTHERWISE and node.otherwise:
+        return name
     return name if node.routes and name in node.routes else None
+
+
+def replies(node: AnyNode | None, kind: str) -> bool:
+    """An approval that takes a free reply besides its options (`otherwise`)."""
+    return kind == "approval" and isinstance(node, ApprovalNode) and bool(node.otherwise)
 
 
 def _triggered_by(run: RunRow) -> uuid.UUID | None:
@@ -292,6 +301,7 @@ class ApprovalExecutor:
             fields=tuple(
                 asks.Box(k, f.title or k, tuple(f.enum or ())) for k, f in (node.form or {}).items()
             ),
+            otherwise=bool(node.otherwise),
         )
         return Park(
             "approval",
@@ -703,7 +713,8 @@ async def decide_wait(
         node = spec.nodes.get(step.node_id)
         kind = kind_of(wait)
         approval = node if isinstance(node, ApprovalNode) and kind != PROPOSALS else None
-        if answer.route not in routes_of(node, kind):
+        other = answer.route == OTHERWISE and replies(node, kind)
+        if answer.route not in routes_of(node, kind) and not other:
             raise BadAnswer(f"Unknown answer: {answer.route}")
         if (
             approval is not None
@@ -714,7 +725,12 @@ async def decide_wait(
         edits = answer.route == ANSWER or (
             answer.route == APPROVE and approval is not None and bool(approval.form)
         )
-        values = _form_values(approval, wait, answer) if edits else {}
+        values: dict[str, JsonValue] = _form_values(approval, wait, answer) if edits else {}
+        if other:
+            text = answer.values.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise BadAnswer("Write a reply first.")
+            values = {"text": text.strip()}
         selected = _selected(wait, answer) if kind == PROPOSALS else None
         comment = (answer.comment or "").strip()[:2000] or None
         if comment is None and needs_comment(node, kind, answer.route):
@@ -770,7 +786,9 @@ async def decide_wait(
             shown_hash=call_hash("binds", shown["binds"]) if shown and "binds" in shown else None,
             now=now,
         )
-        label = {APPROVE: "Approved", REJECT: "Rejected"}.get(answer.route, "Answered")
+        label = {APPROVE: "Approved", REJECT: "Rejected", OTHERWISE: "Replied"}.get(
+            answer.route, "Answered"
+        )
         await asks.queue_updates(
             session, wait, await asks.answered_status(session, wait, by=who.account_id, label=label)
         )

@@ -76,6 +76,8 @@ class InboxDetail(InboxItem):
     form: dict[str, Any] | None = None
     values: dict[str, Any] = {}
     routes: list[Route] = []
+    #: Takes a free reply besides its routes (`otherwise`), sent as route `otherwise`.
+    reply: bool = False
     publish: views.PublishRequest | None = None
     sent: list[dict[str, Any]] = []
     attachments: list[dict[str, Any]] = []
@@ -279,6 +281,7 @@ async def _wait_detail(
         or ({"text": shown["options"][0]} if typed and shown.get("options") else {})
         | {f.name: f.choices[0] for f in waits.question_fields(wait) if f.required and f.choices},
         routes=routes(node, kind),
+        reply=waits.replies(node, kind),
         attachments=[
             run_views.file_view(run.id, f)
             for f in cast("list[object]", shown.get("attachments") or [])
@@ -388,7 +391,8 @@ async def decide(env: Env, item_id: uuid.UUID, body: Decide) -> InboxItem:
     current = await item(env, item_id)
     if current.decision is not None:
         raise service.Refused(f"Already decided by {current.decision.by.name}.")
-    if body.route not in {r.name for r in current.routes}:
+    replied = current.reply and body.route == waits.OTHERWISE
+    if body.route not in {r.name for r in current.routes} and not replied:
         raise service.Invalid(f"Unknown answer: {body.route}")
     if current.kind == "publish":
         await service.decide_publish_request(

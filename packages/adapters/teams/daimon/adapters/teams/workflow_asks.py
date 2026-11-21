@@ -26,6 +26,7 @@ from daimon.core.media.vision import sniff_image_media_type
 from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
 from daimon.core.workflows import answers, waits
 from daimon.core.workflows.answers import Attachment
+from daimon.core.workflows.asks import Box
 from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
@@ -51,18 +52,18 @@ VERB: Final = answers.ASK_ACTION
 _FAILED = "That didn't work. Try again."
 
 
-def _boxes(ask: dict[str, Any]) -> answers.AskForm | None:
+def _boxes(ask: dict[str, Any]) -> tuple[Box, ...]:
+    """The card's answer boxes: a reject's reason or the answer, and a reply's text."""
     shape = ask.get("shape")
-    if shape == "choice":
-        return None
-    return answers.form_of(ask, waits.REJECT if shape == "approve" else waits.ANSWER)
+    routes = [] if shape == "choice" else [waits.REJECT if shape == "approve" else waits.ANSWER]
+    routes += [waits.OTHERWISE] if ask.get("otherwise") else []
+    return tuple(b for r in routes if (f := answers.form_of(ask, r)) for b in f.fields)
 
 
 def ask_card(text: str, ask: dict[str, Any]) -> AdaptiveCard:
     """The ask's words, its answer boxes and its buttons."""
-    form = _boxes(ask)
     body: list[CardElement] = [TextBlock(text=text, wrap=True)]
-    for box in () if form is None else form.fields:
+    for box in _boxes(ask):
         body.append(
             ChoiceSetInput(
                 id=box.name,

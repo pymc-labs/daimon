@@ -100,6 +100,8 @@ class Ask:
     files: tuple[dict[str, JsonValue], ...] = ()
     #: A form's fields, asked in the platform's modal.
     fields: tuple[Box, ...] = field(default=())
+    #: A reply that starts with no option word is an answer too (`otherwise`).
+    otherwise: bool = False
 
 
 def _hint(ask: Ask) -> str:
@@ -107,6 +109,8 @@ def _hint(ask: Ask) -> str:
         return "Use the Answer button to fill it in."
     if ask.shape in ("text", "question"):
         return "Reply here or use the Answer button."
+    if ask.otherwise:
+        return "Use a button, or reply here."
     words = " or ".join(name for name, _ in ask.routes)
     return f"Use a button, or reply starting with {words}."
 
@@ -167,6 +171,7 @@ async def queue(
                     for b in ask.fields
                 ],
                 "addressee": target.get("account_id"),
+                **({"otherwise": True} if ask.otherwise else {}),
                 "body": ask.text,
             },
         }

@@ -54,7 +54,7 @@ ACTIVE: Final = frozenset({"pending", "ready", "running", "waiting", "unknown"})
 DEFAULT_MAX_VISITS: Final = 3
 DEFAULT_MAX_STEPS: Final = 100
 INLINE: Final = (BranchNode, TransformNode, FinishNode)
-_FLOW_KINDS: Final = frozenset({"next", "route", "case", "else"})
+_FLOW_KINDS: Final = frozenset({"next", "route", "case", "else", "otherwise"})
 _DEFAULT_ATTEMPTS: Final = {"agent": 2, "code": 2}
 _BACKOFF_S: Final = 20
 
@@ -499,7 +499,8 @@ class _Walk:
         edges = edges_of(step.node_id, self.spec.nodes[step.node_id])
         if isinstance(self.spec.nodes[step.node_id], BranchNode):
             return [e for e in edges if e.slot == step.route]
-        routed = [e for e in edges if e.kind == "route" and e.label == step.route]
+        # An approval's `otherwise` edge is labelled with its route name, `otherwise`.
+        routed = [e for e in edges if e.kind in ("route", "otherwise") and e.label == step.route]
         return (
             routed if step.route is not None and routed else [e for e in edges if e.kind == "next"]
         )
@@ -623,7 +624,8 @@ def _branch_slot(node: BranchNode, context: dict[str, JsonValue], now: datetime)
 def _check_route(node_id: str, node: AnyNode, outcome: Succeeded) -> Outcome:
     if not isinstance(node, AgentNode | ApprovalNode | WaitNode) or not node.routes:
         return outcome
-    if outcome.route is not None and outcome.route not in node.routes:
+    otherwise = isinstance(node, ApprovalNode) and outcome.route == "otherwise" and node.otherwise
+    if outcome.route is not None and outcome.route not in node.routes and not otherwise:
         return Failed("contract", f"Unknown route: {outcome.route}", reason="contract_invalid")
     if outcome.route is None and not node.next:
         return Failed(

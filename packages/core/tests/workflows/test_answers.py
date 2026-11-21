@@ -228,3 +228,47 @@ async def test_only_a_reply_answers_an_ask_in_a_thread_the_run_did_not_open(
     assert await post_in(existing) == existing, "a thread this run opened is the ask's"
     assert await claim("lunch?") == "hint", "any message in it is for the ask"
     assert await claim("approve") == "answered"
+
+
+@pytest.mark.parametrize(
+    ("text", "step"), [("Make the title shorter", "revise"), ("Approve, looks good", "done")]
+)
+async def test_a_reply_without_an_option_word_goes_to_otherwise(
+    db_session: AsyncSession, text: str, step: str
+) -> None:
+    review = ASK | {"answer": "approve", "routes": {"approve": "done"}, "otherwise": "revise"}
+    review.pop("next")
+    finish = {"kind": "finish", "output": "${{ steps.ok.output.text }}"}
+    nodes = {"ok": review, "revise": finish, "done": {"kind": "finish"}}
+    world = await make_world(db_session, nodes, "ok", home="C1")
+    tenant = await tenants.get_tenant(db_session, world.tenant_id)
+    assert tenant is not None
+    await make_platform_principal(db_session, platform="discord", external_id="7", tenant=tenant)
+    run = await world.run()
+    wait_id = await world.park(run.id, "ok")
+    async with world.sm.begin() as s:
+        await workflow_waits.record_post(
+            s,
+            tenant_id=world.tenant_id,
+            wait_id=wait_id,
+            platform="discord",
+            channel_id="C1",
+            thread_id="T1",
+            message_id="M1",
+            addressee_account_id=None,
+        )
+    reply = answers.Reply(
+        platform="discord",
+        tenant_ids=(world.tenant_id,),
+        author="7",
+        message_id="M2",
+        text=text,
+        thread_id="T1",
+    )
+    claimed = await answers.claim_reply(world.sm, world.settings, reply, now=NOW)
+    assert claimed is not None and claimed.status == "answered", claimed
+    steps = await world.steps(run.id)
+    ran = {k for k, v in steps.items() if v.status == "succeeded"}
+    assert ran == {"ok", step}, {k: v.status for k, v in steps.items()}
+    if step == "revise":
+        assert steps["revise"].output == text, "the reply's text goes with it"
