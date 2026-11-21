@@ -18,7 +18,7 @@ import { TRIGGER } from "./kinds"
 import { checkInputs, mappingText, parseMapping, suggestMapping, type Row } from "./mapping"
 import { RotateDialog } from "./RotateDialog"
 import { JsonTree } from "./run/parts"
-import { listeningAt, until } from "./run/lib"
+import { listeningAt, shortId, until } from "./run/lib"
 import { clone } from "./spec"
 import { ChoiceCards, EditStrip, Part } from "./tabparts"
 import type { DeliveryRow, Spec, Trigger, Workflow } from "./types"
@@ -171,8 +171,6 @@ const OUTCOME = { accepted: { icon: CircleCheck, cls: "text-success", label: "Ac
 
 const show = (v: unknown) => (v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v))
 const isTest = (d: DeliveryRow) => d.id.startsWith("dlv_test_")
-/** Delivery ids carry a full UUID; ten hex digits tell them apart on screen. */
-const shortId = (id: string) => id.replace(/^(dlv_(?:test_)?[0-9a-f]{10})[0-9a-f]+$/, "$1")
 
 function UrlRow({ label, url, action }: { label: string; url: string; action?: React.ReactNode }) {
   return (

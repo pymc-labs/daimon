@@ -8,6 +8,8 @@ import { allEdges, edgeKey, titleOf } from "../spec"
 import type { RunDetail, Spec, StepRun } from "../types"
 
 export const clock = (iso: string | number) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+/** Delivery ids carry a full UUID; ten hex digits tell them apart on screen. */
+export const shortId = (id: string) => id.replace(/^(dlv_(?:test_)?[0-9a-f]{10})[0-9a-f]+$/, "$1")
 export const nodeOf = (key: string) => key.replace(/[#[].*$/, "")
 
 /** "Draft reply", "Draft reply" visit 2, or a For each item's label. */

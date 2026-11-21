@@ -20,7 +20,7 @@ import { titleOf, writes } from "../spec"
 import type { Delivery, Draft, RunDetail, RunEvent, Workflow } from "../types"
 import { RunBadge } from "../ui"
 import { Ledger } from "./Ledger"
-import { choice, type TestRun } from "./lib"
+import { choice, shortId, type TestRun } from "./lib"
 import { Fact } from "./parts"
 import { ForkDialog } from "./RunDialogs"
 import { StepView } from "./StepDrawer"
@@ -68,7 +68,7 @@ export function TestRunSheet({ wf, draft, open, onOpenChange }: { wf: Workflow; 
             {delivery && (
               <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs">
                 <ShieldAlert className="size-3.5 text-warning" /><span className="font-medium">Untrusted</span>
-                <span className="text-muted-foreground">Delivery</span><span className="font-mono">{delivery.id}</span>
+                <span className="text-muted-foreground">Delivery</span><span className="font-mono">{shortId(delivery.id)}</span>
                 <button type="button" className="ml-auto text-muted-foreground hover:text-foreground" aria-label="Clear delivery" onClick={() => { setDelivery(null); setVals({}) }}><X className="size-3.5" /></button>
               </div>
             )}
