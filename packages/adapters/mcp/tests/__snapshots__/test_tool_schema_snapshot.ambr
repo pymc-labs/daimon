@@ -7336,6 +7336,52 @@
         'type': 'object',
       }),
     }),
+    'read_daimon_docs': dict({
+      'description': '''
+        Read Daimon's own documentation, for the release that is running.
+        <blank line>
+        With no page: how Daimon works and the list of pages. With a page from that list
+        (`slack.md`): its text from `start_line`. Use it to answer how Daimon works, how to set
+        it up or why it behaves as it does.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'page': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'start_line': dict({
+            'default': 1,
+            'type': 'integer',
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'read_daimon_source': dict({
+      'description': '''
+        Read Daimon's own source code, for the release that is running.
+        <blank line>
+        `path` is under `packages/` or `defaults/` (`packages/core/daimon/core/config.py`).
+        A file comes back with line numbers from `start_line`; a folder, or no path, lists
+        what is in it.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'path': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'start_line': dict({
+            'default': 1,
+            'type': 'integer',
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'read_thread': dict({
       'description': '''
         Read messages from a thread, oldest-first.
@@ -8851,6 +8897,49 @@
           'skill_id',
           'files',
           'expected_version',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'search_daimon_docs': dict({
+      'description': '''
+        Search Daimon's own documentation for some plain text, ignoring case.
+        <blank line>
+        Returns each matching line as `page:line: text`; read the page with read_daimon_docs.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'query': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'query',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'search_daimon_source': dict({
+      'description': '''
+        Search Daimon's own source code for some plain text, ignoring case.
+        <blank line>
+        Searches `packages/` and `defaults/`, or only the file or folder `path` names.
+        Returns each matching line as `path:line: text`.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'path': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'query': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'query',
         ]),
         'type': 'object',
       }),
