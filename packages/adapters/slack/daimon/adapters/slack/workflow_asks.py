@@ -21,6 +21,7 @@ from daimon.core.slack_files import fetch_slack_file
 from daimon.core.thread_naming import strip_mentions
 from daimon.core.workflows import answers
 from daimon.core.workflows.answers import Attachment, Claimed
+from daimon.core.workflows.asks import Box
 from pydantic import JsonValue
 
 __all__ = ["ASK_FORM", "ask_blocks", "claim_event", "handle_ask_action", "submit_ask_form"]
@@ -135,11 +136,32 @@ def _form_view(form: answers.AskForm, meta: dict[str, str]) -> dict[str, Any]:
         "blocks": [
             {
                 "type": "input",
-                "block_id": name,
-                "label": {"type": "plain_text", "text": title[:2000] or name},
-                "element": {"type": "plain_text_input", "action_id": "value", "multiline": True},
+                "block_id": box.name,
+                "optional": not box.required,
+                "label": {"type": "plain_text", "text": box.title[:2000] or box.name},
+                "element": _element(box),
             }
-            for name, title in form.fields
+            for box in form.fields
+        ],
+    }
+
+
+def _typed(box: dict[str, Any]) -> str:
+    """A modal input's value: the text typed, or the option picked."""
+    return _field(box, "value", "value") or str(
+        _part(_part(box, "value"), "selected_option").get("value") or ""
+    )
+
+
+def _element(box: Box) -> dict[str, Any]:
+    if not box.choices:
+        return {"type": "plain_text_input", "action_id": "value", "multiline": True}
+    return {
+        "type": "static_select",
+        "action_id": "value",
+        "options": [
+            {"text": {"type": "plain_text", "text": c[:75]}, "value": c[:150]}
+            for c in box.choices[:100]
         ],
     }
 
@@ -180,7 +202,7 @@ async def submit_ask_form(runtime: SlackRuntime, payload: dict[str, Any]) -> Non
     view = cast("dict[str, Any]", payload.get("view") or {})
     meta = cast("dict[str, str]", json.loads(str(view.get("private_metadata") or "{}")))
     state = cast("dict[str, dict[str, Any]]", _part(view, "state").get("values") or {})
-    values = {name: _field(box, "value", "value") for name, box in state.items()}
+    values = {name: _typed(box) for name, box in state.items()}
     route = meta.get("route", "")
     sent, comment = answers.form_answer(route, values)
     claimed = await answers.press(
