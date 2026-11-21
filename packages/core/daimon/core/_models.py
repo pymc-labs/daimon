@@ -5891,7 +5891,15 @@ WORKFLOW_STEP_STATES: Final = (
     "cancelled",
     "unknown",
 )
-WORKFLOW_WAITING_REASONS: Final = ("approval", "question", "timer", "event", "blocked", "unknown")
+WORKFLOW_WAITING_REASONS: Final = (
+    "approval",
+    "question",
+    "timer",
+    "event",
+    "blocked",
+    "poll",
+    "unknown",
+)
 WORKFLOW_ERROR_CLASSES: Final = ("retryable", "gate", "contract", "agent", "unknown", "fatal")
 
 

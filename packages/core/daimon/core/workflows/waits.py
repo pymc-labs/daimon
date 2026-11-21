@@ -403,7 +403,8 @@ def event_source(work: StepWork, source: str) -> str:
 
 @dataclass(frozen=True)
 class WaitExecutor:
-    """A timer (`for`, `until`; a past time continues at once) or an event wait."""
+    """A timer (`for`, `until`; a past time continues at once), an event wait or a poll wait
+    (the polls loop checks it from now on)."""
 
     clock: Callable[[], datetime] = _now
 
@@ -411,6 +412,14 @@ class WaitExecutor:
         node = work.node
         assert isinstance(node, WaitNode), "the wait executor runs wait nodes"
         now = self.clock()
+        if node.poll is not None:
+            return Park(
+                "poll",
+                next_check_at=now,
+                expires_at=add_duration(now, node.timeout, work.spec.timezone)
+                if node.timeout
+                else None,
+            )
         try:
             if node.event is None:
                 if node.for_ is not None:
@@ -952,6 +961,43 @@ async def _arrive(
             )
             return True
     return False
+
+
+async def settle_poll(
+    sm: Sessions,
+    settings: Settings,
+    wait: workflow_runs.WaitRow,
+    *,
+    result: JsonValue = None,
+    failure: str | None = None,
+    now: datetime,
+) -> bool:
+    """A poll wait ends: `until` held (the last result continues the run) or the poll cannot
+    go on (`failure` fails the step). False when the wait is no longer open."""
+    async with sm.begin() as session:
+        held = await _held(session, wait.id, wait.run_id, wait.step_id)
+        if held is None:
+            return False
+        run, wait_, step = held
+        node = (await runs.spec_of(session, run)).nodes.get(step.node_id)
+        if not isinstance(node, WaitNode) or node.poll is None:
+            return False
+        key = runs.key_of(step)
+        outcome: Outcome
+        if failure is None:
+            decision, status = "arrived", "completed"
+            outcome = engine.Succeeded(result, _route(node, "arrived"))
+        else:
+            decision, status = "failed", "cancelled"
+            outcome = engine.Failed("fatal", failure, reason="poll_failed")
+        await workflow_waits.decide(
+            session, wait_.id, status=status, decision=decision, by=None, via=None, now=now
+        )
+        event = Event("wait.decided", key, {"id": str(wait_.id), "decision": decision})
+        await runs.resume(
+            session, settings, run=run, step=step, outcome=outcome, before=[event], now=now
+        )
+        return True
 
 
 async def deliver_callback(

@@ -132,7 +132,7 @@ class Park:
     """The step waits instead of settling: on the open wait `wait` (a question its tool
     opened), or on a new wait of `kind` that `execute` opens with the step."""
 
-    kind: Literal["approval", "question", "timer", "event", "blocked"]
+    kind: Literal["approval", "question", "timer", "event", "blocked", "poll"]
     wait: uuid.UUID | None = None
     addressees: tuple[str, ...] = ()
     deliver: str | None = None
@@ -142,6 +142,8 @@ class Park:
     event_key: str | None = None
     expires_at: datetime | None = None
     remind_at: datetime | None = None
+    #: A poll wait's next check.
+    next_check_at: datetime | None = None
     #: What the wait posts on chat (an approval's DMs or thread).
     ask: Ask | None = None
 
@@ -1277,6 +1279,7 @@ async def _park(
                 kind=kind,
                 expires_at=park.expires_at,
                 remind_at=park.remind_at,
+                next_check_at=park.next_check_at,
                 shown=park.shown,
                 addressees=park.addressees,
                 deliver=park.deliver,

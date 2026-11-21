@@ -371,7 +371,7 @@ def create_tables() -> None:
         ),
         sa.CheckConstraint(
             "waiting_reason IS NULL OR waiting_reason IN ('approval', 'question', 'timer', "
-            "'event', 'blocked', 'unknown')",
+            "'event', 'blocked', 'poll', 'unknown')",
             name="ck_workflow_runs_waiting_reason",
         ),
         sa.ForeignKeyConstraint(["forked_from_run_id"], ["workflow_runs.id"], ondelete="SET NULL"),
@@ -636,7 +636,7 @@ def create_tables() -> None:
         ),
         sa.CheckConstraint(
             "waiting_reason IS NULL OR waiting_reason IN ('approval', 'question', 'timer', "
-            "'event', 'blocked', 'unknown')",
+            "'event', 'blocked', 'poll', 'unknown')",
             name="ck_workflow_steps_waiting_reason",
         ),
         sa.ForeignKeyConstraint(["parent_step_id"], ["workflow_steps.id"], ondelete="CASCADE"),
@@ -887,7 +887,7 @@ def create_tables() -> None:
         ),
         sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
-            "kind IN ('approval', 'question', 'timer', 'event', 'blocked', 'unknown')",
+            "kind IN ('approval', 'question', 'timer', 'event', 'blocked', 'poll', 'unknown')",
             name="ck_workflow_waits_kind",
         ),
         sa.CheckConstraint(

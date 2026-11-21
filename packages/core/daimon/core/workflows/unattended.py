@@ -15,7 +15,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
-from daimon.core.tool_safety import ToolSafetyPolicy, classify_tool
+from daimon.core.tool_safety import ToolAnnotations, ToolSafetyPolicy, classify_tool
 from daimon.core.workflows.spec import (
     AgentNode,
     ApprovalNode,
@@ -51,6 +51,8 @@ class Call:
     test: bool = False
     exposed: bool = False
     approved: bool = False
+    #: The server's own listing of the tool; only `readOnlyHint` can make a read of it.
+    annotations: ToolAnnotations | None = None
     args: Mapping[str, JsonValue] = field(default_factory=dict[str, JsonValue])
     scopes: Sequence[WriteScope] = ()
     created: Mapping[str, Collection[str]] = field(default_factory=dict[str, Collection[str]])
@@ -70,7 +72,10 @@ def decide_unattended_call(policy: ToolSafetyPolicy, call: Call) -> Decision:
     key = f"{call.server}/{call.tool}"
     if key in policy.denied or call.server in policy.denied:
         return Decision("refuse", "denied", f"{key} is turned off here by the operator.")
-    if classify_tool(policy, server_name=call.server, tool_name=call.tool) == "read":
+    kind = classify_tool(
+        policy, server_name=call.server, tool_name=call.tool, annotations=call.annotations
+    )
+    if kind == "read":
         return Decision("allow")
     if call.test:
         return Decision("refuse", "test_run", "A test run never writes.")

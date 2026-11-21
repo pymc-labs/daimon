@@ -47,7 +47,7 @@ StepStatus = Literal[
 ]
 ErrorClass = Literal["retryable", "gate", "contract", "agent", "unknown", "fatal"]
 RunStatus = Literal["queued", "running", "waiting", "succeeded", "failed", "cancelled", "timed_out"]
-WaitingReason = Literal["approval", "question", "timer", "event", "blocked", "unknown"]
+WaitingReason = Literal["approval", "question", "timer", "event", "blocked", "poll", "unknown"]
 
 ACTIVE: Final = frozenset({"pending", "ready", "running", "waiting", "unknown"})
 DEFAULT_MAX_VISITS: Final = 3

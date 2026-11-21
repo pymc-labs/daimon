@@ -29,7 +29,13 @@ from daimon.core.workflows import catalog as tool_catalogs
 from daimon.core.workflows import context as turn_context
 from daimon.core.workflows import exchange, gate, run_views, runs, views
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
-from daimon.core.workflows.preflight import Place, Refusal, member_reads, private_reach
+from daimon.core.workflows.preflight import (
+    Place,
+    Refusal,
+    member_reads,
+    private_reach,
+    uses_polls,
+)
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.spec import Spec, dump_spec, node_hash, parse_spec, spec_hash
 from daimon.core.workflows.taint import Catalog
@@ -506,6 +512,10 @@ async def publish(
             first = validation.errors[0].message
             raise Invalid(f"Fix {len(validation.errors)} problem(s) before publishing: {first}")
         parsed = parse_spec(workflow.draft_spec)
+        if uses_polls(parsed):
+            features = await gate.features_at(env.sm, env.settings, workflow.tenant_id)
+            if features is None or not features.polls:
+                raise Off("Polls are off in this workspace. Ask an admin to turn them on.")
         carried, new = await _held_grants(session, workflow, parsed, validation.grants)
         if new and not env.who.admin:
             raise Refused(

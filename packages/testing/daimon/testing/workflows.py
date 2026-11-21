@@ -80,7 +80,7 @@ def make_settings(**workflows_settings: Any) -> Settings:  # noqa: ANN401 - Work
             "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
             "anthropic": AnthropicSettings(api_key=SecretStr("test")),
             "discord": DiscordSettings(bot_token=SecretStr("test")),
-            "features": {"workflows": "on"},
+            "features": {"workflows": "on", "workflow_polls": "on"},
             "workflows": workflows_settings,
         }
     )

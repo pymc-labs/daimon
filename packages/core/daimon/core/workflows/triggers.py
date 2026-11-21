@@ -21,7 +21,7 @@ from daimon.core.stores import workflow_runs, workflows
 from daimon.core.stores import workflow_triggers as store
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_triggers import EventRow, TriggerRow
-from daimon.core.workflows import runs
+from daimon.core.workflows import gate, runs
 from daimon.core.workflows.access import may_run
 from daimon.core.workflows.clock import add_duration
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
@@ -190,6 +190,10 @@ async def _start_one(
     if found is None:
         return Refusal("not_published", "No live version")
     spec, run_as = found
+    if trigger.kind == "poll" and not event.test:
+        features = await gate.features_at(sm, settings, trigger.tenant_id)
+        if features is None or not (features.enabled and features.polls):
+            return "polls_off"
     config = _trigger_spec(spec, trigger.trigger_key)
     if not config or config.get("kind") != trigger.kind:
         return Refusal("not_found", "This trigger is not in the version")

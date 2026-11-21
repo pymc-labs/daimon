@@ -781,6 +781,7 @@ async def open_wait(
     expires_at: datetime | None,
     remind_at: datetime | None,
     now: datetime,
+    next_check_at: datetime | None = None,
     shown: dict[str, Any] | None = None,
     addressees: Sequence[str] = (),
     deliver: str | None = None,
@@ -801,6 +802,7 @@ async def open_wait(
         kind=kind,
         expires_at=expires_at,
         remind_at=remind_at,
+        next_check_at=next_check_at,
         opened_at=now,
     )
     session.add(orm)
@@ -824,6 +826,28 @@ async def due_waits(
         .limit(limit)
     )
     return [WaitRow.model_validate(orm) for orm in rows]
+
+
+async def due_poll_waits(session: AsyncSession, *, now: datetime, limit: int) -> list[WaitRow]:
+    """Open poll waits whose next check is due and that have not passed their timeout."""
+    rows = await session.scalars(
+        select(WorkflowWait)
+        .where(
+            WorkflowWait.status == "waiting",
+            WorkflowWait.kind == "poll",
+            WorkflowWait.next_check_at <= now,
+            (WorkflowWait.expires_at.is_(None)) | (WorkflowWait.expires_at > now),
+        )
+        .order_by(WorkflowWait.next_check_at)
+        .limit(limit)
+    )
+    return [WaitRow.model_validate(orm) for orm in rows]
+
+
+async def set_next_check(session: AsyncSession, wait_id: uuid.UUID, at: datetime) -> None:
+    await session.execute(
+        update(WorkflowWait).where(WorkflowWait.id == wait_id).values(next_check_at=at)
+    )
 
 
 async def set_remind_at(session: AsyncSession, wait_id: uuid.UUID, remind_at: datetime) -> None:

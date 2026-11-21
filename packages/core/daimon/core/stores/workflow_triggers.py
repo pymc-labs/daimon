@@ -27,6 +27,7 @@ from daimon.core._models import (
     WorkflowTriggerSecret,
 )
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
+from daimon.core.workflows.spec import parse_duration
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -148,6 +149,13 @@ async def sync_live(
                     "last_fired_slot": cursor.last_fired_slot,
                     "seeded_after": cursor.seeded_after or values.get("seeded_after"),
                 }
+        elif kind == "poll":
+            # A changed poll starts over (a new baseline); a republish of a paused one wakes it.
+            if old is None or old.live != spec:
+                values |= {"state": {}, "enabled": True, "next_fire_at": now}
+            elif not old.enabled:
+                kept = {k: v for k, v in (old.state or {}).items() if k not in ("paused", "digest")}
+                values |= {"state": kept, "enabled": True, "next_fire_at": now}
         else:
             values["next_fire_at"] = None
         if old is None:
@@ -292,6 +300,72 @@ async def claim_due_schedules(
         if fresh:
             fired.append((row, slot))
     return fired
+
+
+# --- polls ---
+
+
+async def claim_due_polls(
+    session: AsyncSession, *, now: datetime, limit: int
+) -> list[tuple[TriggerRow, timedelta]]:
+    """Due poll triggers of active, published workflows, locked SKIP LOCKED: each moves to its
+    next check at once, so a poll that fails or hangs is retried an interval later, never
+    in a tight loop. Returns each with its interval."""
+    rows = await session.scalars(
+        select(WorkflowTrigger)
+        .join(Workflow, Workflow.id == WorkflowTrigger.workflow_id)
+        .join(Tenant, Tenant.id == WorkflowTrigger.tenant_id)
+        .where(
+            WorkflowTrigger.kind == "poll",
+            WorkflowTrigger.enabled.is_(True),
+            WorkflowTrigger.next_fire_at <= now,
+            Workflow.status == "active",
+            Workflow.live_version.is_not(None),
+            Tenant.archived_at.is_(None),
+        )
+        .order_by(WorkflowTrigger.next_fire_at)
+        .limit(limit)
+        .with_for_update(of=WorkflowTrigger, skip_locked=True)
+    )
+    due: list[tuple[TriggerRow, timedelta]] = []
+    for orm in rows.all():
+        row = TriggerRow.model_validate(orm)
+        spec = row.live
+        if spec is None:
+            continue  # sync_live clears the slot of a dropped trigger
+        every = parse_duration(str(spec["every"]))
+        await session.execute(
+            update(WorkflowTrigger)
+            .where(WorkflowTrigger.id == row.id)
+            .values(next_fire_at=now + every)
+        )
+        due.append((row, every))
+    return due
+
+
+async def set_poll_state(
+    session: AsyncSession, trigger_id: uuid.UUID, state: Mapping[str, Any]
+) -> None:
+    await session.execute(
+        update(WorkflowTrigger).where(WorkflowTrigger.id == trigger_id).values(state=dict(state))
+    )
+
+
+async def pause_poll(session: AsyncSession, trigger: TriggerRow, *, reason: str, text: str) -> None:
+    """Stop a poll that cannot go on as approved; the owner hears and a republish wakes it."""
+    state = {**(trigger.state or {}), "paused": reason}
+    await session.execute(
+        update(WorkflowTrigger)
+        .where(WorkflowTrigger.id == trigger.id)
+        .values(enabled=False, state=state)
+    )
+    await add_owner_notice(
+        session,
+        tenant_id=trigger.tenant_id,
+        workflow_id=trigger.workflow_id,
+        topic=f"poll_paused:{trigger.trigger_key}",
+        text=text,
+    )
 
 
 # --- secrets ---

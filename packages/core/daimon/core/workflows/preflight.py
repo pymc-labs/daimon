@@ -36,6 +36,7 @@ from daimon.core.workflows.spec import (
     FinishNode,
     ForEachNode,
     Spec,
+    WaitNode,
     node_hash,
     slug,
 )
@@ -94,6 +95,13 @@ def has_code(spec: Spec) -> bool:
     )
 
 
+def uses_polls(spec: Spec) -> bool:
+    """Any poll trigger or poll wait."""
+    return any(t.kind == "poll" for t in spec.triggers or []) or any(
+        isinstance(n, WaitNode) and n.poll is not None for n in spec.nodes.values()
+    )
+
+
 def spend_user_id(person: SpendPerson, account_id: uuid.UUID) -> str:
     """The id the run-as person's step spend is gated and recorded under. An allowance
     counts what they spent under any of their ids, so any one of them serves."""
@@ -125,6 +133,8 @@ async def check(
             return Refusal("workflows_off", "Workflows are off here. Ask an admin to turn them on.")
         if not features.code and has_code(place.spec):
             return Refusal("code_off", "Code steps are off here. Ask an admin to turn them on.")
+        if not features.polls and uses_polls(place.spec):
+            return Refusal("polls_off", "Polls are off here. Ask an admin to turn them on.")
         if channel is not None:
             provider = await channel_provider(
                 session, tenant_id=tenant.id, platform=tenant.platform, channel_id=channel
