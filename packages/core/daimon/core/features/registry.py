@@ -1243,7 +1243,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=(
             "Ask before an agent writes to an outside service in a chat reply. Allow writes "
-            "covers chat replies only, not routines or watches. Only a chat app admin, or the "
+            "covers chat replies only, not routines or watches. An agent that calls other agents "
+            "decides their writes with its own value. Only a chat app admin, or the "
             "operator with an audited reason, can change it."
         ),
         authority=Authority(native=True),

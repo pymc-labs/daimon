@@ -521,8 +521,8 @@ async def load_here_card(
         viewer=viewer,
         records=records,
     )
+    answering = roster.answering.ma_agent_id if roster.answering is not None else None
     if web is not None:
-        answering = roster.answering.ma_agent_id if roster.answering is not None else None
         place = FeaturePlace.of(tenant_id, platform, channel_id, thread_id, agent_id=answering)
         web = None if records is None else await links_at(records, settings, place, web)
     resolved = await scoped_config_read.resolve(
@@ -685,7 +685,7 @@ async def load_here_card(
     )
 
     gate = resolve_approval_gate(
-        policy, platform=platform, channel_id=channel_id, thread_id=thread_id
+        policy, platform=platform, channel_id=channel_id, thread_id=thread_id, agent_id=answering
     )
     shown = {"on": "Ask", "off": "Allow writes"}
     if is_dm:
@@ -693,7 +693,7 @@ async def load_here_card(
     elif gate.value == "inherit":
         note = "Approvals: Ask (default)."
     else:
-        note = f"Approvals: {shown[gate.value]} (set by the {gate.scope})."
+        note = f"Approvals: {shown[gate.value]} (set by the {gate.scope.split(':')[0]})."
     card = card.model_copy(
         update={
             "approval_gate_note": note,

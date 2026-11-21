@@ -43,6 +43,7 @@ from daimon.core.features.service import (
 )
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import source_text, view_json
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import get_tenant
 from rich.console import Console
@@ -50,7 +51,11 @@ from rich.table import Table
 
 features_app = typer.Typer(help="Features at a workspace, agent, channel or thread.")
 
-_AGENT = typer.Option("--agent", help="Agent name: its own settings, and its tools.")
+_AGENT = typer.Option(
+    "--agent",
+    help="Agent name: its own settings, and its tools. `set approvals` also takes the id "
+    "of a deleted agent.",
+)
 _CHANNEL = typer.Option("--channel", help="Channel id.")
 _THREAD = typer.Option("--thread", help="Thread id (needs --channel).")
 
@@ -107,13 +112,20 @@ def _agent_actor(target: _Target) -> AgentActor:
     )
 
 
-async def _agent_id(rt: CliRuntime, target: _Target, name: str) -> str:
+async def _agent_id(rt: CliRuntime, target: _Target, name: str, *, stale_ok: bool = False) -> str:
+    """The agent's id; with `stale_ok`, the id of a deleted agent that still holds an
+    Approvals value passes as itself, so that value can be cleared."""
     agent = await find_agent_by_daimon_tag(
         rt.anthropic, tenant_id=target.tenant_id, name=name, records=rt.sessionmaker
     )
-    if agent is None:
-        raise StoreError(f"no agent named {name!r} in this workspace")
-    return agent.id
+    if agent is not None:
+        return agent.id
+    if stale_ok:
+        async with rt.sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=target.tenant_id)
+        if name in policy.agent_approvals:
+            return name
+    raise StoreError(f"no agent named {name!r} in this workspace")
 
 
 async def _read(
@@ -210,7 +222,7 @@ async def features_set(
     if spec.authority.native and not rt.settings.cli.local_user.strip():
         raise StoreError(f"{spec.name} needs cli.local_user, the operator's name, to be set.")
     target = await _target(rt, selector)
-    agent_id = await _agent_id(rt, target, agent) if agent else None
+    agent_id = await _agent_id(rt, target, agent, stale_ok=key == "approvals") if agent else None
     if thread and not channel:
         raise StoreError("--thread needs --channel")
     place = FeaturePlace.of(target.tenant_id, target.platform, channel, thread, agent_id=agent_id)

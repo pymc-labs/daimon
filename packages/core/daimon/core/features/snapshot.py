@@ -69,7 +69,8 @@ class FeaturePlace:
         backend: str | None = None,
         routine_id: uuid.UUID | None = None,
     ) -> FeaturePlace:
-        """From a turn's ids; a thread equal to its channel (or a timer's scope) is none."""
+        """From a turn's ids; a thread equal to its channel (or a timer's scope) is none,
+        and so is an empty agent id (a blank `?agent=` is no agent, not an agent tier)."""
         thread_id = place_thread_id(thread_id)
         if thread_id and platform == "slack" and ":" in thread_id:
             channel, _, thread_id = thread_id.partition(":")
@@ -77,7 +78,13 @@ class FeaturePlace:
         if not thread_id or thread_id == channel_id or not channel_id:
             thread_id = None
         return cls(
-            tenant_id, platform, channel_id or None, thread_id, agent_id, backend, routine_id
+            tenant_id,
+            platform,
+            channel_id or None,
+            thread_id,
+            agent_id or None,
+            backend,
+            routine_id,
         )
 
     @property

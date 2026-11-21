@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`daimon features set approvals off --tier agent --agent NAME --reason ...`),
   the web app or an agent, by a chat admin or the operator, audited as before.
   With "Approvals in direct messages" on, a DM follows its agent's value.
+  An agent that calls other agents decides their writes with its own value.
+  A deleted agent's value is cleared with `--agent ID`.
 
 - **"Approvals in direct messages" no longer changes Approvals for everyone.**
   Setting it, from the CLI, the web app or an agent, wrote the server-wide

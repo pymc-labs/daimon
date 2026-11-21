@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -12,6 +14,9 @@ from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate, set_a
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.confirmation import ServerSkillUpdateCard
 from daimon.core.errors import DaimonError
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.service import place_tiers
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tool_safety import (
@@ -21,7 +26,12 @@ from daimon.core.tool_safety import (
     ToolCall,
     ToolSafetyPolicy,
 )
+from daimon.core.turn.admission import (  # pyright: ignore[reportPrivateUsage]
+    AdmissionGrant,
+    _approval_gate_for,
+)
 from daimon.core.turn.approvals import chat_tool_confirmation, interactive_decider
+from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.posture import PolicyApproval
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -658,3 +668,32 @@ async def test_agent_setting_is_audited_and_cleared(
         "agent:a1:inherit->off (why)",
         "agent:a1:off->inherit (why)",
     ]
+
+
+def test_a_blank_agent_id_is_no_agent_tier() -> None:
+    """`?agent=` arrives as an empty string; it must not read as an agent tier, since the
+    write path treats it as the workspace."""
+    place = FeaturePlace.of(uuid.uuid4(), "discord", "c1", agent_id="")
+    assert place.agent_id is None, "a blank id is no agent"
+    assert "agent" not in place_tiers(FEATURES["approvals"], place), "no agent tier offered"
+
+
+def test_a_coordinators_value_decides_what_its_callees_write() -> None:
+    """The gate is read once per turn for the turn's own agent, which is the coordinator in
+    a session where agents call other agents; a callee's own value is never consulted."""
+    own = {
+        "coordinator": AgentApprovals(approvals="off", approvals_set_by="admin-1"),
+        "callee": AgentApprovals(approvals="on", approvals_set_by="admin-1"),
+    }
+    grant = SimpleNamespace(
+        is_dm=False, platform="discord", channel_id="c1", thread_id=None, tenant_id=uuid.uuid4()
+    )
+    deps = SimpleNamespace(tool_safety=ON)
+    gate = _approval_gate_for(
+        cast(TurnDeps, deps),
+        TenantAccessPolicy(agent_approvals=own),
+        cast(AdmissionGrant, grant),
+        "coordinator",
+    )
+    assert gate is not None
+    assert (gate.value, gate.scope) == ("off", "agent:coordinator"), gate
