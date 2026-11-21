@@ -99,30 +99,52 @@ async def link(db_session_factory, monkeypatch):
     return watch, token
 
 
-async def test_a_callback_watch_cannot_be_made_in_a_dm(db_session_factory, link):
+async def test_a_callback_watch_made_in_a_dm_wakes_that_dm(db_session_factory, link):
+    """A post to a watch made in a Discord DM queues a DM report, which runs a fresh
+    private turn of the owner in that DM (`_run_watch_report`), as a DM timer does."""
     watch, _token = link
     async with db_session_factory.begin() as db:
-        binding = ContinuationRequest(
+        await create_thread_session(
+            db,
             tenant_id=watch.tenant_id,
             platform="discord",
-            parent_channel_id="dm:scope",
             thread_id="dm:scope",
-            requester_account_id=watch.owner_account_id,
-            requester_external_user_id="123",
-            target_ma_agent_id="agent-bound",
-            target_name="analyst",
-            requested_work=None,
-            reason="watch_fired",
-            idempotency_key=uuid.uuid4(),
+            channel_id="5151",
+            account_id=watch.owner_account_id,
+            ma_session_id="session-dm",
+            ma_agent_id="agent-bound",
         )
-        with pytest.raises(ValueError, match="made in a DM"):
-            await watches.register_callback_watch(
-                db,
-                binding,
-                instructions="Summarize.",
-                lifetime=timedelta(days=1),
-                now=datetime.now(UTC),
-            )
+        made, token = await watches.register_callback_watch(
+            db,
+            _dm_binding(watch),
+            instructions="Summarize.",
+            lifetime=timedelta(days=1),
+            now=datetime.now(UTC),
+        )
+    assert (made.delivery, made.session_id) == ("dm", None), "it reports in the owner's DM"
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, made.id, token)).status == 202, "the post is accepted"
+    async with db_session_factory() as db:
+        (evidence,) = await watches.list_evidence(db, made.id)
+        wake = await get_continuation(db, idempotency_key=evidence.wake_key)
+        assert (wake.reason, wake.thread_id) == ("watch_report", "dm:scope"), "a DM report"
+        assert await watches.watch_seed(db, wake, now=datetime.now(UTC)), "and it may run"
+
+
+def _dm_binding(watch):
+    return ContinuationRequest(
+        tenant_id=watch.tenant_id,
+        platform="discord",
+        parent_channel_id="5151",
+        thread_id="dm:scope",
+        requester_account_id=watch.owner_account_id,
+        requester_external_user_id="123",
+        target_ma_agent_id="agent-bound",
+        target_name="analyst",
+        requested_work=None,
+        reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )
 
 
 async def post(client, watch_id, token, body=b"hello", **kw):
