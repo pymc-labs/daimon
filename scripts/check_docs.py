@@ -21,11 +21,14 @@ PARAGRAPH_WORDS = 100
 SENTENCE_WORDS = 40
 MAX_HEADING_LEVEL = 3
 
+# "is new" is a time word at the end of a clause or before "in", "since"; "the value is new
+# and not empty" is an adjective.
 _TIME_WORD_RE = re.compile(
-    r"\bnow\b|\bno longer\b|\bnewly\b|\bnew (?:in|since|as of|from)\b|\b(?:is|are|was|were) new\b",
+    r"\bnow\b|\bno longer\b|\bnewly\b|\bnew (?:in|since|as of|from)\b"
+    r"|\b(?:is|are|was|were) new(?=\s*(?:[.,;:!?]|$)|\s+(?:in|since|as of|from)\b)",
     re.IGNORECASE,
 )
-_LITERAL_RE = re.compile(r"`[^`]*`|\*\*[^*]*\*\*|“[^”]*”")  # code, button labels, quoted text
+_LITERAL_RE = re.compile(r"`[^`]*`|\*\*[^*]*\*\*|“[^”]*”|\"[^\"]*\"")  # code, labels, quotes
 _LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s")
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`\[(*])")
@@ -66,6 +69,8 @@ def _blocks(lines: list[str]) -> list[tuple[int, str]]:
 def check(path: Path) -> list[str]:
     lines = path.read_text().splitlines()
     if lines[:1] == ["---"]:  # front matter: blank it, so line numbers stay true
+        if "---" not in lines[1:]:
+            return [f"{path}:1: front matter: opened with --- and never closed"]
         end = lines.index("---", 1)
         lines[: end + 1] = [""] * (end + 1)
     findings: list[str] = []
