@@ -30,7 +30,14 @@ def test_text_after_the_last_tool_is_the_answer() -> None:
     )
     assert view.text == "Found it."
     assert view.steps == (
-        WebStep(id="t1", label="Search issues", detail="linear", status="done", ms=900),
+        WebStep(
+            id="t1",
+            label="Search issues",
+            detail="linear",
+            status="done",
+            ms=900,
+            tool="search_issues",
+        ),
     )
 
 
