@@ -32,6 +32,7 @@ from daimon.core.stores.workflow_run_events import NewEvent, append_events, list
 from daimon.core.stores.workflow_waits import Wait, WaitPost
 from daimon.core.workflows import asks, waits
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.asks import Box, box_of
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.views import people_of
 from mux.contracts.ids import Scope
@@ -288,7 +289,7 @@ class AskForm:
     """What an ask's answer form asks: one text box, or a form's fields; a reject's reason."""
 
     title: str
-    fields: tuple[tuple[str, str], ...]
+    fields: tuple[Box, ...]
 
 
 @dataclass(frozen=True)
@@ -314,14 +315,13 @@ def form_of(ask: dict[str, Any], route: str) -> AskForm | None:
     """The form `route`'s button opens before it answers, or None when it answers at once."""
     title = str(ask.get("title") or "Answer")[:45]
     if ask.get("shape") == "approve" and route == waits.REJECT:
-        return AskForm(title, (("comment", "Why are you rejecting it?"),))
+        return AskForm(title, (Box("comment", "Why are you rejecting it?"),))
     if route != waits.ANSWER:
         return None
     if ask.get("shape") == "form":
         named = cast("list[dict[str, Any]]", ask.get("fields") or [])
-        fields = tuple((str(f["name"]), str(f["title"])) for f in named)
-        return AskForm(title, fields)
-    return AskForm(title, (("text", "Your answer"),))
+        return AskForm(title, tuple(box_of(f) for f in named))
+    return AskForm(title, (Box("text", "Your answer"),))
 
 
 async def ask_form(sm: Sessions, *, platform: Chat, message_id: str, route: str) -> AskForm | None:

@@ -136,6 +136,16 @@ def _form(node: AnyNode | None, wait: Wait) -> dict[str, Any] | None:
         return {"type": "object", "properties": fields}
     if not _typed(node, wait):
         return None
+    if asked := waits.question_fields(wait):
+        return {
+            "type": "object",
+            "required": [f.name for f in asked if f.required],
+            "properties": {
+                f.name: {"type": "string", "title": f.title}
+                | ({"enum": f.choices} if f.choices else {})
+                for f in asked
+            },
+        }
     fields: dict[str, Any] = {"text": {"type": "string"}}
     if options := (wait.shown or {}).get("options"):
         fields = {"text": {"type": "string", "enum": list(options)}, "note": _NOTE}
@@ -266,7 +276,8 @@ async def _wait_detail(
         question=_question(node, wait, key) if typed else None,
         form=_form(node, wait),
         values=dict(shown.get("values") or {})
-        or ({"text": shown["options"][0]} if typed and shown.get("options") else {}),
+        or ({"text": shown["options"][0]} if typed and shown.get("options") else {})
+        | {f.name: f.choices[0] for f in waits.question_fields(wait) if f.required and f.choices},
         routes=routes(node, kind),
         attachments=[
             run_views.file_view(run.id, f)

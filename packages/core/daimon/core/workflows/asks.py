@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits, workflows
 from daimon.core.stores.workflow_deliveries import DeliveryKind, DeliveryRow
@@ -52,6 +52,27 @@ _WHY: Final[dict[str, str]] = {
 
 
 @dataclass(frozen=True)
+class Box:
+    """One answer field asked in chat: free text, or a pick when `choices` is set."""
+
+    name: str
+    title: str
+    choices: tuple[str, ...] = ()
+    required: bool = True
+
+
+def box_of(raw: dict[str, Any]) -> Box:
+    """A `Box` from an ask payload's `fields` entry."""
+    choices = cast("list[object]", raw.get("choices") or [])
+    return Box(
+        str(raw["name"]),
+        str(raw["title"]),
+        tuple(str(c) for c in choices),
+        raw.get("required") is not False,
+    )
+
+
+@dataclass(frozen=True)
 class Ask:
     """What a wait's chat posts carry, built by the code that opens the wait."""
 
@@ -65,8 +86,8 @@ class Ask:
     home: str | None = None
     channel: str | None = None
     files: tuple[dict[str, JsonValue], ...] = ()
-    #: A form's `(name, title)` fields, asked in the platform's modal.
-    fields: tuple[tuple[str, str], ...] = field(default=())
+    #: A form's fields, asked in the platform's modal.
+    fields: tuple[Box, ...] = field(default=())
 
 
 def _hint(ask: Ask) -> str:
@@ -119,7 +140,11 @@ async def queue(
                 "title": ask.title,
                 "shape": ask.shape,
                 "routes": [{"name": n, "label": label} for n, label in ask.routes],
-                "fields": [{"name": n, "title": t} for n, t in ask.fields],
+                "fields": [
+                    {"name": b.name, "title": b.title, "choices": list(b.choices)}
+                    | ({} if b.required else {"required": False})
+                    for b in ask.fields
+                ],
                 "addressee": target.get("account_id"),
                 "body": ask.text,
             },

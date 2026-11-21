@@ -359,14 +359,20 @@ async def _add_costs(session: AsyncSession, run: RunRow, views: Sequence[RunEven
 
 
 def answer_view(wait: Wait, at: str, names: Mapping[uuid.UUID, Person]) -> dict[str, Any]:
+    values = wait.answer_values or {}
+    # Stored JSON sorts keys; a question's fields show in the order they were asked.
+    asked = {
+        str(obj(f).get("name")): str(obj(f).get("title"))
+        for f in seq((wait.shown or {}).get("fields"))
+    }
     return {
         "by": person(names, wait.decided_by_account_id).model_dump(),
         "via": wait.decided_via or "web",
         "text": wait.answer_text,
-        "values": wait.answer_values or {},
+        "values": {k: values[k] for k in asked if k in values} | values,
         "files": [file_view(wait.run_id, f) for f in wait.answer_files or []],
         "at": at,
-    }
+    } | ({"labels": asked} if asked else {})
 
 
 def sent_view(sent: Mapping[str, Any], names: Mapping[uuid.UUID, Person]) -> dict[str, Any]:

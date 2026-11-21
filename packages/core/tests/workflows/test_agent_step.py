@@ -9,16 +9,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
+import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core import usage_recording
 from daimon.core.headless_runner import StepTurn
 from daimon.core.pricing import MODEL_PRICING
-from daimon.core.stores import workflow_runs, workflow_waits
+from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
-from daimon.core.workflows import brief, run_views, runs, step_tools, waits
+from daimon.core.workflows import answers, brief, inbox, run_views, runs, step_tools, waits
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.agent_step import (
     AgentStepExecutor,
@@ -27,6 +28,7 @@ from daimon.core.workflows.agent_step import (
     step_decider,
 )
 from daimon.core.workflows.runs import StepWork
+from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AgentNode, SchemaField, parse_spec
 from daimon.testing.workflows import NOW, World, make_world
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
@@ -471,3 +473,71 @@ async def test_a_question_parks_the_step_and_the_answer_resumes_its_session(
     await drive(world, run.id, lane)
     assert (await world.get(run.id)).status == "succeeded", "the step carries on"
     assert lane.sessions == [None, "ses_1"] and lane.resumes == [False, False], lane
+
+
+async def test_a_question_with_fields_asks_a_choice_and_a_note_and_answers_with_both(
+    db_session: AsyncSession,
+) -> None:
+    """`ask_human` fields reach the inbox form, the chat modal and the agent in their order."""
+    nodes = {
+        "a": {"kind": "agent", "instructions": "Do it", "can_ask": True, "next": "f"},
+        "f": {"kind": "finish"},
+    }
+    world = await make_world(db_session, nodes, "a")
+    run = await world.run()
+    fields = [
+        waits.AskField(
+            name="channel", title="Channel", choices=["#delivery", "#leads"], required=True
+        ),
+        waits.AskField(name="note", title="Note"),
+    ]
+    told: list[str] = []
+
+    async def asks(lane: Lane, work: StepWork, message: str) -> None:
+        await lane.call(
+            lambda s, g: waits.ask(s, g, question="Where?", options=[], fields=fields, now=NOW)
+        )
+
+    async def answered(lane: Lane, work: StepWork, message: str) -> None:
+        told.append(message)
+        await completes(None)(lane, work, message)
+
+    lane = Lane(world, [asks, answered])
+    await drive(world, run.id, lane)
+    step = (await world.steps(run.id))["a"]
+    async with world.sm() as s:
+        wait = (await workflow_waits.waits_of_step(s, step.id))[-1]
+    env = Env(world.sm, world.settings, Who(tenant_id=world.tenant_id, account_id=world.owner), NOW)
+    detail = await inbox.item(env, wait.id)
+    assert detail.form == {
+        "type": "object",
+        "required": ["channel"],
+        "properties": {
+            "channel": {"type": "string", "title": "Channel", "enum": ["#delivery", "#leads"]},
+            "note": {"type": "string", "title": "Note"},
+        },
+    }, f"the web form asks the fields in order: {detail.form}"
+    assert list(detail.form["properties"]) == ["channel", "note"], "author order kept"
+    assert detail.values == {"channel": "#delivery"}, "a required choice starts on its first"
+    async with world.sm() as s:
+        [post] = await workflow_deliveries.deliveries_of_wait(s, wait.id)
+    form = answers.form_of(post.payload["ask"], waits.ANSWER)
+    assert form is not None and [(b.name, b.title, b.choices, b.required) for b in form.fields] == [
+        ("channel", "Channel", ("#delivery", "#leads"), True),
+        ("note", "Note", (), False),
+    ], f"the chat modal asks the same fields: {form}"
+
+    who = Who(tenant_id=world.tenant_id, account_id=world.owner)
+    wrong = waits.Answer(route="answer", values={"channel": "#nope"})
+    with pytest.raises(waits.BadAnswer, match="Pick one of the choices for Channel"):
+        await waits.decide_wait(world.sm, world.settings, who, wait.id, wrong, via="web", now=NOW)
+    answer = waits.Answer(route="answer", values={"note": "Kickoff Monday", "channel": "#leads"})
+    await waits.decide_wait(world.sm, world.settings, who, wait.id, answer, via="web", now=NOW)
+    await drive(world, run.id, lane)
+    assert told and "<answer>Channel: #leads\nNote: Kickoff Monday</answer>" in told[0], told
+    done = (await inbox.item(env, wait.id)).answer
+    assert done is not None and list(done["values"].items()) == [
+        ("channel", "#leads"),
+        ("note", "Kickoff Monday"),
+    ], f"the answer keeps the fields' order: {done}"
+    assert done["labels"] == {"channel": "Channel", "note": "Note"}, "shown under their titles"
