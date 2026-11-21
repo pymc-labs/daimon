@@ -339,6 +339,8 @@ def origin_turn_place(origin: TurnOriginRow) -> TurnPlace:
 REQUESTER_META_KEY: Final = "requester_platform_user_id"
 CONVERSATION_META_KEY: Final = "requester_conversation"
 KIND_META_KEY: Final = "requester_kind"
+#: A one-time callback watch link for a `wake_tools` call; only the relay writes it.
+WAKE_META_KEY: Final = "wake_url"
 #: Who a stamped call is for: a person's live turn, or a routine run on its owner's behalf.
 RequesterKind = Literal["person", "routine"]
 #: Platforms whose user and channel ids the requester fields may carry.
@@ -434,6 +436,7 @@ def _stamp_message(
     person: str | None,
     conversation: Mapping[str, str | None] | None,
     kind: RequesterKind | None,
+    wake_url: str | None,
 ) -> dict[str, object]:
     if not isinstance(message, dict):
         raise RequesterBodyError("a request body must be an object or an array of objects")
@@ -457,6 +460,7 @@ def _stamp_message(
     meta.pop(REQUESTER_META_KEY, None)
     meta.pop(CONVERSATION_META_KEY, None)
     meta.pop(KIND_META_KEY, None)
+    meta.pop(WAKE_META_KEY, None)
     # Only a tool call is stamped; any other method just loses what a caller put there.
     # A live turn is named only with its place; a routine's place may be unrecorded.
     if (
@@ -468,6 +472,8 @@ def _stamp_message(
         meta[KIND_META_KEY] = kind
         if conversation:
             meta[CONVERSATION_META_KEY] = dict(conversation)
+    if is_call and wake_url is not None:
+        meta[WAKE_META_KEY] = wake_url
     if is_call or existing is not None:
         call["_meta"] = meta
     return fields
@@ -479,6 +485,7 @@ def stamp_requester(
     person: str | None,
     conversation: Mapping[str, str | None] | None,
     kind: RequesterKind | None = "person",
+    wake_url: str | None = None,
 ) -> bytes:
     """The request body with each `tools/call` stamped with who asked, where and for what.
 
@@ -488,6 +495,7 @@ def stamp_requester(
     whose `conversation` is its delivery place (left out when it has none). With no
     `person` or `kind` (a foreign sender, two live turns) the keys are only removed.
     Requester keys are removed under `params._meta` of every method, not only tool calls.
+    `wake_url` is set on each tool call when given; a caller's own one is always removed.
     Strict: a body that is not UTF-8 JSON, repeats a key, or holds a tool call without
     object params raises `RequesterBodyError`. Other methods and responses pass through, but
     the whole body is re-serialized so what was checked is what is sent.
@@ -505,12 +513,37 @@ def stamp_requester(
         if not batch:
             raise RequesterBodyError("a batch must not be empty")
         out: object = [
-            _stamp_message(item, person=person, conversation=conversation, kind=kind)
+            _stamp_message(
+                item, person=person, conversation=conversation, kind=kind, wake_url=wake_url
+            )
             for item in batch
         ]
     else:
-        out = _stamp_message(parsed, person=person, conversation=conversation, kind=kind)
+        out = _stamp_message(
+            parsed, person=person, conversation=conversation, kind=kind, wake_url=wake_url
+        )
     try:
         return json.dumps(out, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except (UnicodeEncodeError, RecursionError, ValueError) as err:
         raise RequesterBodyError("request body cannot be re-encoded") from err
+
+
+def called_tool(body: bytes) -> str | None:
+    """The tool a body that is one `tools/call` names, or None for a batch, another
+    method or a body that is not JSON (`stamp_requester` refuses that one)."""
+    try:
+        message = json.loads(body)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(message, dict):
+        return None
+    fields = cast("dict[str, object]", message)
+    method, params = fields.get("method"), fields.get("params")
+    if not (
+        isinstance(method, str)
+        and method.strip().casefold() == "tools/call"
+        and isinstance(params, dict)
+    ):
+        return None
+    name = cast("dict[str, object]", params).get("name")
+    return name if isinstance(name, str) else None

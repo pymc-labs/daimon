@@ -4,7 +4,8 @@
 (`daimon.core.mcp_vault.create_relay_vault`), signs who is calling
 (`daimon.core.mcp_identity`) and forwards the streamable HTTP request to the
 configured server with that token as its bearer. The response, an SSE stream
-included, is passed back unchanged.
+included, is passed back unchanged. A person's call to one of a server's `wake_tools`
+also carries a callback watch link (`WakeLinks`) the server posts to when the work ends.
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from __future__ import annotations
 import ssl
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import cast
 
 import httpx
 import structlog
@@ -20,7 +23,8 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
 from daimon.core.audience_gate import read_audience_mode
 from daimon.core.channel_audience import channel_has_outsiders
-from daimon.core.config import SignedIdentityServer
+from daimon.core.config import SignedIdentityServer, load_watches_settings
+from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
@@ -33,6 +37,7 @@ from daimon.core.mcp_identity import (
     RelayBinding,
     RequesterBodyError,
     RequesterKind,
+    called_tool,
     caller_claims,
     matching_turn,
     origin_turn_place,
@@ -41,8 +46,9 @@ from daimon.core.mcp_identity import (
     routine_conversation,
     stamp_requester,
 )
+from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
-from daimon.core.stores.domain import RoutineRow, TurnOriginRow
+from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import list_active_origins
@@ -73,6 +79,71 @@ _REQUEST_HEADERS = (
     "mcp-session-id",
 )
 _RESPONSE_HEADERS = ("content-type", "mcp-session-id", "mcp-protocol-version", "cache-control")
+#: A wake link lasts this long, and is handed out again for this long after it is made,
+#: so a job started on its last reuse still has half a day to report.
+WAKE_LIFETIME = timedelta(days=1)
+WAKE_REUSE = timedelta(hours=12)
+
+
+@dataclass(frozen=True)
+class _WakeLink:
+    watch_id: uuid.UUID
+    url: str
+    made_at: datetime
+
+
+class WakeLinks:
+    """Callback watch links for `wake_tools` calls: one per chat session, person and
+    server, reused for `WAKE_REUSE` so repeated calls hold one watch, not one each.
+
+    The link is a secret: it lives only here and in the forwarded call, never in a log.
+    """
+
+    def __init__(self) -> None:
+        self._links: dict[tuple[uuid.UUID, uuid.UUID, str], _WakeLink] = {}
+
+    async def link(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        binding: ContinuationRequest,
+        *,
+        session_key: uuid.UUID,
+        server: str,
+        now: datetime,
+    ) -> str | None:
+        """The link for this conversation, made when there is no live one; None when
+        watches or callbacks are off, or the watch cannot be made (a DM, the owner's cap)."""
+        settings = load_watches_settings()
+        if not settings.enabled or settings.callback_base_url is None:
+            return None
+        key = (session_key, binding.requester_account_id, server)
+        cached = self._links.get(key)
+        if cached is not None and now - cached.made_at < WAKE_REUSE:
+            async with sessionmaker() as db:
+                row = await watches.get_watch(db, cached.watch_id)
+            if row is not None and row.status == "active":
+                return cached.url
+        try:
+            async with sessionmaker.begin() as db:
+                watch, token = await watches.register_callback_watch(
+                    db,
+                    binding,
+                    instructions=(
+                        f"Work started through {server} in this conversation has ended. "
+                        "Tell the person how it went, from the post below."
+                    ),
+                    lifetime=WAKE_LIFETIME,
+                    now=now,
+                )
+        except Exception as err:  # boundary: the call still runs, only without a wake
+            log.info(
+                "mcp_identity.wake_link_unavailable", server=server, error_type=type(err).__name__
+            )
+            return None
+        self._links = {k: v for k, v in self._links.items() if now - v.made_at < WAKE_REUSE}
+        url = f"{settings.callback_base_url}/callbacks/watches/{watch.id}/{token}"
+        self._links[key] = _WakeLink(watch.id, url, now)
+        return url
 
 
 def build_relay_clients(servers: Iterable[SignedIdentityServer]) -> dict[str, httpx.AsyncClient]:
@@ -251,6 +322,7 @@ def build_identity_relay_route(
     """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
     the key of each server whose auth is bearer. A server with neither is refused (503)."""
     keys = bearers or {}
+    wake_links = WakeLinks()
 
     async def handler(request: Request) -> Response:
         server = servers.get(request.path_params["name"])
@@ -374,8 +446,37 @@ def build_identity_relay_route(
                         routine_conversation(routine),
                         "routine",
                     )
+            wake_url: str | None = None
+            if (
+                kind == "person"
+                and origin is not None
+                and binding.session_key is not None
+                and named is not None
+                and called_tool(body) in server.wake_tools
+            ):
+                wake_url = await wake_links.link(
+                    sessionmaker,
+                    ContinuationRequest(
+                        tenant_id=tenant_id,
+                        platform=cast(ChatPlatform, platform),
+                        parent_channel_id=origin.parent_channel_id,
+                        thread_id=origin.thread_id,
+                        requester_account_id=account_id,
+                        requester_external_user_id=named,
+                        target_ma_agent_id=origin.responder_ma_agent_id,
+                        target_name=origin.responder_name,
+                        requested_work=None,
+                        reason="watch_fired",
+                        idempotency_key=uuid.uuid4(),
+                    ),
+                    session_key=binding.session_key,
+                    server=server.name,
+                    now=now,
+                )
             try:
-                body = stamp_requester(body, person=named, conversation=conversation, kind=kind)
+                body = stamp_requester(
+                    body, person=named, conversation=conversation, kind=kind, wake_url=wake_url
+                )
             except RequesterBodyError:
                 return Response(status_code=400)
         http = clients[server.name]

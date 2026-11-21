@@ -2351,6 +2351,15 @@ class SignedIdentityServer(BaseModel):
     # using it stays in its channel (`daimon.core.relay_scope`). False: the server checks
     # each call's asker and place itself, so the agent behaves like any other.
     channel_scoped: bool = True
+    # Tools whose call, in a person's turn, carries a wake link the server posts to
+    # when the work it started ends (`daimon.adapters.mcp.identity_relay.WakeLinks`).
+    wake_tools: frozenset[str] = frozenset()
+
+    @model_validator(mode="after")
+    def _wake_needs_requester(self) -> SignedIdentityServer:
+        if self.wake_tools and not self.requester_meta:
+            raise ValueError("wake_tools needs requester_meta")
+        return self
 
     @model_validator(mode="after")
     def _auth_fields(self) -> SignedIdentityServer:
@@ -2434,6 +2443,11 @@ class McpIdentitySettings(BaseModel):
             "the channel's readers can read. Set channel_scoped to false for a server that "
             "checks each call's asker and place itself: its agents then get their normal "
             "memory and sessions, so what they learn can surface in their other channels. "
+            "A requester_meta server may list wake_tools: a person's call to one carries "
+            "params._meta.wake_url, a private callback watch link for that conversation; "
+            "each POST of the work's outcome to it wakes the conversation once. Calls from "
+            "one chat session reuse the link for 12 hours, and it lasts a day. Needs "
+            "watches on and DAIMON_WATCHES__CALLBACK_BASE_URL. "
             "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is "
             "signed; chat workers use the same server policy without the signing key. "
             "Default: [] (off)."

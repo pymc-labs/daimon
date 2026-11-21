@@ -135,6 +135,7 @@ async def _chat_session(
     foreign: bool = False,
     human: bool | None = True,
     dm: bool = False,
+    channel: str | None = None,
 ) -> tuple[str, uuid.UUID]:
     """A person's chat session in `thread`, optionally running their turn there.
 
@@ -146,7 +147,7 @@ async def _chat_session(
         await create_thread_session(
             db, id=mapping_id, tenant_id=person.tenant_id, platform="discord",
             thread_id=thread, account_id=person.account_id, ma_session_id=f"sess_{thread}",
-            ma_agent_id="agent_a",
+            ma_agent_id="agent_a", channel_id=channel,
         )  # fmt: skip
         if turn:
             origin = await create_origin(
@@ -427,6 +428,36 @@ async def test_bearer_person_turn_is_stamped_and_the_key_replaces_the_credential
         },
         "requester_kind": "person",
     }, "the live turn's asker and place are stamped"
+
+
+async def test_a_wake_tool_call_carries_the_sessions_one_wake_link(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
+    monkeypatch.setenv("DAIMON_WATCHES__CALLBACK_BASE_URL", "https://hooks.example.com")
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1", channel="chan-1")
+    server = BEARER_SERVER.model_copy(update={"wake_tools": frozenset({"send"})})
+    other = json.dumps(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "read"}}
+    )
+    upstream = _Upstream()
+    async with _relay(db_session_factory, upstream, None, server, bearers=_BEARERS) as client:
+        for body in (_tool_call(wake_url="https://forged.example"), _tool_call(), other):
+            await _post(client, token, body)
+    first, second, third = (_sent_meta(sent) for sent in upstream.requests)
+    assert str(first["wake_url"]).startswith("https://hooks.example.com/callbacks/watches/"), (
+        "a person's wake tool call carries Daimon's link, not the caller's"
+    )
+    assert second["wake_url"] == first["wake_url"], "the session's next call reuses the link"
+    assert "wake_url" not in third, "another tool gets no link"
+    async with db_session_factory() as db:
+        threads = (
+            (await db.execute(text("SELECT thread_id FROM watches WHERE source = 'callback'")))
+            .scalars()
+            .all()
+        )
+    assert threads == ["thread-1"], "one callback watch, bound to the asking thread"
 
 
 async def test_forged_requester_fields_are_replaced_on_a_person_turn(

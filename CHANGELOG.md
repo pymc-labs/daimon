@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A relay server's long jobs can wake the conversation when they end.** List the
+  tools that start them in `"wake_tools"` on a `requester_meta` entry of
+  `DAIMON_MCP_IDENTITY__SERVERS`: a person's call then carries a private callback
+  watch link in `_meta.wake_url`, and the server posts the outcome to it. See
+  `docs/mcp-servers.md`.
+
 - **"Approvals in direct messages" no longer changes Approvals for everyone.**
   Setting it, from the CLI, the web app or an agent, wrote the server-wide
   Approvals value instead of its own, so Off turned Allow writes on everywhere.

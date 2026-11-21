@@ -168,6 +168,17 @@ channel, or nowhere. A sender from another organisation, a replaced session and
 two turns at once carry none of the three fields, so a server must not treat a
 call with no `requester_kind` as a routine.
 
+### Wake the conversation when a server's job ends
+
+A `requester_meta` server that starts long work can list the tools that start it
+in `"wake_tools"`. A call to one in a person's turn also carries
+`params._meta.wake_url`, a private [callback watch](watches.md#callback-watches)
+link for that conversation; one the caller supplied is removed. Each `POST` of
+the outcome to it wakes the conversation once, in a turn that reads and reports.
+Calls from one chat session share the link for 12 hours; it lasts a day. Keep it
+secret and out of logs. It needs watches on and
+`DAIMON_WATCHES__CALLBACK_BASE_URL`; a DM, or an owner at the watch limit, gets none.
+
 A request body that is not JSON, repeats a key, cannot be re-encoded, or holds
 a tool call without object `params` is refused with a 400. GET and DELETE
 requests are forwarded without a body. Rotating
