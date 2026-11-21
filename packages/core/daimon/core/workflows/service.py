@@ -733,7 +733,9 @@ async def export(
 # ---------- runs ----------
 
 
-async def _run(session: AsyncSession, env: Env, run_id: uuid.UUID) -> tuple[RunRow, WorkflowRow]:
+async def _run(
+    session: AsyncSession, env: Env, run_id: uuid.UUID
+) -> tuple[RunRow, WorkflowRow, Rights]:
     run = await runs_store.get_run(session, run_id, tenant_id=env.who.tenant_id)
     if run is None:
         raise NotFound(RUN_GONE)
@@ -743,7 +745,7 @@ async def _run(session: AsyncSession, env: Env, run_id: uuid.UUID) -> tuple[RunR
         raise NotFound(RUN_GONE) from err
     if not rights.sees_run(own=run_views.started_by_me(run, env.who.account_id)):
         raise NotFound(RUN_GONE)
-    return run, workflow
+    return run, workflow, rights
 
 
 async def list_runs(
@@ -898,18 +900,18 @@ async def start(
     return await _summary_of(env, result)
 
 
-async def _control(env: Env, run_id: uuid.UUID) -> tuple[RunRow, WorkflowRow]:
+async def _control(env: Env, run_id: uuid.UUID) -> tuple[RunRow, WorkflowRow, Rights]:
     async with env.sm() as session:
         run, workflow, rights = await _run(session, env, run_id)
     if not rights.controls_run(own=run_views.started_by_me(run, env.who.account_id)):
         raise Forbidden(
             "Only the owner or an editor can do this to a run. Ask the workflow's owner."
         )
-    return run, workflow
+    return run, workflow, rights
 
 
 async def cancel(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
-    run, _ = await _control(env, run_id)
+    run, _, _ = await _control(env, run_id)
     if not await runs.cancel_run(
         env.sm, env.settings, run_id=run.id, account_id=env.who.account_id, now=env.now
     ):
@@ -918,7 +920,7 @@ async def cancel(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
 
 
 async def redrive(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
-    run, _ = await _control(env, run_id)
+    run, _, _ = await _control(env, run_id)
     result = await runs.redrive(
         env.sm, env.settings, run_id=run.id, account_id=env.who.account_id, now=env.now
     )
@@ -933,7 +935,7 @@ async def decide(
     decision: Literal["retry", "skip", "fail"],
     output: JsonValue = None,
 ) -> run_views.RunSummary:
-    run, _ = await _control(env, run_id)
+    run, _, _ = await _control(env, run_id)
     if env.who.external:
         raise Forbidden("Deciding a step needs a person.")
     async with env.sm() as session:
@@ -961,9 +963,15 @@ async def rerun(
     version: str | int | None = None,
 ) -> run_views.RunSummary:
     """Run again, or from `step`: a new run that reuses the finished steps upstream of it."""
-    run, workflow = await _control(env, run_id)
+    run, workflow, rights = await _control(env, run_id)
     test = version == "draft" or run.mode == "test"
     picked = version if isinstance(version, int) else None  # None: the fork's source version
+    # The version this runs: a fork keeps its source's unless one is named, a rerun the live.
+    runs_version = (
+        workflow.live_version if version == "live" else picked or (run.version if step else None)
+    )
+    if (test or runs_version not in (None, workflow.live_version)) and not rights.edit:
+        raise Forbidden("Only the owner or an editor can run the draft or an older version.")
     result = await runs.start_run(
         env.sm,
         env.settings,

@@ -12,6 +12,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 )
 from daimon.core import usage_recording
 from daimon.core._models import (
+    Account,
     SecurityAuditEvent,
     UsageEvent,
     WorkflowRun,
@@ -490,3 +491,29 @@ async def test_a_fork_onto_the_live_version_runs_the_live_version(
     forked = await service.rerun(env, source.id, step="f")
     live = await service.rerun(env, source.id, step="f", version="live")
     assert (forked.version, live.version) == (1, 2), "a fork keeps its source's unless told"
+
+
+async def test_a_runner_reruns_only_the_live_version(db_session: AsyncSession) -> None:
+    """Rerunning in test mode needs edit rights, as starting a test run does."""
+    world = await make_world(db_session, {"f": {"kind": "finish"}}, "f")
+    runner = Account(tenant_id=world.tenant_id)
+    db_session.add(runner)
+    await db_session.commit()
+    async with world.sm.begin() as s:
+        await workflows_store.update_settings(
+            s, tenant_id=world.tenant_id, workflow_id=world.workflow_id, visibility="shared"
+        )
+        await workflows_store.set_access(
+            s,
+            tenant_id=world.tenant_id,
+            workflow_id=world.workflow_id,
+            role="runner",
+            granted_by=world.owner,
+            account_id=runner.id,
+        )
+    source = await world.run(triggered_by={"kind": "person", "account_id": str(runner.id)})
+    env = Env(world.sm, world.settings, Who(world.tenant_id, runner.id), NOW)
+    with pytest.raises(service.Forbidden, match="owner or an editor"):
+        await service.rerun(env, source.id, version="draft")
+    again = await service.rerun(env, source.id)
+    assert not again.test, "a plain rerun runs the live version"
