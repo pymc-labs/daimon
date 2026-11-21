@@ -23,6 +23,12 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.mcp import watch_polling
+from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.adapters.mcp.identity_relay import (
+    RELAY_METHODS,
+    RELAY_ROUTE,
+    build_identity_relay_route,
+)
 from daimon.adapters.mcp.tools.watches import create_watch_impl
 from daimon.adapters.mcp.watch_polling import (
     SourceBusy,
@@ -32,16 +38,20 @@ from daimon.adapters.mcp.watch_polling import (
     run_poll,
 )
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.config import SignedIdentityServer
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_call import McpCallError, McpToolSession, mcp_tool_session
 from daimon.core.stores import watches
 from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_agent
 from daimon.testing.asgi import INIT_BODY, asgi_lifespan
 from daimon.testing.mcp_fixture_server import build_fixture_server
 from fastmcp.exceptions import ToolError
+from pydantic import SecretStr
 from sqlalchemy import text
+from starlette.applications import Starlette
 
 from .test_watch_polling import attended_owner, runtime_watch  # noqa: F401
 
@@ -52,6 +62,7 @@ BRIDGE = "https://fixture.example/mcp"
 OTHER = "https://elsewhere.example/mcp"
 PINNED = "93.184.216.34"
 OS_URL = "https://os.example/mcp"
+RELAY = "https://os.example/mcp-identity/internal"
 
 
 def entry(tool: str, **extra: object) -> dict[str, object]:
@@ -676,3 +687,86 @@ async def test_a_saturated_server_cannot_starve_watches_on_another(bridge, monke
             # Busy is not an error and never pauses; it only waits its turn.
             assert row.status == "active" and row.consecutive_errors == 0
             assert row.lease_owner is None
+
+
+async def test_a_relay_poll_reads_as_its_owner_unattended_at_the_watch_place(bridge, monkeypatch):
+    """Through Daimon's own relay the server is told who the watch reads for, marked
+    unattended, and where it reports; once the watch is paused its credential names nobody."""
+    fx = bridge
+    secret = "j" * 32
+    fx.runtime.settings.mcp.jwt_secret = SecretStr(secret)
+    monkeypatch.setenv(
+        "DAIMON_WATCHES__POLLABLE_TOOLS",
+        json.dumps([*NATIVE, entry("fixture_counter_read", server=RELAY, credential="relay")]),
+    )
+    async with fx.runtime.session_factory() as db:
+        tenant = await get_tenant(db, fx.native.tenant_id)
+    assert tenant is not None
+    server = SignedIdentityServer(
+        name="internal",
+        url=BRIDGE,
+        auth="bearer",
+        requester_meta=True,
+        workspaces=frozenset({f"discord:{tenant.external_id}"}),
+        agents=("analyst",),
+    )
+    app = Starlette()
+    app.add_route(
+        RELAY_ROUTE,
+        build_identity_relay_route(
+            servers={server.name: server},
+            auth=DaimonJWTVerifier(secret=secret.encode(), sessionmaker=fx.runtime.session_factory),
+            sessionmaker=fx.runtime.session_factory,
+            tokens=None,
+            bearers={server.name: SecretStr(TOKEN)},
+            clients={server.name: httpx.AsyncClient(transport=fx.transport)},
+            clock=lambda: datetime.now(UTC),
+        ),
+        methods=RELAY_METHODS,
+    )
+    relay = Recording(httpx.ASGITransport(app=app))
+
+    async def pinned_relay(host: str, port: int) -> str:
+        assert host == "os.example"
+        return PINNED
+
+    monkeypatch.setattr(
+        watch_polling,
+        "open_source",
+        partial(mcp_tool_session, resolve=pinned_relay, transport=relay),
+    )
+    fx.agent.return_value = agent_with(("internal", RELAY))
+    watch = await get(fx, (await create(fx, server="internal")).watch_id)
+    assert watch.source_state["credential"] == "relay"
+    assert await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
+    (call,) = [
+        json.loads(r.content)
+        for r in fx.transport.requests
+        if json.loads(r.content).get("method") == "tools/call"
+    ]
+    assert call["params"]["_meta"] == {
+        "requester_platform_user_id": watch.owner_external_id,
+        "requester_kind": "routine",
+        "requester_conversation": {
+            "place_type": "thread",
+            "channel_id": watch.thread_id,
+            "parent_channel_id": watch.parent_channel_id,
+        },
+    }, "the owner, unattended, at the place the watch reports to"
+    assert {r.headers["authorization"] for r in fx.transport.requests} == {f"Bearer {TOKEN}"}, (
+        "the server sees the relay's key, never the poll's own credential"
+    )
+    async with fx.runtime.session_factory.begin() as db:
+        await watches.pause_watch(db, watch.id)
+    async with httpx.AsyncClient(transport=relay, base_url="https://os.example") as client:
+        await client.post(
+            "/mcp-identity/internal",
+            content=json.dumps(call),
+            headers={
+                "authorization": relay.requests[-1].headers["authorization"],
+                "content-type": "application/json",
+            },
+        )
+    assert json.loads(fx.transport.requests[-1].content)["params"]["_meta"] == {}, (
+        "a paused watch's credential names nobody"
+    )

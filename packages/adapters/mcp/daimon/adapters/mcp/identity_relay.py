@@ -40,9 +40,11 @@ from daimon.core.mcp_identity import (
     requester_conversation,
     routine_conversation,
     stamp_requester,
+    watch_conversation,
 )
+from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
-from daimon.core.stores.domain import RoutineRow, TurnOriginRow
+from daimon.core.stores.domain import RoutineRow, TurnOriginRow, WatchRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import list_active_origins
@@ -164,6 +166,38 @@ async def _routine_run(
         or not row.created_by_user_id
         or row.created_by_user_id != binding.owner
         or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+    ):
+        return None
+    return row
+
+
+async def _watch_poll(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    binding: RelayBinding,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    server: str,
+) -> WatchRow | None:
+    """The active watch a poll's credential names, or None.
+
+    Only a watch of this tenant and agent, still owned by the account and user the
+    credential was minted for and still polling this relay server, counts; a paused,
+    deleted or handed-over watch names nobody.
+    """
+    if binding.watch_id is None:
+        return None
+    async with sessionmaker() as session:
+        row = await watches.get_watch(session, binding.watch_id)
+    if (
+        row is None
+        or row.status != "active"
+        or row.source != "mcp_poll"
+        or (row.tenant_id, row.owner_account_id) != (tenant_id, account_id)
+        or row.owner_external_id != binding.owner
+        or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+        or not str(row.source_state.get("server_url")).endswith(f"{RELAY_PATH}/{server}")
     ):
         return None
     return row
@@ -344,10 +378,10 @@ def build_identity_relay_route(
             body = b""
         if server.requester_meta and request.method == "POST":
             # A turn a person started names that person. An unattended run names who
-            # it acts for, as kind "routine": a routine's owner and delivery place, or
-            # the person and place of a wake (watch, timer, continuation). A foreign
-            # sender, a replaced session and two turns at once match neither and
-            # carry no requester fields.
+            # it acts for, as kind "routine": a routine's owner and delivery place, a
+            # watch poll's owner and report place, or the person and place of a wake
+            # (watch, timer, continuation). A foreign sender, a replaced session and
+            # two turns at once match none and carry no requester fields.
             named: str | None = None
             conversation: dict[str, str | None] | None = None
             kind: RequesterKind | None = None
@@ -372,6 +406,25 @@ def build_identity_relay_route(
                     named, conversation, kind = (
                         routine.created_by_user_id,
                         routine_conversation(routine),
+                        "routine",
+                    )
+            elif (
+                binding.watch_id is not None
+                and platform in REQUESTER_PLATFORMS
+                and FOREIGN_HOME_CLAIM not in claims
+            ):
+                watch = await _watch_poll(
+                    sessionmaker,
+                    binding,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    agent_id=agent_id,
+                    server=server.name,
+                )
+                if watch is not None:
+                    named, conversation, kind = (
+                        watch.owner_external_id,
+                        watch_conversation(watch),
                         "routine",
                     )
             try:

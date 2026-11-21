@@ -69,6 +69,8 @@ from daimon.core.continuity.watch_projection import (
 from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import mint_chat_mcp_token
+from daimon.core.mcp_identity import RelayBinding, identity_relay_urls
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_annotations import annotations_from_mcp
 from daimon.core.mcp_tool_call import McpToolSession, mcp_tool_session
@@ -157,6 +159,8 @@ OFF_DEFER_S = 600
 
 #: Opens the bounded MCP session for one poll; tests swap in a fake server.
 open_source = mcp_tool_session
+#: A relay poll's own credential outlives the poll's 25-second bound, and no more.
+RELAY_POLL_TTL = timedelta(minutes=2)
 
 
 def operator_denied(policy: ToolSafetyPolicy, *, server_name: str, tool: str) -> bool:
@@ -199,11 +203,37 @@ async def poll_credential(
     owner_account_id: uuid.UUID,
     server_url: str,
     credential: str,
+    relay: RelayBinding | None = None,
 ) -> str | None:
     """Decrypt exactly one credential for this exact URL: the agent-wide one, the
-    watch owner's own key (looked up by tenant and owner, never another owner's), or none."""
+    watch owner's own key (looked up by tenant and owner, never another owner's), or none.
+
+    Credential "relay" instead mints the owner a short-lived credential for this
+    Daimon's own relay URL, signing the `relay` binding (the watch it polls for, if
+    any), so the relay names the owner as an unattended caller and the watch's place.
+    """
     if credential == "none":
         return None
+    if credential == "relay":
+        mcp = runtime.settings.mcp
+        if (
+            relay is None
+            or mcp.public_url is None
+            or mcp.jwt_secret is None
+            or not identity_relay_urls([server_url], public_url=str(mcp.public_url))
+        ):
+            raise PollAccessRevoked("Watch credential unavailable")
+        async with runtime.session_factory.begin() as db:
+            token, _, _ = await mint_chat_mcp_token(
+                db,
+                account_id=owner_account_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id),
+                secret=mcp.jwt_secret.get_secret_value().encode(),
+                now=datetime.now(UTC),
+                relay=relay,
+                ttl=RELAY_POLL_TTL,
+            )
+        return token
     if credential not in ("agent", "owner") or runtime.fernet is None:
         raise PollAccessRevoked("Watch credential unavailable")
     if credential == "owner":
@@ -289,16 +319,17 @@ async def authorize_poll(
     runtime: McpRuntime,
     watch: WatchRow,
 ) -> tuple[AuthIdentity, ChannelReadPolicy]:
-    auth, read, _ = await authorize_source(runtime, watch)
+    auth, read, _, _ = await authorize_source(runtime, watch)
     return auth, read
 
 
 async def authorize_source(
     runtime: McpRuntime,
     watch: WatchRow,
-) -> tuple[AuthIdentity, ChannelReadPolicy, str | None]:
+) -> tuple[AuthIdentity, ChannelReadPolicy, str | None, str]:
     """Recheck access for every poll, before and after the read. Also returns the name
-    the agent attaches an MCP source under now, or None for a native source."""
+    the agent attaches an MCP source under now (None for a native source) and the
+    agent's own name now."""
     server_name: str | None = None
     if watch.source in ("poll", "mcp_poll"):
         # The operator registry, read fresh each time: before and after every read.
@@ -454,7 +485,7 @@ async def authorize_source(
         origin_channel_ids=frozenset({watch.parent_channel_id, watch.thread_id}),
     ):
         raise PollAccessRevoked("Poll source is sealed")
-    return auth, read, server_name
+    return auth, read, server_name, str(agent.name)
 
 
 async def read_native(
@@ -488,7 +519,7 @@ async def read_native(
 
 
 async def read_mcp(
-    runtime: McpRuntime, watch: WatchRow, *, server_name: str, credential: str
+    runtime: McpRuntime, watch: WatchRow, *, server_name: str, credential: str, agent_name: str
 ) -> JsonValue:
     """One `tools/list` and one `tools/call` on the exact registered URL.
 
@@ -506,6 +537,7 @@ async def read_mcp(
         owner_account_id=watch.owner_account_id,
         server_url=server_url,
         credential=credential,
+        relay=RelayBinding(agent_name, watch_id=watch.id, owner=watch.owner_external_id),
     )
     with SOURCE_BUDGET.take(ascii_mcp_url(server_url)):
         async with open_source(ascii_mcp_url(server_url), token) as source:
@@ -591,7 +623,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     key=key,
                     evidence=evidence_fields,
                 )
-            auth, read, server_name = await authorize_source(runtime, watch)
+            auth, read, server_name, agent_name = await authorize_source(runtime, watch)
             if not load_watches_settings().enabled:
                 return False
             if server_name is None:
@@ -599,7 +631,11 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 kind = "human_rows_v1"
             else:
                 document = await read_mcp(
-                    runtime, watch, server_name=server_name, credential=listed.credential
+                    runtime,
+                    watch,
+                    server_name=server_name,
+                    credential=listed.credential,
+                    agent_name=agent_name,
                 )
                 kind = "mcp_v1"
             # The raw read is bounded and projected; only the projection is kept.

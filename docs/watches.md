@@ -97,6 +97,10 @@ is the only thing that allows a poll. Each entry names a `server`, a `tool`, a
 - `agent` polls with the agent's stored key for that URL. `owner` polls with
   the owner's own read-only key, sent once through the private
   `request_watch_credential` form.
+- `relay` polls a server attached through this Daimon's
+  [identity relay](mcp-servers.md#let-a-server-verify-who-is-calling)
+  (`<root>/mcp-identity/<name>`). The server is told the watch owner asked, as
+  an unattended run, from where the watch reports.
 
 > **Warning:** A server can say a tool only reads and still write. Its
 > read-only hint can refuse a poll but never allow one, so list only tools you

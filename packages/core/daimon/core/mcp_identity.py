@@ -4,9 +4,10 @@ An opted-in server is attached to an agent at Daimon's relay URL
 (`<app root>/mcp-identity/<name>`). Each session reaches it with a credential of
 its own, from a vault only that session mounts, whose signed `RELAY_CLAIM`
 names the session's `thread_sessions` row (none for a routine or any other
-session no person's turn is bound to). The relay verifies it, then forwards each
-request to the server with a compact EdDSA JWS naming the agent, the workspace
-and, when that very session is running a person's turn, who asked and where.
+session no person's turn is bound to); a watch's poll mints one naming its watch.
+The relay verifies it, then forwards each request to the server with a compact
+EdDSA JWS naming the agent, the workspace and, when that very session is running
+a person's turn, who asked and where.
 The server can then apply that person's own permissions.
 
 The Ed25519 key lives only in the process serving the relay: the model runtime
@@ -36,7 +37,7 @@ from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import origin_place
 
 if TYPE_CHECKING:
-    from daimon.core.stores.domain import RoutineRow
+    from daimon.core.stores.domain import RoutineRow, WatchRow
 
 #: Relay path under the app root; the server's configured name follows it.
 RELAY_PATH: Final = "/mcp-identity"
@@ -145,9 +146,11 @@ class RelayBinding:
     session_key: uuid.UUID | None = None
     #: The routine a scheduled run belongs to; never set together with `session_key`.
     routine_id: uuid.UUID | None = None
-    #: The routine's owner when the run started; the relay stamps the routine only
+    #: The routine's or watch's owner at minting; the relay stamps the run only
     #: while the row still names this user, so a later ownership change credits nobody.
     owner: str | None = None
+    #: The watch a poll reads for; at most one of `session_key`, `routine_id` and this.
+    watch_id: uuid.UUID | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
@@ -155,6 +158,8 @@ class RelayBinding:
             value["session"] = str(self.session_key)
         if self.routine_id is not None:
             value["routine"] = str(self.routine_id)
+        if self.watch_id is not None:
+            value["watch"] = str(self.watch_id)
         if self.owner is not None:
             value["owner"] = self.owner
         return value
@@ -166,15 +171,17 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         raise ValueError("relay claim is not an object")
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
-    owner = claim.get("owner")
+    owner, watch = claim.get("owner"), claim.get("watch")
+    unattended = routine is not None or watch is not None
     if (
-        not set(claim) <= {"agent_name", "session", "routine", "owner"}
-        or not (owner is None or (isinstance(owner, str) and owner and routine is not None))
+        not set(claim) <= {"agent_name", "session", "routine", "watch", "owner"}
+        or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not isinstance(name, str)
         or not name
         or not (key is None or isinstance(key, str))
         or not (routine is None or isinstance(routine, str))
-        or (key is not None and routine is not None)
+        or not (watch is None or isinstance(watch, str))
+        or sum(value is not None for value in (key, routine, watch)) > 1
     ):
         raise ValueError("relay claim has the wrong shape")
     return RelayBinding(
@@ -182,6 +189,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         session_key=None if key is None else uuid.UUID(key),
         routine_id=None if routine is None else uuid.UUID(routine),
         owner=owner,
+        watch_id=None if watch is None else uuid.UUID(watch),
     )
 
 
@@ -412,6 +420,24 @@ def routine_conversation(row: RoutineRow) -> dict[str, str | None] | None:
             "parent_channel_id": row.channel_id,
         }
     return None
+
+
+def watch_conversation(row: WatchRow) -> dict[str, str | None]:
+    """Where a watch reports, as `requester_conversation`: its thread, the channel a
+    new thread per report opens in, or the owner's DM (opened at delivery)."""
+    if row.delivery == "dm":
+        return dict(UNOPENED_DM_PLACE)
+    if row.delivery == "new_thread" or row.thread_id == row.parent_channel_id:
+        return {
+            "place_type": "channel",
+            "channel_id": row.parent_channel_id,
+            "parent_channel_id": None,
+        }
+    return {
+        "place_type": "thread",
+        "channel_id": row.thread_id,
+        "parent_channel_id": row.parent_channel_id,
+    }
 
 
 def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:

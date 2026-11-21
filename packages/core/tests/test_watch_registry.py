@@ -79,6 +79,12 @@ def test_mcp_entries_match_by_canonical_url_never_by_name(monkeypatch):
             "returns_chat": False,
         },
         {**NATIVE, "tool": "read_thread", "max_interval_floor_s": 59},
+        {
+            "server": "https://bridge.example/mcp",
+            "tool": "x",
+            "credential": "relay",
+            "returns_chat": False,
+        },
     ],
 )
 def test_unsafe_registry_entries_are_refused_at_settings_load(entry):
@@ -161,3 +167,15 @@ def test_internationalised_hosts_are_one_entry_and_match_either_spelling(monkeyp
     monkeypatch.setenv("DAIMON_WATCHES__POLLABLE_TOOLS", json.dumps([unicode_host]))
     assert require_listed("https://xn--bcher-kva.example/mcp", "x")
     assert require_listed("https://bücher.example/mcp/", "x")
+
+
+def test_a_relay_credential_is_listed_only_on_a_relay_url():
+    entry = PollableTool.model_validate(
+        {
+            "server": "https://daimon.example/mcp-identity/tools",
+            "tool": "notion_search",
+            "credential": "relay",
+            "returns_chat": False,
+        }
+    )
+    assert entry.credential == "relay", "a relay server's tool polls through the relay"

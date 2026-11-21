@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Watches can poll a signed-identity relay server.** List a tool in
+  `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its
+  `<root>/mcp-identity/<name>` URL. Each poll mints the watch owner a
+  two-minute relay credential bound to that watch, so a `requester_meta`
+  server sees the owner, `requester_kind` `"routine"` and the place the watch
+  reports to. A paused or deleted watch's credential names nobody. Such
+  watches could not be created before: no stored key matches a relay URL.
+
 - **Watch instructions can be up to 4000 characters.** Creating, editing and
   importing a watch all allowed 2000, so longer imported instructions were cut.
 
