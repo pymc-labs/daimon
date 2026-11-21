@@ -230,7 +230,8 @@ and a flood of bad links is rate limited per address and in the database. Keep t
 proxy from logging paths.
 
 A callback watch made in a Discord DM reports in that DM, each post as a fresh
-private turn. Slack refuses one made in a DM.
+private turn. The DM conversation the person carries on in is told what it said.
+Slack refuses one made in a DM.
 
 ## Import watches from another system
 

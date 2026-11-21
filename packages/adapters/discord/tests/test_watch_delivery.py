@@ -175,6 +175,23 @@ async def test_dm_report_goes_only_to_the_owner_with_mentions_off(dm_store):
     assert kwargs["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
 
 
+@pytest.mark.parametrize("made_in", ["dm:scope", "4242"])
+async def test_a_dm_report_tells_the_dm_it_was_made_in_what_it_said(dm_store, monkeypatch, made_in):
+    """The report runs as its own turn, so the person's open DM conversation is not
+    taken over: its next turn hears the report instead."""
+    dm_store.watch = dm_store.watch.model_copy(update={"thread_id": made_in})
+    recorded = AsyncMock()
+    monkeypatch.setattr(watch_delivery, "record_agent_notices", recorded)
+    ports, _dm = _ports(text="The job finished.")
+    await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports)
+    if made_in == "4242":
+        recorded.assert_not_awaited()
+        return
+    kwargs = recorded.await_args.kwargs
+    assert (kwargs["thread_id"], kwargs["agent_id"]) == ("dm:scope", "ag_target"), "its scope"
+    assert "The job finished." in kwargs["texts"][0], "the notice carries the report"
+
+
 async def test_agent_grant_leaving_the_owner_out_runs_no_turn_and_pauses_the_watch(dm_store):
     """The watch's agent no longer admits the owner: nothing is sent and the watch pauses."""
     dm_store.granted = False

@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused, so a job started from a DM never woke the conversation and the agent
   had to check on it. Each post now runs a fresh private turn of the owner in
   that DM, the way a DM timer runs, under the same read-and-report rules as any
-  watch. Slack still refuses one made in a DM: it has no way to run a watch's
+  watch. The person's open DM conversation stays theirs, and its next turn is
+  told what the report said, so they can reply to it. Slack still refuses one made in a DM: it has no way to run a watch's
   fire there.
 
 - **Discord answers read the same in DMs and threads, and agents can have a
