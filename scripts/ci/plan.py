@@ -48,6 +48,7 @@ FILES: dict[str, str] = {
     # The core workflow tests check the doc's claims and run the validation fixture the SPA
     # tests also replay.
     "docs/workflows.md": "workflow-docs",
+    "docs/workflows-advanced.md": "workflow-docs",
     "web/src/modules/workflows/fixtures/validation.json": "workflow-validation",
 }
 #: Prose no test or image reads; code trees keep their own (skills, fixtures).

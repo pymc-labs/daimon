@@ -30,8 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in a thread, or in the web app's inbox. `/workflows` on Discord, Slack and
   Teams lists them, and chat cards publish, run and follow runs. Admins can move
   routines to workflows and back, and `daimon workflows` lists, exports, imports
-  and controls them. Workflows, their webhooks and code steps each stay off until
-  an admin turns them on; see [Workflows](docs/workflows.md).
+  and controls them. Steps can post to chat in titled threads, and runs can start
+  from a chat mention or from new rows a tool returns. A workflow can save state
+  for later runs, run every few weeks or once at a set time, wait in business
+  days, and show its runs on a board or calendar. A step can make a write with
+  nobody watching when its arguments fit a stated scope. Workflows, their
+  webhooks, code steps, mentions (`workflow_mentions`), polls (`workflow_polls`)
+  and scoped writes (`workflow_scoped_writes`) each stay off until an admin turns
+  them on; see [Workflows](docs/workflows.md) and
+  [Advanced workflows](docs/workflows-advanced.md).
 
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and

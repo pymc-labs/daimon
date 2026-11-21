@@ -11,7 +11,8 @@ numbered version. Every run keeps a tamper-evident record of its steps.
 
 Workflows are Off by default. An admin turns on [`workflows`](features.md#workflows)
 and, for the pages, [`web.workflows`](features.md#web-app-workflows). Webhook
-triggers and code steps are separate features, also Off by default.
+triggers, code steps, mentions, polls and scoped writes are separate features,
+also Off by default.
 
 ```bash
 DAIMON_FEATURES__WORKFLOWS=on
@@ -28,6 +29,9 @@ Runs already started stop at their next step without spending.
 | Web pages | `web.workflows` | Off |
 | Webhook triggers | `workflow_webhooks` | Off |
 | Code steps | `workflow_code` | Off |
+| Mention triggers | `workflow_mentions` | Off |
+| Poll triggers and waits | `workflow_polls` | Off |
+| Scoped writes | `workflow_scoped_writes` | Off |
 | Run budget | `workflow_run_budget` | $5 |
 | Run history | `workflow_retention_days` | 90 days |
 
@@ -47,6 +51,7 @@ Deployment caps on steps, runs, items and webhooks are under
 | Wait | Waits for a time, a date or an event |
 | For each | Runs one step for each item of a list |
 | Workflow | Runs another workflow and takes its output |
+| Post | Posts a message and carries on |
 | Finish | Ends the run and can post the result |
 
 Values come from `${{ }}` expressions, such as `${{ steps.draft.output.text }}`.
@@ -58,8 +63,10 @@ pins the version it saw, so a later library edit reaches runs after a republish.
 
 ## Triggers
 
-A workflow starts by hand, on a schedule, from a webhook, or when another
-workflow finishes. Another workflow can also call it as a step.
+A workflow starts by hand, on a schedule, from a webhook, from a chat mention,
+when a tool's data changes, or when another workflow finishes. Another workflow
+can also call it as a step. [Advanced workflows](workflows-advanced.md) covers
+mentions, polls and schedules.
 
 A schedule fires each slot once. A missed slot is skipped, unless the trigger
 catches up with one run.
@@ -75,7 +82,8 @@ inbox. On Discord, the person answers by reply; on Slack, in the thread under
 the message; on Teams, with the card's button. In a thread, an answer from
 someone who was not asked is refused.
 
-An answer can be approve or reject, a choice, or text. Several approvers
+An answer can be approve or reject, a choice, or text. In a thread, a reply that
+names no option goes to the step's `otherwise` route, with its text. Several approvers
 count as distinct people, and the person who started the run cannot approve it
 unless the step allows it. An unanswered ask times out to its own route.
 
@@ -94,14 +102,16 @@ press: the draft with Publish, or the inputs with Run. A run started from a card
 shows on a run card that follows it.
 
 A Finish step can post the result to the workflow's home channel, a thread, its
-owner or the person it runs as. When runs fail, the owner gets one card for each
+owner or the person it runs as. A Post step does the same mid-run, as
+[Advanced workflows](workflows-advanced.md) shows. When runs fail, the owner gets one card for each
 streak of failures.
 
 ## Grants and the Rule of Two
 
 A step that sees outside input must not also write. Outside input is a webhook
 body, an answer from someone who cannot edit the workflow, or a page from the web.
-Validation refuses such a step unless an Approval before it binds the write.
+Validation refuses such a step unless an Approval before it binds the write. A write inside a
+[scope](workflows-advanced.md#writes-inside-a-scope) is the one exception.
 
 A bound write sends exactly what was approved. An agent step set to propose
 its writes sends only the ones a person approves. A test run never writes to
@@ -126,7 +136,9 @@ An admin can move a routine to a workflow and back, from the web app or the CLI.
 The workflow takes over the routine's schedule, and a paused routine moves
 paused. A routine that posts to its owner's direct messages becomes a step in
 that conversation, which is skipped while the owner is busy. A routine that is
-running, or already moved, stays.
+running, or already moved, stays. A copy made while migrating from another
+system moves like any other and keeps its link to its source. A workflow on a
+one-time or multi-week schedule cannot move back.
 
 A moved routine's step writes as the routine did, under the same tool policy.
 The preview lists what the admin approves by moving it, including a waiver when

@@ -20,7 +20,8 @@ server](https://daimon.decision.ai/) instead.
   [MCP servers](mcp-servers.md) and the
   [Claude Code plugin](plugin.md).
 - **Shape what it does:** [Defaults](defaults.md) for agents and skills,
-  [Routines](routines.md), [Workflows](workflows.md) and [Watches](watches.md)
+  [Routines](routines.md), [Workflows](workflows.md),
+  [Advanced workflows](workflows-advanced.md) and [Watches](watches.md)
   for scheduled work,
   [Direct messages](direct-messages.md),
   [Repository memory](repo-memory.md),

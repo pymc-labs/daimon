@@ -34,9 +34,13 @@ Publish only when the person asks. An agent key cannot publish.
 | `wait` | Wait for a time, a date or an event |
 | `for_each` | Run one step for each item of a list |
 | `workflow` | Run another workflow and take its output |
-| `finish` | End the run, with an `output` and an optional `deliver` |
+| `post` | Post a message and carry on |
+| `finish` | End the run, with an `output` and an optional `deliver` or `state` |
 
 Every path ends at a `finish`. A loop needs `max_visits`.
+
+An agent step lists `skills` by name from the workspace library; an unknown name is an
+error. An `approval` with `otherwise` sends a reply that names no option to that step.
 
 ## Expressions
 
@@ -61,3 +65,28 @@ step that sees it and writes is refused unless an approval binds the write. With
 Some settings need an admin's approval before the version goes live: writes without
 asking, built-in tools, code with network access, an unsigned webhook, a budget over the
 default, or a step that trusts outside input.
+
+## Posts, triggers and time
+
+A `post` step and `finish.deliver` take `to`, `thread`, `also`, `mention` and `message`.
+`to` is `home`, `owner`, `run_as`, `origin`, an id or a template. A templated `to` must
+be one of the spec's `destinations`, and `destinations` hold fixed ids. `thread` finds or
+creates the thread with that exact title.
+
+Triggers also include `mention` (`channels` or `match`) and `poll` (`agent`, a read
+`tool`, `every`, `key`, and `items`). A wait can `poll` too. A schedule takes a cron with
+`every_weeks` and an `anchor`, or one `at` time. A duration like `2bd` counts business
+days in waits and approvals only.
+
+## State, scopes and boards
+
+`finish.state` saves keys for later runs. Read them as `workflow.state` and the last
+success as `workflow.last_run`; `run.date` is the day the run started. Saved state is
+untrusted input.
+
+A step that must write with nobody watching lists `writes_to`: a `tool`, a `where`
+rule per argument (`in`, `prefix`, `domains` or `created_by`) and `free` arguments.
+Prefer it to `writes: allow`. Leave `writes: routine` to routines that moved.
+
+`stage` on a step and a `card` on the spec put runs on a board. `card.date` names the
+field a calendar uses.

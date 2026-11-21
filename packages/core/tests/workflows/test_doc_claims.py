@@ -10,7 +10,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
-PAGES = (ROOT / "docs/workflows.md", ROOT / "defaults/skills/workflow-authoring/SKILL.md")
+PAGES = (
+    ROOT / "docs/workflows.md",
+    ROOT / "docs/workflows-advanced.md",
+    ROOT / "defaults/skills/workflow-authoring/SKILL.md",
+)
 FIXTURES = ROOT / "web/src/modules/workflows/fixtures/validation.json"
 
 _W = "packages/core/tests/workflows/"
@@ -21,6 +25,26 @@ _CLI = "packages/adapters/cli/tests/commands/test_workflows.py::"
 _LANES = "packages/adapters/scheduler/tests/test_workflow_agent_lanes.py::"
 _ASKS = "packages/adapters/{}/tests/test_workflow_asks.py::"
 _GAPS = "tests/parity/test_workflow_chat_gaps.py::test_the_recorded_gaps_still_hold"
+_P = _W + "test_post_step.py::"
+_MENTION = _W + "test_mentions.py::"
+_STATE = _W + "test_state.py::"
+_POLLS = _W + "test_polls.py::"
+_BOARD = _W + "test_board.py::"
+_UNATT = (
+    _W + "test_unattended.py::test_a_matched_scope_writes_even_when_untrusted_data_steers_the_step"
+)
+_SCOPED = (
+    _W + "test_actions.py::test_a_scoped_action_edits_only_what_this_run_made",
+    "packages/core/tests/workflows/test_agent_step.py::"
+    "test_a_scoped_call_goes_out_unwatched_only_when_its_arguments_fit",
+)
+_SKILLS = (
+    _W + "test_agent_step.py::test_a_step_loads_its_skills_as_published_until_republished",
+    f"{_V}[a poll wait and skills the library has]",
+)
+_TRIGGERS = f"{_V}[valid mention, poll and schedule triggers]"
+_SHAPES = f"{_V}[mention, poll and schedule shapes]"
+_ROUTINE = _W + "test_convert.py::test_converted_step_decides_like_its_routine"
 _OFF = _W + "test_features.py::test_workflow_features_default_off"
 _EDIT = _MCP + "test_edit_workflow_draft_when_edits_add_and_connect_nodes_then_the_revision_moves"
 _INBOX = _W + "test_waits.py::test_the_inbox_lists_and_decides_for_the_addressee"
@@ -46,7 +70,7 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "tamper-evident record": _W + "test_engine.py::test_ledger_chain_verifies_and_detects_edits",
     "Workflows are Off by default.": _OFF,
     "An admin turns on": _OFF,
-    "Webhook triggers and code steps are separate features": _OFF,
+    "are separate features, also Off by default": _OFF,
     "every path refuses": (
         _WEB + "test_every_workflows_route_refuses_when_the_feature_is_off",
         "packages/adapters/mcp/tests/test_capability_gate.py::"
@@ -61,11 +85,15 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     + "test_expressions.py::test_render_keeps_the_type_of_a_lone_expression_and_joins_text",
     "steps before it.": f"{_V}[reads a later step]",
     "A loop needs": f"{_V}[a loop without max visits]",
+    "load skills from the workspace library": _SKILLS,
+    "Each publish pins the version": _SKILLS[0],
+    "lists `skills` by name": _SKILLS,
     "a draft with errors cannot be published": (
         f"{_V}[unknown next step]",
         _W + "test_validate.py::test_a_draft_with_errors_cannot_be_published",
     ),
     "A workflow starts by hand": (
+        _TRIGGERS,
         _W + "test_runs.py::test_a_manual_run_goes_through_branch_transform_finish",
         _W + "test_triggers.py::test_a_schedule_fires_its_slot_once_and_starts_a_run",
         _W + "test_ingress.py::test_a_signed_delivery_starts_a_run_with_mapped_inputs_once",
@@ -100,6 +128,10 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
         _ASKS.format("teams") + "test_ask_derick_by_dm_resolves_by_its_button_and_closes_the_card",
     ),
     "someone who was not asked is refused": _STRANGERS,
+    "names no option goes to the step's `otherwise`": _W
+    + "test_answers.py::test_a_reply_without_an_option_word_goes_to_otherwise",
+    "sends a reply that names no option": _W
+    + "test_answers.py::test_a_reply_without_an_option_word_goes_to_otherwise",
     "An answer can be approve or reject": (
         _W + "test_waits.py::test_reject_says_why_and_fails_without_a_reject_route",
         f"{_V}[a choice with one route]",
@@ -132,6 +164,8 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     + "test_in_a_chat_turn_publish_and_runs_answer_with_cards",
     "shows on a run card that follows it": _W
     + "test_chat_cards.py::test_a_confirmed_run_starts_on_its_card_and_the_card_follows_it",
+    "A Post step does the same mid-run": _P
+    + "test_a_post_step_waits_for_its_post_and_outputs_where_it_landed",
     "A Finish step can post the result": (
         _W + "test_delivery.py::test_targets_name_threads_on_every_platform",
         _W + "test_delivery.py::test_post_time_rules_and_dms",
@@ -142,6 +176,7 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "Outside input is": _UNTRUSTED,
     "unless an Approval before it binds the write": f"{_V}[binds an action after an agent]",
     "unless an approval binds the write": (f"{_V}[binds an action after an agent]", *_UNTRUSTED),
+    "A write inside a": _UNATT,
     "sends exactly what was approved": _W
     + "test_actions.py::test_3_inbound_lead_sends_exactly_the_approved_email",
     "propose its writes sends only": _W
@@ -182,6 +217,12 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
         _W + "test_convert.py::test_a_dm_routine_becomes_an_owner_dm_step_that_posts_to_the_owner",
         _LANES + "test_an_owner_dm_step_runs_as_the_owners_dm_and_skips_when_they_are_busy",
     ),
+    "keeps its link to its source": _W
+    + "test_convert.py::test_a_cutover_copy_converts_and_keeps_its_source_link",
+    "cannot move back": _W
+    + "test_convert.py::test_a_workflow_on_a_multi_week_or_one_time_schedule_does_not_move_back",
+    "A moved routine's step writes as the routine did": _ROUTINE,
+    "The preview lists what the admin approves": _ROUTINE,
     "or already moved, stays": _W + "test_convert.py::test_routines_that_cannot_move_are_refused",
     "commands act as a workspace admin": _CLI
     + "test_a_file_imports_as_a_draft_lists_shows_and_exports_the_same_spec",
@@ -200,6 +241,118 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "Publishing from chat records no note.": _GAPS,
     "a run confirmation card cannot start a run": _GAPS,
     "replaces the pressed card": _GAPS,
+    # Advanced workflows.
+    "A Post step sends a message and carries on": _P
+    + "test_a_post_step_waits_for_its_post_and_outputs_where_it_landed",
+    "A Finish step posts the same way": _P + "test_every_workflow_post_goes_through_queue_post",
+    "`to` is `home`, `owner`": _P + "test_addresses_land_in_reach_or_are_refused",
+    "`origin` is the thread a mention": _P + "test_addresses_land_in_reach_or_are_refused",
+    "A templated target must be one of": _P + "test_addresses_land_in_reach_or_are_refused",
+    "Anything else is refused and": _P + "test_a_refused_post_fails_its_step",
+    "A test run posts to the tester only": _P
+    + "test_an_unlisted_address_with_no_channels_listed_is_refused_and_tests_dm_the_tester",
+    "`thread` finds the thread with exactly": _P + "test_a_titled_thread_is_found_or_made_once",
+    "A post step can run inside a For each": _P + "test_a_post_in_for_each_posts_once_per_item",
+    "Its output holds": _P + "test_a_post_step_waits_for_its_post_and_outputs_where_it_landed",
+    "On Discord, a titled post also finds": _GAPS,
+    "Slack and Teams threads are found only": _GAPS,
+    "named but never pinged": _GAPS,
+    "tags Daimon in one of its": _MENTION
+    + "test_a_mention_starts_one_run_as_its_author_and_a_redelivery_starts_none",
+    "The run is for that person": _MENTION
+    + "test_a_mention_starts_one_run_as_its_author_and_a_redelivery_starts_none",
+    "A direct message never starts one": "tests/parity/test_workflow_answer_paths.py::"
+    "test_the_ask_claim_returns_before_admission",
+    "A redelivered message starts no second run": _MENTION
+    + "test_a_mention_starts_one_run_as_its_author_and_a_redelivery_starts_none",
+    "A message that starts nothing": (
+        _MENTION + "test_a_mention_that_starts_nothing_stays_chat",
+        _MENTION + "test_a_held_concurrency_key_leaves_the_mention_to_chat",
+    ),
+    "calls another service's read tool every": (
+        _SHAPES,
+        _POLLS + "test_polls_off_stops_polling_and_refuses_runs",
+    ),
+    "Each new row starts a run": _POLLS
+    + "test_the_first_poll_sets_a_baseline_and_each_new_row_starts_one_run",
+    "The first check only records": _POLLS
+    + "test_the_first_poll_sets_a_baseline_and_each_new_row_starts_one_run",
+    "With `rule: updated` and `watch`": _POLLS
+    + "test_updated_rows_start_a_run_per_change_unless_once",
+    "A tool that changed since publishing": _POLLS
+    + "test_a_changed_tool_pauses_the_trigger_until_it_is_published_again",
+    "A Wait step can also `poll`": (
+        _POLLS + "test_a_poll_wait_keeps_checking_until_its_condition_holds",
+        _POLLS + "test_a_poll_wait_times_out_on_its_route",
+    ),
+    "A wait can `poll` too": _POLLS + "test_a_poll_wait_keeps_checking_until_its_condition_holds",
+    "A poll wait's result is untrusted input": _SKILLS[1],
+    "While `workflow_polls` is": _POLLS + "test_polls_off_stops_polling_and_refuses_runs",
+    "fires on its cron every": (
+        _W + "test_triggers.py::test_an_every_other_week_schedule_fires_in_its_weeks_only",
+        _W + "test_clock.py::test_every_weeks_fires_in_the_anchor_week_and_every_nth_week_after",
+    ),
+    "A schedule with `at` fires once": _W
+    + "test_triggers.py::test_a_one_time_schedule_fires_once_even_late_and_stays_fired",
+    "A schedule takes a cron with": (
+        _W + "test_triggers.py::test_an_every_other_week_schedule_fires_in_its_weeks_only",
+        _W + "test_triggers.py::test_a_one_time_schedule_fires_once_even_late_and_stays_fired",
+    ),
+    "counts business days": (
+        _W + "test_clock.py::test_business_days_skip_weekends_in_the_spec_timezone",
+        f"{_V}[business days time waits and approvals only]",
+    ),
+    "Use it in waits and approvals": f"{_V}[business days time waits and approvals only]",
+    "Triggers also include `mention`": _TRIGGERS,
+    "A live run's Finish step can save": _STATE
+    + "test_a_finish_merges_its_state_and_a_null_deletes_a_key",
+    "The keys merge into": _STATE + "test_a_finish_merges_its_state_and_a_null_deletes_a_key",
+    "Later runs read it as": _STATE + "test_a_finish_merges_its_state_and_a_null_deletes_a_key",
+    "`finish.state` saves keys": _STATE + "test_a_finish_merges_its_state_and_a_null_deletes_a_key",
+    "Read them as `workflow.state`": _STATE + "test_last_run_is_the_latest_succeeded_live_run",
+    "is the latest succeeded live run": _STATE + "test_last_run_is_the_latest_succeeded_live_run",
+    "is the day the run started": _STATE + "test_run_date_is_the_day_in_the_specs_timezone",
+    "takes a list's final items": _W
+    + "test_expressions.py::test_last_takes_the_final_items_of_a_list",
+    "A test run or a failed run saves nothing": _STATE
+    + "test_test_runs_and_failed_runs_leave_the_state_alone",
+    "State over 64 KiB": _STATE + "test_a_state_over_the_cap_fails_the_run_and_changes_nothing",
+    "State is untrusted input": f"{_V}[saved state from earlier runs is untrusted]",
+    "Saved state is untrusted input": f"{_V}[saved state from earlier runs is untrusted]",
+    "Each entry names a `tool`": f"{_V}[scoped writes need fixed where rules for their own tool]",
+    "viewers see the State tab": (
+        _STATE + "test_the_state_is_shown_to_viewers_and_cleared_by_editors",
+        _WEB + "test_the_saved_state_is_read_and_cleared_through_the_routes",
+    ),
+    "lists the writes it may make with nobody watching": (
+        *_SCOPED,
+        f"{_V}[scoped writes need fixed where rules for their own tool]",
+    ),
+    "A step that must write with nobody watching lists": _SCOPED,
+    "A `where` rule is": (
+        _W + "test_unattended.py::test_listed_values_match_by_type",
+        _W + "test_unattended.py::test_an_address_passes_only_inside_the_listed_domains",
+    ),
+    "A write goes out only when every argument fits": _SCOPED,
+    "allows only ids this run": _W
+    + "test_unattended.py::test_created_by_allows_only_ids_this_run_made",
+    "A write that fits goes out even when": _UNATT,
+    "A scope needs `workflow_scoped_writes`": _SCOPED[0],
+    "Give steps a `stage`": _BOARD + "test_the_board_has_a_column_per_stage_then_done_and_failed",
+    "The Runs tab then shows a board": (
+        _BOARD + "test_the_board_has_a_column_per_stage_then_done_and_failed",
+        _WEB + "test_runs_answer_as_a_board_or_a_calendar",
+    ),
+    "it shows a calendar of the runs": _BOARD
+    + "test_the_calendar_lists_the_months_runs_by_their_card_date",
+    "`stage` on a step and a `card`": _BOARD
+    + "test_the_board_has_a_column_per_stage_then_done_and_failed",
+    "`card.date` names the field": _BOARD
+    + "test_the_calendar_lists_the_months_runs_by_their_card_date",
+    "`destinations` hold fixed ids": f"{_V}[delivery targets, timezone, destinations and card]",
+    "A templated `to` must": _P + "test_addresses_land_in_reach_or_are_refused",
+    "A `post` step and `finish.deliver` take": _P + "test_addresses_land_in_reach_or_are_refused",
+    "`thread` finds or creates": _P + "test_a_titled_thread_is_found_or_made_once",
     # The skill.
     "nothing goes live until someone publishes it": _EDIT,
     "passing that revision as `base_revision`": _EDIT,
@@ -224,6 +377,11 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
 
 #: Sentences that direct the reader or point elsewhere; they claim no behaviour.
 GUIDANCE = (
+    "Post to chat, start runs from mentions",
+    "Each is a field of the workflow spec",
+    "covers mentions, polls and schedules",
+    "Prefer it to `writes: allow`.",
+    "Leave `writes: routine` to routines that moved.",
     "How workflows run, how people take part",
     "Deployment caps on steps, runs, items and webhooks are under",
     "Name the workspace with `--tenant`.",
