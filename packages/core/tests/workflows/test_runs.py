@@ -311,6 +311,17 @@ async def test_runs_over_the_active_limit_queue(db_session: AsyncSession) -> Non
     assert (await world.get(second.id)).status == "running", "the queued run begins"
 
 
+async def test_a_test_run_does_not_compete_with_the_live_run_for_its_slot(
+    db_session: AsyncSession,
+) -> None:
+    world = await make_world(db_session, AGENT, "a", max_active_runs=1)
+    live = await world.run()
+    test = await world.run(mode="test")
+    assert (live.status, test.status) == ("running", "running"), "the test run starts beside it"
+    queued = await world.run(mode="test")
+    assert queued.status == "queued", "test runs still queue behind each other"
+
+
 async def test_deadline_and_budget_end_the_run(db_session: AsyncSession) -> None:
     world = await make_world(db_session, AGENT, "a")
     run = await world.run()

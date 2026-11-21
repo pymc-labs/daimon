@@ -838,18 +838,22 @@ async def start_run(
     if isinstance(cleared, Refusal):
         return cleared
     if conflict == "replace":
-        await _replace(sm, settings, workflow.id, key, limit, now)
+        await _replace(sm, settings, workflow.id, key, start.mode, limit, now)
     async with sm.begin() as session:
         await workflows.get_workflow(
             session, tenant_id=tenant_id, workflow_id=workflow.id, lock=True
         )
         active = await workflow_runs.count_active_runs(
-            session, workflow_id=workflow.id, concurrency_key=key
+            session, workflow_id=workflow.id, concurrency_key=key, mode=start.mode
         )
         if active >= limit and conflict == "skip":
             return Refusal("skipped", "A run is already going. This one was skipped.")
         queued_count = await workflow_runs.count_active_runs(
-            session, workflow_id=workflow.id, concurrency_key=key, statuses=("queued",)
+            session,
+            workflow_id=workflow.id,
+            concurrency_key=key,
+            statuses=("queued",),
+            mode=start.mode,
         )
         if active >= limit and queued_count >= QUEUE_LIMIT:
             return Refusal("queue_full", f"{QUEUE_LIMIT} runs are already waiting. Try later.")
@@ -930,13 +934,15 @@ async def _replace(
     settings: Settings,
     workflow_id: uuid.UUID,
     key: str | None,
+    mode: Literal["live", "test"],
     limit: int,
     now: datetime,
 ) -> None:
-    """`replace`: cancel the oldest active runs of the key until a new one fits."""
+    """`replace`: cancel the oldest active runs of the key and mode until a new one fits.
+    A test run never cancels a live run."""
     async with sm() as session:
         active = await workflow_runs.active_run_ids(
-            session, workflow_id=workflow_id, concurrency_key=key
+            session, workflow_id=workflow_id, concurrency_key=key, mode=mode
         )
     end = RunEnd("cancelled", reason="replaced", message="A newer run replaced this one")
     for run_id in active[: max(len(active) - limit + 1, 0)]:
@@ -993,7 +999,10 @@ async def promote_queued(
         )
         spec = await spec_of(session, run)
         active = await workflow_runs.count_active_runs(
-            session, workflow_id=run.workflow_id, concurrency_key=run.concurrency_key
+            session,
+            workflow_id=run.workflow_id,
+            concurrency_key=run.concurrency_key,
+            mode=run.mode,
         )
         if active >= _active_limit(spec, settings, run.trigger_kind):
             return False

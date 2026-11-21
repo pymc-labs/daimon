@@ -849,21 +849,31 @@ async def count_active_runs(
     workflow_id: uuid.UUID,
     concurrency_key: str | None = None,
     statuses: Sequence[str] = ("running", "waiting"),
+    mode: Literal["live", "test"] | None = None,
 ) -> int:
-    """Runs of the workflow in `statuses`; with a key, only the runs holding that key."""
+    """Runs of the workflow in `statuses`; with a key, only the runs holding that key, and
+    with a mode, only live or only test runs, so a test never competes with a live run."""
     stmt = select(func.count()).where(
         WorkflowRun.workflow_id == workflow_id, WorkflowRun.status.in_(statuses)
     )
+    if mode is not None:
+        stmt = stmt.where(WorkflowRun.mode == mode)
     if concurrency_key is not None:
         stmt = stmt.where(WorkflowRun.concurrency_key == concurrency_key)
     return await session.scalar(stmt) or 0
 
 
 async def active_run_ids(
-    session: AsyncSession, *, workflow_id: uuid.UUID, concurrency_key: str | None
+    session: AsyncSession,
+    *,
+    workflow_id: uuid.UUID,
+    concurrency_key: str | None,
+    mode: Literal["live", "test"],
 ) -> list[uuid.UUID]:
     stmt = select(WorkflowRun.id).where(
-        WorkflowRun.workflow_id == workflow_id, WorkflowRun.status.in_(("running", "waiting"))
+        WorkflowRun.workflow_id == workflow_id,
+        WorkflowRun.status.in_(("running", "waiting")),
+        WorkflowRun.mode == mode,
     )
     if concurrency_key is not None:
         stmt = stmt.where(WorkflowRun.concurrency_key == concurrency_key)
