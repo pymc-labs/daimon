@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useParam } from "@/lib/filters"
 import { duration } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { useStep } from "../api"
+import { useCatalog, useStep } from "../api"
 import { KIND, STEP } from "../kinds"
 import type { Proposal, RunDetail, RunEvent, StepDetail, StepRun } from "../types"
 import { clock, stepTitle, until } from "./lib"
@@ -23,6 +23,8 @@ export function StepView({ run, events, stepKey, now }: { run: RunDetail; events
   const n = attempt ? Number(attempt) : null
   const live = s?.status === "running" || s?.status === "waiting"
   const q = useStep(run.id, s ? stepKey : null, n, live)
+  const { data: catalog } = useCatalog()
+  const agent = q.data?.agent
   if (!s) return <PanelSection>Not reached</PanelSection>
   const node = run.spec.nodes[s.node]
   const K = node ? KIND[node.kind] : null
@@ -57,7 +59,7 @@ export function StepView({ run, events, stepKey, now }: { run: RunDetail; events
       )}
       <PanelSection>
         <Facts rows={[
-          ["Agent", q.data?.agent],
+          ["Agent", agent && (catalog?.agents.find((x) => x.key === agent)?.name ?? agent)],
           ["Model", q.data?.model],
           ["Started", s.started_at && <Ago key="a" iso={s.started_at} />],
           ["Duration", took != null && <span key="d" className="tabular">{duration(took)}</span>],
