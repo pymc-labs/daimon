@@ -519,7 +519,7 @@ A thread Daimon starts is titled from its opening message by a short model call.
 
 ## Display name
 
-The name people see for an agent on its answers, cards and private conversations, up to 40 characters. The agent's id stays its identifier everywhere else.
+The name people see for an agent, up to 40 characters. Its id stays the identifier.
 
 | | |
 | --- | --- |
@@ -531,7 +531,7 @@ The name people see for an agent on its answers, cards and private conversations
 
 ## Thread title style
 
-How a thread Daimon opens to answer a mention is titled: sentence case up to 50 characters, or Title Case up to 100.
+Sentence case up to 50 characters, or Title Case up to 100, for a thread opened to answer a mention.
 
 | | |
 | --- | --- |
@@ -543,7 +543,7 @@ How a thread Daimon opens to answer a mention is titled: sentence case up to 50 
 
 ## Thread archive time
 
-How long a thread Daimon opens to answer a mention stays open with no messages before Discord archives it.
+How long an idle thread opened to answer a mention stays open.
 
 | | |
 | --- | --- |
@@ -555,7 +555,7 @@ How long a thread Daimon opens to answer a mention stays open with no messages b
 
 ## Status reactions
 
-The message being answered shows ⏳ while the turn runs and ✅ first once it ends, however it ended. A message waiting behind a running turn shows 📨 and gets no notice. Off shows 👀 while it runs and ✅ only with Completion pings.
+⏳ while a turn runs, then ✅ first however it ended, and 📨 instead of a notice on a queued message. Off shows 👀, and ✅ only with Completion pings.
 
 | | |
 | --- | --- |
@@ -567,7 +567,7 @@ The message being answered shows ⏳ while the turn runs and ✅ first once it e
 
 ## Lock reaction
 
-A mention where the agent may not answer gets a 🔒 reaction as well as the direct message that says why. Off sends only the direct message.
+A 🔒 on a mention the agent may not answer, besides the direct message saying why.
 
 | | |
 | --- | --- |
@@ -579,7 +579,7 @@ A mention where the agent may not answer gets a 🔒 reaction as well as the dir
 
 ## Text before tool calls
 
-A long text the agent writes before it calls a tool is posted as its own message. Off keeps it on the working card, and only the final answer is posted.
+Text written before a tool call is posted as its own message. Off keeps it on the working card.
 
 | | |
 | --- | --- |

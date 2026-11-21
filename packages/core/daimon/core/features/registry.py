@@ -545,9 +545,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="id",
         tiers=("agent",),
         binds="turn",
-        doc="The name people see for an agent on its answers, cards and private "
-        "conversations, up to 40 characters. The agent's id stays its identifier everywhere "
-        "else.",
+        doc="The name people see for an agent, up to 40 characters. Its id stays the identifier.",
         max_length=40,
     ),
     FeatureSpec(
@@ -559,8 +557,8 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="sentence",
         tiers=_CHANNELS,
         binds="turn",
-        doc="How a thread Daimon opens to answer a mention is titled: sentence case up to 50 "
-        "characters, or Title Case up to 100.",
+        doc="Sentence case up to 50 characters, or Title Case up to 100, for a thread opened "
+        "to answer a mention.",
         platforms=_DISCORD,
         authority=_ADMIN,
     ),
@@ -573,17 +571,15 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="10080",
         tiers=_CHANNELS,
         binds="turn",
-        doc="How long a thread Daimon opens to answer a mention stays open with no messages "
-        "before Discord archives it.",
+        doc="How long an idle thread opened to answer a mention stays open.",
         platforms=_DISCORD,
         authority=_ADMIN,
     ),
     _shown(
         "status_reactions",
         "Status reactions",
-        "The message being answered shows ⏳ while the turn runs and ✅ first once it ends, "
-        "however it ended. A message waiting behind a running turn shows 📨 and gets no notice. "
-        "Off shows 👀 while it runs and ✅ only with Completion pings.",
+        "⏳ while a turn runs, then ✅ first however it ended, and 📨 instead of a notice on a "
+        "queued message. Off shows 👀, and ✅ only with Completion pings.",
         tiers=_CHANNELS,
         platforms=_DISCORD,
         authority=_ADMIN,
@@ -591,8 +587,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     _shown(
         "protected_notice_reaction",
         "Lock reaction",
-        "A mention where the agent may not answer gets a 🔒 reaction as well as the direct "
-        "message that says why. Off sends only the direct message.",
+        "A 🔒 on a mention the agent may not answer, besides the direct message saying why.",
         tiers=_CHANNELS,
         default="on",
         platforms=_DISCORD,
@@ -601,8 +596,8 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     _shown(
         "pre_tool_messages",
         "Text before tool calls",
-        "A long text the agent writes before it calls a tool is posted as its own message. Off "
-        "keeps it on the working card, and only the final answer is posted.",
+        "Text written before a tool call is posted as its own message. Off keeps it on the "
+        "working card.",
         default="on",
         platforms=_DISCORD,
     ),
