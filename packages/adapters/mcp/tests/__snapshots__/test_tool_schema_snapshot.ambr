@@ -821,11 +821,71 @@
         Ask a person a question from your workflow step, then end your turn.
         <blank line>
         Only when the step allows questions, one open at a time and at most 3 a step.
+        `options` offers answers to pick from; `fields` asks for typed answers instead,
+        each a choice (with `choices`) or free text, such as a channel and a note.
         The answer arrives as your next message; carry on with the step from there.
       ''',
       'parameters': dict({
+        '$defs': dict({
+          'AskField': dict({
+            'description': 'One typed answer field of `ask_human`: a choice when `choices` is set, else free text.',
+            'properties': dict({
+              'choices': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      'type': 'string',
+                    }),
+                    'maxItems': 25,
+                    'minItems': 1,
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'name': dict({
+                'description': 'Key in the answer',
+                'pattern': '^[a-z][a-z0-9_]{0,39}$',
+                'type': 'string',
+              }),
+              'required': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+              'title': dict({
+                'description': 'Label the person sees',
+                'maxLength': 45,
+                'minLength': 1,
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'name',
+              'title',
+            ]),
+            'type': 'object',
+          }),
+        }),
         'additionalProperties': False,
         'properties': dict({
+          'fields': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  '$ref': '#/$defs/AskField',
+                }),
+                'maxItems': 5,
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'options': dict({
             'anyOf': list([
               dict({

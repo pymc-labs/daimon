@@ -16,6 +16,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.workflows import step_tools, waits
 from daimon.core.workflows.step_tools import FailKind, Grant, StepRefused
+from daimon.core.workflows.waits import AskField
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field, JsonValue
@@ -116,15 +117,20 @@ def register_workflow_step_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         step: uuid.UUID,
         question: Annotated[str, Field(min_length=1, max_length=2000)],
         options: list[str] | None = None,
+        fields: Annotated[list[AskField] | None, Field(max_length=5)] = None,
     ) -> str:
         """Ask a person a question from your workflow step, then end your turn.
 
         Only when the step allows questions, one open at a time and at most 3 a step.
+        `options` offers answers to pick from; `fields` asks for typed answers instead,
+        each a choice (with `choices`) or free text, such as a channel and a note.
         The answer arrives as your next message; carry on with the step from there.
         """
 
         async def put(s: AsyncSession, g: Grant) -> str:
-            return await waits.ask(s, g, question=question, options=options or [], now=_now())
+            return await waits.ask(
+                s, g, question=question, options=options or [], fields=fields or [], now=_now()
+            )
 
         return await _on_step(runtime, await _auth(ctx), step, put)
 
