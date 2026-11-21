@@ -414,7 +414,9 @@ async def test_every_write_path_consults_decide_unattended_call(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An agent's third-party and Daimon-own writes and an Action all stop where the one
-    decision refuses them, under a base decider that would allow anything."""
+    decision refuses them, under a base decider that would allow anything. An owner DM step
+    writes under the routine policy instead, so only `writes: routine` runs it (scheduler
+    `test_workflow_agent_lanes.py`)."""
     asked: list[str] = []
 
     def refuse(policy: ToolSafetyPolicy, call: Call) -> Decision:

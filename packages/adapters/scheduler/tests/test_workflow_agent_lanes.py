@@ -222,12 +222,24 @@ async def test_step_spend_counts_against_the_run_as_persons_allowance_and_gates_
     assert (seen, steps["write"].waiting_reason) == ([None], "blocked"), "the next step waits"
 
 
-@pytest.mark.parametrize("busy", [False, True])
+@pytest.mark.parametrize(
+    ("busy", "writes", "mode"),
+    [(False, "routine", "live"), (True, "routine", "live"), (False, None, "live")]
+    + [(False, "routine", "test")],
+)
 async def test_an_owner_dm_step_runs_as_the_owners_dm_and_skips_when_they_are_busy(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, busy: bool
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    busy: bool,
+    writes: str | None,
+    mode: str,
 ) -> None:
+    """The write-path contract's owner DM case: the DM turn writes under the operator's routine
+    policy, not `decide_unattended_call`, so only a `writes: routine` grant runs it, never
+    in a test run."""
+    run_node = {"kind": "agent", "agent": "daimon", "instructions": "Hi", "session": "owner_dm"}
     nodes = {
-        "run": {"kind": "agent", "agent": "daimon", "instructions": "Hi", "session": "owner_dm"},
+        "run": run_node | ({"writes": writes} if writes else {}),
         "done": {"kind": "finish"},
     }
     nodes["run"]["next"] = "done"
@@ -257,7 +269,8 @@ async def test_an_owner_dm_step_runs_as_the_owners_dm_and_skips_when_they_are_bu
         AsyncMock(),
         owner_dm=owner_dm.OwnerDmTurn(world.sm, world.settings, deps),  # type: ignore[arg-type]
     )
-    run = await world.run()
+    await world.grant_all()
+    run = await world.run(mode=mode)
     await runs.execute(
         world.sm,
         world.settings,
@@ -266,6 +279,10 @@ async def test_an_owner_dm_step_runs_as_the_owners_dm_and_skips_when_they_are_bu
         clock=lambda: NOW,
     )
     done, step = await world.get(run.id), (await world.steps(run.id))["run"]
+    if writes is None or mode == "test":
+        want = "failed" if writes is None else "succeeded"
+        assert (asked, done.status) == ([], want), "no grant or a test run: no DM turn"
+        return
     assert asked == [("U1", "Hi")], "the owner's DM turn gets the instructions"
     assert done.status == "succeeded", done
     assert step.summary == ("Skipped: the owner was busy." if busy else "Your digest"), step

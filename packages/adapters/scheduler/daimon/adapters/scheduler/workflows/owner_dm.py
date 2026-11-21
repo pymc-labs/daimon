@@ -23,12 +23,15 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.workflows import engine
+from daimon.core.workflows.agent_step import writes_of
 from daimon.core.workflows.lanes import agent_of
 from daimon.core.workflows.runs import StepWork
 from daimon.core.workflows.spec import AgentNode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 CLOSED = "Routine DMs are off here, or the owner may not use them."
+#: The DM turn writes under the operator's routine policy, which only `writes: routine` grants.
+ROUTINE_ONLY = "An owner DM step writes as a routine does, so it needs writes set to routine."
 
 
 async def dm_open(
@@ -69,6 +72,10 @@ class OwnerDmTurn:
     async def __call__(self, work: StepWork) -> engine.Outcome:
         node, tenant_id = work.node, work.run.tenant_id
         assert isinstance(node, AgentNode), "owner DM steps are agent nodes"
+        if work.run.mode == "test":
+            return engine.Succeeded(summary="Skipped: a test run sends no DM.", early=True)
+        if writes_of(work) != "routine":
+            return engine.Failed("fatal", ROUTINE_ONLY, reason="writes_refused")
         agent = agent_of(work.spec, node)
         async with self.sm() as s:
             tenant = await get_tenant(s, tenant_id)
