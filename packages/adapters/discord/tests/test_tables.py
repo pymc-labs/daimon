@@ -97,3 +97,11 @@ async def test_render_failure_keeps_raw_table_text(monkeypatch):
     monkeypatch.setattr(tables, "table_png", fail)
     table = "| A | B |\n| --- | --- |\n| a | b |\n"
     assert await render_discord_tables(table, enabled=True) == (table, [])
+
+
+async def test_closing_a_tables_gap_keeps_blank_lines_in_code():
+    source = "a\n\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n\n```\nx\n\n\n\ny\n```\nend"
+    text, files = await render_discord_tables(source, enabled=True)
+    assert (
+        len(files) == 1 and "```\nx\n\n\n\ny\n```" in text and "\n\n\n" not in text.split("```")[0]
+    )

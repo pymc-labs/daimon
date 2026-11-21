@@ -629,10 +629,15 @@ class DiscordTurnLifecycle(OutputGate):
         if self._trigger_message is None:
             return
         if self._model_marks_for is not None:
-            self._model_marks = await self._model_marks_for()
+            try:
+                self._model_marks = await self._model_marks_for()
+            except Exception:  # cosmetic boundary: the turn starts without the model emoji
+                log.warning("turn.model_marks_failed", exc_info=True)
         if self._status_reactions:
-            await arrange_reactions(self._trigger_message, status=WORKING, model=self._model_marks)
-            self._model_marked = bool(self._model_marks)
+            arranged = await arrange_reactions(
+                self._trigger_message, status=WORKING, model=self._model_marks
+            )
+            self._model_marked = arranged and bool(self._model_marks)
             return
         if not self._model_marks:
             return
@@ -1187,6 +1192,8 @@ class DiscordTurnLifecycle(OutputGate):
             if mention is not None
             else {}
         )
+        if mention is not None:
+            await self._discard_embed()  # an edit never notifies, so a pinged card goes up anew
         if self._message_ref is None:
             self._message_ref = await self._send_message(embeds=[embed], view=None, **pinged)
             self._card_message_ref = self._message_ref
@@ -1221,9 +1228,9 @@ class DiscordTurnLifecycle(OutputGate):
         as permanent messages, once each. Without this, an answer composed
         before a trailing tool call (e.g. a memory-repo write) is discarded by
         the final-response extraction and only the post-tool recap survives.
-        With `pre_tool_messages` off they stay on the card, and only the final text posts."""
+        With `pre_tool_messages` off they stay on the card, then fold into the final answer."""
         if not self._post_pre_tool_text:
-            return
+            return  # `_deliver_success` folds them into the answer
         async with self._sealed_lock:
             for index, text in extract_sealed_responses(
                 state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
@@ -1338,6 +1345,16 @@ class DiscordTurnLifecycle(OutputGate):
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
         response_text = self._final_response(state)
+        if not self._post_pre_tool_text:
+            # Kept on the card while the turn ran, so the answer carries them now.
+            sealed = [
+                text.strip()
+                for _, text in extract_sealed_responses(
+                    state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
+                )
+                if not _pure_tool_markup(text)
+            ]
+            response_text = "\n\n".join(t for t in (*sealed, response_text) if t)
         if self._deferred_sealed_text:
             response_text = "\n\n".join([*self._deferred_sealed_text, response_text])
         if self._unprompted and not response_text:

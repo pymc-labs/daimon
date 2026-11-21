@@ -188,7 +188,7 @@ from daimon.core.stores.tenants import (
     list_tenants_by_platform,
     set_provision_status,
 )
-from daimon.core.stores.thread_agent_bindings import update_lifecycle
+from daimon.core.stores.thread_agent_bindings import get_binding, update_lifecycle
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     clear_active_turn_if_message_id,
@@ -773,7 +773,8 @@ class DaimonBot(commands.Bot):
         # The running turn of each thread, for a typed "stop" (`_typed_stop`).
         self._typed_stops = TypedStops()
         self._pending: dict[int, list[discord.Message]] = {}
-        self._queued_reactions: set[int] = set()
+        # The queue marker on each queued message: ⌛, or 📨 with status reactions.
+        self._queued_reactions: dict[int, str] = {}
         # Threads whose running turn lost its thread (deleted) or its right to write
         # to it (archived), so the card lifecycle and the bot agree on one answer.
         self._thread_stops = ThreadStops()
@@ -1323,6 +1324,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.commands.settings import SettingsCog
         from daimon.adapters.discord.commands.share_secret import (
+            SecretShareConfirmButton,
             SecretShareRevealButton,
             ShareSecretCog,
         )
@@ -1341,7 +1343,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(MemoryCog(self))
         await self.add_cog(ModelCog(self))
         await self.add_cog(ShareSecretCog(self))
-        self.add_dynamic_items(SecretShareRevealButton)
+        self.add_dynamic_items(SecretShareRevealButton, SecretShareConfirmButton)
         await self.add_cog(FeedbackReactionCog(self))
 
         # One-time CLASS registration (not per-button) for the chat-initiated
@@ -2909,22 +2911,44 @@ class DaimonBot(commands.Bot):
         ).on
 
     async def _message_feature_on(
-        self, message: discord.Message, tenant_id: uuid.UUID, key: str
+        self, message: discord.Message, tenant_id: uuid.UUID, key: str, *, per_agent: bool = False
     ) -> bool:
-        """A chat-behaviour feature where `message` was posted; a failed read keeps the default."""
+        """A chat-behaviour feature where `message` was posted; a failed read keeps the default.
+        `per_agent` reads it for the agent a thread is bound to, where one is."""
         # A thread's setting lives under its parent channel; its own id is no channel.
         channel = message.channel
+        agent_id = await self._thread_agent(channel, tenant_id) if per_agent else None
         if isinstance(channel, discord.Thread):
-            place = FeaturePlace.of(tenant_id, "discord", str(channel.parent_id), str(channel.id))
+            place = FeaturePlace.of(
+                tenant_id, "discord", str(channel.parent_id), str(channel.id), agent_id=agent_id
+            )
         else:
-            place = FeaturePlace.of(tenant_id, "discord", str(channel.id))
+            place = FeaturePlace.of(tenant_id, "discord", str(channel.id), agent_id=agent_id)
         return (
             await place_feature(self.runtime.sessionmaker, self.runtime.settings, place, key)
         ).on
 
+    async def _thread_agent(self, channel: object, tenant_id: uuid.UUID) -> str | None:
+        """The agent a thread is bound to, for a read before admission names the agent."""
+        if not isinstance(channel, discord.Thread):
+            return None
+        try:
+            async with self.runtime.sessionmaker() as session:
+                binding = await get_binding(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    parent_channel_id=str(channel.parent_id),
+                    thread_id=str(channel.id),
+                )
+        except SQLAlchemyError:
+            log.warning("thread_agent.read_failed", exc_info=True)
+            return None
+        return None if binding is None else binding.responder_ma_agent_id
+
     async def working_mark(self, message: discord.Message, tenant_id: uuid.UUID) -> str:
         """The reaction a message shows while its turn runs: ⏳ with status reactions, else 👀."""
-        if await self._message_feature_on(message, tenant_id, "status_reactions"):
+        if await self._message_feature_on(message, tenant_id, "status_reactions", per_agent=True):
             return WORKING
         return "👀"
 
@@ -3009,6 +3033,7 @@ class DaimonBot(commands.Bot):
                 message,
                 derive_tenant_uuid(platform="discord", workspace_id=str(guild_id)),
                 "protected_notice_reaction",
+                per_agent=True,
             ):
                 await message.add_reaction(PROTECTED_CHANNEL_REACTION)
                 reacted = True
@@ -3544,23 +3569,24 @@ class DaimonBot(commands.Bot):
         retry) is logged and swallowed rather than dropping the queued message
         into the prologue error path.
         """
-        self._queued_reactions.add(id(message))
+        self._queued_reactions[id(message)] = "⌛"
         self._thread_queue.enqueue(thread_id, message)
         generation = self._processing.generation(thread_id)
         notify = self._processing.should_notify(thread_id)
-        if message.guild is not None and await self._message_feature_on(
+        # 📨 says it joins the next turn, whose ⏳ replaces it; no notice is posted.
+        mail = message.guild is not None and await self._message_feature_on(
             message,
             derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id)),
             "status_reactions",
-        ):
-            # 📨 says it joins the next turn, whose ⏳ replaces it; no notice is posted.
-            self._queued_reactions.discard(id(message))
-            await self._add_mention_reaction(message, QUEUED)
-            return
+            per_agent=True,
+        )
+        emoji = QUEUED if mail else "⌛"
+        if id(message) in self._queued_reactions:
+            self._queued_reactions[id(message)] = emoji
         try:
             if self._thread_lost(message):
                 return  # no reaction in a gone or closed thread; the release finishes the row
-            await message.add_reaction("⌛")
+            await message.add_reaction(emoji)
         except Exception as exc:
             # best-effort queue marker after the message is already queued; see docstring
             log.warning(
@@ -3571,9 +3597,10 @@ class DaimonBot(commands.Bot):
         finally:
             # The drain can finish while add_reaction is still in flight.
             if id(message) not in self._queued_reactions and not self._thread_lost(message):
-                await self._remove_mention_reaction(message, "⌛")
+                await self._remove_mention_reaction(message, emoji)
         if (
             notify
+            and not mail
             and not self._thread_lost(message)
             and self._processing.is_current(thread_id, generation)
         ):
@@ -3615,21 +3642,21 @@ class DaimonBot(commands.Bot):
             log.warning("mention.reaction_clear_failed", emoji=emoji, err_type=type(exc).__name__)
 
     async def _clear_queued_reactions(self, messages: list[discord.Message]) -> None:
+        """Take each message's queue marker off, whether its group ran, was refused or dropped."""
         for message in messages:
-            self._queued_reactions.discard(id(message))
-            await self._remove_mention_reaction(message, "⌛")
+            emoji = self._queued_reactions.pop(id(message), "⌛")
+            await self._remove_mention_reaction(message, emoji)
 
     async def _drop_queued(self, messages: list[discord.Message], tenant_id: uuid.UUID) -> None:
         """Give up on messages queued behind a turn whose thread is gone or closed.
 
         No turn will run them, so their admission rows are finished (startup
-        replay must not start them again). Their hourglass stays: it sits in the
-        thread, and no reaction call is issued there once the thread is lost.
+        replay must not start them again). Their markers come off where the
+        thread still stands; a lost thread takes no reaction call.
         """
         if not messages:
             return
-        for message in messages:
-            self._queued_reactions.discard(id(message))  # bookkeeping only: no reaction call
+        await self._clear_queued_reactions(messages)
         try:
             await self._finish_admitted_messages(
                 tenant_id, tuple(str(m.id) for m in messages), discard_committed=True
@@ -5760,7 +5787,7 @@ class DaimonBot(commands.Bot):
                 # The fallback title quotes the message, never the agent's
                 # internal name (a slug means nothing to the reader).
                 naming = self.runtime.settings.thread_naming
-                place = FeaturePlace.of(tenant_id, "discord", parent_channel_id)
+                place = FeaturePlace.of(tenant_id, "discord", parent_channel_id, agent_id=agent.id)
                 style: TitleStyle = (
                     "title"
                     if (await self._place_value(place, "thread_title_style")) == "title"

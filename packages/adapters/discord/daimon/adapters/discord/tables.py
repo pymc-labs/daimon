@@ -17,6 +17,7 @@ import discord
 
 _NUMBER = re.compile(r"[-+−]?[$€£¥]?\d[\d,. ]*(?:%|[kKMBx])?")
 _PAD = 12
+_FENCE = re.compile(r"(```.*?```)", re.DOTALL)
 
 
 def _aligned(alignment: Alignment, cell: str, *, header: bool) -> Alignment:
@@ -139,6 +140,10 @@ async def render_discord_tables(
             # The image follows the message; no placeholder stands in the text.
             files.append(discord.File(io.BytesIO(png), filename=name, description=raw[:1024]))
     text = "".join(rendered)
-    if files:  # close the gap each table left
-        text = re.sub(r"\n{3,}", "\n\n", text).strip("\n")
+    if files:  # close the gap each table left, outside code blocks
+        parts = _FENCE.split(text)
+        text = "".join(
+            part if index % 2 else re.sub(r"\n{3,}", "\n\n", part)
+            for index, part in enumerate(parts)
+        ).strip("\n")
     return text, files

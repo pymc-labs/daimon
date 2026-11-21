@@ -3492,3 +3492,46 @@ async def test_a_card_edit_refused_by_a_contained_room_is_not_retried_every_tick
 
     assert len(attempts) == 1, "the refused edit is not retried"
     assert edits == []
+
+
+async def test_a_stop_card_that_pings_the_asker_is_a_new_message() -> None:
+    """Discord never notifies an edit, so the pinged card replaces the old one."""
+    lc, sends, _edits = _make_lifecycle(notify_on_completion=True)
+    lc._delete = AsyncMock()  # pyright: ignore[reportPrivateUsage]
+    await lc.post_initial()
+    await lc.on_terminal_success(
+        TurnState(content=_running_tool_turn().content, termination=TerminationReason.INTERRUPTED)
+    )
+    lc._delete.assert_awaited_once()  # pyright: ignore[reportPrivateUsage]
+    assert sends[-1]["content"] == "<@123>"
+    _assert_stopped_card(sends[-1])
+
+
+async def test_with_pre_tool_messages_off_the_text_before_a_tool_joins_the_answer() -> None:
+    lc, sends, edits = _make_lifecycle()
+    lc._post_pre_tool_text = False  # pyright: ignore[reportPrivateUsage]
+    await lc.post_initial()
+    early = "Findings so far. " * 40
+    call = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    state = TurnState(
+        content=[TextBlock(kind="text", text=early), call, TextBlock(kind="text", text="Done.")]
+    )
+    await lc.on_terminal_success(state)
+    posted = "\n".join(str(kw.get("content", "")) for kw in [*sends, *[e[1] for e in edits]])
+    assert early.strip() in posted and "Done." in posted
+    assert posted.index(early.strip()) < posted.rindex("Done.")
+
+
+async def test_a_failed_model_mark_read_still_starts_the_turn() -> None:
+    message = MagicMock(add_reaction=AsyncMock())
+    lc = DiscordTurnLifecycle(
+        send=AsyncMock(return_value=_SENTINEL_REF),
+        edit=AsyncMock(),
+        agent_name="test",
+        model_id="m",
+        trigger_message=message,
+        model_marks_for=AsyncMock(side_effect=RuntimeError("down")),
+    )
+    await lc.post_initial()
+    assert not lc.model_marked and lc.model_marks == ()
+    message.add_reaction.assert_not_awaited()

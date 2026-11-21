@@ -39,7 +39,6 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_escalation import answer_place
 from daimon.adapters.discord.support_post import post_to_support_channel
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.domain import MessageFeedbackRow
 from daimon.core.stores.message_feedback import attach_feedback_text
 from daimon.core.stores.tenants import get_tenant
@@ -55,6 +54,15 @@ _EMPTY_TEXT = "Write a few words first."
 _NO_LONGER_AVAILABLE = "This request has expired."
 _SUBMIT_FAILED = "That didn't work. Try again."
 _THANKS = "Thanks for the feedback."
+
+
+async def _in_private_channel(bot: commands.Bot, channel_id: str) -> bool:
+    """Whether the answer voted on is in a DM; one that cannot be told counts as private."""
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+    except (discord.HTTPException, ValueError):
+        return True
+    return isinstance(channel, discord.DMChannel | discord.GroupChannel)
 
 
 class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
@@ -97,17 +105,10 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
 
         _log.info("feedback_modal.submit", feedback_id=str(self._feedback_id))
         bot = cast(commands.Bot, interaction.client)
-        async with self._runtime.sessionmaker() as session:
-            in_dm = await get_conversation(
-                session,
-                platform="discord",
-                route_key=updated_row.channel_id,
-                external_user_id=updated_row.platform_user_id,
-            )
         # Feedback on a private answer stays private.
         channel_id = (
             None
-            if in_dm is not None
+            if await _in_private_channel(bot, updated_row.channel_id)
             else await support_channel_for(
                 self._runtime,
                 bot,
