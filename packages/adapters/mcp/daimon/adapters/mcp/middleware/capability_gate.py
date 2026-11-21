@@ -7,7 +7,8 @@ external MCP clients and agent keys reach the server directly, so the server ref
 tools/list is filtered for every caller except a chat-execution credential: the native turn
 checks this catalogue against its consent, less the tools Off at its place, which a template's
 allowlist leaves out (`turn/template_mcp.py`); Claude sessions hide them in their session
-config. Such a caller is refused at call time.
+config. Such a caller is refused at call time, and `search_tools` leaves them out of its
+results, so a feature that is Off here is not found (`_SEARCHING`).
 
 A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
 and its call is refused as not set up: a worker can't judge that setup, and the server's
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from contextvars import ContextVar
 from typing import Final
 
 import structlog
@@ -143,6 +145,12 @@ async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.U
     return found
 
 
+_SEARCH_TOOL: Final = "search_tools"
+#: True while `search_tools` reads the catalogue it ranks: it offers a chat-execution credential
+#: only what its place allows, though `tools/list` stays whole for that credential.
+_SEARCHING: Final[ContextVar[bool]] = ContextVar("capability_gate_searching", default=False)
+
+
 def _lists_everything(auth: AuthIdentity) -> bool:
     """A chat-execution credential: its native turn checks the whole catalogue (`mint`)."""
     return auth.chat_agent_id is not None and auth.agent_id is None
@@ -160,6 +168,12 @@ class CapabilityGateMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         tool = context.message.name
+        if tool == _SEARCH_TOOL:
+            token = _SEARCHING.set(True)
+            try:
+                return await call_next(context)
+            finally:
+                _SEARCHING.reset(token)
         key = server_gate_key(tool)
         ctx = context.fastmcp_context
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
@@ -202,7 +216,7 @@ class CapabilityGateMiddleware(Middleware):
         settings = self._runtime.settings
         unset = gated_tools(k for k in GATED_KEYS if not server_setup_met(FEATURES[k], settings))
         tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
-        if _lists_everything(auth):
+        if _lists_everything(auth) and not _SEARCHING.get():
             return tools
         try:
             places = await caller_places(self._runtime, auth, None)

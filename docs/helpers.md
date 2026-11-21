@@ -50,7 +50,8 @@ the asking agent's own value ([Approvals](approvals.md#approvals-per-agent)).
 
 A program, or another agent, can ask a Daimon agent outside chat with an **agent
 key**. The agent-chat tools `ask`, `start_turn` and `continue_turn` start or continue
-a conversation, and the key holder sees only those tools. The turn runs
+a conversation. The key holder sees those tools and the agent's own file and credential
+tools, and no others, so Knows Daimon's tools are not offered to it. The turn runs
 [unattended](unattended.md#which-turns-are-unattended): a write that needs a card is
 refused, and `unattended_time_limit` bounds the run.
 

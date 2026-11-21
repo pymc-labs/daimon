@@ -413,6 +413,7 @@ async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
     _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
     async with Client(mcp) as client:
         chat_before = {t.name for t in await client.list_tools()}
+        chat_found_off = str(await client.call_tool("search_tools", search))
     _as(monkeypatch, tenant_id, platform="cli")
     async with Client(mcp) as client:
         hidden = str(await client.call_tool("search_tools", search))
@@ -427,6 +428,7 @@ async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
     _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
     async with Client(mcp) as client:
         chat_after = {t.name for t in await client.list_tools()}
+        chat_found_on = str(await client.call_tool("search_tools", search))
     assert "read_daimon_docs" not in hidden, "Off by default: search does not find it"
     assert OFF in refused and OFF in proxied, f"Off refuses, the proxy too: {proxied!r}"
     assert "read_daimon_docs" in shown, "On, search finds it"
@@ -434,4 +436,6 @@ async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
     assert not web_on, f"a web page reads where the web app is On: {web_on!r}"
     assert "no page" in web_off, f"a web page is hidden where the web app is Off: {web_off!r}"
     assert chat_before == chat_after, "a chat credential's list is left whole"
+    assert "read_daimon_docs" not in chat_found_off, "Off: a chat credential's search skips it"
+    assert "read_daimon_docs" in chat_found_on, "On: and finds it"
     assert not chat_after & SELF_KNOWLEDGE_TOOLS, "behind search: a pinned catalogue keeps"
