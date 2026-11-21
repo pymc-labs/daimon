@@ -271,6 +271,8 @@ def routine_fields(spec: dict[str, Any]) -> _Back | str:
     if len(schedules) != 1 or others or len(agents) != 1 or len(parsed.nodes) != 2 or not finishes:
         return "This workflow does more than a routine can: one schedule, one step, one finish."
     trigger, agent, finish = schedules[0], agents[0], finishes[0]
+    if trigger.cron is None or trigger.every_weeks:
+        return "This workflow's schedule is more than a routine's: one cron, every week."
     return _Back(
         name=parsed.name,
         cron=trigger.cron,
