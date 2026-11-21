@@ -19,6 +19,7 @@ from typing import Any, Final, Literal, cast
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings
 from daimon.core.mux_backend import managed_agents
 from daimon.core.mux_compat import legacy_call
@@ -140,7 +141,11 @@ async def ingest_files(
                 )
             )
         except anthropic.APIError as err:
-            log.warning("workflow_answer.file_upload_failed", err_type=type(err).__name__)
+            log.warning(
+                "workflow_answer.file_upload_failed",
+                err_type=type(err).__name__,
+                causes=backend_refusal_causes(err),
+            )
             continue
         refs.append(
             RoutineFile(
