@@ -53,6 +53,7 @@ from daimon.core.routine_delivery import (
     teams_thread_id,
 )
 from daimon.core.routine_files import payload_for, unsupported_files_note
+from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.direct_messages import dm_enabled
@@ -187,6 +188,7 @@ def make_teams_routine_poster(
             platform="teams",
             requester_name=name,
             agent_name=await routine_agent_name(sessionmaker, row),
+            header=await routine_header_shown(sessionmaker, row, "teams"),
         ) + unsupported_files_note(payload_for(row))
         conversation = teams_thread_id(target)
         ids: list[str] = []

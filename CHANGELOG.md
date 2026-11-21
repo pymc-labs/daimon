@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routine results can post without their header.** A routine's result
+  normally starts with `Result from <agent>'s <schedule>:`. The new Routine
+  result header setting, on by default, turns that line off for a deployment,
+  a workspace, an agent, a channel or one routine, on every platform and for
+  channel, thread and direct-message results alike. The requester line and the
+  failure notice are unchanged. Set one routine's value with
+  `daimon features set routine_result_header off --routine <id>`; its value
+  beats its agent's.
+
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎
   feedback, voice messages and the card's model footer. Pings are joined with a

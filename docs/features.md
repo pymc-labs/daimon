@@ -58,6 +58,7 @@ Where each feature can be set, and its default.
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  |  | Only Discord |
+| Routine result header | `routine_result_header` | Chat | On | ✓ | ✓ | ✓ | ✓ |  | ✓ |  |
 | Tool server names | `tool_server_names` | Chat | On |  | ✓ | ✓ |  |  |  |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |  |
@@ -368,7 +369,7 @@ The agent can search the web. Off removes it here; On never gives more than the 
 
 ## Web app
 
-The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
+The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves it out.
 
 | | |
 | --- | --- |
@@ -637,6 +638,18 @@ The first message in a thread, and the first after the model or effort changes, 
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Routine result header
+
+Off drops the "Result from" line above a routine's result.
+
+| | |
+| --- | --- |
+| Key | `routine_result_header` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel, Routine |
 | Combines | Most specific wins |
 
 ## Tool server names
@@ -969,7 +982,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; an admin can set limits, a menu and their own channel.
+Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. The operator sets the default channel and credits; an admin sets limits, a menu and their own channel.
 
 | | |
 | --- | --- |
@@ -981,7 +994,7 @@ Answers offer a way to ask a person for help, which posts the request in the sup
 
 ## Feedback to support
 
-A submitted thumbs-down form (the reasons, the text, the person, the agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
+A submitted thumbs-down form (reasons, text, person, agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
 
 | | |
 | --- | --- |

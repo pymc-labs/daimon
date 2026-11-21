@@ -117,6 +117,7 @@ _NARROWED: dict[str, str] = {
     "monitor_direct_messages": "kept per agent: a DM or web chat has no channel to set",
     "monitor_mcp": "kept per agent: an MCP call has no channel or thread",
     "routine_sandbox_tools": "an admin's opt-in for routine runs, so a workspace, agent or routine",
+    "routine_result_header": "read when a routine posts, which has no thread; the routine sets its own",
     "model_reactions": "a workspace or agent display choice, read when the turn starts",
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",

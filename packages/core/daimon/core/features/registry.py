@@ -288,7 +288,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "The agent knows about the web app: messages, routine runs and tool results carry "
             "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+            "and Daimon's cards show buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -640,6 +640,13 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "an emoji for the model and one for the effort it runs on.",
         tiers=("workspace", "agent"),
         platforms=frozenset({"discord"}),
+    ),
+    _shown(
+        "routine_result_header",
+        "Routine result header",
+        'Off drops the "Result from" line above a routine\'s result.',
+        tiers=("deployment", "workspace", "agent", "channel", "routine"),
+        default="on",
     ),
     _shown(
         "tool_server_names",
@@ -1158,8 +1165,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "Answers offer a way to ask a person for help, which posts the request in the "
-            "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "default channel and credits; an admin can set limits, a menu and their own channel."
+            "support channel. Off removes the button and the form. The operator sets the "
+            "default channel and credits; an admin sets limits, a menu and their own channel."
         ),
         requires=("support_channel", "support_credits"),
         authority=_SETTINGS,
@@ -1174,7 +1181,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "A submitted thumbs-down form (the reasons, the text, the person, the agent and a "
+            "A submitted thumbs-down form (reasons, text, person, agent and a "
             "link to the answer) is also posted where Ask a person requests go, and the form "
             "says so first. It spends no credits. Off keeps the form in the database only."
         ),

@@ -63,6 +63,7 @@ from daimon.core.routine_delivery import (
     tenant_dm_still_open,
 )
 from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
+from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import DeliveryGate, delivery_gate, result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.direct_messages import dm_enabled
@@ -509,7 +510,9 @@ def make_discord_routine_poster(
                         sessionmaker,
                         row,
                         render_fallback_post(
-                            row, agent_name=await routine_agent_name(sessionmaker, row)
+                            row,
+                            agent_name=await routine_agent_name(sessionmaker, row),
+                            header=await routine_header_shown(sessionmaker, row, "discord"),
                         ),
                     )
                 )
@@ -651,6 +654,7 @@ def make_discord_routine_poster(
                         row,
                         platform="discord",
                         agent_name=await routine_agent_name(sessionmaker, row),
+                        header=await routine_header_shown(sessionmaker, row, "discord"),
                     ),
                 ),
                 _DISCORD_MAX_CHARS,
@@ -686,6 +690,7 @@ def make_discord_routine_poster(
                         as_agent=True,
                         platform="discord",
                         agent_name=identity.name,
+                        header=await routine_header_shown(sessionmaker, row, "discord"),
                     ),
                 ),
                 limit,
