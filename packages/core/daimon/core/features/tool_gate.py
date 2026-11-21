@@ -9,7 +9,9 @@ from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
-GATED_KEYS: Final[tuple[str, ...]] = (*CAPABILITY_KEYS, "repo_memory", "web_awareness")
+GATED_KEYS: Final[tuple[str, ...]] = (
+    *CAPABILITY_KEYS, "repo_memory", "web_awareness", "self_knowledge",
+)  # fmt: skip
 
 WEB_APP_TOOLS: Final[frozenset[str]] = frozenset(
     {
@@ -26,6 +28,13 @@ WEB_APP_TOOLS: Final[frozenset[str]] = frozenset(
 """Tools that exist only for the web app: `web_awareness` Off hides and refuses them. The
 people and group lookups stay: allowances, owners and turn rules take their ids."""
 
+SELF_KNOWLEDGE_TOOLS: Final[frozenset[str]] = frozenset(
+    {"read_daimon_docs", "search_daimon_docs", "read_daimon_source", "search_daimon_source"}
+)
+"""This release's docs and source: `self_knowledge` Off hides and refuses them. They stay behind
+`search_tools`, never pinned, so a pinned provider install's exact allowlist still reaches them
+through `call_tool` and its catalogue does not change."""
+
 STOP_TOOLS: Final[frozenset[str]] = frozenset(
     {"fly_stop_session", "fly_list_sessions", "list_long_jobs", "get_long_job", "cancel_long_job"}
 )
@@ -40,6 +49,7 @@ _TOOLS: Final[dict[str, frozenset[str]]] = {
     **CAPABILITY_TOOLS,
     "repo_memory": REPO_MEMORY_TOOLS,
     "web_awareness": WEB_APP_TOOLS,
+    "self_knowledge": SELF_KNOWLEDGE_TOOLS,
 }
 _FEATURE_OF: Final[dict[str, str]] = {tool: key for key, tools in _TOOLS.items() for tool in tools}
 

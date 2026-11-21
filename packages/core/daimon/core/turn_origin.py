@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.platform_words import Place, turn_words, works_in_sentence
+from daimon.core.self_knowledge import SELF_KNOWLEDGE_HINT
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
     ChatPlatform,
@@ -349,7 +350,8 @@ def render_turn_origin(
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
     and JSON-encoded like everything else, never interpolated into the prose.
 
-    `features` sets `web_awareness`; None renders everything.
+    `features` sets `web_awareness`, and `self_knowledge` adds `SELF_KNOWLEDGE_HINT` where it
+    is On; None renders everything but that hint.
     """
     if features is not None and not features.on("web_awareness"):
         web = None
@@ -397,6 +399,9 @@ def render_turn_origin(
         controls["web"] = {"url": web.root(), "pages": web.pages()}
     else:
         web = None
+    knows = None if features is None else features.features.get("self_knowledge")
+    if knows is not None and knows.on:
+        controls["self_knowledge"] = SELF_KNOWLEDGE_HINT
     if handoff is not None:
         controls["handoff"] = {
             "from_name": handoff.from_name,

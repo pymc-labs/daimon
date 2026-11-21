@@ -270,6 +270,23 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
+        key="self_knowledge",
+        name="Knows Daimon",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent", "channel", "thread"),
+        binds="turn",
+        doc=(
+            "The agent can read the docs and source code of the Daimon release it runs on, to "
+            "answer how Daimon works, how to set it up and why it behaves as it does. Pages "
+            "about the web app are left out where Web app is Off."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
         key="mcp_briefing",
         name="Connected server briefing",
         category="model_input",
