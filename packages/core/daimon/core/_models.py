@@ -1970,12 +1970,15 @@ class SecretShare(Base):
 
     `content` is Fernet ciphertext, cleared on reveal or expiry; the row stays as the audit
     record. Person-scoped like `credential_requests`: erased by platform user, no account FK.
+    `agent_id` is the provider id of the agent whose key it is; `awaiting_sender` holds a
+    share until its sender confirms it.
     """
 
     __tablename__ = "secret_shares"
     __table_args__ = (
         Index("secret_shares_sender_idx", "tenant_id", "platform", "sender_platform_user_id"),
         Index("secret_shares_recipient_idx", "tenant_id", "platform", "recipient_platform_user_id"),
+        Index("secret_shares_live_idx", "expires_at", postgresql_where=text("content IS NOT NULL")),
     )
 
     id: Mapped[UuidPk]
@@ -1985,6 +1988,8 @@ class SecretShare(Base):
     recipient_platform_user_id: Mapped[str]
     label: Mapped[str]
     content: Mapped[bytes | None]
+    agent_id: Mapped[str | None]
+    awaiting_sender: Mapped[bool] = mapped_column(server_default=text("false"), default=False)
     channel_id: Mapped[str | None]
     message_id: Mapped[str | None]
     created_at: Mapped[TsNow]

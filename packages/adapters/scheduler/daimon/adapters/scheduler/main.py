@@ -182,6 +182,7 @@ from daimon.core.stores.routines import (
     update_routine_agent_id,
 )
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.stores.secret_shares import clear_lapsed_shares
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
@@ -1177,6 +1178,19 @@ async def _sweep_wizard_sessions(sm: async_sessionmaker[AsyncSession]) -> None:
         await sweep_expired_wizard_sessions(sm, now=datetime.now(UTC))
     except SQLAlchemyError:
         log.exception("scheduler.wizard_sweep.failed")
+
+
+@scheduler_step
+async def _sweep_secret_shares(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Delete shared-secret values past their day, revealed or not, so none outlives it.
+    Boundary catch: a sweep failure must not kill the scheduler loop; the next tick retries.
+    """
+    try:
+        async with sm.begin() as session:
+            cleared = await clear_lapsed_shares(session, now=datetime.now(UTC))
+        log.info("secret_share_sweep.cleared", count=cleared)
+    except SQLAlchemyError:
+        log.exception("scheduler.secret_share_sweep.failed")
 
 
 @scheduler_step
@@ -2205,6 +2219,7 @@ async def run(
                 sweep=lambda: _sweep_headless_usage(client, sm, markup=settings.billing.markup),
             )
             await _sweep_wizard_sessions(sm)
+            await _sweep_secret_shares(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_pending_carry_overs(sm)
@@ -2246,6 +2261,7 @@ async def run(
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
+            await _sweep_secret_shares(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_pending_carry_overs(sm)

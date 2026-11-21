@@ -1,4 +1,5 @@
-"""/share-secret stores nothing without a posted card, and Reveal shows the value only once."""
+"""/share-secret keeps no share without a posted card, Reveal shows the value only once,
+and a held share is sent only by its sender."""
 
 from __future__ import annotations
 
@@ -11,11 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from daimon.adapters.discord.commands import share_secret as cmd
+from daimon.core import secret_share_flow as flow
 from daimon.core import secret_shares as words
 from daimon.core.stores import secret_shares as store
 from daimon.core.stores.secret_shares import Reveal, ShareView
 
 SHARE = ShareView(uuid.uuid4(), "1", "2", "Prod DB", "9", "8", datetime.now(UTC))
+TENANT = uuid.uuid4()
 
 
 class _Tx:
@@ -44,8 +47,7 @@ def _runtime(tx: _Tx) -> Any:
 
 @pytest.fixture
 def on(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cmd, "_sharing_on", AsyncMock(return_value=True))
-    monkeypatch.setattr(cmd, "env_dm_policy", MagicMock())
+    monkeypatch.setattr(flow, "sharing_refusal", AsyncMock(return_value=None))
 
 
 async def _share(tx: _Tx, recipient: Any) -> tuple[str, bool]:
@@ -55,15 +57,17 @@ async def _share(tx: _Tx, recipient: Any) -> tuple[str, bool]:
 
 
 @pytest.mark.usefixtures("on")
-async def test_a_closed_dm_rolls_the_share_back(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_closed_dm_deletes_the_share(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store, "create_share", AsyncMock(return_value=SHARE))
-    set_card = AsyncMock()
+    set_card, delete = AsyncMock(), AsyncMock()
     monkeypatch.setattr(store, "set_share_card", set_card)
+    monkeypatch.setattr(store, "delete_share", delete)
     forbidden = discord.Forbidden(MagicMock(status=403, reason="x"), "closed")
     recipient = NS(id=2, send=AsyncMock(side_effect=forbidden))
     tx = _Tx()
     assert await _share(tx, recipient) == (words.dm_closed_text("2"), False)
-    assert isinstance(tx.failed[-1], discord.Forbidden), "the transaction rolled back"
+    assert tx.failed[0] is None, "the share was committed before the send"
+    assert delete.await_args is not None and delete.await_args.args[1] == SHARE.id
     set_card.assert_not_awaited()
 
 
@@ -84,7 +88,7 @@ async def test_the_card_names_the_secret_but_never_holds_it(
 
 
 async def test_sharing_off_stores_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cmd, "_sharing_on", AsyncMock(return_value=False))
+    monkeypatch.setattr(flow, "sharing_refusal", AsyncMock(return_value=words.OFF))
     create = AsyncMock()
     monkeypatch.setattr(store, "create_share", create)
     assert await _share(_Tx(), NS(id=2)) == (words.OFF, False)
@@ -95,29 +99,84 @@ def _click(user_id: int) -> Any:
     interaction = MagicMock()
     interaction.client.runtime = _runtime(_Tx())
     interaction.user.id = user_id
-    interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
     interaction.message.edit = AsyncMock()
     return interaction
 
 
+def _reply(interaction: Any) -> dict[str, Any]:
+    return interaction.followup.send.await_args.kwargs
+
+
+@pytest.fixture
+def found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(store, "get_share", AsyncMock(return_value=SHARE))
+
+
+@pytest.mark.usefixtures("on", "found")
 async def test_reveal_shows_the_value_privately_and_leaves_only_the_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(store, "reveal_share", AsyncMock(return_value=Reveal(SHARE, "s3cret")))
     interaction = _click(2)
-    await cmd.reveal(interaction, SHARE.id)
-    reply = interaction.response.send_message.await_args.kwargs
+    await cmd.reveal(interaction, TENANT, SHARE.id)
+    reply = _reply(interaction)
     assert reply["ephemeral"] is True and "s3cret" in reply["embed"].description
     card = interaction.message.edit.await_args.kwargs
     assert card["view"] is None and "s3cret" not in card["embed"].description
     assert "was revealed by <@2>" in card["embed"].description
 
 
+@pytest.mark.usefixtures("on", "found")
 async def test_anyone_else_is_refused_and_the_card_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
     refused = Reveal(SHARE, refusal="not_recipient")
     monkeypatch.setattr(store, "reveal_share", AsyncMock(return_value=refused))
     interaction = _click(3)
-    await cmd.reveal(interaction, SHARE.id)
-    reply = interaction.response.send_message.await_args.kwargs
-    assert reply["embed"].description == words.REVEAL_REFUSALS["not_recipient"]
+    await cmd.reveal(interaction, TENANT, SHARE.id)
+    assert _reply(interaction)["embed"].description == words.REVEAL_REFUSALS["not_recipient"]
     interaction.message.edit.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("found")
+async def test_a_reveal_rechecks_the_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(flow, "sharing_refusal", AsyncMock(return_value=words.DMS_OFF))
+    reveal = AsyncMock()
+    monkeypatch.setattr(store, "reveal_share", reveal)
+    interaction = _click(2)
+    await cmd.reveal(interaction, TENANT, SHARE.id)
+    assert _reply(interaction)["embed"].description == words.DMS_OFF
+    reveal.assert_not_awaited()
+
+
+async def test_the_click_defers_before_anything_reads_the_share(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    interaction = _click(2)
+    interaction.response.defer = AsyncMock(side_effect=lambda **_: order.append("defer"))
+    monkeypatch.setattr(cmd, "reveal", AsyncMock(side_effect=lambda *_: order.append("reveal")))
+    button = cmd.SecretShareRevealButton(tenant_id=str(TENANT), share_id=str(SHARE.id))
+    await button.callback(interaction)
+    assert order == ["defer", "reveal"]
+    assert interaction.response.defer.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.usefixtures("on", "found")
+async def test_only_the_sender_sends_a_held_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    confirm = AsyncMock(return_value=Reveal(SHARE))
+    monkeypatch.setattr(store, "confirm_share", confirm)
+    post = AsyncMock()
+    monkeypatch.setattr(flow, "post_card", post)
+    interaction = _click(1)
+    await cmd.confirm(interaction, TENANT, SHARE.id)
+    assert confirm.await_args is not None and confirm.await_args.kwargs["sender"] == "1"
+    post.assert_awaited_once()
+    assert "<@2>" in _reply(interaction)["embed"].description
+
+    confirm.return_value = Reveal(SHARE, refusal="not_sender")
+    post.reset_mock()
+    other = _click(3)
+    await cmd.confirm(other, TENANT, SHARE.id)
+    assert _reply(other)["embed"].description == words.REVEAL_REFUSALS["not_sender"]
+    post.assert_not_awaited()

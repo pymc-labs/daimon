@@ -6,6 +6,7 @@ its reveal or expiry; there is no plaintext fallback (`NO_KEY` without deploymen
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,7 +17,7 @@ from daimon.core.errors import StoreError
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.secret_shares import MAX_LIVE_PER_SENDER, NO_KEY, SHARE_LIFETIME, RevealRefusal
 from daimon.core.stores.agent_files import _cipher  # pyright: ignore[reportPrivateUsage]
-from sqlalchemy import ColumnElement, delete, func, or_, select, update
+from sqlalchemy import ColumnElement, delete, func, or_, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +38,7 @@ class ShareView:
     channel_id: str | None
     message_id: str | None
     expires_at: datetime
+    agent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,15 +57,28 @@ def _view(row: SecretShare) -> ShareView:
         row.channel_id,
         row.message_id,
         row.expires_at,
+        row.agent_id,
     )
 
 
-async def _clear_lapsed(session: AsyncSession, now: datetime) -> None:
-    await session.execute(
-        update(SecretShare)
+async def clear_lapsed_shares(session: AsyncSession, *, now: datetime, limit: int = 500) -> int:
+    """Delete up to `limit` values past their expiry (the scheduler's sweep); rows stay."""
+    lapsed = (
+        select(SecretShare.id)
         .where(SecretShare.content.is_not(None), SecretShare.expires_at <= now)
-        .values(content=None)
+        .limit(limit)
     )
+    result = await session.execute(
+        update(SecretShare).where(SecretShare.id.in_(lapsed)).values(content=None)
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
+async def _lock_sender(session: AsyncSession, tenant_id: uuid.UUID, sender: str) -> None:
+    """Serialize one sender's shares, so two at once cannot pass the count together."""
+    digest = hashlib.sha256(tenant_id.bytes + b"secret_shares:" + sender.encode()).digest()
+    key = int.from_bytes(digest[:8], "big", signed=True)
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
 async def create_share(
@@ -76,12 +91,15 @@ async def create_share(
     label: str,
     value: str,
     now: datetime,
+    agent_id: str | None = None,
+    awaiting_sender: bool = False,
 ) -> ShareView | None:
-    """Store one encrypted share, or None when the sender already has the most live ones."""
+    """Store one encrypted share, or None when the sender already has the most live ones.
+    `awaiting_sender` holds it until its sender confirms it (`confirm_share`)."""
     cipher = _cipher(session)
     if cipher is None:
         raise SecretShareEncryptionRequiredError()
-    await _clear_lapsed(session, now)
+    await _lock_sender(session, tenant_id, sender)
     live = await session.scalar(
         select(func.count())
         .select_from(SecretShare)
@@ -90,6 +108,7 @@ async def create_share(
             SecretShare.platform == platform,
             SecretShare.sender_platform_user_id == sender,
             SecretShare.content.is_not(None),
+            SecretShare.expires_at > now,
         )
     )
     if (live or 0) >= MAX_LIVE_PER_SENDER:
@@ -101,6 +120,8 @@ async def create_share(
         recipient_platform_user_id=recipient,
         label=label,
         content=encrypt_token(cipher, value),
+        agent_id=agent_id,
+        awaiting_sender=awaiting_sender,
         expires_at=now + SHARE_LIFETIME,
     )
     session.add(row)
@@ -123,16 +144,66 @@ async def delete_share(session: AsyncSession, share_id: uuid.UUID) -> None:
     await session.execute(delete(SecretShare).where(SecretShare.id == share_id))
 
 
+def _one(
+    tenant_id: uuid.UUID, share_id: uuid.UUID, platform: str
+) -> tuple[ColumnElement[bool], ...]:
+    return (
+        SecretShare.id == share_id,
+        SecretShare.tenant_id == tenant_id,
+        SecretShare.platform == platform,
+    )
+
+
+async def get_share(
+    session: AsyncSession, *, tenant_id: uuid.UUID, share_id: uuid.UUID, platform: str
+) -> ShareView | None:
+    row = await session.scalar(select(SecretShare).where(*_one(tenant_id, share_id, platform)))
+    return None if row is None else _view(row)
+
+
+async def confirm_share(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    share_id: uuid.UUID,
+    platform: str,
+    sender: str,
+    now: datetime,
+) -> Reveal:
+    """Release a held share for its card: by its sender only, once, before it expires."""
+    row = await session.scalar(
+        select(SecretShare).where(*_one(tenant_id, share_id, platform)).with_for_update()
+    )
+    if row is None:
+        return Reveal(None, refusal="gone")
+    share = _view(row)
+    if row.sender_platform_user_id != sender:
+        return Reveal(share, refusal="not_sender")
+    if not row.awaiting_sender or row.content is None:
+        return Reveal(share, refusal="gone")
+    if row.expires_at <= now:
+        row.content = None
+        await session.flush()
+        return Reveal(share, refusal="expired")
+    row.awaiting_sender = False
+    await session.flush()
+    return Reveal(share)
+
+
 async def reveal_share(
-    session: AsyncSession, *, share_id: uuid.UUID, platform: str, recipient: str, now: datetime
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    share_id: uuid.UUID,
+    platform: str,
+    recipient: str,
+    now: datetime,
 ) -> Reveal:
     """Hand the value to its recipient once: the row lock makes a second click see it gone."""
     row = await session.scalar(
-        select(SecretShare)
-        .where(SecretShare.id == share_id, SecretShare.platform == platform)
-        .with_for_update()
+        select(SecretShare).where(*_one(tenant_id, share_id, platform)).with_for_update()
     )
-    if row is None:
+    if row is None or row.awaiting_sender:
         return Reveal(None, refusal="gone")
     share = _view(row)
     if row.recipient_platform_user_id != recipient:

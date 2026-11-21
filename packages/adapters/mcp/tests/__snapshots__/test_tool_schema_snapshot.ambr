@@ -10349,8 +10349,10 @@
       'description': '''
         Send one of this agent's saved keys to a person's Discord DMs, where they can
         reveal it once within a day. Use it when someone asks for a key's value; never
-        paste a value in chat. It goes to the person who asked unless an admin names
-        someone else. The result never holds the value.
+        paste a value in chat. Only an admin, the agent's owner or whoever saved the key
+        can get it, and only while they are in the conversation. It goes to them; when an
+        admin names someone else, it goes once they click Send. The result never holds
+        the value.
       ''',
       'parameters': dict({
         'additionalProperties': False,

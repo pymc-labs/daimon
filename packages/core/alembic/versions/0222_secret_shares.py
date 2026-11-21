@@ -32,6 +32,8 @@ def upgrade() -> None:
         sa.Column("recipient_platform_user_id", sa.Text(), nullable=False),
         sa.Column("label", sa.Text(), nullable=False),
         sa.Column("content", sa.LargeBinary(), nullable=True),
+        sa.Column("agent_id", sa.Text(), nullable=True),
+        sa.Column("awaiting_sender", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("channel_id", sa.Text(), nullable=True),
         sa.Column("message_id", sa.Text(), nullable=True),
         sa.Column(
@@ -51,6 +53,12 @@ def upgrade() -> None:
         "secret_shares_recipient_idx",
         "secret_shares",
         ["tenant_id", "platform", "recipient_platform_user_id"],
+    )
+    op.create_index(
+        "secret_shares_live_idx",
+        "secret_shares",
+        ["expires_at"],
+        postgresql_where=sa.text("content IS NOT NULL"),
     )
 
 
