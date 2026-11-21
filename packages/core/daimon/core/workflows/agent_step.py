@@ -295,7 +295,7 @@ class AgentStepExecutor:
         assert isinstance(node, AgentNode), "the agent executor runs agent nodes"
         if node.session == OWNER_DM:
             if self.owner_dm is None:
-                return engine.Failed("fatal", "Owner DM steps run on Discord only.")
+                return engine.Failed("fatal", "Owner DM steps are not available here.")
             return await self.owner_dm(work)
         if (held := await reviewed(self.sm, work)) is not None:
             return await send_proposals(

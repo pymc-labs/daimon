@@ -82,7 +82,7 @@ async def _slack_reads(http: httpx.AsyncClient, token: str, user_id: str, channe
             )
         )
         if body.get("ok") is not True:
-            raise PlatformUnreadable("slack refused")
+            raise PlatformUnreadable("the member list was refused")
         members = body.get("members")
         if isinstance(members, list) and user_id in members:
             return True
