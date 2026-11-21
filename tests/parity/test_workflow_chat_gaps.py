@@ -15,6 +15,8 @@ its line goes:
   and Teams threads are found by record only, as they are a titled post and its replies.
 - A `role:` mention is named, never pinged (role and group pings stay off); Teams names
   no role at all, and a Teams post carries no link back to it.
+- An ask posted into a thread the run did not open takes only replies to it. Slack and
+  Teams messages carry no reply reference, so there it is answered by its buttons only.
 """
 
 from __future__ import annotations
@@ -25,8 +27,10 @@ from pathlib import Path
 from daimon.adapters.discord import workflow_cards as discord_cards
 from daimon.adapters.discord import workflow_delivery as discord_posts
 from daimon.adapters.discord.commands.workflows import WorkflowsCog
+from daimon.adapters.slack import workflow_asks as slack_asks
 from daimon.adapters.slack import workflow_cards as slack_cards
 from daimon.adapters.slack import workflow_delivery as slack_posts
+from daimon.adapters.teams import workflow_asks as teams_asks
 from daimon.adapters.teams import workflow_cards as teams_cards
 from daimon.adapters.teams import workflow_delivery as teams_posts
 from daimon.core.platform_words import WORDS
@@ -64,3 +68,5 @@ def test_the_recorded_post_gaps_still_hold() -> None:
     tags = inspect.getsource(workflow_delivery._mention_tags)  # pyright: ignore[reportPrivateUsage]
     assert "<@&" in tags and "<!subteam^" in tags and "roles=False" in discord, "roles named"
     assert '"link": None' in teams, "a Teams post has no link"
+    replies = inspect.getsource(slack_asks) + inspect.getsource(teams_asks)
+    assert "reply_to=" not in replies, "Slack and Teams replies carry no reply reference"

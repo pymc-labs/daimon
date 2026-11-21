@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
-from daimon.core.stores import tenants, web_identities, workflow_waits
+import pytest
+from daimon.core.stores import tenants, web_identities, workflow_deliveries, workflow_waits
 from daimon.core.stores.accounts import get_account
-from daimon.core.workflows import answers
+from daimon.core.workflows import answers, asks
 from daimon.testing.factories import make_platform_principal, make_web_person
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.workflows import NOW, make_world
@@ -166,3 +168,63 @@ async def test_a_press_decides_only_the_wait_its_button_names_in_its_channel(
     assert pressed.status == "answered", pressed
     assert (await world.get(first.id)).status == "waiting", "the other channel's ask is open"
     assert (await world.get(second.id)).status == "succeeded", "the pressed ask decided"
+
+
+@pytest.mark.parametrize(
+    ("platform", "existing", "message"),
+    [
+        ("discord", "T9", "M1"),
+        ("slack", "C1:1.0", "2.0"),
+        ("teams", "C1;messageid=9", "M1"),
+    ],
+)
+async def test_only_a_reply_answers_an_ask_in_a_thread_the_run_did_not_open(
+    db_session: AsyncSession, platform: answers.Chat, existing: str, message: str
+) -> None:
+    ask = {key: value for key, value in ASK.items() if key != "answer"}
+    nodes = {"ok": ask, "f": {"kind": "finish"}}
+    world = await make_world(db_session, nodes, "ok", platform=platform, home="C1")
+    tenant = await tenants.get_tenant(db_session, world.tenant_id)
+    assert tenant is not None
+    await make_platform_principal(db_session, platform=platform, external_id="7", tenant=tenant)
+    run = await world.run()
+    wait_id = await world.park(run.id, "ok")
+
+    async def post_in(thread: str) -> str | None:
+        async with world.sm.begin() as s:
+            [row] = await workflow_deliveries.deliveries_of_wait(s, wait_id)
+            post = await asks.record_post(
+                s, row, platform=platform, channel_id="C1", thread_id=thread,
+                message_id=message, at=NOW,
+            )  # fmt: skip
+        assert post is not None
+        return post.thread_id
+
+    async def claim(text: str, reply_to: str | None = None, author: str = "7") -> str | None:
+        reply = answers.Reply(
+            platform=platform,
+            tenant_ids=(world.tenant_id,),
+            author=author,
+            message_id=f"m{uuid.uuid4().hex[:6]}",
+            text=text,
+            thread_id=existing,
+            reply_to=reply_to,
+        )
+        claimed = await answers.claim_reply(world.sm, world.settings, reply, now=NOW)
+        return None if claimed is None else claimed.status
+
+    assert await post_in(existing) is None, "a thread the run did not open is not the ask's"
+    assert await claim("lunch?") is None, "ordinary chat there stays chat: no hint, no refusal"
+    assert await claim("lunch?", reply_to=message) == "hint", "a reply to the ask is for it"
+    assert await claim("approve", reply_to=message, author="8") == "refused", "not admitted"
+    async with world.sm.begin() as s:
+        [row] = await workflow_deliveries.claim_deliveries(
+            s, platform=platform, owner="w", now=NOW, lease=timedelta(minutes=1)
+        )
+        await workflow_deliveries.settle_delivery(
+            s, row.id, owner="w", status="sent", now=NOW,
+            placed={"thread": existing, "opened": True},
+        )  # fmt: skip
+    assert await post_in(existing) == existing, "a thread this run opened is the ask's"
+    assert await claim("lunch?") == "hint", "any message in it is for the ask"
+    assert await claim("approve") == "answered"

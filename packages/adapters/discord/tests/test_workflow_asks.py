@@ -145,7 +145,7 @@ async def test_ask_derick_by_dm_resolves_by_reply_and_closes_the_ask(
     assert "Approved by" in closed.content and closed.component_labels == (), closed
 
 
-async def test_ask_reviewer_in_a_thread_is_answered_there_and_refuses_strangers(
+async def test_ask_reviewer_in_a_thread_refuses_strangers_and_leaves_chat_alone(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = DiscordSurfaceHarness(evidence_id="wf", session_id="s", root_turn_id="r")
@@ -159,13 +159,14 @@ async def test_ask_reviewer_in_a_thread_is_answered_there_and_refuses_strangers(
     assert ask.component_labels == ("Answer",), ask
     async with world.sm() as s:
         [post] = await workflow_waits.posts_of_wait(s, wait_id)
-    assert post.thread_id == str(harness.thread.id), "an ask in a thread records the thread"
+    assert post.thread_id is None, "a thread the run did not open is not the ask's"
 
+    assert not await _claims(world, harness, DERICK, "lunch?", None), "other chat is a turn"
     assert await _claims(world, harness, STRANGER, "ship it", ask.message_id)
     refusal = harness.gateway.surviving_messages()[-1]
     assert "Ask " in refusal.embed_texts[-1], refusal
     assert (await world.get(run.id)).status != "succeeded", "a stranger cannot answer"
-    assert await _claims(world, harness, DERICK, "Ship it", None), "a reply in its thread answers"
+    assert await _claims(world, harness, DERICK, "Ship it", ask.message_id)
     output = (await world.steps(run.id))["f"].output
     assert isinstance(output, dict) and output["text"] == "Ship it", output
 

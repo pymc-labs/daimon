@@ -10,6 +10,7 @@ reply there answer. A held or refused ask stays in the inbox and tells the owner
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -196,10 +197,20 @@ async def record_post(
     link: str | None = None,
     at: datetime,
 ) -> WaitPost | None:
-    """Where an ask landed, so a reply there answers it; `wait.posted` on the run's ledger."""
+    """Where an ask landed, so a reply there answers it; `wait.posted` on the run's ledger.
+
+    `thread_id` is the thread the ask went into. It is kept only for a thread the ask owns:
+    one rooted at the ask, or one this run's posts opened. Any message there answers. In
+    another thread only a reply to the ask does; the rest is ordinary chat."""
     ask = ask_of(row.payload)
     if row.kind != "ask" or ask is None or row.wait_id is None or row.run_id is None:
         return None
+    if (
+        thread_id is not None
+        and not _rooted(thread_id, message_id)
+        and thread_id not in await workflow_deliveries.opened_threads(session, row.run_id)
+    ):
+        thread_id = None
     raw = ask.get("addressee")
     addressee = uuid.UUID(raw) if isinstance(raw, str) else None
     post = await workflow_waits.record_post(
@@ -227,6 +238,12 @@ async def record_post(
         at=at,
     )
     return post
+
+
+def _rooted(thread_id: str, message_id: str) -> bool:
+    """A thread started on the ask: Slack `<channel>:<ts>`, Teams `<channel>;messageid=<id>`,
+    or a Discord thread made from the message, which takes the message's id."""
+    return re.split(r"[:=]", thread_id)[-1] == message_id
 
 
 async def _queue_on_posts(
