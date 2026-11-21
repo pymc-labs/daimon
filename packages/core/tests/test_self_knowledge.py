@@ -195,3 +195,19 @@ def test_bad_input_is_refused_in_plain_words_without_server_paths(tmp_path: Path
         assert len(str(refused.value)) < 200, "no echoed input"
     assert "binary.py" not in library.search_source("needle"), "an undecodable file is skipped"
     assert "binary.md" not in library.search_docs("Install"), "and so is an undecodable page"
+
+
+def test_a_missing_docs_or_source_root_fails_clearly_not_empty(tmp_path: Path) -> None:
+    library = _library(tmp_path, web=True)
+    gone = Library(
+        tmp_path / "no-docs", tmp_path / "no-source", library.docs_url, library.repo_url, "x", True
+    )
+    for call in (
+        gone.read_docs,
+        lambda: gone.read_docs("slack.md"),
+        lambda: gone.search_docs("Install"),
+        gone.read_source,
+        lambda: gone.search_source("needle"),
+    ):
+        with pytest.raises(SelfKnowledgeError, match="no Daimon (docs|source) installed"):
+            call()

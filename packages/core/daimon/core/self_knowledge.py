@@ -216,6 +216,14 @@ class Library:
             f"{self.repo_url} (clone it at {self.release} for tests and history)."
         )
 
+    def _need_docs(self) -> None:
+        if not self.docs.is_dir():
+            raise SelfKnowledgeError("This deployment has no Daimon docs installed to read.")
+
+    def _need_source(self) -> None:
+        if not (self.source / SOURCE_DIR).is_dir():
+            raise SelfKnowledgeError("This deployment has no Daimon source installed to read.")
+
     def _page(self, page: str) -> str | None:
         """A page's visible text; None when it is hidden here or missing."""
         parts = _parts(page)
@@ -245,6 +253,7 @@ class Library:
     @_refusing
     def read_docs(self, page: str = "", start_line: int = 1) -> str:
         """A page from `start_line`; with no page, how Daimon works and every page."""
+        self._need_docs()
         if page.strip():
             text = self._page(page)
             if text is None:
@@ -280,6 +289,7 @@ class Library:
     @_refusing
     def search_docs(self, query: str) -> str:
         needle = _query(query)
+        self._need_docs()
         hits = (
             f"{relative}:{number}: {_clip(line)}"
             for relative, text in self._pages()
@@ -313,6 +323,7 @@ class Library:
     @_refusing
     def read_source(self, path: str = "", start_line: int = 1) -> str:
         """A text file from `start_line`, or a directory's entries."""
+        self._need_source()
         target, parts = self._source_path(path)
         shown = "/".join(parts) or "."
         if target.is_dir():
@@ -337,6 +348,7 @@ class Library:
     @_refusing
     def search_source(self, query: str, path: str = "") -> str:
         needle = _query(query)
+        self._need_source()
         target, parts = self._source_path(path)
         base = self.source.resolve()
         files = [target] if target.is_file() else self._files(target, parts)
