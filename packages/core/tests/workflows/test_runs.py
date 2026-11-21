@@ -84,6 +84,37 @@ async def test_specs_keep_their_key_order_and_ledger_rows_read_in_words(
     )
 
 
+async def test_a_step_given_all_untrusted_inputs_marks_each_field(
+    db_session: AsyncSession,
+) -> None:
+    nodes = {
+        "a": {"kind": "agent", "instructions": "Read", "inputs": {"lead": "${{ inputs }}"}},
+    }
+    world = await make_world(db_session, nodes, "a")
+    run = await world.run(inputs={"name": "Ana", "email": "a@b.co"}, untrusted_inputs=True)
+    await world.claim(run.id, "a")
+    async with world.sm() as s:
+        shown = await run_views.step_detail(s, run, "a", None, now=NOW)
+    assert shown is not None and shown.untrusted == ["input.lead.name", "input.lead.email"]
+
+
+async def test_the_latest_plan_note_is_the_step_checklist(db_session: AsyncSession) -> None:
+    world = await make_world(db_session, {"a": {"kind": "agent", "instructions": "Do"}}, "a")
+    run = await world.run()
+    step = (await world.claim(run.id, "a")).step
+    async with world.sm.begin() as s:
+        for text in ("[>] Read", "Halfway", "[x] Read\n[>] Write"):
+            await workflow_runs.add_activity(
+                s, tenant_id=world.tenant_id, step_id=step.id, kind="note", text=text, now=NOW
+            )
+        shown = await run_views.step_detail(s, run, "a", None, now=NOW)
+    assert shown is not None and shown.plan == [
+        {"text": "Read", "status": "done"},
+        {"text": "Write", "status": "active"},
+    ]
+    assert [a.text for a in shown.activity] == ["Halfway"], "plans leave the activity lines"
+
+
 async def test_preflight_refuses_before_anything_is_created(db_session: AsyncSession) -> None:
     world = await make_world(db_session, INLINE, "b")
     world.settings = world.settings.model_copy(update={"features": {}})
@@ -140,6 +171,11 @@ async def test_executor_seam_retries_then_succeeds(db_session: AsyncSession) -> 
     async with world.sm() as s:
         attempts = await workflow_runs.list_attempts(s, step.id)
     assert [a.status for a in attempts] == ["failed", "succeeded"], "one attempt row each"
+    async with world.sm() as s:
+        state = run_views.project(await run_views.event_views(s, done))
+    [shown] = [x for x in state.steps if x.key == "a"]
+    first = shown.attempts[0].error
+    assert first is not None and first["class"] == "retryable", "the attempt shows why it failed"
 
 
 async def test_a_missing_executor_fails_the_step_fatally(db_session: AsyncSession) -> None:

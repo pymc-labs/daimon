@@ -18,7 +18,7 @@ from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import workflow_runs, workflow_waits
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
-from daimon.core.workflows import brief, runs, step_tools, waits
+from daimon.core.workflows import brief, run_views, runs, step_tools, waits
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.agent_step import (
     AgentStepExecutor,
@@ -186,6 +186,10 @@ async def test_agent_then_finish_records_output_cost_and_ledger(db_session: Asyn
     assert step.cost_usd == done.cost_usd > 0, f"the turn's cost is on step and run: {step}"
     types = await world.verified(run.id)
     assert {"step.brief_sent", "step.output_recorded", "step.succeeded"} <= set(types), types
+    async with world.sm() as s:
+        state = run_views.project(await run_views.event_views(s, done))
+    [a] = [x for x in state.steps if x.key == "a"]
+    assert a.attempts[-1].session, "the step shows the agent session it ran in"
 
 
 async def test_digest_continues_the_main_lane_through_a_branch(db_session: AsyncSession) -> None:

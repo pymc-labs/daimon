@@ -21,7 +21,7 @@ from daimon.core.stores.workflow_waits import Wait
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows import catalog, lanes, run_views, runs, service, views, waits
 from daimon.core.workflows.service import Env
-from daimon.core.workflows.spec import AgentNode, AnyNode, ApprovalNode, Spec
+from daimon.core.workflows.spec import ActionNode, AgentNode, AnyNode, ApprovalNode, Spec
 from daimon.core.workflows.views import Person, iso
 from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -145,11 +145,15 @@ def _form(node: AnyNode | None, wait: Wait) -> dict[str, Any] | None:
 def _bound(preview: dict[str, Any], approved: dict[str, Any], spec: Spec) -> dict[str, Any]:
     """A bound Action as shown: the approved call once decided, else the preview."""
     call = approved.get(preview["node"]) or preview
+    node = spec.nodes.get(preview["node"])
+    args: dict[str, Any] = call.get("args") or {}
+    # Stored JSON comes back with sorted keys; show them in the author's order.
+    order = (node.args or {}) if isinstance(node, ActionNode) else {}
     return {
         "tool": call["tool"],
         "label": catalog.tool_label(call["tool"]),
-        "step": waits.step_title(spec.nodes.get(preview["node"]), preview["node"]),
-        "args": call.get("args") or {},
+        "step": waits.step_title(node, preview["node"]),
+        "args": {k: args[k] for k in order if k in args} | args,
     }
 
 

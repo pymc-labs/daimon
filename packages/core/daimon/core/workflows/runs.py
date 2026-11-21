@@ -1160,6 +1160,7 @@ async def settle(
                 now=now,
                 delay=timedelta(seconds=delay),
                 message=outcome.message,
+                error_class=outcome.error_class,
             )
             return True
         await _resolve(session, loaded, step, outcome, now=now)
@@ -1174,6 +1175,7 @@ async def _retry_later(
     now: datetime,
     delay: timedelta,
     message: str,
+    error_class: str | None = None,
 ) -> None:
     write: StepWrite = {
         "status": "ready",
@@ -1182,11 +1184,10 @@ async def _retry_later(
         "lease_expires_at": None,
         "error_message": _cut(message),
     }
-    event = Event(
-        "step.retry_scheduled",
-        key_of(step),
-        {"after_s": int(delay.total_seconds()), "message": _cut(message)},
-    )
+    data: dict[str, JsonValue] = {"after_s": int(delay.total_seconds()), "message": _cut(message)}
+    if error_class:
+        data["error_class"] = error_class
+    event = Event("step.retry_scheduled", key_of(step), data)
     await _write_step(session, loaded, step, write, [event], now=now)
 
 

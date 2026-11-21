@@ -11,7 +11,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
@@ -231,7 +231,7 @@ def _detail(e: EventRow, data: Mapping[str, Any], actor: str, run: RunRow | None
     text = data.get("message") or data.get("reason")
     by = _name(data.get("by")) or (actor if _account_of(e.actor) else None)
     match e.type:
-        case "run.failed" | "step.failed" | "step.unknown" if isinstance(text, str):
+        case "run.failed" | "step.failed" if isinstance(text, str):
             return text
         case "run.queued":
             trigger = obj(data.get("trigger")).get("kind") or data.get("trigger") or "manual"
@@ -465,7 +465,7 @@ def project(events: Sequence[RunEvent]) -> RunState:
             if last:
                 last.cost_usd += cost
         err = {
-            "class": _str(d.get("class")) or "agent",
+            "class": _str(d.get("error_class")) or "agent",
             "message": _str(d.get("message")) or e.detail,
         }
 
@@ -528,6 +528,8 @@ def project(events: Sequence[RunEvent]) -> RunState:
                                 session=_str(d.get("session")) or "",
                             )
                         )
+            case "step.brief_sent" if last:
+                last.session = _str(d.get("session"))
             case "step.route_chosen" if st:
                 st.route = _str(d.get("route"))
             case "step.retry_scheduled":
@@ -827,19 +829,24 @@ async def step_detail(
             shown[name] = render(text, context, now=now) if context is not None else text
         except ExpressionError:
             shown[name] = None
-    untrusted = [
-        f"input.{name}"
-        for name, text in exprs.items()
-        if run.untrusted_inputs
-        and isinstance(text, str)
-        and any(r.path[:1] == ("inputs",) for r in _refs(text))
-    ]
+    untrusted: list[str] = []
+    for name, text in exprs.items():
+        paths = [r.path for r in _refs(text)] if isinstance(text, str) else []
+        if not run.untrusted_inputs or not any(p[:1] == ("inputs",) for p in paths):
+            continue
+        value = shown.get(name)
+        # The whole inputs object marks each field, as a single value marks itself.
+        if paths == [("inputs",)] and isinstance(value, dict):
+            untrusted += [f"input.{name}.{k}" for k in cast(dict[str, object], value)]
+        else:
+            untrusted.append(f"input.{name}")
     events = await list_events(session, run.id)
     done = step.status == "succeeded"
     agent = node.get("agent") or obj(spec.get("defaults")).get("agent")
     route = step.route
     way = obj(node.get("routes")).get(route) if route else None
     activity = await runs_store.list_activity(session, step.id)
+    plans = [p for _, kind, text, _ in activity if kind == "note" and (p := _plan_of(text))]
     return StepDetail(
         key=key,
         attempt=chosen.number if chosen else 0,
@@ -849,7 +856,7 @@ async def step_detail(
         route={"name": route, "reason": str(obj(way).get("when") or "")} if route else None,
         files=[file_view(run.id, f) for f in step.files] if done else [],
         input=shown,
-        output=step.output if done else None,
+        output=_in_order(step.output, obj(node.get("output"))) if done else None,
         untrusted=untrusted,
         rejections=[
             {"attempt": 1, "errors": list(e.data.get("errors") or [])}
@@ -860,9 +867,21 @@ async def step_detail(
         activity=[
             ActivityLine(at=at.isoformat(), kind=kind, text=text, tool=tool)
             for at, kind, text, tool in activity
+            if not (kind == "note" and _plan_of(text))
         ],
-        plan=[],
+        plan=plans[-1] if plans else [],
     )
+
+
+_PLAN_MARKS: Final = {"[x]": "done", "[>]": "active", "[ ]": "todo"}
+
+
+def _plan_of(text: str) -> list[dict[str, str]]:
+    """The checklist in an `update_plan` note (`[x] step` lines), or nothing for other notes."""
+    rows = [(_PLAN_MARKS.get(line[:3]), line[4:]) for line in text.splitlines()]
+    if not rows or any(status is None for status, _ in rows):
+        return []
+    return [{"text": text, "status": status or ""} for status, text in rows]
 
 
 def file_view(run_id: uuid.UUID, ref: object) -> dict[str, Any]:
@@ -875,6 +894,14 @@ def file_view(run_id: uuid.UUID, ref: object) -> dict[str, Any]:
         "size": file.get("size_bytes"),
         "url": f"/api/workflows/runs/{run_id}/files/{file.get('file_id')}",
     }
+
+
+def _in_order(output: object, schema: dict[str, Any]) -> object:
+    """An output in its schema's field order; stored JSON comes back with sorted keys."""
+    if not isinstance(output, dict) or not schema:
+        return cast(object, output)
+    fields = cast(dict[str, object], output)
+    return {k: fields[k] for k in schema if k in fields} | fields
 
 
 def _refs(text: str) -> list[Ref]:
