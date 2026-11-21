@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from daimon.core._models import Routine, Tenant, Workflow, WorkflowTrigger
 from daimon.core.errors import RoutineMoved
+from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.stores import routines
 from daimon.core.workflows import convert, triggers
 from daimon.core.workflows.access import Who
@@ -120,3 +121,28 @@ async def test_a_dm_routine_becomes_an_owner_dm_step_that_posts_to_the_owner(
     spec = convert.routine_spec(dm, builtins=False)
     assert spec["nodes"][convert.STEP]["session"] == OWNER_DM
     assert spec["nodes"][convert.DONE]["deliver"]["to"] == "owner"
+
+
+async def test_a_stale_panel_button_on_a_moved_routine_changes_nothing(
+    db_session: AsyncSession,
+) -> None:
+    env = await _env(db_session)
+    routine_id = await _routine(db_session, env)
+    await convert.from_routine(env, routine_id)
+
+    async def allowed(_row: object) -> bool:
+        return True
+
+    async with env.sm.begin() as s:
+        result = await apply_routine_action(
+            s,
+            routine_id,
+            tenant_id=env.who.tenant_id,
+            op="resume",
+            allowed=allowed,
+            load=routines.get_routine,
+            pause=routines.pause_routine,
+            resume=routines.resume_routine,
+            now=lambda: NOW,
+        )
+    assert result == "moved", "the panel says it moved instead of failing"
