@@ -167,15 +167,27 @@ async def _view(
     )
 
 
-async def _catalog(env: Env) -> Catalog:
-    return await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents, env.skills)
+async def _catalog(env: Env, spec: object) -> Catalog:
+    return await tool_catalogs.tool_catalog(
+        env.settings.tool_safety, env.agents, env.skills, spec=spec
+    )
+
+
+async def _draft_of(env: Env, workflow_id: uuid.UUID) -> dict[str, Any]:
+    """The draft as it is now, to build its catalog before the locked publish; a draft that
+    changes meanwhile and names new skills fails validation (closed)."""
+    async with env.sm() as session:
+        row = await store.get_workflow(
+            session, tenant_id=env.who.tenant_id, workflow_id=workflow_id
+        )
+    return row.draft_spec if row is not None else {}
 
 
 async def _validate(env: Env, spec: dict[str, Any], catalog: Catalog | None = None) -> Validation:
     budget = await _budget(env)
     return validate_document(
         spec,
-        catalog or await _catalog(env),
+        catalog or await _catalog(env, spec),
         run_budget_usd=obj(spec.get("limits")).get("budget_usd") or budget,
         now=env.now,
     )
@@ -504,7 +516,7 @@ async def publish(
     env: Env, workflow_id: uuid.UUID, note: str, *, source: Literal["web", "chat"] = "web"
 ) -> views.Workflow:
     budget = await _budget(env)
-    catalog = await _catalog(env)
+    catalog = await _catalog(env, await _draft_of(env, workflow_id))
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
         await _need(session, workflow, rights.edit, "the owner or an editor")
@@ -641,7 +653,7 @@ async def _held_grants(
 
 async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.Workflow:
     budget = await _budget(env)
-    catalog = await _catalog(env)
+    catalog = await _catalog(env, await _draft_of(env, workflow_id))
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
         await _need(session, workflow, rights.edit, "the owner or an editor")
@@ -688,7 +700,13 @@ async def decide_publish_request(
     note = (comment or "").strip()[:500] or None
     if not approve and note is None:
         raise Invalid("Add a comment.")
-    catalog = await _catalog(env) if approve else None
+    catalog = None
+    if approve:
+        async with env.sm() as session:
+            asked = await publish_requests.get_request(
+                session, tenant_id=env.who.tenant_id, request_id=request_id
+            )
+        catalog = await _catalog(env, asked.spec if asked is not None else {})
     async with env.sm.begin() as session:
         request = await publish_requests.get_request(
             session, tenant_id=env.who.tenant_id, request_id=request_id, lock=True
@@ -987,7 +1005,8 @@ async def _pins(env: Env, from_run: uuid.UUID, nodes: Sequence[str]) -> dict[str
 
 async def _draft_skills(env: Env, workflow: WorkflowRow) -> dict[str, dict[str, str]]:
     """The library skills a test run of the draft loads, at their versions now."""
-    return tool_catalogs.spec_skills(parse_spec(workflow.draft_spec), await _catalog(env))
+    catalog = await _catalog(env, workflow.draft_spec)
+    return tool_catalogs.spec_skills(parse_spec(workflow.draft_spec), catalog)
 
 
 async def start(

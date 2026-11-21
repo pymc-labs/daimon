@@ -176,7 +176,9 @@ async def _plan(session: AsyncSession, env: Env, routine_id: uuid.UUID) -> Plan:
     builtins = (await opted_in_by_many(session, [row], tenant.platform))[row.id] is not None
     other = await _on_other_backend(session, row, tenant.platform)
     spec = routine_spec(row, builtins=builtins)
-    catalog = await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents, env.skills)
+    catalog = await tool_catalogs.tool_catalog(
+        env.settings.tool_safety, env.agents, env.skills, spec=spec
+    )
     if STEP in tainted_steps(parse_spec(spec), catalog):
         # The routine read outside content and wrote anyway; that stays, approved and shown.
         spec["nodes"][STEP]["untrusted_waiver"] = f"Moved from routine {spec['name']}"

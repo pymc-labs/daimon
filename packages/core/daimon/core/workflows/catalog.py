@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -88,12 +89,27 @@ def agent_tool_ids(agent: BetaManagedAgentsAgent) -> list[str]:
     return ids
 
 
+def names_skills(spec: object) -> bool:
+    """A raw spec where some step (a loop's included) names library skills."""
+    if isinstance(spec, Mapping):
+        items = cast("Mapping[str, object]", spec).items()
+        return any((k == "skills" and bool(v)) or names_skills(v) for k, v in items)
+    return isinstance(spec, list) and any(names_skills(v) for v in cast("list[object]", spec))
+
+
 async def tool_catalog(
-    policy: ToolSafetyPolicy, agents: AgentLister | None, skills: SkillLister | None = None
+    policy: ToolSafetyPolicy,
+    agents: AgentLister | None,
+    skills: SkillLister | None,
+    *,
+    spec: object,
 ) -> Catalog:
-    """The catalog every validation reads; no lister means no agents or skills (fails closed)."""
+    """The catalog validating `spec` reads; no lister means no agents or skills (fails
+    closed). The skills are listed only when the spec names some, so a skills outage never
+    blocks a workflow that uses none."""
     listed: Sequence[BetaManagedAgentsAgent] = await agents() if agents is not None else ()
-    pins: Mapping[str, SkillPin] = await skills() if skills is not None else {}
+    wanted = skills is not None and names_skills(spec)
+    pins: Mapping[str, SkillPin] = await skills() if wanted and skills is not None else {}
     held = {agent_key(a): frozenset(s.skill_id for s in a.skills) for a in listed}
     return catalog_of(policy, {agent_key(a): agent_tool_ids(a) for a in listed}, pins, held)
 

@@ -131,25 +131,28 @@ async def test_a_toolset_on_by_default_offers_its_unlisted_tools() -> None:
     async def agents() -> list[Any]:
         return [ma_agent(id="agent_triage", name="triage", tools=[gmail])]
 
-    catalog = await tool_catalog(OPEN_TOOL_SAFETY, agents)
-    spec = parse_spec(
-        {
-            "schema": "daimon.workflow/v1",
-            "name": "triage",
-            "start": "read",
-            "nodes": {
-                "read": {
-                    "kind": "agent",
-                    "agent": "triage",
-                    "instructions": "x",
-                    "writes": "allow",
-                    "next": "send",
-                },
-                "send": {"kind": "action", "tool": "gmail/send_message", "args": {}, "next": "f"},
-                "f": {"kind": "finish"},
+    async def down() -> dict[str, SkillPin]:
+        raise RuntimeError("the skills API is down")
+
+    raw: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "triage",
+        "start": "read",
+        "nodes": {
+            "read": {
+                "kind": "agent",
+                "agent": "triage",
+                "instructions": "x",
+                "writes": "allow",
+                "next": "send",
             },
-        }
-    )
+            "send": {"kind": "action", "tool": "gmail/send_message", "args": {}, "next": "f"},
+            "f": {"kind": "finish"},
+        },
+    }
+    # A spec that names no skills never lists them, so a skills outage blocks nothing.
+    catalog = await tool_catalog(OPEN_TOOL_SAFETY, agents, down, spec=raw)
+    spec = parse_spec(raw)
     codes = [p.code for p in validate_spec(spec, catalog).errors]
     assert "rule_of_two" in codes and "unknown_tool" not in codes, codes
     stored = catalog_of(OPEN_TOOL_SAFETY, spec_agent_tools(spec, catalog))
