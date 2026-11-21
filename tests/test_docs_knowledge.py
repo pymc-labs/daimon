@@ -98,9 +98,6 @@ URL_WORDS = {  # slash-led words that are paths, not slash commands
 }  # fmt: skip
 
 
-PENDING = {"self_knowledge"}  # spec lands with the Knows Daimon feature
-
-
 def _corpus() -> str:
     roots = [ROOT / d for d in ("packages", "apps", "scripts", "defaults")]
     files = [p for r in roots for p in r.rglob("*") if p.suffix in {".py", ".sh", ".yaml"}]
@@ -160,7 +157,7 @@ def test_env_vars_and_feature_keys_in_docs_exist() -> None:
                 if not ok:
                     bad.append(f"{path.name}: {var}")
             for key in re.findall(r"daimon features set ([a-z][\w.]*)", chunk):
-                if key not in FEATURES and key not in PENDING:
+                if key not in FEATURES:
                     bad.append(f"{path.name}: feature {key}")
     assert not bad, "\n".join(bad)
 
@@ -196,7 +193,7 @@ def test_mcp_tool_names_in_docs_exist() -> None:
     tools = set(re.findall(r"^\| `([a-z][a-z0-9_]+)` \|", catalogue, re.M))
     verbs = {t.partition("_")[0] for t in tools}
     corpus = _corpus()
-    others = {k.replace(".", "_") for k in FEATURES} | PENDING
+    others = {k.replace(".", "_") for k in FEATURES}
     bad = []
     for path, text in _hand_written():
         for span in CODE_SPAN.findall(FENCE.sub("", text)):

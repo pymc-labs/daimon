@@ -112,9 +112,10 @@ The web app also sets features, in its Settings section.
 ## Knows Daimon
 
 **Knows Daimon** (`self_knowledge`) lets an agent answer questions about Daimon
-itself. It gives the agent read-only tools, `daimon_docs` and `daimon_source`, that
-serve these pages and the source of the running release. The agent then answers "how
-does Daimon work" and "how do I do this" from the release it runs on, not from memory.
+itself. It gives the agent four read-only tools, `read_daimon_docs`,
+`search_daimon_docs`, `read_daimon_source` and `search_daimon_source`, that serve these
+pages and the source of the running release. The agent then answers "how does Daimon
+work" and "how do I do this" from the release it runs on, not from memory.
 
 It is off by default and is set per agent. Turn it on in an agent's settings, with
 `/settings`, or from the CLI:
