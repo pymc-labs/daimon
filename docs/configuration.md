@@ -542,8 +542,8 @@ Read from `daimon.core.config.McpIdentitySettings`. Prefix `DAIMON_MCP_IDENTITY_
 Ed25519 private key that signs caller identities for the servers in
 DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte seed.
 Generate one with `daimon mcp identity-keygen`, which also prints the public key to
-register with each server. Read by the mcp service, and by the web service when a
-DAIMON_WEB__NODES__* node names a server.
+register with each server. Read by the mcp service and by any service that connects to
+those servers.
 
 ### `DAIMON_MCP_IDENTITY__SERVERS`
 
@@ -606,9 +606,7 @@ otherwise invalidate every issued login).
 `str | None` · optional · default unset
 
 Slack OAuth app client ID for the /slack/mcp login mount. Register &lt;hub
-origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url). Web
-app sign-in with Slack uses this app too: also register &lt;web public
-url&gt;/auth/slack/callback.
+origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url).
 
 ### `DAIMON_HUB__SLACK_CLIENT_SECRET`
 
@@ -622,8 +620,6 @@ Slack OAuth app client secret for the /slack/mcp login mount.
 
 Discord OAuth app client ID for the /discord/mcp login mount. Register &lt;hub
 origin&gt;/discord/auth/callback as a redirect URI on the Discord app (see public_url).
-Web app sign-in with Discord uses this app too: also register &lt;web public
-url&gt;/auth/discord/callback.
 
 ### `DAIMON_HUB__DISCORD_CLIENT_SECRET`
 
@@ -1365,8 +1361,7 @@ Inert until `client_id`, `client_secret` and `tenant_id` are all set.
 `str | None` · optional · default unset
 
 Application (client) ID of the Entra app registration people sign in to with Connect
-Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`; web
-app sign-in with Microsoft also needs `&lt;web public url&gt;/auth/microsoft/callback`.
+Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`.
 
 ### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET`
 

@@ -11,7 +11,7 @@ from daimon.core.self_knowledge import sections
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
-GENERATED = {"configuration.md", "mcp-tools.md", "features.md"}
+GENERATED = {"configuration.md", "mcp-tools.md", "features.md"}  # names come from code
 OPEN, CLOSE = "<!-- knowledge: web -->", "<!-- /knowledge -->"
 FENCE = re.compile(r"^```.*?^```", re.M | re.S)
 CODE_SPAN = re.compile(r"`([^`\n]+)`")
@@ -77,7 +77,7 @@ def test_markers_are_paired_on_their_own_lines(path: Path) -> None:
 
 
 WEB_MENTION = re.compile(
-    r"\bweb app\b|\bweb chat\b|\bweb model\b|\bweb (?:routines|settings)\b|\bthe web\b"
+    r"\bweb app\b|\bweb chat\b|\bweb model\b|\bweb (?:routines|settings)\b|(?<!search )\bthe web\b"
     r"|web\.md|DAIMON_WEB__|\bweb access\b|\bon the web\b",
     re.I,
 )
@@ -86,8 +86,8 @@ WEB_MENTION = re.compile(
 @pytest.mark.parametrize("path", _pages(), ids=lambda p: p.name)
 def test_web_app_is_mentioned_only_inside_markers(path: Path) -> None:
     text = path.read_text()
-    if path.name in GENERATED or _is_web_page(text):
-        pytest.skip("generated or web-only page")
+    if _is_web_page(text):
+        pytest.skip("web-only page")
     for line in _unmarked(text).splitlines():
         assert not WEB_MENTION.search(line), f"{path.name}: web text outside markers: {line}"
 

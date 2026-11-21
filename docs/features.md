@@ -12,6 +12,9 @@ Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool or `daimon features`.
+<!-- knowledge: web -->
+The web app sets them too.
+<!-- /knowledge -->
 
 A chat conversation picks up a change to a feature that hides tools at its next message.
 A CLI session, or an agent chat continued with `send_message`, keeps the tools it started
@@ -373,7 +376,7 @@ The agent can search the web. Off removes it here; On never gives more than the 
 
 ## Knows Daimon
 
-The agent can read the docs and source code of the Daimon release it runs on, to answer how Daimon works, how to set it up and why it behaves as it does. Pages about the web app are left out where Web app is Off.
+The agent can read the docs and source of the Daimon release it runs on.
 
 | | |
 | --- | --- |
@@ -947,7 +950,7 @@ How long a callback watch lasts, new or moved in, before it must be renewed. The
 
 ## Answer time limit
 
-The longest one answer may take before it is stopped when someone is talking to the agent in a chat, a direct message or the web app: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
+The longest one answer may take before it is stopped when someone is talking to the agent: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
 
 | | |
 | --- | --- |
@@ -1154,7 +1157,7 @@ A routine the agent makes must name where its results go, or it is not made. Exi
 
 ## Monitor direct messages
 
-Keeps what people ask this agent in direct messages and web chat, and what it answers, for admins to read. People are told in the conversation. Kept from when it is turned on, for the retention period.
+Keeps what people ask this agent in direct messages and private chats, and what it answers, for admins to read. People are told in the conversation. Kept from when it is turned on, for the retention period.
 
 | | |
 | --- | --- |

@@ -19,6 +19,9 @@ server](https://daimon.decision.ai/) instead.
   [Microsoft Teams](teams.md), [GitHub](github.md),
   [MCP servers](mcp-servers.md) and the
   [Claude Code plugin](plugin.md).
+<!-- knowledge: web -->
+- **Use it in a browser:** the [web app](web.md).
+<!-- /knowledge -->
 - **Shape what it does:** [Defaults](defaults.md) for agents and skills,
   [Routines](routines.md) and [Watches](watches.md) for scheduled work,
   [Direct messages](direct-messages.md),

@@ -1,4 +1,4 @@
-"""Chat tools for the skills the data server node's server serves, as in the web app's agent
+"""Chat tools for the skills the data server node's server serves, as in the agent
 editor: add one to the library, check or approve its update, fork it, follow its updates."""
 
 from __future__ import annotations

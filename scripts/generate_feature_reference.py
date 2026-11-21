@@ -53,6 +53,9 @@ Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool or `daimon features`.
+<!-- knowledge: web -->
+The web app sets them too.
+<!-- /knowledge -->
 
 A chat conversation picks up a change to a feature that hides tools at its next message.
 A CLI session, or an agent chat continued with `send_message`, keeps the tools it started

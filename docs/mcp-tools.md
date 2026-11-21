@@ -27,7 +27,7 @@ tool is hidden by default and restored only for a matching caller.
 - **Slack callers** — carries the `slack` tag.
 - **Teams callers** — carries the `teams` tag.
 <!-- knowledge: web -->
-- **web app callers** — carries the `web` tag.
+- **web callers** — carries the `web` tag.
 <!-- /knowledge -->
 
 A CLI token matches no platform tag, so it sees none of the Discord, Slack or Teams
@@ -154,8 +154,8 @@ invite.
 
 ## `audit_log`
 
-The workspace's audit log, from chat: what admins changed in the web app and the chat
-tool calls and panel writes, newest first.
+The workspace's audit log, from chat: what admins changed and the chat tool calls and
+panel writes, newest first.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -245,15 +245,15 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `forget_watch_credential` | Discord callers | Delete your own saved watch key for one server. |
-| `request_agent_key` | Discord callers, Slack callers, Teams callers, web app callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
+| `request_agent_key` | Discord callers, Slack callers, Teams callers, web callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
 | `request_watch_credential` | Discord callers | Ask the person for their own read-only key for a server their watches check. |
 
 ## `credit_reports`
 
-The web app's credit and feedback pages, from chat: a person's own use, the workspace
-overview, spend by person, agent or channel, and what people said about answers.
+The credit and feedback pages, from chat: a person's own use, the workspace overview,
+spend by person, agent or channel, and what people said about answers.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -570,9 +570,8 @@ Read-only tools over this release's docs and source (`daimon.core.self_knowledge
 
 ## `server_skills`
 
-Chat tools for the skills the data server node's server serves, as in the web app's
-agent editor: add one to the library, check or approve its update, fork it, follow its
-updates.
+Chat tools for the skills the data server node's server serves, as in the agent editor:
+add one to the library, check or approve its update, fork it, follow its updates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |

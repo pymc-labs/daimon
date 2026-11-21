@@ -284,9 +284,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "The agent can read the docs and source code of the Daimon release it runs on, to "
-            "answer how Daimon works, how to set it up and why it behaves as it does. Pages "
-            "about the web app are left out where Web app is Off."
+            "The agent can read the docs and source of the Daimon release it runs on."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -936,8 +934,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             (
                 "monitor_direct_messages",
                 "Monitor direct messages",
-                "Keeps what people ask this agent in direct messages and web chat, and what "
-                "it answers, for admins to read. People are told in the conversation. "
+                "Keeps what people ask this agent in direct messages and private chats, and "
+                "what it answers, for admins to read. People are told in the conversation. "
                 "Kept from when it is turned on, for the retention period.",
             ),
             (
@@ -1223,9 +1221,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Answer time limit",
         (
             "The longest one answer may take before it is stopped when someone is talking to "
-            "the agent in a chat, a direct message or the web app: the standard 45 minutes, "
-            "or shorter. The smallest setting wins. Routines and watches use "
-            "the unattended run limit."
+            "the agent: the standard 45 minutes, or shorter. The smallest setting wins. "
+            "Routines and watches use the unattended run limit."
         ),
         _TIME_LIMITS,
         default="45",
