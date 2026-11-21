@@ -1,0 +1,29 @@
+# daimon-eval-sandbox
+
+The image an eval item runs in. One pod per item, three uids:
+
+| uid | runs | network |
+| --- | --- | --- |
+| `exec` (10000; root for the harness) | the executor: Anthropic environment worker, `codex exec-server`, `gemini-api environments connect`, or the harness | control-plane hosts tunnelled untouched; nothing else |
+| `agent` (10001 and up) | every command the agent runs | the eval world only |
+| `gateway` (61000) | mitmproxy with `gateway.py` and a fake resolver | DNS, the world, and public web ports for control-plane and allowed registry hosts |
+
+`netinit.py` sets the packet rules (`init` on Kubernetes, `net` on Docker). Web ports go to
+the gateway, DNS to its resolver, and every other packet is rejected; new inbound
+connections reach only the harness port. The gateway opens no connection but a tunnel or
+an allowed registry. The shells the executor starts (`bash`, `/bin/sh`, its login shell,
+`$SHELL`) go through `image/exec-shell.c` to `image/agent-exec.c`, which drops to the
+agent uid with the agent environment only. Executor binaries are unreadable to it, so
+nothing they start can read their memory or environment. `probe isolation`, run as the
+executor, checks each path.
+
+Limits: a command the executor starts without a shell (the codex backend's `python3`, `curl`)
+and a direct run of the real shells under `/usr/libexec/eval` run as the executor uid. That uid
+reaches control-plane and `passthrough_hosts` untouched, which the gateway matches by SNI,
+not Host. Provider web tools are off only through the eval compile path. This is not a boundary
+against a hostile executor.
+
+Pod files arrive under `/run/eval`: the gateway's
+`config.json` and `ca.pem`, and the main container's `pod.json` and `ca.crt`.
+
+Probes: `python -m daimon_eval_sandbox probe [name ...]` prints pass, fail or skipped per tool.

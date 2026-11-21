@@ -293,6 +293,77 @@ Effort the eval world simulator runs at.
 Base URL where eval sandbox gateways reach the eval worker's fake world, e.g.
 http://eval-worker:8090. Unset: no sandbox can be enclosed.
 
+### `DAIMON_EVALS__SANDBOX_RUNTIME`
+
+`'docker' | 'kubernetes' | None` · optional · default unset
+
+Where eval sandbox pods run: a Docker host or a Kubernetes namespace.
+
+### `DAIMON_EVALS__DOCKER_HOST`
+
+`str` · optional · default `unix:///var/run/docker.sock`
+
+Docker Engine for eval sandboxes: a unix socket, or tcp://host:2376 with the TLS files.
+
+### `DAIMON_EVALS__DOCKER_NETWORK`
+
+`str | None` · optional · default unset
+
+Docker network for eval pods; it must reach the eval world URL. Unset: the default
+bridge.
+
+### `DAIMON_EVALS__DOCKER_TLS_CA`
+
+`Path | None` · optional · default unset
+
+CA file that signs the remote Docker host's certificate.
+
+### `DAIMON_EVALS__DOCKER_TLS_CERT`
+
+`Path | None` · optional · default unset
+
+Client certificate file for the remote Docker host.
+
+### `DAIMON_EVALS__DOCKER_TLS_KEY`
+
+`Path | None` · optional · default unset
+
+Client key file for the remote Docker host.
+
+### `DAIMON_EVALS__KUBERNETES_NAMESPACE`
+
+`str` · optional · default `daimon-evals`
+
+Namespace for eval sandbox pods, reached with the worker's in-cluster service account.
+
+### `DAIMON_EVALS__SANDBOX_IMAGE`
+
+`str | None` · optional · default unset
+
+Eval sandbox image, pinned by digest (registry/daimon-eval-sandbox@sha256:...).
+
+### `DAIMON_EVALS__CA_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+PEM RSA private key of the eval CA. Sandbox tools trust it; the gateway mints a
+certificate per host with it. Unset: no sandbox can be enclosed.
+
+### `DAIMON_EVALS__PASSTHROUGH_HOSTS`
+
+`list[str]` · optional · default unset
+
+Extra hosts the eval executor's own user may reach untouched, besides its provider's
+control plane. Matched by TLS server name, not Host. Shells the executor starts run as
+the agent and reach the fake world; commands it starts without a shell run as the
+executor and reach these hosts.
+
+### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
+
+`Decimal` · optional · default `0`
+
+What an hour of one eval sandbox pod costs, for run cost reports.
+
 ## Long Jobs
 
 Read from `daimon.core.config.LongJobsSettings`. Prefix `DAIMON_LONG_JOBS__`.

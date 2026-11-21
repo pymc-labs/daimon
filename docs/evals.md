@@ -123,6 +123,45 @@ Every call is logged with the effects it would have had, such as a created issue
 Pushes go to a private copy of the repository for that item only. Set the
 simulator with [`DAIMON_EVALS__SIMULATOR_MODEL`](configuration.md#daimon_evals__simulator_model).
 
+## Sandboxes
+
+Each item runs its tools in an enclosed sandbox pod. A gateway in the pod sends
+every web request the tools make to the fake world and refuses every other
+connection. The provider worker that runs the agent reaches its provider, and
+the shells it starts run as the agent. Package downloads are blocked
+unless the `eval_package_registries` feature lets them reach the real registries.
+
+A pod gets 2 CPUs, 4 GB of memory, 4,096 processes and 20 GB of disk.
+Docker has no per-container disk cap, and on Kubernetes the process limit is
+the node's. Kubernetes stops a pod after 4 hours. Tools written in Go, such
+as `gh`, see the real clock instead of the case's.
+
+Limits: this encloses the agent's tools, not a hostile executor. A command the
+executor starts without a shell, such as the codex backend's `python3` or `curl`,
+and a direct run of the real shell binaries, run as the executor user. That user
+reaches the provider's control plane and any
+[`passthrough_hosts`](configuration.md#daimon_evals__passthrough_hosts) untouched,
+and the gateway matches them by TLS server name, not by the request's Host header.
+Provider web tools are off only for agents compiled by the eval path.
+
+Pods run on a Docker host or in a Kubernetes namespace, chosen by
+[`DAIMON_EVALS__SANDBOX_RUNTIME`](configuration.md#daimon_evals__sandbox_runtime).
+The pod sets its own packet rules, so the platform must allow the `NET_ADMIN`
+capability. Managed container services that forbid it cannot host sandboxes.
+
+On Kubernetes, the eval worker's service account needs to create, read, list and
+delete pods, `pods/exec` and secrets in the namespace. The namespace needs the
+`privileged` pod security level. Pods get no service account token. Add a
+NetworkPolicy that admits connections to pods labelled `daimon.eval/item` only
+from the eval worker.
+
+Sandbox tools trust an eval CA. Create its key once and store it as
+[`DAIMON_EVALS__CA_KEY`](configuration.md#daimon_evals__ca_key):
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out eval-ca.pem
+```
+
 ## Who can do what
 
 | Person | Can |

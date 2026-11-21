@@ -716,6 +716,8 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "published_artifact_mount",
         "reserved_mcp_credential",
         "reserved_skill_metadata",
+        "self_hosted_environment",
+        "self_hosted_skills",
         "selfhosted_environment_required",
         "session_add_non_file_resource",
         "session_archive",

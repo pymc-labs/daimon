@@ -142,10 +142,12 @@ def build_prompt(context: SimContext) -> str:
     """The user turn: request, service guidance, case facts, item state, earlier answers."""
     case, request = context.case, context.request
     world = case.world
+    # A binary's HTTP calls are aimed at its recorded output: show the recorded commands too.
+    surfaces = {request.surface, "cli"} if request.surface == "http" else {request.surface}
     relevant = [
         to_document(x)
         for x in world.exchanges or ()
-        if x.service in (None, request.service) and x.surface == request.surface
+        if x.surface in surfaces and (x.surface == "cli" or x.service in (None, request.service))
     ]
     resources = [to_document(r) for r in world.resources or () if r.service == request.service]
     identities = [to_document(i) for i in world.identities or ()]
