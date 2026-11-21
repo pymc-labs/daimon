@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had to check on it. Each post now runs a fresh private turn of the owner in
   that DM, the way a DM timer runs, under the same read-and-report rules as any
   watch. The person's open DM conversation stays theirs, and its next turn is
-  told what the report said, so they can reply to it. Slack still refuses one made in a DM: it has no way to run a watch's
-  fire there.
+  told what the report said, so they can reply to it. Poll watches made in a
+  Discord DM follow the same rule: they reported nowhere before. Slack refuses
+  any watch made in a DM: it has no way to run a watch's fire there.
 
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎

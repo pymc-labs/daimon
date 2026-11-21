@@ -229,8 +229,8 @@ once and still answers `202`. Wakes share the per-watch and per-owner limits abo
 and a flood of bad links is rate limited per address and in the database. Keep the
 proxy from logging paths.
 
-A callback watch made in a Discord DM reports in that DM, each post as a fresh
-private turn. The DM conversation the person carries on in is told what it said.
+A watch made in a Discord DM, callback or poll, reports in that DM, each fire as a
+fresh private turn. The DM conversation the person carries on in is told what it said.
 Slack refuses one made in a DM.
 
 ## Import watches from another system

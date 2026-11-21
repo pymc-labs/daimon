@@ -617,21 +617,6 @@ def callback_end(now: datetime, lifetime: timedelta | None) -> datetime | None:
     return None if lifetime is None else now + lifetime
 
 
-def callback_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> WatchDelivery:
-    """Where a callback watch reports. One made in a DM reports in that DM, each post as a
-    fresh private turn of its owner, as DM timers run (`direct_messages.run_dm_watch`)."""
-    require_delivery(binding, delivery)
-    if not (
-        binding.thread_id.startswith(DM_SCOPE_PREFIX)
-        or binding.parent_channel_id.startswith(DM_SCOPE_PREFIX)
-    ):
-        return delivery
-    if binding.platform != "discord":
-        # Only Discord runs a fire in a DM; elsewhere its posts would be dropped, yet counted.
-        raise ValueError("A callback watch can't be made in a DM here. Make it in a channel.")
-    return "dm"
-
-
 async def register_callback_watch(
     session: AsyncSession,
     binding: ContinuationRequest,
@@ -647,7 +632,7 @@ async def register_callback_watch(
     Only the token's sha256 is stored. It lasts `lifetime`, the `callback_watch_lifetime`
     feature; None makes the watch and its link permanent.
     """
-    delivery = callback_delivery(binding, delivery)
+    delivery = require_delivery(binding, delivery)
     expires_at = callback_end(now, lifetime)
     watch = await register_page_watch(
         session,
@@ -697,11 +682,11 @@ async def wake_link(
     """A new link to the conversation's one wake watch for `server`, made on first use.
 
     Each call adds its own token (only its hash is stored), moves the watch onto the
-    conversation's newest session (a DM's watch has none: `callback_delivery`) and gives
+    conversation's newest session (a DM's watch has none: `require_delivery_place`) and gives
     it `lifetime` from now, so every job started gets a link that lasts. Returns the watch
     id and the token.
     """
-    delivery = callback_delivery(binding, "thread")
+    delivery = require_delivery(binding, "thread")
     await _lock_owner(session, binding.requester_account_id)
     row = await session.scalar(
         select(Watch)
@@ -1200,20 +1185,28 @@ async def delete_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
     await session.execute(delete(Watch).where(Watch.id == watch_id))
 
 
-def require_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> None:
-    """A DM or a new thread per fire is for Discord watches made outside a DM."""
-    require_delivery_place(binding.platform, binding.thread_id, binding.parent_channel_id, delivery)
+def require_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> WatchDelivery:
+    """Where a watch made at `binding` reports (`require_delivery_place`)."""
+    return require_delivery_place(
+        binding.platform, binding.thread_id, binding.parent_channel_id, delivery
+    )
 
 
 def require_delivery_place(
     platform: str, thread_id: str, parent_channel_id: str, delivery: WatchDelivery
-) -> None:
-    if delivery == "thread":
-        return
-    if platform != "discord":
-        raise ValueError("Watches here can only report in this thread. Leave delivery as thread.")
+) -> WatchDelivery:
+    """Where a watch reports. One made in a DM reports in that DM, each fire a fresh private
+    turn of its owner, as DM timers run (`direct_messages.run_dm_watch`); only Discord runs
+    those, so elsewhere it is refused rather than never report."""
     if thread_id.startswith(DM_SCOPE_PREFIX) or parent_channel_id.startswith(DM_SCOPE_PREFIX):
-        raise ValueError("A watch made in a DM reports in that DM")
+        if delivery == "new_thread":
+            raise ValueError("A watch made in a DM reports in that DM")
+        if platform != "discord":
+            raise ValueError("A watch can't be made in a DM here. Make it in a channel.")
+        return "dm"
+    if delivery != "thread" and platform != "discord":
+        raise ValueError("Watches here can only report in this thread. Leave delivery as thread.")
+    return delivery
 
 
 def _delivery_values(delivery: WatchDelivery) -> dict[str, object]:
@@ -1263,7 +1256,7 @@ async def register_poll_watch(
         evidence=evidence or (),
     )
     require_distinct_source(args, binding.thread_id)
-    require_delivery(binding, delivery)
+    delivery = require_delivery(binding, delivery)
     watch = await register_page_watch(
         session,
         binding,
@@ -1337,7 +1330,7 @@ async def register_mcp_poll_watch(
     validate_mcp_poll(
         args, projection=projection, rule=rule, interval=interval, key=key, evidence=evidence or ()
     )
-    require_delivery(binding, delivery)
+    delivery = require_delivery(binding, delivery)
     watch = await register_page_watch(
         session,
         binding,
@@ -1512,12 +1505,13 @@ async def update_watch(
             approved_by=admin_account_id,
             excluding=current.id,
         )
-    delivery = edit.delivery or current.delivery
+    delivery = current.delivery
+    if edit.delivery is not None:
+        delivery = require_delivery_place(
+            current.platform, current.thread_id, current.parent_channel_id, edit.delivery
+        )
     session_id = current.session_id
     if delivery != current.delivery:
-        require_delivery_place(
-            current.platform, current.thread_id, current.parent_channel_id, delivery
-        )
         session_id = None
         if delivery == "thread":
             # Back into its own thread: bind the owner's live conversation there now.

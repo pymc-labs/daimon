@@ -121,7 +121,20 @@ async def test_a_callback_watch_made_in_a_dm_wakes_that_dm(db_session_factory, l
             lifetime=timedelta(days=1),
             now=datetime.now(UTC),
         )
+        polled = await watches.register_poll_watch(
+            db,
+            _dm_binding(watch),
+            instructions="Report changes.",
+            tool="read_thread",
+            arguments={"thread_id": "4343"},
+            projection=".rows",
+            rule="change",
+            interval=60,
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+            now=datetime.now(UTC),
+        )
     assert (made.delivery, made.session_id) == ("dm", None), "it reports in the owner's DM"
+    assert polled.delivery == "dm", "as does a poll watch made there: one rule for every watch"
     async with TestClient(TestServer(create_app(db_session_factory))) as client:
         assert (await post(client, made.id, token)).status == 202, "the post is accepted"
     async with db_session_factory() as db:

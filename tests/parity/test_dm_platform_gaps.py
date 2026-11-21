@@ -19,7 +19,7 @@ import yaml
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.features.registry import FEATURES
 from daimon.core.slack_oauth import SLACK_BOT_SCOPES
-from daimon.core.stores.watches import callback_delivery
+from daimon.core.stores.watches import require_delivery
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -44,9 +44,9 @@ def test_teams_personal_chats_when_routed_then_follow_the_dm_settings() -> None:
         assert FEATURES[key].on_platform("teams"), f"{key} applies to a personal chat"
 
 
-def test_callback_watches_when_made_in_a_dm_then_report_there_on_discord_only() -> None:
-    """A Discord DM's posts run as fresh private turns there (`_run_watch_report`); Slack
-    has no such path, so it refuses rather than drop posts it counted."""
+def test_watches_when_made_in_a_dm_then_report_there_on_discord_only() -> None:
+    """A Discord DM watch's fires run as fresh private turns there (`_run_watch_report`);
+    Slack has no such path, so it refuses rather than never report."""
 
     def made_in_dm(platform: str) -> ContinuationRequest:
         return ContinuationRequest(
@@ -56,6 +56,6 @@ def test_callback_watches_when_made_in_a_dm_then_report_there_on_discord_only() 
             requested_work=None, reason="watch_fired", idempotency_key=uuid.uuid4(),
         )  # fmt: skip
 
-    assert callback_delivery(made_in_dm("discord"), "thread") == "dm", "Discord DMs the owner"
+    assert require_delivery(made_in_dm("discord"), "thread") == "dm", "Discord DMs the owner"
     with pytest.raises(ValueError, match="made in a DM here"):
-        callback_delivery(made_in_dm("slack"), "thread")
+        require_delivery(made_in_dm("slack"), "thread")
