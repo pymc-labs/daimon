@@ -100,8 +100,8 @@ from daimon.adapters.discord.typed_stop import (
 )
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
-from daimon.adapters.discord.workflow_cards import card_editor
 from daimon.adapters.discord.workflow_asks import AskButton
+from daimon.adapters.discord.workflow_cards import card_editor
 from daimon.adapters.discord.workflow_delivery import make_discord_workflow_poster
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
