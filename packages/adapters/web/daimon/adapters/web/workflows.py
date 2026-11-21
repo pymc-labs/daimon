@@ -27,11 +27,11 @@ from daimon.adapters.web.directory import chattable
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.routines import reachable_channels_of
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core.channel_audience import channels_with_outsiders
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.output_delivery import download_output_file
 from daimon.core.stores import tenants
 from daimon.core.stores import web_chat as chat_store
-from daimon.core.stores.channel_directory import list_shared_channel_ids
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.web_identity import place_of, thread_key
 from daimon.core.workflows import (
@@ -157,7 +157,7 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
             tenant = await tenants.get_tenant(db, tenant_id)
             platform = tenant.platform if tenant is not None else ""
             people = await catalog.people(db, tenant_id)
-            shared = await list_shared_channel_ids(db, tenant_id=tenant_id, platform=platform)
+            shared = await channels_with_outsiders(db, tenant_id=tenant_id, platform=platform)
             reachable = await reachable_channels_of(runtime, db, caller, platform)
             usable: list[BetaManagedAgentsAgent] = []
             if (anthropic := client()) is not None:
