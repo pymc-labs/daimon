@@ -280,8 +280,9 @@ async def test_approved_proposals_are_sent_and_the_rest_are_not(db_session: Asyn
     await runs.execute(world.sm, world.settings, executors, await world.claim(run.id, "file"))
     assert tools.calls == [("https://linear.example.com/mcp", "create_issue", {"title": "A"})]
     async with world.sm() as s:
-        statuses = [p.status for p in await workflow_proposals.proposals_of(s, step.id)]
-    assert statuses == ["sent", "rejected"]
+        statuses = {p.id: p.status for p in await workflow_proposals.proposals_of(s, step.id)}
+    # Keyed by id: proposals added in one transaction share `created_at`, so order is by uuid.
+    assert statuses == {picked[0]: "sent", picked[1]: "rejected"}, "only the chosen one goes"
     assert (await world.steps(run.id))["file"].output == {"filed": 2}, "the turn's output holds"
 
 
