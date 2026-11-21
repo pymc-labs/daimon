@@ -342,10 +342,17 @@ def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
     return chunks
 
 
+_BLOCK_START = re.compile(r"\||```|#|>|[-*+] |\d+[.)] ")
+
+
 def _with_ping(user_id: int, text: str) -> str:
-    """`text` after a mention of `user_id`, dropping one the model already opened with."""
+    """`text` after a mention of `user_id`, dropping one the model already opened with. A
+    space joins them, or a line break when `text` opens with a table, list or other block."""
     body = re.sub(rf"^\s*<@!?{user_id}>\s*", "", text, count=1)
-    return f"<@{user_id}> {body}" if body else f"<@{user_id}>"
+    if not body:
+        return f"<@{user_id}>"
+    sep = "\n" if _BLOCK_START.match(body) else " "
+    return f"<@{user_id}>{sep}{body}"
 
 
 def _without_adjacent_repeats(messages: list[str], previous: str | None) -> list[str]:
@@ -1197,8 +1204,9 @@ class DiscordTurnLifecycle(OutputGate):
             return None
         return None if await self._requester_opted_out() else self._requester_id
 
-    def _ended_line(self, reason: TerminationReason) -> str:
-        return f"-# {ended_label(reason, self._clock() - self._state.started_at)}\n"
+    def _with_ended_line(self, body: str, reason: TerminationReason) -> str:
+        """`body` above a small line saying how the turn ended and how long it ran."""
+        return f"{body}\n\n-# {ended_label(reason, self._clock() - self._state.started_at)}"
 
     async def _show_card_error(self, title: str, body: str | None = None) -> None:
         """End the turn's card as the red error card; `body` defaults to the usual retry step."""
@@ -1360,7 +1368,7 @@ class DiscordTurnLifecycle(OutputGate):
             self._state = update(self._state, EmbedEvent(kind="error", label=_STOPPED_TITLE))
             self._state = dataclasses.replace(
                 self._state,
-                notice=self._ended_line(TerminationReason.INTERRUPTED) + _STOPPED_NEXT_STEP,
+                notice=self._with_ended_line(_STOPPED_NEXT_STEP, TerminationReason.INTERRUPTED),
                 notice_title=_STOPPED_TITLE,
             )
         else:
@@ -1389,7 +1397,10 @@ class DiscordTurnLifecycle(OutputGate):
                 self._summary_ref = self._message_ref
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
-            await self._show_card_error(_STOPPED_TITLE, _STOPPED_NEXT_STEP)
+            await self._show_card_error(
+                _STOPPED_TITLE,
+                self._with_ended_line(_STOPPED_NEXT_STEP, TerminationReason.INTERRUPTED),
+            )
             log.info("turn.terminal_success", has_text=False)
             return
 
@@ -1662,7 +1673,7 @@ class DiscordTurnLifecycle(OutputGate):
             )
             if notice is not None:
                 label, body = notice.headline, format_termination_notice(notice)
-            body = self._ended_line(reason) + body
+            body = self._with_ended_line(body, reason)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)
         self._state = update(self._state, EmbedEvent(kind="error", label=label))

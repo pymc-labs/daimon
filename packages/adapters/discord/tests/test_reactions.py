@@ -19,3 +19,4 @@ def test_ping_is_joined_with_a_space_and_replaces_one_the_model_wrote() -> None:
     assert _with_ping(7, "<@7> Done.") == "<@7> Done."
     assert _with_ping(7, "<@!7>Done.") == "<@7> Done."
     assert _with_ping(7, "Done.") == "<@7> Done."
+    assert _with_ping(7, "| a |\n| - |") == "<@7>\n| a |\n| - |"

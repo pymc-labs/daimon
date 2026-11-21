@@ -1546,8 +1546,12 @@ class DirectMessageCog(commands.Cog):
             working: str | None = None
             if isinstance(message, discord.Message):
                 working = await self.bot.working_mark(message, conversation.tenant_id)
-                with contextlib.suppress(discord.HTTPException):
-                    await message.add_reaction(working)
+                if working == _SEEN_REACTION:
+                    # A held message already shows 👀 while it is answered (DmBurst).
+                    working = None
+                else:
+                    with contextlib.suppress(discord.HTTPException):
+                        await message.add_reaction(working)
             try:
                 async with message.channel.typing():
                     if await ticket.wait(asyncio.Event()) != "started":
