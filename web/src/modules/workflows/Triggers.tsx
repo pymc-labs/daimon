@@ -171,6 +171,8 @@ const OUTCOME = { accepted: { icon: CircleCheck, cls: "text-success", label: "Ac
 
 const show = (v: unknown) => (v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v))
 const isTest = (d: DeliveryRow) => d.id.startsWith("dlv_test_")
+/** Delivery ids carry a full UUID; ten hex digits tell them apart on screen. */
+const shortId = (id: string) => id.replace(/^(dlv_(?:test_)?[0-9a-f]{10})[0-9a-f]+$/, "$1")
 
 function UrlRow({ label, url, action }: { label: string; url: string; action?: React.ReactNode }) {
   return (
@@ -226,7 +228,7 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
             )}
             {captured && (
               <>
-                <div className="flex items-center gap-2 text-sm"><CircleCheck className="size-4 text-success" /><span className="font-medium">Test delivery captured</span><Mono className="text-xs text-faint">{captured.id}</Mono></div>
+                <div className="flex items-center gap-2 text-sm"><CircleCheck className="size-4 text-success" /><span className="font-medium">Test delivery captured</span><Mono className="text-xs text-faint">{shortId(captured.id)}</Mono></div>
                 <div className="rounded-lg border px-3 py-2.5"><JsonTree value={captured.payload} root="payload" /></div>
                 <div className="flex justify-end gap-2 max-sm:[&>*]:flex-1">
                   <Button variant="ghost" onClick={() => setSince(null)}>Dismiss</Button>
@@ -262,7 +264,7 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
           {!last && <p className="text-sm text-muted-foreground">No delivery to preview</p>}
           {last && (
             <div className="space-y-2">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground"><span>Preview against</span><Mono>{last.id}</Mono><Ago iso={last.received_at} /></div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground"><span>Preview against</span><Mono>{shortId(last.id)}</Mono><Ago iso={last.received_at} /></div>
               {!t.inputs && <p className="text-sm text-muted-foreground">No mapping</p>}
               {mapped && !mapped.ok && <p className="flex items-center gap-2 text-sm text-destructive"><CircleAlert className="size-4" />{mapped.error}</p>}
               {checked && (
@@ -305,7 +307,7 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
                   return (
                     <TableRow key={d.id} className="h-12">
                       <TableCell className="pl-3" title={absolute(d.received_at, true)}><Ago iso={d.received_at} /></TableCell>
-                      <TableCell className="max-md:hidden"><span className="flex items-center gap-1.5"><Mono className="text-xs">{d.id}</Mono>{isTest(d) && <Tag>Test</Tag>}</span></TableCell>
+                      <TableCell className="max-md:hidden"><span className="flex items-center gap-1.5"><Mono className="text-xs">{shortId(d.id)}</Mono>{isTest(d) && <Tag>Test</Tag>}</span></TableCell>
                       <TableCell className="max-sm:hidden"><span className="inline-flex items-center gap-1.5 whitespace-nowrap">{d.verified ? <ShieldCheck className="size-3.5 text-success" /> : <ShieldX className="size-3.5 text-destructive" />}{d.verified ? "Verified" : "Not verified"}</span></TableCell>
                       <TableCell><span className="inline-flex items-center gap-1.5 whitespace-nowrap"><O.icon className={cn("size-3.5", O.cls)} />{O.label}</span></TableCell>
                       <TableCell className="tabular max-sm:hidden">{d.status}</TableCell>
