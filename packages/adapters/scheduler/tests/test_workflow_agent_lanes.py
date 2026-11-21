@@ -24,7 +24,7 @@ from daimon.adapters.scheduler.workflows import (
 )
 from daimon.core.direct_messages import DirectMessageAccessRevoked
 from daimon.core.headless_runner import StepTurn
-from daimon.core.stores import accounts, spend_allowances, tenants
+from daimon.core.stores import accounts, spend_allowances, tenants, workflow_run_events
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.workflows import runs, step_tools
 from daimon.core.workflows.agent_step import AgentStepExecutor
@@ -269,3 +269,9 @@ async def test_an_owner_dm_step_runs_as_the_owners_dm_and_skips_when_they_are_bu
     assert asked == [("U1", "Hi")], "the owner's DM turn gets the instructions"
     assert done.status == "succeeded", done
     assert step.summary == ("Skipped: the owner was busy." if busy else "Your digest"), step
+    async with world.sm() as s:
+        events = await workflow_run_events.list_events(s, run.id)
+    started = next(e for e in events if e.type == "step.started")
+    assert (started.data.get("lane"), started.data.get("agent")) == ("owner_dm:daimon", "daimon"), (
+        f"the owner DM lane is on step.started: {started.data}"
+    )
