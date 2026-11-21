@@ -33,6 +33,7 @@ def upgrade() -> None:
         sa.Column("label", sa.Text(), nullable=False),
         sa.Column("content", sa.LargeBinary(), nullable=True),
         sa.Column("agent_id", sa.Text(), nullable=True),
+        sa.Column("key_name", sa.Text(), nullable=True),
         sa.Column("awaiting_sender", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("channel_id", sa.Text(), nullable=True),
         sa.Column("message_id", sa.Text(), nullable=True),

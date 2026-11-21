@@ -89,9 +89,10 @@ def reveal_reply(*, sender: str, label: str, value: str) -> str:
     return f"{_bold(label)} from <@{sender}>:\n```\n{value}\n```\nShown once; it is deleted now."
 
 
-def confirm_text(*, recipient: str, label: str, expires_at: datetime) -> str:
+def confirm_text(*, recipient: str, label: str, key_name: str, expires_at: datetime) -> str:
+    key = key_name.replace("`", "")
     return (
-        f"Send {_bold(label)} to <@{recipient}>? Only they can reveal it, once. "
+        f"Send {_bold(label)} (the key `{key}`) to <@{recipient}>? Only they can reveal it, once. "
         f"This expires <t:{int(expires_at.timestamp())}:R>."
     )
 

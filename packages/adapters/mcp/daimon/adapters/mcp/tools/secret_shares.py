@@ -87,15 +87,17 @@ async def share_secret_with_impl(
     ma_agent_id = origin.responder_ma_agent_id
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id)
     async with runtime.session_factory() as session:
-        refusal = await flow.sharing_refusal(
-            session,
-            runtime.settings,
-            tenant_id=auth.tenant_id,
-            recipient=recipient,
-            agent_id=ma_agent_id,
-        )
-        if refusal is not None:
-            raise ToolError(refusal)
+        # A held card goes to the asker's DMs first, so the asker's policy applies too.
+        for dm_person in dict.fromkeys((recipient, asker)):
+            refusal = await flow.sharing_refusal(
+                session,
+                runtime.settings,
+                tenant_id=auth.tenant_id,
+                recipient=dm_person,
+                agent_id=ma_agent_id,
+            )
+            if refusal is not None:
+                raise ToolError(refusal)
         admin = await current_admin(session, auth)
         row = await get_agent_file(
             session, tenant_id=auth.tenant_id, agent_id=agent_id, key=key_name
@@ -127,7 +129,10 @@ async def share_secret_with_impl(
             tenant, share_id = str(auth.tenant_id), str(share.id)
             if held:
                 text = words.confirm_text(
-                    recipient=recipient, label=cleaned, expires_at=share.expires_at
+                    recipient=recipient,
+                    label=cleaned,
+                    key_name=key_name,
+                    expires_at=share.expires_at,
                 )
                 card = share_card(
                     text, words.build_custom_id(tenant, share_id, confirm=True), "Send"
@@ -152,6 +157,7 @@ async def share_secret_with_impl(
                 value=row.content,
                 now=datetime.now(UTC),
                 agent_id=ma_agent_id,
+                key_name=key_name,
                 awaiting_sender=held,
             )
         except discord.HTTPException:

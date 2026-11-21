@@ -26,6 +26,7 @@ from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.audience_sync import AudienceSync
 from daimon.adapters.discord.budget_notice import discord_budget_alerter, with_budget_notifier
 from daimon.adapters.discord.button_message import ButtonMessage
+from daimon.adapters.discord.channel_agent import channel_agent_id
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
@@ -2917,7 +2918,7 @@ class DaimonBot(commands.Bot):
         `per_agent` reads it for the agent a thread is bound to, where one is."""
         # A thread's setting lives under its parent channel; its own id is no channel.
         channel = message.channel
-        agent_id = await self._thread_agent(channel, tenant_id) if per_agent else None
+        agent_id = await self._message_agent(channel, tenant_id) if per_agent else None
         if isinstance(channel, discord.Thread):
             place = FeaturePlace.of(
                 tenant_id, "discord", str(channel.parent_id), str(channel.id), agent_id=agent_id
@@ -2928,10 +2929,14 @@ class DaimonBot(commands.Bot):
             await place_feature(self.runtime.sessionmaker, self.runtime.settings, place, key)
         ).on
 
-    async def _thread_agent(self, channel: object, tenant_id: uuid.UUID) -> str | None:
-        """The agent a thread is bound to, for a read before admission names the agent."""
+    async def _message_agent(self, channel: object, tenant_id: uuid.UUID) -> str | None:
+        """The agent answering in a channel or thread, for a read before admission names the
+        agent; None when not known yet."""
         if not isinstance(channel, discord.Thread):
-            return None
+            channel_id = getattr(channel, "id", None)
+            if channel_id is None:
+                return None
+            return await channel_agent_id(self.runtime, tenant_id, str(channel_id))
         try:
             async with self.runtime.sessionmaker() as session:
                 binding = await get_binding(

@@ -39,6 +39,7 @@ class ShareView:
     message_id: str | None
     expires_at: datetime
     agent_id: str | None = None
+    key_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ def _view(row: SecretShare) -> ShareView:
         row.message_id,
         row.expires_at,
         row.agent_id,
+        row.key_name,
     )
 
 
@@ -92,6 +94,7 @@ async def create_share(
     value: str,
     now: datetime,
     agent_id: str | None = None,
+    key_name: str | None = None,
     awaiting_sender: bool = False,
 ) -> ShareView | None:
     """Store one encrypted share, or None when the sender already has the most live ones.
@@ -121,6 +124,7 @@ async def create_share(
         label=label,
         content=encrypt_token(cipher, value),
         agent_id=agent_id,
+        key_name=key_name,
         awaiting_sender=awaiting_sender,
         expires_at=now + SHARE_LIFETIME,
     )

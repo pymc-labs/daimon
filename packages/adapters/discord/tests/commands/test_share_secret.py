@@ -52,7 +52,13 @@ def on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _share(tx: _Tx, recipient: Any) -> tuple[str, bool]:
     return await cmd.share(
-        _runtime(tx), uuid.uuid4(), sender="1", recipient=recipient, label="Prod DB", value="s3cret"
+        _runtime(tx),
+        uuid.uuid4(),
+        sender="1",
+        recipient=recipient,
+        label="Prod DB",
+        value="s3cret",
+        agent_id=None,
     )
 
 
@@ -180,3 +186,33 @@ async def test_only_the_sender_sends_a_held_share(monkeypatch: pytest.MonkeyPatc
     await cmd.confirm(other, TENANT, SHARE.id)
     assert _reply(other)["embed"].description == words.REVEAL_REFUSALS["not_sender"]
     post.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("found")
+async def test_a_failed_reveal_reply_keeps_the_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(flow, "sharing_refusal", AsyncMock(return_value=None))
+    monkeypatch.setattr(store, "reveal_share", AsyncMock(return_value=Reveal(SHARE, "s3cret")))
+    tx = _Tx()
+    interaction = _click(2)
+    interaction.client.runtime = _runtime(tx)
+    interaction.followup.send = AsyncMock(side_effect=RuntimeError("discord is down"))
+    with pytest.raises(RuntimeError):
+        await cmd.reveal(interaction, TENANT, SHARE.id)
+    assert isinstance(tx.failed[0], RuntimeError), "the claim rolled back with the failed send"
+    interaction.message.edit.assert_not_awaited()
+
+
+async def test_the_command_reads_the_feature_for_the_channels_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = AsyncMock(return_value=words.OFF)
+    monkeypatch.setattr(flow, "sharing_refusal", refusal)
+    monkeypatch.setattr(cmd, "channel_agent_id", AsyncMock(return_value="ag_1"))
+    monkeypatch.setattr(cmd, "resolve_tenant_for_interaction", AsyncMock(return_value=TENANT))
+    interaction = _click(1)
+    interaction.channel_id = 5
+    interaction.response.send_message = AsyncMock()
+    cog = cmd.ShareSecretCog(MagicMock())
+    run = cmd.ShareSecretCog.share_secret.callback.__wrapped__  # pyright: ignore[reportFunctionMemberAccess, reportUnknownMemberType, reportUnknownVariableType]
+    await run(cog, interaction, NS(id=2, bot=False), "Prod DB")  # pyright: ignore[reportUnknownVariableType]
+    assert refusal.await_args is not None and refusal.await_args.kwargs["agent_id"] == "ag_1"

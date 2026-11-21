@@ -27,6 +27,7 @@ from daimon.core.agent_editing import (
     builtin_reader,
     builtin_writer,
 )
+from daimon.core.agent_target import agent_names_loader
 from daimon.core.authz import Subject, Surface
 from daimon.core.channel_changes import ChannelChangeRefused, Expected
 from daimon.core.config import load_settings
@@ -240,6 +241,7 @@ async def features_set(
         actor = FeatureActor(
             *who,
             operator=True,
+            agent_names=agent_names_loader(edit, agent_actor),
             write_builtin=builtin_writer(edit, actor=agent_actor, ma_agent_id=agent_id)
             if builtin and agent_id
             else None,

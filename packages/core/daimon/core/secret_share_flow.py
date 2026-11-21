@@ -66,6 +66,7 @@ async def offer_share(
     value: str,
     now: datetime,
     agent_id: str | None = None,
+    key_name: str | None = None,
     awaiting_sender: bool = False,
 ) -> ShareView | None:
     """Store a share and post its card; None when the sender has the most live ones."""
@@ -80,6 +81,7 @@ async def offer_share(
             value=value,
             now=now,
             agent_id=agent_id,
+            key_name=key_name,
             awaiting_sender=awaiting_sender,
         )
     if share is not None:

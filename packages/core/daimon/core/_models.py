@@ -1970,8 +1970,8 @@ class SecretShare(Base):
 
     `content` is Fernet ciphertext, cleared on reveal or expiry; the row stays as the audit
     record. Person-scoped like `credential_requests`: erased by platform user, no account FK.
-    `agent_id` is the provider id of the agent whose key it is; `awaiting_sender` holds a
-    share until its sender confirms it.
+    `agent_id` is the provider id of the agent whose key it is, `key_name` the key;
+    `awaiting_sender` holds a share until its sender confirms it.
     """
 
     __tablename__ = "secret_shares"
@@ -1989,6 +1989,7 @@ class SecretShare(Base):
     label: Mapped[str]
     content: Mapped[bytes | None]
     agent_id: Mapped[str | None]
+    key_name: Mapped[str | None]
     awaiting_sender: Mapped[bool] = mapped_column(server_default=text("false"), default=False)
     channel_id: Mapped[str | None]
     message_id: Mapped[str | None]

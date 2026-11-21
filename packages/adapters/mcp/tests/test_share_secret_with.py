@@ -133,6 +133,22 @@ async def test_a_key_for_someone_else_waits_for_the_askers_send(wired: dict[str,
     assert "ssc:" in _card(wired, "1"), "the Send card goes to the asker"
     wired["members"]["2"].create_dm.assert_not_awaited()
     assert "Send button" in result.note
+    assert "TOGGL_API_TOKEN" in _card(wired, "1"), "the card names the key that goes out"
+    assert wired["create"].await_args.kwargs["key_name"] == "TOGGL_API_TOKEN"
+
+
+async def test_a_held_card_checks_the_askers_dm_policy_too(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wired["admin"].return_value = True
+
+    async def refuse(*_: Any, recipient: str, **__: Any) -> str | None:
+        return "no dms" if recipient == "1" else None
+
+    monkeypatch.setattr(flow, "sharing_refusal", refuse)
+    with pytest.raises(ToolError, match="no dms"):
+        await _call("2")
+    wired["create"].assert_not_awaited()
 
 
 async def test_only_an_admin_the_owner_or_the_setter_gets_a_key(wired: dict[str, Any]) -> None:

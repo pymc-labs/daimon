@@ -727,7 +727,7 @@ async def change_feature(
     if refusal is not None:
         raise refusal
     spec = FEATURES[key]
-    if key == "display_name" and value not in spec.values:
+    if key == "display_name" and value != DEFAULT and value not in spec.values:
         await _refuse_taken_name(sessions, actor, place, value)
     await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)

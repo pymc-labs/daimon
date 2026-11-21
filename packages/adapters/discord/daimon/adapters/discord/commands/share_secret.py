@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Self, cast
 
 import structlog
+from daimon.adapters.discord.channel_agent import channel_agent_id
 from daimon.adapters.discord.checks import require_registered_guild, resolve_tenant_for_interaction
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -96,7 +97,8 @@ class SecretShareConfirmButton(_ShareButton, template=words.CONFIRM_ID_TEMPLATE)
 async def reveal(
     interaction: discord.Interaction[commands.Bot], tenant_id: uuid.UUID, share_id: uuid.UUID
 ) -> None:
-    """Claim the value for the clicker, show it once, then turn the card into its record."""
+    """Claim the value for the clicker, show it once, then turn the card into its record.
+    The reply is sent before the claim commits, so a failed send keeps the value."""
     runtime = _runtime(interaction)
     clicker = str(interaction.user.id)
     async with runtime.sessionmaker() as session, session.begin():
@@ -124,6 +126,11 @@ async def reveal(
                 now=datetime.now(UTC),
             )
         )
+        if got is not None and got.value is not None and got.share is not None:
+            reply = words.reveal_reply(
+                sender=got.share.sender, label=got.share.label, value=got.value
+            )
+            await interaction.followup.send(**_reply(reply, neutral=True))
     if got is None or got.value is None or got.share is None:
         text = refusal or words.REVEAL_REFUSALS[(got and got.refusal) or "gone"]
         await interaction.followup.send(**_reply(text))
@@ -132,8 +139,6 @@ async def reveal(
             await _retire(interaction, expired)
         return
     share = got.share
-    reply = words.reveal_reply(sender=share.sender, label=share.label, value=got.value)
-    await interaction.followup.send(**_reply(reply, neutral=True))
     text = words.revealed_text(
         sender=share.sender, recipient=share.recipient, label=share.label, at=datetime.now(UTC)
     )
@@ -210,10 +215,12 @@ async def _retire(interaction: discord.Interaction[commands.Bot], text: str) -> 
         _log.warning("secret_share.card_edit_failed", err_type=type(err).__name__)
 
 
-async def _refusal(runtime: DiscordRuntime, tenant_id: uuid.UUID, recipient: str) -> str | None:
+async def _refusal(
+    runtime: DiscordRuntime, tenant_id: uuid.UUID, recipient: str, agent_id: str | None
+) -> str | None:
     async with runtime.sessionmaker() as session:
         return await flow.sharing_refusal(
-            session, runtime.settings, tenant_id=tenant_id, recipient=recipient, agent_id=None
+            session, runtime.settings, tenant_id=tenant_id, recipient=recipient, agent_id=agent_id
         )
 
 
@@ -225,11 +232,12 @@ async def share(
     recipient: discord.Member,
     label: str,
     value: str,
+    agent_id: str | None,
 ) -> tuple[str, bool]:
     """Store the share, then post its card; (what to tell the sender, ok)."""
     if not words.value_ok(value):
         return words.BAD_VALUE, False
-    if refusal := await _refusal(runtime, tenant_id, str(recipient.id)):
+    if refusal := await _refusal(runtime, tenant_id, str(recipient.id), agent_id):
         return refusal, False
 
     async def send(view_of: ShareView) -> tuple[str, str]:
@@ -251,6 +259,7 @@ async def share(
             label=label,
             value=value,
             now=datetime.now(UTC),
+            agent_id=agent_id,
         )
     except discord.HTTPException:
         return words.dm_closed_text(str(recipient.id)), False
@@ -263,11 +272,16 @@ async def share(
 
 class ShareSecretModal(discord.ui.Modal, title="Share a secret"):
     def __init__(
-        self, runtime: DiscordRuntime, tenant_id: uuid.UUID, recipient: discord.Member, label: str
+        self,
+        runtime: DiscordRuntime,
+        tenant_id: uuid.UUID,
+        recipient: discord.Member,
+        label: str,
+        agent_id: str | None,
     ) -> None:
         super().__init__(timeout=600)
         self._runtime, self._tenant_id = runtime, tenant_id
-        self._recipient, self._label = recipient, label
+        self._recipient, self._label, self._agent_id = recipient, label, agent_id
         self.secret: discord.ui.TextInput[ShareSecretModal] = discord.ui.TextInput(
             label="Secret",
             style=discord.TextStyle.paragraph,
@@ -284,6 +298,7 @@ class ShareSecretModal(discord.ui.Modal, title="Share a secret"):
             recipient=self._recipient,
             label=self._label,
             value=str(self.secret.value or ""),
+            agent_id=self._agent_id,
         )
         await interaction.followup.send(embed=build_notice_embed(text, neutral=ok), ephemeral=True)
 
@@ -313,16 +328,19 @@ class ShareSecretCog(commands.Cog):
         runtime = _runtime(interaction)
         tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
         cleaned = words.clean_label(label)
+        agent_id = None
+        if tenant_id is not None:
+            agent_id = await channel_agent_id(runtime, tenant_id, str(interaction.channel_id))
         if tenant_id is None:
             refusal = words.OFF
         elif recipient.bot:
             refusal = words.NOT_A_PERSON
         elif cleaned is None:
             refusal = words.BAD_LABEL
-        elif refusal := await _refusal(runtime, tenant_id, str(recipient.id)):
+        elif refusal := await _refusal(runtime, tenant_id, str(recipient.id), agent_id):
             pass
         else:
-            modal = ShareSecretModal(runtime, tenant_id, recipient, cleaned)
+            modal = ShareSecretModal(runtime, tenant_id, recipient, cleaned, agent_id)
             await interaction.response.send_modal(modal)
             return
         await interaction.response.send_message(embed=build_notice_embed(refusal), ephemeral=True)

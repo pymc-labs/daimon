@@ -6,7 +6,7 @@ import pytest
 from daimon.core.agent_identity import shown_name
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.features import service
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.registry import DEFAULT, FEATURES
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import FeatureActor, feature_refusal
 from daimon.core.features.snapshot import FeaturePlace
@@ -79,3 +79,25 @@ async def test_a_display_name_may_not_pass_for_daimon_or_another_agent(
             await refused
     else:
         await refused
+
+
+async def test_clearing_a_display_name_skips_the_taken_name_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    taken = AsyncMock()
+    monkeypatch.setattr(service, "_refuse_taken_name", taken)
+    monkeypatch.setattr(service, "support_setup", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_require_inside", AsyncMock(side_effect=RuntimeError("stop")))
+    sessions = MagicMock(return_value=AsyncMock())
+    place = FeaturePlace(uuid.uuid4(), "discord", agent_id="agent_1")
+    with pytest.raises(RuntimeError, match="stop"):
+        await service.change_feature(
+            sessions,
+            MagicMock(),
+            _actor(),
+            key="display_name",
+            tier="agent",
+            value=DEFAULT,
+            place=place,
+        )
+    taken.assert_not_awaited()
