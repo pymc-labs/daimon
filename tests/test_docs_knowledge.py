@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from pathlib import Path
 
 import pytest
 from daimon.core.features.registry import FEATURES
+from daimon.core.self_knowledge import sections
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
@@ -17,23 +17,8 @@ FENCE = re.compile(r"^```.*?^```", re.M | re.S)
 CODE_SPAN = re.compile(r"`([^`\n]+)`")
 
 
-def _slug(heading: str) -> str:
-    text = re.sub(r"[`*_]", "", heading).strip()
-    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return re.sub(r"[-\s]+", "-", re.sub(r"[^\w\s-]", "", text).strip().lower())
-
-
 def _anchors(path: Path) -> set[str]:
-    text = FENCE.sub("", path.read_text())
-    seen: dict[str, int] = {}
-    out: set[str] = set()
-    for line in text.splitlines():
-        if match := re.match(r"#{1,6} (.+)", line):
-            slug = _slug(match.group(1))
-            n = seen.get(slug, 0)
-            seen[slug] = n + 1
-            out.add(slug if n == 0 else f"{slug}_{n}")
-    return out
+    return set(sections(path.read_text()))
 
 
 def _pages() -> list[Path]:

@@ -43,8 +43,9 @@ def register_self_knowledge_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Read Daimon's own documentation, for the release that is running.
 
         With no page: how Daimon works and the list of pages. With a page from that list
-        (`slack.md`): its text from `start_line`. Use it to answer how Daimon works, how to set
-        it up or why it behaves as it does.
+        (`quickstart.md`): its text from `start_line`; `quickstart.md#heading-anchor` reads
+        only that section. Use it to answer how Daimon works, how to set it up or why it
+        behaves as it does.
         """
         return await _read(ctx, runtime, lambda library: library.read_docs(page, start_line))
 

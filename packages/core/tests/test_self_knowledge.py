@@ -15,6 +15,8 @@ from daimon.core.self_knowledge import (
     SELF_KNOWLEDGE_HINT,
     Library,
     SelfKnowledgeError,
+    anchor_slug,
+    sections,
     visible_text,
 )
 from daimon.core.tool_safety import ToolSafetyPolicy, classify_tool
@@ -211,3 +213,38 @@ def test_a_missing_docs_or_source_root_fails_clearly_not_empty(tmp_path: Path) -
     ):
         with pytest.raises(SelfKnowledgeError, match="no Daimon (docs|source) installed"):
             call()
+
+
+_ANCHORED = """# Title
+
+## Set up_it (`now`)
+
+Body.
+
+```md
+## Not a heading
+```
+
+### Deeper
+
+Inner.
+
+## Set up_it (`now`)
+
+Again.
+"""
+
+
+def test_anchors_follow_the_sites_slugs_and_a_page_reads_by_anchor(tmp_path: Path) -> None:
+    assert anchor_slug("Set up_it (`now`) *now*!") == "set-up_it-now-now", "markup out, _ kept"
+    assert anchor_slug("[Café](x.md) - 2 & 3") == "cafe-2-3", "link text, ASCII, one hyphen"
+    found = sections(_ANCHORED)
+    assert list(found) == ["title", "set-up_it-now", "deeper", "set-up_it-now_1"], "fence skipped"
+    library = _library(tmp_path, web=True)
+    (library.docs / "anchored.md").write_text(_ANCHORED)
+    text = library.read_docs("anchored.md#set-up_it-now")
+    assert "Body." in text and "Inner." in text, "a section runs to the next of its level"
+    assert "Again." not in text and "# Title" not in text, "and stops there"
+    assert "Again." in library.read_docs("anchored.md#set-up_it-now_1"), "a repeat is _1"
+    with pytest.raises(SelfKnowledgeError, match="no section"):
+        library.read_docs("anchored.md#missing")

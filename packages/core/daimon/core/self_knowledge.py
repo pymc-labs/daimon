@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -145,6 +146,43 @@ def _named(text: str) -> str:
     return repr(text if len(text) <= 60 else text[:60] + "...")
 
 
+_HEADING: Final = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_LINK: Final = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+
+def anchor_slug(heading: str) -> str:
+    """The id the docs site gives a heading (Python-Markdown's `toc` slugify): markup
+    dropped, ASCII only, lowercase, runs of spaces and hyphens one hyphen, `_` kept."""
+    text = re.sub(r"[`*]", "", _LINK.sub(r"\1", heading))
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return re.sub(r"[-\s]+", "-", re.sub(r"[^\w\s-]", "", text).strip().lower())
+
+
+def sections(text: str) -> dict[str, tuple[int, int]]:
+    """Each heading's anchor and its lines (start, end) in `text`: the heading to the next of
+    its level or above. Headings in code fences are not headings; a repeat gets `_1`, `_2`
+    as the site does."""
+    lines = text.splitlines()
+    found: list[tuple[int, int, str]] = []
+    seen: dict[str, int] = {}
+    fenced = False
+    for index, line in enumerate(lines):
+        if line.strip().startswith(_FENCES):
+            fenced = not fenced
+        elif not fenced and (heading := _HEADING.match(line)) is not None:
+            slug = anchor_slug(heading[2])
+            count = seen.get(slug, 0)
+            seen[slug] = count + 1
+            found.append((index, len(heading[1]), slug if count == 0 else f"{slug}_{count}"))
+    return {
+        slug: (
+            index,
+            next((later for later, deeper, _ in found[at + 1 :] if deeper <= level), len(lines)),
+        )
+        for at, (index, level, slug) in enumerate(found)
+    }
+
+
 def _parts(relative: str) -> tuple[str, ...]:
     """`relative`'s parts; refuses an absolute path, `..` and any dot-named part."""
     path = PurePosixPath(relative.strip().replace("\\", "/"))
@@ -252,14 +290,21 @@ class Library:
 
     @_refusing
     def read_docs(self, page: str = "", start_line: int = 1) -> str:
-        """A page from `start_line`; with no page, how Daimon works and every page."""
+        """A page, or its `#anchor` section (`page.md#anchor`), from `start_line`; with no page,
+        how Daimon works and every page."""
         self._need_docs()
         if page.strip():
-            text = self._page(page)
+            name, _, anchor = page.strip().partition("#")
+            text = self._page(name)
             if text is None:
                 raise SelfKnowledgeError(
-                    f"There is no page {_named(page)}. Read with no page for the list."
+                    f"There is no page {_named(name)}. Read with no page for the list."
                 )
+            if anchor:
+                found = sections(text).get(anchor)
+                if found is None:
+                    raise SelfKnowledgeError(f"{_named(name)} has no section {_named(anchor)}.")
+                text = "\n".join(text.splitlines()[slice(*found)])
             return f"{self.provenance}\n\n{page}\n\n{_window(text, start_line, numbered=False)}"
         index = self.docs / PAGE_INDEX
         summary, entries = parse_page_index(
