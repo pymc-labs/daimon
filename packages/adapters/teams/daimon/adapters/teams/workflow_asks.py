@@ -30,6 +30,8 @@ from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
     CardElement,
+    Choice,
+    ChoiceSetInput,
     ExecuteAction,
     TextBlock,
     TextInput,
@@ -60,8 +62,17 @@ def ask_card(text: str, ask: dict[str, Any]) -> AdaptiveCard:
     """The ask's words, its answer boxes and its buttons."""
     form = _boxes(ask)
     body: list[CardElement] = [TextBlock(text=text, wrap=True)]
-    for name, title in () if form is None else form.fields:
-        body.append(TextInput(id=name, label=title, is_multiline=True, max_length=2000))
+    for box in () if form is None else form.fields:
+        body.append(
+            ChoiceSetInput(
+                id=box.name,
+                label=box.title,
+                is_required=box.required,
+                choices=[Choice(title=c, value=c) for c in box.choices],
+            )
+            if box.choices
+            else TextInput(id=box.name, label=box.title, is_multiline=True, max_length=2000)
+        )
     actions = [
         ExecuteAction(
             title=b.label,
@@ -103,7 +114,9 @@ class AskActions:
         form = await answers.ask_form(
             runtime.sessionmaker, platform="teams", message_id=message_id, route=route
         )
-        values = {} if form is None else {n: str(fields.get(n) or "") for n, _ in form.fields}
+        values = (
+            {} if form is None else {b.name: str(fields.get(b.name) or "") for b in form.fields}
+        )
         if form is not None and form.fields and not any(v.strip() for v in values.values()):
             return "Fill in the box above, then press the button again."
         comment = str(fields.get("comment") or "").strip() or None
