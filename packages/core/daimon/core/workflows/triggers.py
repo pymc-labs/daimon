@@ -17,8 +17,8 @@ from typing import Any, Final
 
 import structlog
 from daimon.core.config import Settings
+from daimon.core.stores import workflow_runs, workflows
 from daimon.core.stores import workflow_triggers as store
-from daimon.core.stores import workflows
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_triggers import EventRow, TriggerRow
 from daimon.core.workflows import runs
@@ -250,7 +250,11 @@ async def _settle_event(
     trigger: TriggerRow,
     now: datetime,
 ) -> bool:
-    """Start one event's run and mark the event; True when a run started."""
+    """Start one event's run and mark the event; True when a run started. A run already
+    started for it (the mark was lost to a crash) is marked, not started again."""
+    if (run_id := await workflow_runs.run_of_event(session, event.id)) is not None:
+        await store.mark_event(session, event.id, status="started", run_id=run_id)
+        return False
     result = await _start_one(sm, settings, session, event, trigger, now)
     if result is None:
         return False

@@ -379,6 +379,13 @@ def create_tables() -> None:
         postgresql_where=sa.text("status IN ('queued', 'running', 'waiting')"),
     )
     op.create_index(
+        "ix_workflow_runs_event",
+        "workflow_runs",
+        [sa.text("(triggered_by ->> 'event_id')")],
+        unique=False,
+        postgresql_where=sa.text("triggered_by ? 'event_id'"),
+    )
+    op.create_index(
         "ix_workflow_runs_forked_from",
         "workflow_runs",
         ["forked_from_run_id"],

@@ -249,6 +249,15 @@ async def get_run(
     return None if orm is None else RunRow.model_validate(orm)
 
 
+async def run_of_event(session: AsyncSession, event_id: uuid.UUID) -> uuid.UUID | None:
+    """The run a trigger event already started, if any."""
+    stmt = select(WorkflowRun.id).where(
+        WorkflowRun.triggered_by.has_key("event_id"),
+        WorkflowRun.triggered_by["event_id"].astext == str(event_id),
+    )
+    return await session.scalar(stmt.limit(1))
+
+
 async def carded_runs(
     session: AsyncSession, *, platform: str, ended_after: datetime, started_after: datetime
 ) -> list[RunRow]:

@@ -6160,6 +6160,11 @@ class WorkflowRun(Base):
         Index("ix_workflow_runs_workflow_created", "workflow_id", "created_at"),
         Index("ix_workflow_runs_run_as", "run_as_account_id"),
         Index(
+            "ix_workflow_runs_event",
+            text("(triggered_by ->> 'event_id')"),
+            postgresql_where=text("triggered_by ? 'event_id'"),
+        ),
+        Index(
             "ix_workflow_runs_parent",
             "parent_run_id",
             postgresql_where=text("parent_run_id IS NOT NULL"),

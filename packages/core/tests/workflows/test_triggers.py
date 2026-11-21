@@ -235,3 +235,23 @@ async def test_an_event_that_cannot_start_is_rejected_and_the_batch_goes_on(
         ("rejected", "failed"),
         ("started", None),
     ], marks
+
+
+async def test_an_event_whose_mark_was_lost_is_not_started_twice(db_session: AsyncSession) -> None:
+    """A crash after the run starts but before its event is marked leaves the event accepted;
+    the next tick marks it with the run it already started."""
+    tenant_id, owner = await _workspace(db_session)
+    hook = {"id": "hook", "kind": "webhook", "verify": "bearer"}
+    flow = await _publish(db_session, tenant_id, owner, triggers=[hook])
+    await _webhook_event(db_session, tenant_id, flow, {}, NOW)
+    await db_session.commit()
+    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    assert await triggers.start_from_events(sm, make_settings(), now=NOW) == 1, "it starts"
+    await db_session.execute(update(WorkflowTriggerEvent).values(status="accepted", run_id=None))
+    await db_session.commit()
+
+    assert await triggers.start_from_events(sm, make_settings(), now=NOW) == 0, "no new run"
+    runs = (await db_session.scalars(select(WorkflowRun.id))).all()
+    event = (await db_session.scalars(select(WorkflowTriggerEvent))).one()
+    assert len(runs) == 1, f"one run for one event: {runs}"
+    assert (event.status, event.run_id) == ("started", runs[0]), "marked with its run"
