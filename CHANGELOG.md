@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Operators can rename a workspace's own agent.** `daimon agents rename OLD NEW`
+  keeps the agent's id, so its saved MCP logins, memory and sessions stay, and
+  moves every channel default, rule, routine and access-policy rule to the new
+  name. `--replace-seeded` retires the built-in agent that holds NEW in that
+  workspace only, so a later `defaults apply` leaves the renamed agent alone.
+  `--dry-run` shows what would change.
+
 - **Direct messages can match channel behaviour.** Three new settings, all off
   by default. "Approvals in direct messages" lets a DM follow the team's
   Approvals setting, so Allow writes reaches DMs too; only a server admin sets
