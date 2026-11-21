@@ -35,10 +35,10 @@ Postgres backups and upgrades are in [operations](operations.md).
 
 ## Run a published image
 
-Every tagged release is published as `ghcr.io/pymc-labs/daimon`. All seven
-application services (`init`, `mcp`, `discord`, `slack`, `teams`, `scheduler`,
-`web`) run that one image. Set the `image:` line for each in
-`docker-compose.override.yml`, which Compose reads automatically:
+Every tagged release is published as `ghcr.io/pymc-labs/daimon`. The application
+services (`init`, `mcp`, `discord`, `slack`, `teams`, `scheduler`) run that one
+image. Set the `image:` line for each in `docker-compose.override.yml`, which
+Compose reads automatically:
 
 ```yaml
 services:
@@ -54,9 +54,17 @@ services:
     image: ghcr.io/pymc-labs/daimon:0.2.0
   scheduler:
     image: ghcr.io/pymc-labs/daimon:0.2.0
+```
+
+<!-- knowledge: web -->
+The `web` service runs the same image:
+
+```yaml
+services:
   web:
     image: ghcr.io/pymc-labs/daimon:0.2.0
 ```
+<!-- /knowledge -->
 
 Then pull and start:
 

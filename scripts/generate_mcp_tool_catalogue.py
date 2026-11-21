@@ -238,8 +238,13 @@ def _first_sentence(description: str | None) -> str:
     return collapsed[: ends[-1]]
 
 
-def _visibility(tool: Tool) -> str:
-    labels = sorted(TAG_LABELS[tag] for tag in tool.tags if tag in TAG_LABELS)
+def _visibility(tool: Tool, *, in_web_module: bool) -> str:
+    """The row's callers. The web tag is named only in a `web_` module, whose section sits
+    between the web markers; a table cell cannot, so elsewhere the tag is left out."""
+    keep = (tag for tag in tool.tags if tag in TAG_LABELS and (in_web_module or tag != "web"))
+    labels = sorted(TAG_LABELS[tag] for tag in keep)
+    if "web" in tool.tags and not labels and not in_web_module:
+        raise RuntimeError(f"{tool.name} is for the web app only: move it into a `web_` module")
     unknown = sorted(tag for tag in tool.tags if tag not in TAG_LABELS)
     if unknown:
         raise RuntimeError(
@@ -274,7 +279,10 @@ def _group_tools(tools: Sequence[Tool]) -> list[ToolGroup]:
                 ToolRow(
                     name=tool.name,
                     purpose=_first_sentence(tool.description),
-                    visibility=_visibility(tool),
+                    visibility=_visibility(
+                        tool,
+                        in_web_module=module_name.removeprefix(TOOLS_PACKAGE).startswith("web_"),
+                    ),
                 )
                 for tool in sorted(by_module[module_name], key=lambda t: t.name)
             ),

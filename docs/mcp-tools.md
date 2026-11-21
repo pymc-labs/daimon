@@ -245,7 +245,7 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `forget_watch_credential` | Discord callers | Delete your own saved watch key for one server. |
-| `request_agent_key` | Discord callers, Slack callers, Teams callers, web callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
+| `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
 | `request_watch_credential` | Discord callers | Ask the person for their own read-only key for a server their watches check. |

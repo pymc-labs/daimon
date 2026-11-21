@@ -77,8 +77,8 @@ def test_markers_are_paired_on_their_own_lines(path: Path) -> None:
 
 
 WEB_MENTION = re.compile(
-    r"\bweb app\b|\bweb chat\b|\bweb model\b|\bweb (?:routines|settings)\b|(?<!search )\bthe web\b"
-    r"|web\.md|DAIMON_WEB__|\bweb access\b|\bon the web\b",
+    r"\bweb (?:app|chat|model|routines|settings|callers?|service|users?|client|surface)\b"
+    r"|(?<!search )\bthe web\b|`web`|web\.md|DAIMON_WEB__|\bweb access\b|\bon the web\b",
     re.I,
 )
 
