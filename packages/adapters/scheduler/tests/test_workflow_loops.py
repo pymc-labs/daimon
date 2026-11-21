@@ -83,7 +83,9 @@ async def test_a_manual_run_finishes_through_the_loops(db_session: AsyncSession)
     assert checked.ok and checked.head == done.head_hash, f"the ledger verifies: {checked}"
 
 
-async def test_the_loops_stop_runs_without_spending_while_workflows_are_off(db_session: AsyncSession) -> None:
+async def test_the_loops_stop_runs_without_spending_while_workflows_are_off(
+    db_session: AsyncSession,
+) -> None:
     sm, settings, run_id = await _started(db_session)
     off = settings.model_copy(update={"features": {"workflows": "off"}})
     called: list[runs.StepWork] = []
