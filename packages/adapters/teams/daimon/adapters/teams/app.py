@@ -1117,7 +1117,9 @@ class TeamsApp:
         self.spawn(self._answer_or_admit(parsed), name="teams.turn")
 
     async def _answer_or_admit(self, parsed: TeamsInbound) -> None:
-        if await workflow_asks.claim_inbound(self.runtime, parsed, self._tenant_id, self._sender):
+        if await workflow_asks.claim_inbound(
+            self.runtime, parsed, self._tenant_id, self._sender, self._reader
+        ):
             return  # a workflow ask's answer, not a turn
         if not self._ignored_unprompted(parsed):
             await self._admit(parsed)

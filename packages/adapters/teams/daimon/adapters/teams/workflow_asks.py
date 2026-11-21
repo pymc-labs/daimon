@@ -11,15 +11,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import mimetypes
 import uuid
 from typing import TYPE_CHECKING, Any, Final
 
+import httpx
 import structlog
+from daimon.adapters.teams.attachments import FetchRefused, fetch_bytes
 from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.card_actions import card_actor, submitted_fields, toast
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TEAMS_SEND_ERRORS, TeamsSender
+from daimon.core.media.vision import sniff_image_media_type
+from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
 from daimon.core.workflows import answers, waits
+from daimon.core.workflows.answers import Attachment
 from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
@@ -31,8 +37,10 @@ from microsoft_teams.cards import (
 
 if TYPE_CHECKING:
     from daimon.adapters.teams.runtime import TeamsRuntime
+    from daimon.adapters.teams.thread_reader import ThreadReader
     from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
     from microsoft_teams.apps import ActivityContext
+    from pydantic import JsonValue
 
 __all__ = ["VERB", "AskActions", "ask_card", "claim_inbound"]
 
@@ -113,8 +121,50 @@ class AskActions:
         return claimed.text or "Your answer is in."
 
 
+def _files(
+    runtime: TeamsRuntime, parsed: TeamsInbound, reader: ThreadReader | None
+) -> answers.Ingest | None:
+    """The reply's images and files as Files API refs, read through Graph when it answers.
+
+    A channel activity carries only text, so its media are Graph's copy: hosted images with
+    the Graph token, shared files from SharePoint once an admin granted the channel's files."""
+    if reader is None or not parsed.files:
+        return None
+
+    async def ingest() -> list[dict[str, JsonValue]]:
+        media = await reader.read_media(parsed)
+        if media is None:
+            return []
+        token = await reader.token()
+        wanted = [(f"image-{i + 1}", url, True) for i, url in enumerate(media.image_urls)]
+        wanted += [(f.name, f.download_url, False) for f in media.files if f.download_url]
+        read: list[Attachment] = []
+        for name, url, hosted in wanted[: answers.MAX_FILES]:
+            try:
+                content = await fetch_bytes(
+                    runtime.http_client,
+                    url,
+                    is_allowed=is_graph_url if hosted else is_sharepoint_host,
+                    token=token if hosted else None,
+                    max_bytes=answers.MAX_FILE_BYTES,
+                )
+            except (FetchRefused, httpx.HTTPError) as err:
+                # Never the URL: a download URL is itself a credential.
+                log.warning("workflow_ask.file_read_failed", err_type=type(err).__name__)
+                continue
+            mime = sniff_image_media_type(content) if hosted else mimetypes.guess_type(name)[0]
+            read.append(Attachment(name, mime or "application/octet-stream", content))
+        return await answers.ingest_files(runtime.anthropic, read)
+
+    return ingest
+
+
 async def claim_inbound(
-    runtime: TeamsRuntime, parsed: TeamsInbound, tenant_id: uuid.UUID, sender: TeamsSender
+    runtime: TeamsRuntime,
+    parsed: TeamsInbound,
+    tenant_id: uuid.UUID,
+    sender: TeamsSender,
+    reader: ThreadReader | None = None,
 ) -> bool:
     """Answer an ask with a reply in a channel thread it opened. True when no turn follows.
 
@@ -131,6 +181,7 @@ async def claim_inbound(
             message_id=parsed.activity_id,
             text=parsed.text.strip(),
             thread_id=parsed.conversation_id,
+            files=_files(runtime, parsed, reader),
         ),
     )
     if claimed is None:
