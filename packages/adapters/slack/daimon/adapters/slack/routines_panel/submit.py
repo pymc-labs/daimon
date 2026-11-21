@@ -379,6 +379,11 @@ async def run_routines_delete_submission(
                 **notice_fields("This routine no longer exists."),
             )
             return
+        except RoutineRefused as refused:  # moved to Workflows after the card was shown
+            await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id or user_id, user=user_id, **notice_fields(str(refused))
+            )
+            return
 
         # Refresh the underlying panel in place (best-effort — the row is gone).
         async with runtime.sessionmaker() as session:

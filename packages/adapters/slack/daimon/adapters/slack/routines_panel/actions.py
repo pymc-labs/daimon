@@ -47,7 +47,12 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.routines import can_manage_routine, can_read_routine_output, routine_label
+from daimon.core.routines import (
+    MOVED_TO_WORKFLOWS,
+    can_manage_routine,
+    can_read_routine_output,
+    routine_label,
+)
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
 from slack_sdk.errors import SlackApiError
@@ -218,6 +223,8 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                         if result == "gone"
                         else "This routine is already on."
                         if result == "already_running"
+                        else MOVED_TO_WORKFLOWS
+                        if result == "moved"
                         else "Only the routine's creator or a workspace admin "
                         "can pause or resume this routine."
                     )
