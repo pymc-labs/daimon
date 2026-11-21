@@ -660,6 +660,7 @@ async def open_pressed(
     if env is None:
         return UNAVAILABLE
     try:
+        await service.ensure_on(env)
         workflow = await service.get(env, workflow_id)
     except WorkflowError as err:
         return str(err)

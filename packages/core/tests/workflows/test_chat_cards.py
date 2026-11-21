@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 from daimon.core._models import PlatformPrincipal
 from daimon.core.posted_controls import PostedCard, card_text
 from daimon.core.stores import workflow_runs
-from daimon.core.workflows import chat_cards, service
+from daimon.core.workflows import chat_cards, gate, service
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.chat_cards import ChatPlace, Presser
 from daimon.core.workflows.service import Env
@@ -156,3 +157,32 @@ def test_a_run_form_types_what_was_typed() -> None:
     assert chat_cards.form_inputs(form, {"n": "2"}) == "Fill in email."
     assert chat_cards.form_inputs(form, {"email": "a@b.c", "n": "2"}) == {"email": "a@b.c", "n": 2}
     assert chat_cards.run_form(uuid.uuid4(), spec, limit=1) is None, "too many fields: the web"
+
+
+async def test_every_chat_entry_refuses_while_workflows_are_off(db_session: AsyncSession) -> None:
+    world, presser = await _world(db_session)
+    off = world.settings.model_copy(update={"features": {"workflows": "off"}})
+    entries = {
+        name
+        for name, fn in inspect.getmembers(chat_cards, inspect.iscoroutinefunction)
+        if "presser" in inspect.signature(fn).parameters and name != "env_of"
+    }
+    assert entries == {"press", "submit_form", "open_pressed", "list_for", "pick"}, entries
+    wid = world.workflow_id
+
+    async def never(*_: object) -> Any:
+        raise AssertionError("nothing is posted while workflows are off")
+
+    run = chat_cards._id(wid, "run")  # pyright: ignore[reportPrivateUsage]
+    pressed = await chat_cards.press(world.sm, off, presser=presser, custom_id=run, place=PLACE)
+    form = f"wff:{wid}:l"
+    said = [
+        pressed.say,
+        await chat_cards.submit_form(world.sm, off, presser=presser, form_id=form, raw={}),
+        await chat_cards.open_pressed(
+            world.sm, off, presser, wid, test=False, post=never, edit=never
+        ),
+        await chat_cards.list_for(world.sm, off, presser),
+        card_text(await chat_cards.pick(world.sm, off, presser, str(wid))),
+    ]
+    assert all(gate.OFF in str(s) for s in said), said

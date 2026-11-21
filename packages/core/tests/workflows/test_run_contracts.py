@@ -89,3 +89,47 @@ def test_every_manual_start_is_a_listed_path() -> None:
         "workflows.py:start",  # the web route
         "workflows.py:workflows_router",  # the route's enclosing router
     }, f"a new path that starts manual runs joins this list: {sorted(callers)}"
+
+
+#: Session openers a workflow step reaches, and the keywords each must pass so the
+#: session carries its run and step stamps and its usage settles to the run.
+_STAMPED = {
+    "run_turn": {"step", "usage_record_factory"},
+    "record_turn_usage": {"workflow_run_id"},
+    "source_metadata": {"MA_METADATA_KEY_WORKFLOW_RUN", "MA_METADATA_KEY_WORKFLOW_STEP"},
+}
+#: Deliberate gaps, each with its reason.
+_UNSTAMPED = {
+    "owner_dm.py:run_dm_routine": "an owner DM step continues the owner's DM session, which "
+    "bills through the DM's own usage path and is not a workflow session",
+}
+
+
+def test_every_workflow_session_is_stamped_and_settles_through_usage_recording() -> None:
+    found: dict[str, set[str]] = {}
+    roots = ("core/daimon/core/workflows", "adapters/scheduler/daimon/adapters/scheduler/workflows")
+    for path in (p for root in roots for p in sorted((PACKAGES / root).glob("*.py"))):
+        for call in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name == "partial" and call.args and isinstance(call.args[0], ast.Name):
+                name = call.args[0].id
+            passed = {k.arg for k in call.keywords if k.arg}
+            for kw in call.keywords:
+                if kw.arg == "source_metadata" and isinstance(kw.value, ast.Dict):
+                    name = "source_metadata"
+                    passed = {k.id for k in kw.value.keys if isinstance(k, ast.Name)}
+            if name in _STAMPED or name == "run_dm_routine":
+                found[f"{path.name}:{name}"] = passed
+    assert set(found) == {
+        "lane_turn.py:run_turn",
+        "lane_turn.py:record_turn_usage",
+        "code_worker.py:source_metadata",
+        *_UNSTAMPED,
+    }, f"a new session path: stamp it or list it with its reason: {sorted(found)}"
+    for where, passed in found.items():
+        if where not in _UNSTAMPED:
+            missing = _STAMPED[where.split(":")[1]] - passed
+            assert not missing, f"{where} passes no {sorted(missing)}"

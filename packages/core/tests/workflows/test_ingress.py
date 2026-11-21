@@ -194,6 +194,9 @@ async def test_limits_and_switches_refuse_before_anything_is_stored(
     hook = await make_hook(db_session)
     req = hook.signed(GOOD, "msg_1")
     assert (await hook.post(settings("off"), **req)).status == 404, "webhooks off"
+    off = {"workflows": "off", "workflow_webhooks": "on"}
+    no_workflows = settings().model_copy(update={"features": off})
+    assert (await hook.post(no_workflows, **req)).status == 404, "workflows off"
     small = settings(webhook_max_body_bytes=8)
     assert (await hook.post(small, **req)).status == 413, "over the cap"
     unknown = await ingress.receive(
