@@ -130,9 +130,26 @@ async def _need(session: AsyncSession, workflow: WorkflowRow, allowed: bool, wha
         raise Forbidden(f"Only {what} can do this. Ask {await _owner_name(session, workflow)}.")
 
 
-async def _validate(env: Env, spec: dict[str, Any]) -> Validation:
+async def _budget(env: Env) -> float:
+    """The workspace's default run budget; a spec over it needs an admin's grant."""
     features = await gate.features_at(env.sm, env.settings, env.who.tenant_id)
-    budget = float(features.run_budget_usd) if features else 5.0
+    return float(features.run_budget_usd) if features else 5.0
+
+
+async def _view(
+    env: Env,
+    session: AsyncSession,
+    workflow: WorkflowRow,
+    access: Sequence[WorkflowAccessRow] | None = None,
+) -> views.Workflow:
+    budget = await _budget(env)
+    return await views.workflow_view(
+        session, workflow, env.who, now=env.now, default_budget_usd=budget, access=access
+    )
+
+
+async def _validate(env: Env, spec: dict[str, Any]) -> Validation:
+    budget = await _budget(env)
     return validate_document(
         spec, env.catalog, run_budget_usd=obj(spec.get("limits")).get("budget_usd") or budget
     )
@@ -156,13 +173,15 @@ def _sync(spec: dict[str, Any]) -> store.Settings:
 
 async def list_workflows(env: Env) -> list[views.WorkflowSummary]:
     async with env.sm() as session:
-        return await views.list_summaries(session, env.who, now=env.now)
+        return await views.list_summaries(
+            session, env.who, now=env.now, default_budget_usd=await _budget(env)
+        )
 
 
 async def get(env: Env, workflow_id: uuid.UUID) -> views.Workflow:
     async with env.sm() as session:
         workflow, access, _ = await _load(session, env, workflow_id)
-        return await views.workflow_view(session, workflow, env.who, now=env.now, access=access)
+        return await _view(env, session, workflow, access=access)
 
 
 BLANK: dict[str, Any] = {
@@ -200,7 +219,7 @@ async def create(env: Env, body: NewWorkflow, defaults_root: Path) -> views.Work
             home_channel_id=columns.get("home_channel_id"),
             visibility=columns.get("visibility", "private"),
         )
-        return await views.workflow_view(session, workflow, env.who, now=env.now)
+        return await _view(env, session, workflow)
 
 
 async def patch(env: Env, workflow_id: uuid.UUID, body: Patch) -> views.Workflow:
@@ -244,7 +263,7 @@ async def patch(env: Env, workflow_id: uuid.UUID, body: Patch) -> views.Workflow
         if body.runners is not None:
             await _set_role(session, workflow, "runner", body.runners, env.who.account_id)
         fresh, access, _ = await _load(session, env, workflow_id)
-        return await views.workflow_view(session, fresh, env.who, now=env.now, access=access)
+        return await _view(env, session, fresh, access=access)
 
 
 async def _set_role(
@@ -508,7 +527,7 @@ async def publish(
             session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, **changes
         )
         fresh, access, _ = await _load(session, env, workflow_id)
-        view = await views.workflow_view(session, fresh, env.who, now=env.now, access=access)
+        view = await _view(env, session, fresh, access=access)
         return view
 
 
@@ -600,7 +619,7 @@ async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.
             requested_by=env.who.account_id,
         )
         fresh, access, _ = await _load(session, env, workflow_id)
-        return await views.workflow_view(session, fresh, env.who, now=env.now, access=access)
+        return await _view(env, session, fresh, access=access)
 
 
 async def decide_publish_request(
@@ -973,7 +992,9 @@ async def attention(env: Env) -> list[Attention]:
     async with env.sm() as session:
         out: list[Attention] = []
         latest_runs: dict[uuid.UUID, dict[str, str]] = {}
-        for summary in await views.list_summaries(session, env.who, now=env.now):
+        for summary in await views.list_summaries(
+            session, env.who, now=env.now, default_budget_usd=await _budget(env)
+        ):
             ref = {"id": summary.id, "name": summary.name}
             workflow_id = uuid.UUID(summary.id)
             if summary.status in ("needs_owner", "needs_review"):

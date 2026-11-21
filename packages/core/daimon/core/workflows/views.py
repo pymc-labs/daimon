@@ -6,7 +6,6 @@ names here, at read time: the stores hold account ids only.
 
 from __future__ import annotations
 
-import math
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -217,14 +216,14 @@ def status_of(workflow: WorkflowRow, *, unreviewed: bool = False) -> Status:
 
 
 async def unreviewed(
-    session: AsyncSession, workflow: WorkflowRow, live: WorkflowVersionRow | None
+    session: AsyncSession, workflow: WorkflowRow, live: WorkflowVersionRow | None, budget: float
 ) -> bool:
-    """The live version lacks a grant (the budget's is checked when a run starts)."""
+    """The live version lacks a grant, the budget's over the workspace default `budget` too."""
     if live is None:
         return False
     spec = parse_spec(live.spec)
     return (
-        await preflight.missing_grant(session, workflow.id, live.number, spec, math.inf) is not None
+        await preflight.missing_grant(session, workflow.id, live.number, spec, budget) is not None
     )
 
 
@@ -302,7 +301,7 @@ def _summary(
 
 
 async def list_summaries(
-    session: AsyncSession, who: Who, *, now: datetime
+    session: AsyncSession, who: Who, *, now: datetime, default_budget_usd: float
 ) -> list[WorkflowSummary]:
     """The workflows the caller may see, by name."""
     workflows = await workflows_store.list_workflows(session, tenant_id=who.tenant_id)
@@ -343,7 +342,7 @@ async def list_summaries(
             spend=float(spend.get(w.id, 0)),
             who=who,
             next_run=fires.get(w.id),
-            unreviewed=await unreviewed(session, w, lives.get(w.id)),
+            unreviewed=await unreviewed(session, w, lives.get(w.id), default_budget_usd),
             origin=origins.get(w.id),
         )
         for w in seen
@@ -377,7 +376,7 @@ async def workflow_view(
     who: Who,
     *,
     now: datetime,
-    run_budget_usd: float | None = None,
+    default_budget_usd: float,
     access: Sequence[WorkflowAccessRow] | None = None,
 ) -> Workflow:
     """The workflow page's record, for a caller who may see it."""
@@ -430,7 +429,7 @@ async def workflow_view(
         spend=float(spend),
         who=who,
         next_run=fires.get(workflow.id),
-        unreviewed=await unreviewed(session, workflow, live),
+        unreviewed=await unreviewed(session, workflow, live, default_budget_usd),
         origin=origin,
     )
     spec = _live_spec(workflow, versions)
