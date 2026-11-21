@@ -5,10 +5,18 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from daimon.core._models import Routine, Tenant
+from daimon.core._models import (
+    Routine,
+    Tenant,
+    Workflow,
+    WorkflowRun,
+    WorkflowTrigger,
+    WorkflowTriggerEvent,
+)
 from daimon.core.errors import StoreError
-from daimon.core.routine_move import RoutineSeedEntry, seed_first_slot
+from daimon.core.routine_move import MovedRoutine, RoutineSeedEntry, seed_first_slot
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.routines import migrated_workflows
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,6 +73,9 @@ async def seed_routines(
             planned.append((row, seed_first_slot(entry, row, now=now)))
         except ValueError as exc:
             errors.append(f"{entry.source_routine_id}: {exc}")
+    for row, _ in planned:
+        if await migrated_workflows(session, [row.id]):
+            errors.append(f"{row.source_routine_id}: runs as a workflow, not a routine")
     if errors:
         raise StoreError("\n".join(errors) + "\nNothing was changed.")
     if apply:
@@ -133,6 +144,53 @@ async def rollback_rows(
     return rows
 
 
+async def moved_routines(session: AsyncSession, rows: list[RoutineRow]) -> dict[UUID, MovedRoutine]:
+    """Where each routine that runs as a workflow keeps its cursor: the workflow's trigger."""
+    moved = await migrated_workflows(session, [row.id for row in rows])
+    if not moved:
+        return {}
+    found = (
+        await session.execute(
+            select(WorkflowTrigger, Workflow.name, Workflow.status)
+            .join(Workflow, Workflow.id == WorkflowTrigger.workflow_id)
+            .where(WorkflowTrigger.from_routine_id.in_(moved))
+        )
+    ).all()
+    open_runs = set(
+        (
+            await session.execute(
+                select(WorkflowRun.workflow_id, WorkflowRun.trigger_key).where(
+                    WorkflowRun.workflow_id.in_([workflow_id for workflow_id, _ in moved.values()]),
+                    WorkflowRun.mode == "live",
+                    WorkflowRun.status.in_(("queued", "running", "waiting")),
+                )
+            )
+        ).tuples()
+    )
+    # A claimed slot is an accepted event until the starts loop makes it a run.
+    waiting = set(
+        await session.scalars(
+            select(WorkflowTriggerEvent.trigger_id).where(
+                WorkflowTriggerEvent.trigger_id.in_([trigger.id for trigger, _, _ in found]),
+                WorkflowTriggerEvent.status == "accepted",
+                WorkflowTriggerEvent.test.is_(False),
+            )
+        )
+    )
+    return {
+        trigger.from_routine_id: MovedRoutine(
+            workflow_name=name,
+            active=status == "active" and trigger.enabled,
+            run_in_flight=trigger.id in waiting
+            or (trigger.workflow_id, trigger.trigger_key) in open_runs,
+            last_fired_slot=trigger.last_fired_slot,
+            seeded_after=trigger.seeded_after,
+        )
+        for trigger, name, status in found
+        if trigger.from_routine_id is not None
+    }
+
+
 async def pause_for_handback(
     session: AsyncSession,
     *,
@@ -168,6 +226,13 @@ async def pause_for_handback(
                 else "several routines match"
             )
             raise StoreError(f"{rid}: {reason}. Nothing was changed.")
+    for row in rows:
+        if row.id in (running := await migrated_workflows(session, [row.id])):
+            raise StoreError(
+                f"{row.source_routine_id}: runs as workflow {running[row.id][1]}. "
+                f"Move it back first: daimon workflows to-routine {running[row.id][0]}. "
+                "Nothing was changed."
+            )
     if apply:
         for row in rows:
             if row.handback_paused_at is not None:

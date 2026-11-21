@@ -4,8 +4,9 @@
 (`source: routine`) published as the routine's owner, hands the routine's cursor and link to
 the schedule trigger (`sync_live`) and stops the routine claiming slots, so no slot fires
 twice or is lost. `to_routine` gives the cursor back the same way and pauses the workflow.
-Lead intake, handback and in-flight routines stay put; a routine on another backend moves
-paused, since its workflow could not run there either.
+Lead intake, routines paused for handback and in-flight routines stay put; a cutover copy
+(`source_routine_id`) moves like any routine and keeps its source link. A routine on another
+backend moves paused, since its workflow could not run there either.
 """
 
 from __future__ import annotations
@@ -102,8 +103,8 @@ def exclusion(row: RoutineRow, *, moved: bool, lead_intake: bool) -> str | None:
         return "This routine already runs as a workflow."
     if lead_intake:
         return "Lead intake runs this routine, so it stays a routine for now."
-    if row.source_routine_id is not None or row.handback_paused_at is not None:
-        return "This routine came from another system and may go back there, so it stays."
+    if row.handback_paused_at is not None:
+        return "This routine is paused for handback to another system, so it stays."
     if row.created_by_user_id is None:
         return "This routine has no owner. Create it again first."
     if row.delivery_status in ("pending", "claimed"):

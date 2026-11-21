@@ -4,13 +4,30 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
-from daimon.core._models import Routine, Tenant, Workflow, WorkflowTrigger
-from daimon.core.errors import RoutineMoved
+from daimon.core._models import (
+    Routine,
+    Tenant,
+    Workflow,
+    WorkflowRun,
+    WorkflowTrigger,
+    WorkflowTriggerEvent,
+)
+from daimon.core.cron import next_slot_at_or_after
+from daimon.core.errors import RoutineMoved, StoreError
 from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.routine_move import RoutineSeedEntry, routine_rollback_document
 from daimon.core.stores import routines, workflows
+from daimon.core.stores import workflow_runs as runs_store
+from daimon.core.stores.routine_move import (
+    moved_routines,
+    pause_for_handback,
+    rollback_rows,
+    seed_routines,
+)
 from daimon.core.workflows import convert, triggers
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import AgentLister
@@ -95,6 +112,10 @@ async def test_a_paused_routine_moves_to_a_paused_workflow(db_session: AsyncSess
 async def test_routines_that_cannot_move_are_refused(db_session: AsyncSession) -> None:
     env = await _env(db_session)
     handed = await _routine(db_session, env, source_routine_id=uuid.uuid4())
+    await db_session.execute(
+        update(Routine).where(Routine.id == handed).values(handback_paused_at=NOW)
+    )
+    await db_session.commit()
     with pytest.raises(Refused):
         await convert.from_routine(env, handed)
     running = await _routine(db_session, env)
@@ -163,3 +184,106 @@ async def test_a_stale_panel_button_on_a_moved_routine_changes_nothing(
             now=lambda: NOW,
         )
     assert result == "moved", "the panel says it moved instead of failing"
+
+
+async def _export(env: Env, *, at: datetime) -> dict[str, Any]:
+    async with env.sm() as s:
+        rows = await rollback_rows(s, tenant_id=env.who.tenant_id)
+        moved = await moved_routines(s, rows)
+    return routine_rollback_document(rows, exported_at=at, moved=moved)
+
+
+async def test_a_cutover_copy_converts_and_keeps_its_source_link(db_session: AsyncSession) -> None:
+    env = await _env(db_session)
+    source = uuid.uuid4()
+    routine_id = await _routine(db_session, env, source_routine_id=source)
+    flow = await convert.from_routine(env, routine_id)
+    trigger = await db_session.scalar(select(WorkflowTrigger))
+    assert trigger is not None and trigger.from_routine_id == routine_id, "chain kept"
+    assert await convert.to_routine(env, flow) == routine_id
+    async with env.sm() as s:
+        back = await routines.get_routine(s, routine_id, tenant_id=env.who.tenant_id)
+    assert back is not None and back.source_routine_id == source, "link untouched both ways"
+
+
+async def test_rollback_export_follows_the_workflows_cursor_and_waits_for_it(
+    db_session: AsyncSession,
+) -> None:
+    env = await _env(db_session)
+    source = uuid.uuid4()
+    routine_id = await _routine(db_session, env, source_routine_id=source)
+    flow = await convert.from_routine(env, routine_id)
+    fired = SLOT + timedelta(seconds=5)
+    assert await triggers.fire_schedules(env.sm, now=fired) == 1
+    later = SLOT + timedelta(minutes=30)
+    doc = await _export(env, at=later)
+    entry = doc["routines"][0]
+    assert entry["resume_after"] == SLOT.isoformat(), "the workflow's last slot, not the routine's"
+    assert entry["enabled"] is True, "the workflow is active"
+    assert not doc["final"], "not final while the workflow is active"
+    assert any("runs as workflow" in r for r in doc["not_final_reasons"]), doc
+    assert any("run in flight" in r for r in doc["not_final_reasons"]), "its slot waits to start"
+    async with env.sm.begin() as s:
+        await s.execute(update(Workflow).where(Workflow.id == flow).values(status="paused"))
+        await s.execute(update(WorkflowTriggerEvent).values(status="started"))
+        run = await runs_store.create_run(
+            s,
+            tenant_id=env.who.tenant_id,
+            workflow_id=flow,
+            version=1,
+            mode="live",
+            run_as_account_id=None,
+            triggered_by={"kind": "schedule"},
+            trigger_kind="schedule",
+            trigger_key=convert.TRIGGER,
+            inputs={},
+            budget_usd=Decimal(1),
+            deadline_at=None,
+        )
+    assert "run in flight" in " ".join((await _export(env, at=later))["not_final_reasons"])
+    async with env.sm.begin() as s:
+        await s.execute(
+            update(WorkflowRun).where(WorkflowRun.id == run.id).values(status="succeeded")
+        )
+    paused = await _export(env, at=later)
+    assert paused["final"], paused["not_final_reasons"]
+    assert paused["routines"][0]["enabled"] is False
+    assert paused["routines"][0]["resume_after"] == SLOT.isoformat(), "no slot replays"
+
+
+async def test_pause_for_handback_refuses_a_moved_routine_until_it_moves_back(
+    db_session: AsyncSession,
+) -> None:
+    env = await _env(db_session)
+    source = uuid.uuid4()
+    routine_id = await _routine(db_session, env, source_routine_id=source)
+    flow = await convert.from_routine(env, routine_id)
+    async with env.sm.begin() as s:
+        with pytest.raises(StoreError, match=f"to-routine {flow}"):
+            await pause_for_handback(
+                s, tenant_id=env.who.tenant_id, source_routine_ids=[source], now=NOW, apply=True
+            )
+    await convert.to_routine(env, flow)
+    async with env.sm.begin() as s:
+        rows = await pause_for_handback(
+            s, tenant_id=env.who.tenant_id, source_routine_ids=[source], now=NOW, apply=True
+        )
+    assert [r.id for r in rows] == [routine_id], "back as a routine, it pauses for handback"
+
+
+async def test_seed_refuses_a_routine_that_runs_as_a_workflow(db_session: AsyncSession) -> None:
+    env = await _env(db_session)
+    source = uuid.uuid4()
+    routine_id = await _routine(db_session, env, source_routine_id=source, enabled=False)
+    await convert.from_routine(env, routine_id)
+    done = NOW - timedelta(hours=2)
+    entry = RoutineSeedEntry(
+        source_routine_id=source,
+        last_completed_slot=done.isoformat(),  # pyright: ignore[reportArgumentType]  # ISO wire form
+        source_next_run=next_slot_at_or_after("0 * * * *", "UTC", done).isoformat(),  # pyright: ignore[reportArgumentType]  # ISO wire form
+        cron_expr="0 * * * *",
+        timezone="UTC",
+    )
+    async with env.sm.begin() as s:
+        with pytest.raises(StoreError, match="runs as a workflow"):
+            await seed_routines(s, [entry], tenant_id=env.who.tenant_id, now=NOW, apply=True)

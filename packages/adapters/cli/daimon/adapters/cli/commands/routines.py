@@ -69,7 +69,12 @@ from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import SANDBOX_KEY, AnySandboxPin, RoutineRow, stored_pin
 from daimon.core.stores.feature_values import list_feature_values
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.stores.routine_move import pause_for_handback, rollback_rows, seed_routines
+from daimon.core.stores.routine_move import (
+    moved_routines,
+    pause_for_handback,
+    rollback_rows,
+    seed_routines,
+)
 from daimon.core.stores.routines import (
     create_routine,
     get_routine,
@@ -836,9 +841,11 @@ def export_rollback_command(
                     rows = await rollback_rows(
                         session, tenant_id=tenant, source_routine_ids=source_ids
                     )
+                    moved = await moved_routines(session, rows)
             except StoreError as exc:
                 raise UserFacingError(str(exc)) from exc
-        return json.dumps(routine_rollback_document(rows, exported_at=datetime.now(UTC)), indent=2)
+        document = routine_rollback_document(rows, exported_at=datetime.now(UTC), moved=moved)
+        return json.dumps(document, indent=2)
 
     rendered = asyncio.run(run()) + "\n"
     if output is not None:

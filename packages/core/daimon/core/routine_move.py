@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -109,11 +111,30 @@ def seed_scheduler_action(
     return "fire next tick"
 
 
-def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) -> dict[str, Any]:
+@dataclass(frozen=True)
+class MovedRoutine:
+    """A routine that runs as a workflow: its trigger, not the routine row, holds the cursor."""
+
+    workflow_name: str
+    #: The workflow is active and the trigger on, so a slot can still fire.
+    active: bool
+    run_in_flight: bool
+    last_fired_slot: datetime | None
+    seeded_after: datetime | None
+
+
+def routine_rollback_document(
+    rows: list[RoutineRow],
+    *,
+    exported_at: datetime,
+    moved: Mapping[UUID, MovedRoutine] | None = None,
+) -> dict[str, Any]:
     """The complete versioned rollback format; keep wire-format changes local here.
 
     Handback consumes every slot before the captured next run. Other paused
     rows use claim or seed evidence. Incomplete evidence prevents finality.
+    A routine in `moved` (by routine id) takes its cursor and on/off state from the
+    workflow's trigger, and is not final while that workflow is active or has a run open.
     """
     if not rows:
         raise ValueError("Select at least one routine to export.")
@@ -149,7 +170,16 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
         resume_after = row.last_fired_slot or row.seeded_after
         expected_next_run = None
         enabled = row.enabled
-        if row.handback_paused_at is not None:
+        workflow = (moved or {}).get(row.id)
+        if workflow is not None:
+            enabled = workflow.active
+            resume_after = workflow.last_fired_slot or workflow.seeded_after
+            if workflow.active:
+                reasons.append(f"{label}: runs as workflow {workflow.workflow_name}")
+            if workflow.run_in_flight:
+                reasons.append(f"{label}: workflow run in flight")
+                in_flight = True
+        elif row.handback_paused_at is not None:
             enabled = row.handback_enabled
             expected_next_run = row.handback_next_fire_at
             if enabled is None:
