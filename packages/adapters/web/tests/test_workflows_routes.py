@@ -18,6 +18,7 @@ from daimon.adapters.web.workflows import workflows_router
 from daimon.core.config import Settings
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.stores import web_roles as roles_store
+from daimon.core.stores import workflow_runs
 from daimon.core.stores.domain import WebPersonRow
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from fastapi.routing import APIRoute
@@ -90,6 +91,7 @@ class Rig:
                 surface="web",
             )
         router = build_turn_router(str(self.ws.tenant_id), sent_event_bodies=self.sent)
+        self.router = router
         built = build_turns(self.factory, router, self.tmp_path)
         features = {"workflows": "on" if engine else "off", **settings.pop("features", {})}
         config = discord_settings(features=features, defaults_root=_DEFAULTS, **settings)
@@ -174,6 +176,34 @@ async def test_a_blank_workflow_is_drafted_published_and_run_to_the_end(rig: Rig
         assert by_number.json()["id"] == detail["id"], "a run opens by its number too"
         listed = (await r.client.get("/api/workflows")).json()
         assert [w["ticks"][0]["status"] for w in listed] == ["succeeded"], "the list shows ticks"
+
+
+async def test_a_run_file_downloads_for_a_viewer_and_no_other_file_does(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        await r.client.post(f"/api/workflows/{made['id']}/draft/publish", json={})
+        run = (await r.client.post(f"/api/workflows/{made['id']}/runs", json={})).json()
+        ref = {"file_id": "file_x", "filename": "notes.txt", "mime_type": "text/plain"}
+        async with r.factory.begin() as db:
+            await workflow_runs.save_steps(
+                db,
+                tenant_id=r.ws.tenant_id,
+                run_id=uuid.UUID(run["id"]),
+                steps={("done", 1): {"files": [ref | {"size_bytes": 5}]}},
+            )
+        r.router.add(
+            "GET",
+            r"/v1/files/file_x/content",
+            lambda _req, _m: httpx.Response(200, content=b"hello"),
+        )
+        detail = (await r.client.get(f"/api/workflows/runs/{run['id']}/steps/done")).json()
+        [shown] = detail["files"]
+        assert shown["url"] == f"/api/workflows/runs/{run['id']}/files/file_x", shown
+        got = await r.client.get(shown["url"])
+        assert (got.status_code, got.content) == (200, b"hello"), got.text
+        assert got.headers["content-disposition"].startswith("attachment;"), "always a download"
+        other = await r.client.get(f"/api/workflows/runs/{run['id']}/files/file_y")
+        assert other.status_code == 404, "only files the run holds download"
 
 
 async def test_each_starter_template_creates_a_draft_that_validates(rig: Rig) -> None:

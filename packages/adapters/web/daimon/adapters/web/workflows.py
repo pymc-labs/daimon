@@ -14,6 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from anthropic import AsyncAnthropic
@@ -27,6 +28,7 @@ from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.routines import reachable_channels_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.output_delivery import download_output_file
 from daimon.core.stores import tenants
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.channel_directory import list_shared_channel_ids
@@ -259,9 +261,19 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
         return await service.step(await env_of(caller), run_id, key, attempt)
 
     @router.get("/runs/{run_id}/files/{name}")
-    async def run_file(run_id: uuid.UUID, name: str, caller: Viewer) -> None:  # pyright: ignore[reportUnusedFunction]
-        await env_of(caller)
-        raise HTTPException(status_code=404, detail="There is no such file.")
+    @speaks
+    async def run_file(run_id: uuid.UUID, name: str, caller: Viewer) -> Response:  # pyright: ignore[reportUnusedFunction]
+        ref = await service.run_file(await env_of(caller), run_id, name)
+        anthropic = client()
+        if anthropic is None:
+            raise HTTPException(status_code=503, detail=SOON)
+        content = await download_output_file(anthropic, ref.file_id)
+        disposition = f"attachment; filename*=UTF-8''{quote(ref.filename)}"
+        return Response(
+            content,
+            media_type=ref.mime_type,
+            headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
+        )
 
     @asynccontextmanager
     async def wakeups(tenant_id: uuid.UUID, run_id: uuid.UUID) -> AsyncIterator[asyncio.Event]:
