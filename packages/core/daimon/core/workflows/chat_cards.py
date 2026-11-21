@@ -28,6 +28,7 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import run_views, service, views
 from daimon.core.workflows.access import who_of
+from daimon.core.workflows.catalog import AgentLister
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.service import Env, Patch, WorkflowError
 from daimon.core.workflows.views import obj, seq
@@ -461,9 +462,15 @@ def form_inputs(form: RunForm, raw: Mapping[str, str]) -> dict[str, Any] | str:
 
 
 async def env_of(
-    sm: Sessions, settings: Settings, presser: Presser, now: datetime | None = None
+    sm: Sessions,
+    settings: Settings,
+    presser: Presser,
+    now: datetime | None = None,
+    *,
+    agents: AgentLister | None = None,
 ) -> Env | None:
-    """The presser as the workflow rules see them, or None when suspended."""
+    """The presser as the workflow rules see them, or None when suspended; `agents` are the
+    workspace's, for a press that validates."""
     async with sm.begin() as session:
         principal = await get_or_create_platform_principal(
             session,
@@ -474,7 +481,7 @@ async def env_of(
         who = await who_of(session, presser.tenant_id, principal.account_id)
     if who is None:
         return None
-    return Env(sm=sm, settings=settings, who=who, now=now or datetime.now(UTC))
+    return Env(sm=sm, settings=settings, who=who, now=now or datetime.now(UTC), agents=agents)
 
 
 async def run_card_of(
@@ -527,10 +534,11 @@ async def press(
     links: WebAt,
     card_text: str = "",
     form_limit: int = 5,
+    agents: AgentLister | None = None,
 ) -> Pressed:
     """One press on a workflow card, as the person who pressed."""
     parsed = parse_custom_id(custom_id)
-    env = await env_of(sm, settings, presser)
+    env = await env_of(sm, settings, presser, agents=agents)
     if parsed is None or env is None:
         return Pressed(say=UNAVAILABLE)
     target, action, arg = parsed

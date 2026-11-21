@@ -25,6 +25,7 @@ from daimon.core.posted_controls.teams_card import CONTROL_VERB, build_adaptive_
 from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards
+from daimon.core.workflows.catalog import tenant_agents
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from daimon.core.workflows.views import seq
 from microsoft_teams.api import MessageActivityInput
@@ -151,6 +152,7 @@ async def answer(
             place=place,
             links=links,
             form_limit=FORM_LIMIT,
+            agents=tenant_agents(runtime.anthropic, presser.tenant_id),
         )
         if pressed.form is not None:
             return replace_card(form_card(pressed.form))

@@ -27,6 +27,7 @@ from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.workflows import convert, exchange, run_views, service
 from daimon.core.workflows.access import Who, who_of
+from daimon.core.workflows.catalog import tenant_agents
 from daimon.core.workflows.service import Env, NewWorkflow, WorkflowError
 from pydantic import BaseModel
 from rich.console import Console
@@ -68,7 +69,10 @@ async def operator_env(
             who = await who_of(session, tenant_id, owner) if on_tenant else None
     if who is None:
         raise UserFacingError(f"Account {owner} is not an active member of this tenant.")
-    env = Env(sm=rt.sessionmaker, settings=rt.settings, who=who, now=datetime.now(UTC))
+    agents = tenant_agents(rt.anthropic, tenant_id)
+    env = Env(
+        sm=rt.sessionmaker, settings=rt.settings, who=who, now=datetime.now(UTC), agents=agents
+    )
     await _say(service.ensure_on(env))
     return env
 

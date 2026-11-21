@@ -15,7 +15,7 @@ from typing import Literal
 
 from daimon.core.tool_safety import ToolSafetyPolicy, classify_tool
 from daimon.core.workflows.spec import AgentNode, ApprovalNode, ForEachNode, Spec
-from daimon.core.workflows.taint import tainted_steps
+from daimon.core.workflows.taint import Catalog, tainted_steps
 from pydantic import JsonValue
 
 Writes = Literal["refuse", "propose", "allow"]
@@ -68,14 +68,16 @@ def decide_unattended_call(policy: ToolSafetyPolicy, call: Call) -> Decision:
     return Decision("refuse", "writes_refused", "This step may not write.")
 
 
-def exposed_at_run(spec: Spec, node_id: str, *, untrusted_inputs: bool) -> bool:
+def exposed_at_run(
+    spec: Spec, node_id: str, *, untrusted_inputs: bool, catalog: Catalog | None = None
+) -> bool:
     """Untrusted data reaches this step in this run, and no admin waived it. A manual run by
     anyone but the publisher counts its inputs as untrusted."""
     node = spec.nodes[node_id]
     inner = node.do if isinstance(node, ForEachNode) else node
     if isinstance(inner, AgentNode) and inner.untrusted_waiver:
         return False
-    return node_id in tainted_steps(spec, untrusted_inputs=untrusted_inputs)
+    return node_id in tainted_steps(spec, catalog, untrusted_inputs=untrusted_inputs)
 
 
 def bound_by(spec: Spec, node_id: str) -> str | None:

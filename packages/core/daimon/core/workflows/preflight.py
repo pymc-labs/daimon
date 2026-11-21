@@ -24,7 +24,7 @@ from daimon.core.spend_gate import (
     spend_gate,
     spend_person_of_account,
 )
-from daimon.core.stores import accounts, identity, tenants, workflow_runs
+from daimon.core.stores import accounts, identity, tenants, workflow_runs, workflows
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -39,7 +39,7 @@ from daimon.core.workflows.spec import (
     node_hash,
     slug,
 )
-from daimon.core.workflows.taint import Catalog
+from daimon.core.workflows.taint import catalog_of
 from daimon.core.workflows.validate import validate_spec
 from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -149,7 +149,7 @@ async def check(
         if place.mode == "live" and (
             missing := await missing_grant(
                 session,
-                place.workflow.id,
+                place.workflow,
                 place.version,
                 place.spec,
                 float(default),
@@ -248,19 +248,22 @@ async def private_reach(
 
 async def missing_grant(
     session: AsyncSession,
-    workflow_id: uuid.UUID,
+    workflow: WorkflowRow,
     version: int,
     spec: Spec,
     budget: float,
     policy: ToolSafetyPolicy,
 ) -> str | None:
     """The first grant the spec needs that this version has no live, matching row for; its
-    tools are classed by the operator's policy now, as the calls will be."""
-    catalog = Catalog(agents={}, tools={}, policy=policy)
+    agents' tools as published, classed by the operator's policy now, as the calls will be."""
+    row = await workflows.get_version(
+        session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, number=version
+    )
+    catalog = catalog_of(policy, (row.agent_tools if row else None) or {})
     needed = validate_spec(spec, catalog, run_budget_usd=budget).grants
     if not needed:
         return None
-    held = await workflow_runs.live_grants(session, workflow_id=workflow_id, version=version)
+    held = await workflow_runs.live_grants(session, workflow_id=workflow.id, version=version)
     for grant in needed:
         pinned = node_hash(spec.nodes[grant.node]) if grant.node in spec.nodes else None
         if not any(

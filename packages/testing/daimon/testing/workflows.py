@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core._models import Tenant
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.stores import workflow_publish_requests as publish_requests
@@ -14,17 +16,51 @@ from daimon.core.stores import workflow_runs, workflows
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.workflows import engine, runs
+from daimon.core.workflows.catalog import AgentLister
 from daimon.core.workflows.ledger import verify
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.runs import Start, StepWork
 from daimon.core.workflows.spec import node_hash, parse_spec
 from daimon.core.workflows.validate import validate_spec
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 11, 20, 12, tzinfo=UTC)
+
+
+def agents_with(tools: dict[str, list[str]]) -> AgentLister:
+    """An `Env.agents` listing one agent per key, each with these `server/tool` MCP tools."""
+    allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    listed = [
+        ma_agent(
+            id=f"agent_{key}",
+            name=key,
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": server,
+                    "default_config": allow,
+                    "configs": [
+                        {"name": t.split("/", 1)[1], **allow}
+                        for t in ids
+                        if t.startswith(f"{server}/")
+                    ],
+                }
+                for server in dict.fromkeys(t.split("/", 1)[0] for t in ids)
+            ],
+        )
+        for key, ids in tools.items()
+    ]
+
+    async def agents() -> Sequence[BetaManagedAgentsAgent]:
+        return listed
+
+    return agents
+
+
 Sessions = async_sessionmaker[AsyncSession]
 
 

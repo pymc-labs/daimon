@@ -65,7 +65,7 @@ async def test_5_monthly_profitability_takes_numbers_from_code(
     db_session: AsyncSession, tmp_path: Path
 ) -> None:
     nodes: dict[str, Any] = {
-        "fetch": {"kind": "action", "tool": "timetrack/hours", "next": "compute"},
+        "fetch": {"kind": "action", "tool": "timetrack/get_hours", "next": "compute"},
         "compute": {
             "kind": "code",
             "source": MARGINS,

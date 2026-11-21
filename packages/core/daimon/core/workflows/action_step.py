@@ -58,7 +58,12 @@ class ToolClient(Protocol):
 
 
 def exposed(work: StepWork) -> bool:
-    return exposed_at_run(work.spec, work.step.node_id, untrusted_inputs=work.run.untrusted_inputs)
+    return exposed_at_run(
+        work.spec,
+        work.step.node_id,
+        untrusted_inputs=work.run.untrusted_inputs,
+        catalog=work.catalog,
+    )
 
 
 async def _approved_calls(

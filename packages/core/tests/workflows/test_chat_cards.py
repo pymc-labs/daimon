@@ -16,7 +16,7 @@ from daimon.core.workflows import chat_cards, gate, service
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.chat_cards import ChatPlace, Presser
 from daimon.core.workflows.service import Env
-from daimon.testing.workflows import NOW, World, make_world
+from daimon.testing.workflows import NOW, World, agents_with, make_world
 from sqlalchemy.ext.asyncio import AsyncSession
 
 NODES: dict[str, Any] = {
@@ -53,7 +53,8 @@ def _ids(card: PostedCard) -> list[str]:
 
 async def test_the_draft_card_publishes_its_own_revision_only(db_session: AsyncSession) -> None:
     world, presser = await _world(db_session)
-    owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW)
+    agents = agents_with({"default": []})
+    owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW, agents)
     draft = await service.get_draft(owner, world.workflow_id)
     spec = draft.spec | {"name": "Deals"}
     saved = await service.save_draft(
@@ -69,7 +70,13 @@ async def test_the_draft_card_publishes_its_own_revision_only(db_session: AsyncS
     assert stale.say == chat_cards.STALE, "an older card cannot publish a newer draft"
     publish = _ids(card)[-1]
     done = await chat_cards.press(
-        world.sm, world.settings, presser=presser, custom_id=publish, place=PLACE, links=NO_LINKS
+        world.sm,
+        world.settings,
+        presser=presser,
+        custom_id=publish,
+        place=PLACE,
+        links=NO_LINKS,
+        agents=agents,
     )
     assert done.card is not None and done.card.headline == "✅ Deals: version 2 is live"
     stranger = Presser(world.tenant_id, "discord", "u2")

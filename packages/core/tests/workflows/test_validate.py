@@ -8,13 +8,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.workflows import service
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.service import Env
-from daimon.core.workflows.taint import Catalog, tool_facts
+from daimon.core.workflows.spec import parse_spec
+from daimon.core.workflows.taint import Catalog, catalog_of, tool_facts
+from daimon.core.workflows.unattended import exposed_at_run
 from daimon.core.workflows.validate import validate_document
-from daimon.testing.workflows import NOW, make_world
+from daimon.testing.workflows import NOW, agents_with, make_world
 from sqlalchemy.ext.asyncio import AsyncSession
 
 FIXTURES = Path(__file__).parents[4] / "web/src/modules/workflows/fixtures/validation.json"
@@ -41,7 +43,7 @@ def test_an_action_is_classified_as_tool_safety_classifies_it() -> None:
     """A write the old name guess missed needs its grant; an operator effect overrides it."""
 
     def grants(tool: str) -> list[str]:
-        spec = {
+        spec: dict[str, Any] = {
             "schema": "daimon.workflow/v1",
             "name": "merge",
             "start": "act",
@@ -66,3 +68,35 @@ async def test_a_draft_with_errors_cannot_be_published(db_session: AsyncSession)
     await service.save_draft(env, world.workflow_id, base_revision=draft.revision, spec=broken)
     with pytest.raises(service.Invalid, match="before publishing"):
         await service.publish(env, world.workflow_id, "")
+
+
+async def test_every_validation_classes_the_agents_tools(db_session: AsyncSession) -> None:
+    """An agent reading mail and sending it breaks the Rule of Two on any path, and its run
+    sees the same exposure from the tools kept with the version."""
+    tools = {"triage": ["gmail/list_messages", "gmail/send_message"]}
+    nodes = {
+        "read": {
+            "kind": "agent",
+            "agent": "triage",
+            "instructions": "x",
+            "writes": "allow",
+            "next": "done",
+        },
+        "done": {"kind": "finish"},
+    }
+    world = await make_world(db_session, nodes, "read")
+    who = Who(world.tenant_id, world.owner, admin=True)
+    blind = Env(world.sm, world.settings, who, NOW)
+    env = Env(world.sm, world.settings, who, NOW, agents_with(tools))
+    draft = await service.get_draft(env, world.workflow_id)
+    codes = [p.code for p in (await service.validate(env, world.workflow_id, draft.spec)).errors]
+    assert "rule_of_two" in codes, f"the agent's own mail reads taint its sends: {codes}"
+    with pytest.raises(service.Invalid, match="before publishing"):
+        await service.publish(env, world.workflow_id, "")
+    unknown = [
+        p.code for p in (await service.validate(blind, world.workflow_id, draft.spec)).errors
+    ]
+    assert "unknown_agent" in unknown, "a path that lists no agents fails closed"
+    spec = parse_spec(draft.spec)
+    run_catalog = catalog_of(OPEN_TOOL_SAFETY, tools)
+    assert exposed_at_run(spec, "read", untrusted_inputs=False, catalog=run_catalog), "at run"

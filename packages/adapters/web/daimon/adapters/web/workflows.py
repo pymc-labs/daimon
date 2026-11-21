@@ -28,7 +28,6 @@ from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.routines import reachable_channels_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_audience import channels_with_outsiders
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.output_delivery import download_output_file
 from daimon.core.stores import tenants
 from daimon.core.stores import web_chat as chat_store
@@ -47,7 +46,6 @@ from daimon.core.workflows import (
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
-from daimon.core.workflows.spec import slug
 from daimon.core.workflows.taint import tool_facts
 from daimon.core.workflows.validate import Validation
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -135,22 +133,39 @@ _LISTEN_ERRORS = (OSError, SQLAlchemyError, asyncpg.PostgresError, asyncpg.Inter
 def workflows_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/workflows")
 
-    async def env_of(caller: WebCaller, *, with_catalog: bool = False) -> Env:
+    async def env_of(caller: WebCaller) -> Env:
         person = caller.person
         admin = is_admin(caller.role)
         who = Who(person.tenant_id, person.account_id, admin=admin, groups=groups_of(caller))
-        env = Env(sm=runtime.sessionmaker, settings=runtime.settings, who=who, now=runtime.now())
+        env = Env(
+            sm=runtime.sessionmaker,
+            settings=runtime.settings,
+            who=who,
+            now=runtime.now(),
+            agents=lambda: usable_agents(caller),
+        )
         try:
             await service.ensure_on(env)
         except WorkflowError as error:
             raise _http(error) from error
-        if with_catalog:
-            options = await options_of(caller)
-            env = Env(env.sm, env.settings, env.who, env.now, options.for_validation())
         return env
 
     def client() -> AsyncAnthropic | None:
         return runtime.anthropic or (runtime.turns.deps.anthropic if runtime.turns else None)
+
+    async def usable_agents(caller: WebCaller) -> list[BetaManagedAgentsAgent]:
+        """The agents the caller may chat with: the ones they build with."""
+        if (anthropic := client()) is None:
+            return []
+        listed = await runtime.agents.agents(anthropic, caller.person.tenant_id)
+        async with runtime.sessionmaker() as db:
+            return await chattable(
+                db,
+                listed,
+                person=caller.person,
+                role=caller.role,
+                principal=await caller.principal(db),
+            )
 
     async def options_of(caller: WebCaller) -> catalog.Options:
         tenant_id = caller.person.tenant_id
@@ -160,28 +175,10 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
             people = await catalog.people(db, tenant_id)
             shared = await channels_with_outsiders(db, tenant_id=tenant_id, platform=platform)
             reachable = await reachable_channels_of(runtime, db, caller, platform)
-            usable: list[BetaManagedAgentsAgent] = []
-            if (anthropic := client()) is not None:
-                listed = await runtime.agents.agents(anthropic, tenant_id)
-                usable = await chattable(
-                    db,
-                    listed,
-                    person=caller.person,
-                    role=caller.role,
-                    principal=await caller.principal(db),
-                )
         agents: list[catalog.AgentOption] = []
         tools: dict[str, catalog.ToolOption] = {}
-        agent_tools: dict[str, list[str]] = {}
-        for agent in sorted(usable, key=lambda a: a.name.lower()):
-            name = str(agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
-            ids = [
-                f"{t.mcp_server_name}/{c.name}"
-                for t in agent.tools
-                if t.type == "mcp_toolset"
-                for c in t.configs
-                if c.enabled is not False
-            ]
+        for agent in sorted(await usable_agents(caller), key=lambda a: a.name.lower()):
+            ids = catalog.agent_tool_ids(agent)
             for tool_id in ids:
                 tools.setdefault(
                     tool_id,
@@ -191,9 +188,14 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
                         writes=tool_facts(runtime.settings.tool_safety, tool_id).writes,
                     ),
                 )
-            key = slug(name)
-            agent_tools[key] = ids
-            agents.append(catalog.AgentOption(key=key, id=agent.id, name=name, tools=len(ids)))
+            agents.append(
+                catalog.AgentOption(
+                    key=catalog.agent_key(agent),
+                    id=agent.id,
+                    name=catalog.agent_name(agent),
+                    tools=len(ids),
+                )
+            )
         return catalog.Options(
             agents=agents,
             tools=sorted(tools.values(), key=lambda t: t.id),
@@ -202,7 +204,6 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
                 catalog.ChannelOption(id=cid, name=name, platform=platform, shared=cid in shared)
                 for cid, name in reachable.items()
             ],
-            agent_tools=agent_tools,
         )
 
     # ----- not behind a workflow id: before `/{workflow_id}` -----
@@ -429,25 +430,19 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/{workflow_id}/draft/publish")
     @speaks
     async def publish(workflow_id: uuid.UUID, body: Note, caller: Member) -> views.Workflow:  # pyright: ignore[reportUnusedFunction]
-        return await service.publish(
-            await env_of(caller, with_catalog=True), workflow_id, body.note
-        )
+        return await service.publish(await env_of(caller), workflow_id, body.note)
 
     @router.post("/{workflow_id}/draft/request")
     @speaks
     async def request_publish(  # pyright: ignore[reportUnusedFunction]
         workflow_id: uuid.UUID, body: Note, caller: Member
     ) -> views.Workflow:
-        return await service.request_publish(
-            await env_of(caller, with_catalog=True), workflow_id, body.note
-        )
+        return await service.request_publish(await env_of(caller), workflow_id, body.note)
 
     @router.post("/{workflow_id}/validate")
     @speaks
     async def validate(workflow_id: uuid.UUID, body: ValidateBody, caller: Viewer) -> Validation:  # pyright: ignore[reportUnusedFunction]
-        return await service.validate(
-            await env_of(caller, with_catalog=True), workflow_id, body.spec
-        )
+        return await service.validate(await env_of(caller), workflow_id, body.spec)
 
     @router.get("/{workflow_id}/chat")
     @speaks

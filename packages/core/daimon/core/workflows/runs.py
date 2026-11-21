@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
@@ -45,6 +45,7 @@ from daimon.core.workflows.spec import (
     parse_duration,
     parse_spec,
 )
+from daimon.core.workflows.taint import Catalog, catalog_of
 from pydantic import JsonValue
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -122,6 +123,8 @@ class StepWork:
     context: dict[str, JsonValue]
     #: Where the run spends, for an executor that checks preflight again before a nudge.
     place: Place | None = None
+    #: The version's agents' tools as published, for the exposure check.
+    catalog: Catalog | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,7 @@ class Loaded:
     spec: Spec
     steps: list[StepRow]
     facts: RunFacts
+    catalog: Catalog | None = None
 
     def views(self) -> list[StepView]:
         return [_view(s) for s in self.steps]
@@ -226,14 +230,21 @@ def _cut(text: str | None) -> str | None:
 
 
 async def spec_of(session: AsyncSession, run: RunRow) -> Spec:
+    return (await _version_of(session, run))[0]
+
+
+async def _version_of(
+    session: AsyncSession, run: RunRow
+) -> tuple[Spec, Mapping[str, Sequence[str]]]:
+    """The run's spec and its agents' tools as published (none for a test run)."""
     if run.mode == "test" and run.test_options is not None:
-        return parse_spec(run.test_options["spec"])
+        return parse_spec(run.test_options["spec"]), {}
     version = await workflows.get_version(
         session, tenant_id=run.tenant_id, workflow_id=run.workflow_id, number=run.version
     )
     if version is None:
         raise LookupError(f"Run {run.id} has no version {run.version}")
-    return parse_spec(version.spec)
+    return parse_spec(version.spec), version.agent_tools or {}
 
 
 def _max_steps(spec: Spec, settings: Settings) -> int:
@@ -246,7 +257,7 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
         session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
     )
     assert workflow is not None, "a run's workflow outlives it"
-    spec = await spec_of(session, run)
+    spec, agent_tools = await _version_of(session, run)
     pinned = (run.test_options or {}).get("pinned", {})
     facts = RunFacts(
         inputs=run.inputs,
@@ -266,7 +277,8 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
             for n, p in pinned.items()
         },
     )
-    return Loaded(run, workflow, spec, await workflow_runs.list_steps(session, run.id), facts)
+    steps = await workflow_runs.list_steps(session, run.id)
+    return Loaded(run, workflow, spec, steps, facts, catalog_of(settings.tool_safety, agent_tools))
 
 
 async def _lock(session: AsyncSession, run_id: uuid.UUID) -> RunRow | None:
@@ -398,7 +410,7 @@ async def _reload(session: AsyncSession, loaded: Loaded) -> Loaded:
     run = await workflow_runs.get_run(session, loaded.run.id)
     assert run is not None, "a locked run stays"
     steps = await workflow_runs.list_steps(session, run.id)
-    return Loaded(run, loaded.workflow, loaded.spec, steps, loaded.facts)
+    return replace(loaded, run=run, steps=steps)
 
 
 def _ended(status: str, now: datetime) -> StepWrite:
@@ -1110,6 +1122,7 @@ async def execute(
             )
             | item_context(loaded.spec, claimed.step),
             loaded.place(),
+            loaded.catalog,
         )
         try:
             outcome = await executor(work)
@@ -1621,7 +1634,7 @@ async def redrive(
 
 def _running(loaded: Loaded) -> Loaded:
     run = loaded.run.model_copy(update={"status": "running", "waiting_reason": None})
-    return Loaded(run, loaded.workflow, loaded.spec, loaded.steps, loaded.facts)
+    return replace(loaded, run=run)
 
 
 async def decide_unknown(

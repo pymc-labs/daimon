@@ -3,15 +3,21 @@
 Untrusted: inputs and trigger data when a webhook or event can start the run (or when the
 caller says so, as for a manual run by someone other than the publisher), Action results,
 Wait payloads, answers from people who are not the owner or an editor, built-in web tools,
-third-party read tools the catalog marks untrusted, and agent lanes an exposed step shared
+third-party read tools (`tool_facts`), and agent lanes an exposed step shared
 earlier. Taint follows references until nothing changes.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Final
 
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, classify_tool
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    OPEN_TOOL_SAFETY,
+    ToolSafetyPolicy,
+    classify_tool,
+)
 from daimon.core.workflows.expressions import ExpressionError, template_refs
 from daimon.core.workflows.graph import ancestors, templates_of
 from daimon.core.workflows.spec import (
@@ -48,11 +54,22 @@ class Catalog(BaseModel):
     policy: ToolSafetyPolicy = OPEN_TOOL_SAFETY
 
 
+def catalog_of(policy: ToolSafetyPolicy, agent_tools: Mapping[str, Sequence[str]]) -> Catalog:
+    """Agents' tools, each classed by the operator's policy as the run-time calls are."""
+    return Catalog(
+        agents={k: frozenset(v) for k, v in agent_tools.items()},
+        tools={t: tool_facts(policy, t) for ids in agent_tools.values() for t in ids},
+        policy=policy,
+    )
+
+
 def tool_facts(policy: ToolSafetyPolicy, tool: str) -> ToolFacts:
     """A `server/tool` as `decide_unattended_call` classes it: the operator's overrides,
     then the name, and any name not plainly a read writes."""
     server, _, name = tool.rpartition("/")
-    return ToolFacts(writes=classify_tool(policy, server_name=server, tool_name=name) == "write")
+    writes = classify_tool(policy, server_name=server, tool_name=name) == "write"
+    # A third-party read returns outside content (mail, tickets, chat, web); Daimon's own do not.
+    return ToolFacts(writes=writes, untrusted=not writes and server != DAIMON_SERVER_NAME)
 
 
 def tool_writes(tool: str, catalog: Catalog | None) -> bool:
@@ -104,7 +121,7 @@ def _exposed(node: AnyNode, spec: Spec, catalog: Catalog | None) -> bool:
             return True
         if catalog is not None:
             return any(
-                catalog.tools.get(t, ToolFacts()).untrusted
+                (catalog.tools.get(t) or tool_facts(catalog.policy, t)).untrusted
                 for t in _agent_tools(inner, spec, catalog)
             )
     return isinstance(node, WaitNode) and node.event is not None

@@ -13,7 +13,7 @@ keeps account ids only, so the chain still verifies.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, TypedDict, Unpack, cast
@@ -74,6 +74,7 @@ class WorkflowVersionRow(_Row):
     source: VersionSource
     published_by_account_id: uuid.UUID | None
     approved_by_account_id: uuid.UUID | None
+    agent_tools: dict[str, list[str]] | None
     published_at: datetime
 
 
@@ -219,6 +220,7 @@ async def publish_version(
     approved_by: uuid.UUID | None = None,
     now: datetime | None = None,
     cursors: Mapping[str, workflow_triggers.Cursor] | None = None,
+    agent_tools: Mapping[str, Sequence[str]] | None = None,
 ) -> WorkflowVersionRow:
     """Add the next version and make it live with its triggers; the draft now begins from it."""
     workflow = await get_workflow(session, tenant_id=tenant_id, workflow_id=workflow_id, lock=True)
@@ -237,6 +239,7 @@ async def publish_version(
         note=note,
         published_by_account_id=published_by,
         approved_by_account_id=approved_by,
+        agent_tools={k: list(v) for k, v in agent_tools.items()} if agent_tools else None,
     )
     session.add(orm)
     await session.flush()

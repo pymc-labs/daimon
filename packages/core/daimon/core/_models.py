@@ -5949,6 +5949,8 @@ class WorkflowVersion(Base):
     source: Mapped[str]
     published_by_account_id: Mapped[AccountSetNull]
     approved_by_account_id: Mapped[AccountSetNull]
+    #: Each agent's tools when published, so a run checks exposure as the publish did.
+    agent_tools: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     published_at: Mapped[TsNow]
 
 

@@ -21,6 +21,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls import PostedCard
 from daimon.core.web_links import Assignment, TenantLinks, WebAt, links_at, panel_links
 from daimon.core.workflows import chat_cards
+from daimon.core.workflows.catalog import tenant_agents
 from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -221,6 +222,7 @@ class WorkflowCardControl(
                 links=web_at(runtime, bot._channel_by_id),  # pyright: ignore[reportPrivateUsage]
                 card_text=card_text(message.components),
                 form_limit=FORM_LIMIT,
+                agents=tenant_agents(runtime.anthropic, presser.tenant_id),
             )
         except Exception:
             # Boundary: a failed press must answer the presser, not leave the click hanging.

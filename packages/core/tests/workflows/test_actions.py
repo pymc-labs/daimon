@@ -32,7 +32,7 @@ from daimon.core.workflows.agent_step import step_decider
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AgentNode
 from daimon.core.workflows.unattended import Call, decide_unattended_call
-from daimon.testing.workflows import NOW, World, make_world
+from daimon.testing.workflows import NOW, World, agents_with, make_world
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -401,8 +401,11 @@ async def test_a_write_grant_is_requested_approved_and_carried_over(
     admin = Account(tenant_id=world.tenant_id)
     db_session.add(admin)
     await db_session.commit()
-    owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW)
-    approver = Env(world.sm, world.settings, Who(world.tenant_id, admin.id, admin=True), NOW)
+    agents = agents_with({"mailer": ["gmail/send_message"]})
+    owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW, agents)
+    approver = Env(
+        world.sm, world.settings, Who(world.tenant_id, admin.id, admin=True), NOW, agents
+    )
 
     async def status() -> str:
         async with world.sm() as s:

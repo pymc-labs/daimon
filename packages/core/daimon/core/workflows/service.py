@@ -25,6 +25,7 @@ from daimon.core.stores import workflows as store
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import GrantRow, RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow
+from daimon.core.workflows import catalog as tool_catalogs
 from daimon.core.workflows import context as turn_context
 from daimon.core.workflows import exchange, gate, run_views, runs, views
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
@@ -76,7 +77,8 @@ class Env:
     settings: Settings
     who: Who
     now: datetime
-    catalog: Catalog | None = None
+    #: The caller's agents; every validation classes their tools (none means no agents).
+    agents: tool_catalogs.AgentLister | None = None
 
 
 class Patch(BaseModel):
@@ -156,10 +158,16 @@ async def _view(
     )
 
 
-async def _validate(env: Env, spec: dict[str, Any]) -> Validation:
+async def _catalog(env: Env) -> Catalog:
+    return await tool_catalogs.tool_catalog(env.settings.tool_safety, env.agents)
+
+
+async def _validate(env: Env, spec: dict[str, Any], catalog: Catalog | None = None) -> Validation:
     budget = await _budget(env)
     return validate_document(
-        spec, env.catalog, run_budget_usd=obj(spec.get("limits")).get("budget_usd") or budget
+        spec,
+        catalog or await _catalog(env),
+        run_budget_usd=obj(spec.get("limits")).get("budget_usd") or budget,
     )
 
 
@@ -486,12 +494,13 @@ async def publish(
     env: Env, workflow_id: uuid.UUID, note: str, *, source: Literal["web", "chat"] = "web"
 ) -> views.Workflow:
     budget = await _budget(env)
+    catalog = await _catalog(env)
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
         await _need(session, workflow, rights.edit, "the owner or an editor")
         if env.who.external:
             raise Forbidden("Publishing needs a person. Ask the workflow's owner to publish.")
-        validation = await _validate(env, workflow.draft_spec)
+        validation = await _validate(env, workflow.draft_spec, catalog)
         if validation.errors:
             first = validation.errors[0].message
             raise Invalid(f"Fix {len(validation.errors)} problem(s) before publishing: {first}")
@@ -519,6 +528,7 @@ async def publish(
             published_by=env.who.account_id,
             note=note.strip()[:500],
             now=env.now,
+            agent_tools=tool_catalogs.spec_agent_tools(parsed, catalog),
         )
         for approver, grants in [
             *((g.approved_by_account_id, [_carried(g)]) for g in carried),
@@ -612,10 +622,11 @@ async def _held_grants(
 
 async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.Workflow:
     budget = await _budget(env)
+    catalog = await _catalog(env)
     async with env.sm.begin() as session:
         workflow, _, rights = await _load(session, env, workflow_id, lock=True)
         await _need(session, workflow, rights.edit, "the owner or an editor")
-        validation = await _validate(env, workflow.draft_spec)
+        validation = await _validate(env, workflow.draft_spec, catalog)
         if validation.errors:
             raise Invalid(
                 f"Fix {len(validation.errors)} problem(s) first: {validation.errors[0].message}"
@@ -639,6 +650,15 @@ async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.
         return await _view(env, session, fresh, access=access, budget=budget)
 
 
+def _check_requested(validation: Validation, requested: Sequence[Mapping[str, Any]]) -> None:
+    """The spec still validates with today's tools and needs no grant beyond those requested."""
+    if validation.errors:
+        raise Invalid(f"This version no longer validates: {validation.errors[0].message}")
+    asked = {(g.get("kind"), g.get("node")) for g in requested}
+    if any((g.kind, g.node) not in asked for g in validation.grants):
+        raise Refused("This version now needs more than was requested. Ask for a new request.")
+
+
 async def decide_publish_request(
     env: Env, request_id: uuid.UUID, *, approve: bool, comment: str | None
 ) -> publish_requests.PublishRequestRow:
@@ -649,6 +669,7 @@ async def decide_publish_request(
     note = (comment or "").strip()[:500] or None
     if not approve and note is None:
         raise Invalid("Add a comment.")
+    catalog = await _catalog(env) if approve else None
     async with env.sm.begin() as session:
         request = await publish_requests.get_request(
             session, tenant_id=env.who.tenant_id, request_id=request_id, lock=True
@@ -660,6 +681,8 @@ async def decide_publish_request(
         version = None
         if approve:
             workflow, _, _ = await _load(session, env, request.workflow_id, lock=True)
+            assert catalog is not None, "built when approving"
+            _check_requested(await _validate(env, request.spec, catalog), request.grants)
             parsed = parse_spec(request.spec)
             spec = dump_spec(parsed)
             requester = request.requested_by_account_id or env.who.account_id
@@ -674,6 +697,7 @@ async def decide_publish_request(
                 note=request.note,
                 approved_by=env.who.account_id,
                 now=env.now,
+                agent_tools=tool_catalogs.spec_agent_tools(parsed, catalog),
             )
             version = row.number
             grants = _grant_rows(parsed, request.grants, requester)

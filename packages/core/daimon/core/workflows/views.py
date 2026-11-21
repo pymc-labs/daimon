@@ -227,7 +227,7 @@ async def unreviewed(
     if live is None:
         return False
     spec = parse_spec(live.spec)
-    missing = await preflight.missing_grant(session, workflow.id, live.number, spec, budget, policy)
+    missing = await preflight.missing_grant(session, workflow, live.number, spec, budget, policy)
     return missing is not None
 
 

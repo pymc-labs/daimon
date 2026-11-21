@@ -86,6 +86,7 @@ from daimon.core.turn_queue import TurnQueue
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key, with_spend_person
 from daimon.core.workflows import service
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.catalog import tenant_agents
 from daimon.core.workflows.context import WorkflowContext
 from daimon.core.workflows.service import Env
 from mux.errors import ProviderError
@@ -554,6 +555,7 @@ class WebTurns:
             settings=self.deps.settings,
             who=Who(thread.tenant_id, account_id, admin=admin),
             now=datetime.now(UTC),
+            agents=tenant_agents(self.deps.anthropic, thread.tenant_id),
         )
         return await service.context(env, workflow_id, selected_node)
 
