@@ -1154,3 +1154,54 @@ async def test_a_permanent_watch_lists_as_permanent(db_session_factory, moved):
     assert lasts(week.expires_at).startswith("until ")
     shown = summary(week)
     assert not shown.permanent and shown.expires_at == week.expires_at
+
+
+async def test_a_wake_link_still_wakes_after_the_conversation_moves_to_a_new_session(
+    db_session_factory, link
+):
+    """A relay wake link made in one turn wakes the thread's newest session, and a later
+    job's link shares its one watch."""
+    watch, _ = link
+    now = datetime.now(UTC)
+    binding = ContinuationRequest(
+        tenant_id=watch.tenant_id,
+        platform="discord",
+        parent_channel_id="4241",
+        thread_id="4242",
+        requester_account_id=watch.owner_account_id,
+        requester_external_user_id="123",
+        target_ma_agent_id="agent-bound",
+        target_name="analyst",
+        requested_work=None,
+        reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )
+    async with db_session_factory.begin() as db:
+        wake_id, first = await watches.wake_link(
+            db, binding, server="jobs", lifetime=timedelta(days=1), now=now
+        )
+    async with db_session_factory.begin() as db:
+        await create_thread_session(
+            db,
+            tenant_id=watch.tenant_id,
+            platform="discord",
+            thread_id="4242",
+            channel_id="4241",
+            account_id=watch.owner_account_id,
+            ma_session_id="session-next",
+            ma_agent_id="agent-bound",
+            created_at=now + timedelta(seconds=1),
+        )
+        again, second = await watches.wake_link(
+            db, binding, server="jobs", lifetime=timedelta(days=1), now=now
+        )
+    assert again == wake_id and second != first, "a later job gets its own link to one watch"
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        for token in (first, second):
+            response = await post(client, wake_id, token, f"done {token[:4]}".encode())
+            assert response.status == 202, "each link wakes the conversation's newest session"
+    async with db_session_factory() as db:
+        bound = await db.scalar(
+            text("SELECT session_id FROM watches WHERE id = :id"), {"id": wake_id}
+        )
+    assert bound == "session-next", "the wake watch moved with the conversation"
