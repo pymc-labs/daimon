@@ -19,7 +19,7 @@ from daimon.core.access_policy import Approvals, TenantAccessPolicy
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.approval_admin import approval_admin
 from daimon.core.approval_gate import ApprovalChange, resolve_approval_gate, set_approval_gate
-from daimon.core.authz import Subject
+from daimon.core.authz import Action, Subject
 from daimon.core.channel_changes import (
     ChannelActor,
     ChannelChangeRefused,
@@ -79,6 +79,7 @@ from daimon.core.stores.feature_values import (
     replace_agent_values,
     set_feature_value,
 )
+from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.support_rows import SupportSetup
 from daimon.core.stores.tenants import get_tenant
 from pydantic import JsonValue
@@ -127,9 +128,9 @@ class OperatorActor(FeatureActor):
     """The deployment operator at the CLI, who holds the database and has no chat identity.
 
     A distinct type, not a flag on `FeatureActor`: only `_native_admin` accepts it for a
-    setting that needs a native admin (approvals), and only the CLI entrypoint builds one
-    (`test_operator_actor.py` checks that). It names the operator and carries the stated
-    reason, which the audit row records."""
+    setting that needs a native admin (approvals, approvals in direct messages), and only the
+    CLI entrypoint builds one (`test_operator_actor.py` checks that). It names the operator
+    and carries the stated reason, which the audit row records."""
 
     operator_name: str
     reason: str
@@ -316,7 +317,9 @@ def needs_admin(spec: FeatureSpec, platform: str) -> ChannelChangeRefused:
     admin = admin_word(platform)
     if spec.authority.native:
         return _refused(
-            f"Only {admin} can change approvals. Ask {admin}.", "native_admin_required", "forbidden"
+            f"Only {admin} can change {spec.name.lower()}. Ask {admin}.",
+            "native_admin_required",
+            "forbidden",
         )
     return _refused(
         f"Only {admin} can change {spec.name.lower()} here. Ask {admin}.",
@@ -409,7 +412,7 @@ def feature_refusal(
 
 
 async def _native_admin(
-    sessions: Sessions, settings: Settings, actor: FeatureActor, platform: str
+    sessions: Sessions, settings: Settings, actor: FeatureActor, spec: FeatureSpec, platform: str
 ) -> Subject:
     """A live, uncached native admin check of the actor's chat identity, or a refusal.
     The operator at the CLI is the one other admin; it is checked by type, nothing else."""
@@ -421,7 +424,7 @@ async def _native_admin(
         )
         if subject.is_admin:
             return subject
-    raise needs_admin(FEATURES["approvals"], platform)
+    raise needs_admin(spec, platform)
 
 
 def thread_open_to_anyone(key: str, *, locked: bool = False) -> bool:
@@ -470,7 +473,7 @@ async def change_refusal(
     spec = FEATURES[key]
     try:
         if spec.authority.native:
-            await _native_admin(sessions, settings, actor, place.platform)
+            await _native_admin(sessions, settings, actor, spec, place.platform)
         elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
         async with sessions() as session:
@@ -579,7 +582,7 @@ async def _change_approvals(
     expected: Expected[str] | None,
 ) -> TierSetting:
     subject = replace(
-        await _native_admin(sessions, settings, actor, place.platform),
+        await _native_admin(sessions, settings, actor, FEATURES["approvals"], place.platform),
         origin_channel_ids=actor.inside,
         operator=actor.operator,
     )
@@ -708,15 +711,20 @@ async def change_feature(
     spec = FEATURES[key]
     await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)
-    if spec.authority.native:
+    if key == "approvals":  # the one native feature kept in the approval gate, not feature storage
         before = await _change_approvals(sessions, settings, actor, tier, value, place, expected)
     else:
-        if not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
+        admin = None
+        if spec.authority.native:
+            admin = await _native_admin(sessions, settings, actor, spec, place.platform)
+        elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
         if tier == "agent" and key.startswith("tool."):
             before = await _write_builtin(sessions, settings, actor, spec, after, place, expected)
         else:
-            before = await _write(sessions, settings, actor, spec, after, place, expected, pin)
+            before = await _write(
+                sessions, settings, actor, spec, after, place, expected, pin, audit=admin
+            )
     CACHE.clear()
     builtins = (
         await actor.read_builtins()
@@ -761,9 +769,12 @@ async def _write(
     place: FeaturePlace,
     expected: Expected[str] | None,
     pin: AnySandboxPin | None = None,
+    audit: Subject | None = None,
 ) -> TierSetting:
     async with sessions.begin() as session:
-        return await _write_in(session, settings, actor, spec, after, place, expected, pin=pin)
+        return await _write_in(
+            session, settings, actor, spec, after, place, expected, pin=pin, audit=audit
+        )
 
 
 async def _write_in(
@@ -777,10 +788,12 @@ async def _write_in(
     *,
     check_own_lock: bool = True,
     pin: AnySandboxPin | None = None,
+    audit: Subject | None = None,
 ) -> TierSetting:
     """One tier's write in the caller's transaction: the lock checks, the row, its pin, the
     record. A row already locked at this tier is only changed by someone who may lock;
-    callers that have checked their admin themselves pass `check_own_lock=False`."""
+    callers that have checked their admin themselves pass `check_own_lock=False`.
+    A native admin's change (`audit`) also writes a security audit event, as approvals do."""
     tier = after.tier
     if (refused := _pin_refusal(spec, tier, after.value, pin, place)) is not None:
         raise refused
@@ -840,6 +853,20 @@ async def _write_in(
         actor_account_id=actor.account_id,
         surface=actor.surface,
     )
+    if audit is not None:
+        await append_event(
+            session,
+            tenant_id=place.tenant_id,
+            account_id=None,
+            agent_id=None,
+            platform=place.platform,
+            platform_user_id=audit.platform_user_id,
+            tool_name=spec.key,
+            operation=Action.SET_WORKSPACE_SETTINGS,
+            outcome="allowed",
+            reason=f"{tier}:{before.text}->{after.text}"
+            + (f" ({actor.reason})" if isinstance(actor, OperatorActor) else ""),
+        )
     channel_actor = ChannelActor(
         actor.tenant_id, actor.account_id, Subject(), actor.surface, actor.on_write
     )
