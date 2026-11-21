@@ -100,7 +100,7 @@ class TestBuildHelpView:
             for text in _collect_text_display_content(build_help_view())
             if text.startswith("/here")
         )
-        assert len(commands.splitlines()) == 14
+        assert len(commands.splitlines()) == 15
         assert all(line.startswith("/") for line in commands.splitlines())
         assert "/dm-me" in content
         assert "/model" in content

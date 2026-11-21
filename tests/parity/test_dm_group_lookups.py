@@ -28,6 +28,10 @@ NO_GRANT_CHECK: dict[str, str] = {
     "adapters/discord/daimon/adapters/discord/commands/direct_messages.py": (
         "the person's own cold DM or `/dm-me`; core `start_cold_dm` and `start_dm` check the grant"
     ),
+    "adapters/mcp/daimon/adapters/mcp/tools/secret_shares.py": (
+        "a share card, not a conversation: it goes to the asker or to whom an admin names, "
+        "behind the Secret sharing feature"
+    ),
     "adapters/discord/daimon/adapters/discord/bot.py": (
         "`open_member_dm` opens the chat that routine, watch and timer delivery asked for after their grant check"
     ),

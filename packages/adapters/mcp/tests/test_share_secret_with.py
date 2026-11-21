@@ -30,6 +30,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(tool, "feature_in", AsyncMock(return_value=MagicMock(on=True)))
     monkeypatch.setattr(tool, "current_admin", AsyncMock(return_value=False))
     monkeypatch.setattr(tool, "get_agent_file", AsyncMock(return_value=MagicMock(content="s3cret")))
+    monkeypatch.setattr(tool, "env_dm_policy", MagicMock())
     monkeypatch.setattr(tool, "_require_bot_token", MagicMock(return_value="token"))
     member = MagicMock(bot=False)
     member.create_dm = AsyncMock(

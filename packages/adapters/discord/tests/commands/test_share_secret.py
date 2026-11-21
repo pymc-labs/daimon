@@ -44,6 +44,7 @@ def _runtime(tx: _Tx) -> Any:
 @pytest.fixture
 def on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cmd, "_sharing_on", AsyncMock(return_value=True))
+    monkeypatch.setattr(cmd, "env_dm_policy", MagicMock())
 
 
 async def _share(tx: _Tx, recipient: Any) -> tuple[str, bool]:

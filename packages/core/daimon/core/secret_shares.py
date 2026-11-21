@@ -38,6 +38,7 @@ TOO_MANY: Final = (
     "Wait for one to be revealed or to expire."
 )
 NOT_A_PERSON: Final = "Share it with a person in this server."
+DM_NOT_ALLOWED: Final = "Direct messages to this person are not allowed here."
 NO_KEY: Final = (
     "Nothing was shared: this Daimon install has no encryption key. Ask whoever runs it to add one."
 )

@@ -183,6 +183,7 @@ TAIL = (
     "0219_channel_budget_alerts",
     "0220_discord_audience_facts",
     "0221_routine_delivery_hold",
+    "0222_secret_shares",
 )
 HEAD = TAIL[-1]
 

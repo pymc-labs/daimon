@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core import secret_shares as words
+from daimon.core.config import env_dm_policy
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import secret_shares as store
@@ -62,14 +63,18 @@ async def share_secret_with_impl(
 ) -> ShareSecretResult:
     """Fail closed at each step; the share is stored only with its card posted."""
     if auth.platform != "discord" or auth.platform_user_id is None:
-        raise ToolError("Sharing a secret works in Discord only.")
+        raise ToolError("Sharing a secret doesn't work here.")
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if origin.sender_foreign:
         raise ToolError("Only a member of this server can ask for a key. Do not retry.")
     asker = auth.platform_user_id
     recipient = recipient_id or asker
     if re.fullmatch(r"[0-9]{1,20}", recipient) is None:
-        raise ToolError("recipient_id must be one Discord user ID, not a mention.")
+        raise ToolError("recipient_id must be one user ID, not a mention.")
+    if not env_dm_policy(runtime.settings.direct_message_policies, auth.tenant_id).allows(
+        recipient
+    ):
+        raise ToolError(words.DM_NOT_ALLOWED)
     cleaned = words.clean_label(label)
     if cleaned is None:
         raise ToolError(words.BAD_LABEL)
@@ -136,7 +141,7 @@ def register_secret_share_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         label: Annotated[str, Field(description="What the person sees, up to 100 characters.")],
         recipient_id: Annotated[
             str | None,
-            Field(description="Discord user ID; omit to send it to the person who asked."),
+            Field(description="Their user ID; omit to send it to the person who asked."),
         ] = None,
     ) -> ShareSecretResult:
         """Send one of this agent's saved keys to a person's Discord DMs, where they can

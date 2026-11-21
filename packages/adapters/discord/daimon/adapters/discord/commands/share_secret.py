@@ -14,6 +14,7 @@ from daimon.adapters.discord.checks import require_registered_guild, resolve_ten
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import secret_shares as words
+from daimon.core.config import env_dm_policy
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores import secret_shares as store
@@ -118,6 +119,10 @@ async def share(
         return words.BAD_VALUE, False
     if not await _sharing_on(runtime, tenant_id):
         return words.OFF, False
+    if not env_dm_policy(runtime.settings.direct_message_policies, tenant_id).allows(
+        str(recipient.id)
+    ):
+        return words.DM_NOT_ALLOWED, False
     try:
         async with runtime.sessionmaker() as session, session.begin():
             row = await store.create_share(
@@ -158,7 +163,7 @@ class ShareSecretModal(discord.ui.Modal, title="Share a secret"):
         self.secret: discord.ui.TextInput[ShareSecretModal] = discord.ui.TextInput(
             label="Secret",
             style=discord.TextStyle.paragraph,
-            max_length=words.MAX_VALUE,
+            max_length=1700,  # words.MAX_VALUE; a literal for the modal lint
         )
         self.add_item(self.secret)
 
