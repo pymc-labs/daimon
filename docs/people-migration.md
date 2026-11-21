@@ -129,7 +129,7 @@ use.
 
 Reminders and callback watches made natively in a private conversation: the first
 deploy settles the reminders already due there, which never fired before, so none
-fires at once. A callback watch cannot be made in a private conversation.
+fires at once. A callback watch made in a Discord private conversation reports there.
 
 ```bash
 daimon watches unpause --tenant TENANT_UUID --all-timers   # or --timer-id, --watch-id
@@ -140,4 +140,5 @@ daimon watches rotate-link WATCH_UUID --tenant TENANT_UUID --urls-out link.json
 `unpause` releases timers or a watch that went live paused because they were
 paused in the old system; rerun `go-live` to schedule released timers.
 `rotate-link` replaces every link of a callback watch and shows the new
-one once, or writes it to `--urls-out` (mode 0600).
+one once, or writes it to `--urls-out` (mode 0600), keyed by the old id as
+`import --urls-out` is.
