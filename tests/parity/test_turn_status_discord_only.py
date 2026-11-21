@@ -40,3 +40,9 @@ def test_only_discord_labels_the_end_and_pings_the_asker() -> None:
         if "ended_label" in path.read_text() or "_asker_to_mention" in path.read_text()
     }
     assert users == {"discord"}
+
+
+def test_only_discord_times_the_headline() -> None:
+    """`card_timer` is Discord's: Slack and Teams keep "Working on it" with no time."""
+    assert "timed" in _headline_keywords(_CARDS["discord"])
+    assert all("timed" not in _headline_keywords(_CARDS[p]) for p in ("slack", "teams"))

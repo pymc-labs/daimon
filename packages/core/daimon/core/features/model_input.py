@@ -45,6 +45,7 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
     "model_reactions",
     "status_reactions",
     "pre_tool_messages",
+    "card_timer",
     "display_name",
     "tool_server_names",
     "message_feedback",

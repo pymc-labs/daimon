@@ -1429,6 +1429,7 @@ class DirectMessageCog(commands.Cog):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,

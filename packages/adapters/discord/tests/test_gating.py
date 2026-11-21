@@ -239,3 +239,16 @@ def test_plain_text_candidate_admits_a_person_naming_the_bot_in_a_guild() -> Non
 def test_plain_text_candidate_rejects(overrides: dict[str, object], why: str) -> None:
     """Only a person's unmentioned guild message that names the bot qualifies."""
     assert not _plain_text_candidate(**overrides), f"{why} must not be a candidate"  # type: ignore[arg-type]
+
+
+def test_answer_bots_lets_another_bots_mention_through_but_never_its_reply_or_our_own() -> None:
+    """`answer_bots` decides later; a reply could be another agent answering, so it never counts."""
+    other = partial(_should_process_message, author_is_bot=True, answer_bots=True)
+    assert other(author_id=OTHER_BOT_ID, bot_mentioned=True), "a mention reaches the agent check"
+    assert not other(author_id=OTHER_BOT_ID, bot_mentioned=False, reply_to_recorded_post=True), (
+        "a bot's reply to an answer is never answered"
+    )
+    assert not other(author_id=DAIMON_ID, bot_mentioned=True), "never itself"
+    assert not other(author_id=OTHER_BOT_ID, bot_mentioned=True, author_is_webhook=True), (
+        "never an agent posting through a webhook"
+    )

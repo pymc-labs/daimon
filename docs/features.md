@@ -54,6 +54,8 @@ Where each feature can be set, and its default.
 | Status reactions | `status_reactions` | Chat | Off | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
 | Lock reaction | `protected_notice_reaction` | Chat | On | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
 | Text before tool calls | `pre_tool_messages` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
+| Working card timer | `card_timer` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
+| Answer bots | `answer_bots` | Chat | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
@@ -588,6 +590,30 @@ Text written before a tool call is posted as its own message. Off keeps it on th
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
+## Working card timer
+
+The card shows Working or Thinking with the time, and the model in its footer.
+
+| | |
+| --- | --- |
+| Key | `card_timer` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
+## Answer bots
+
+Answer a bot that mentions the agent, under people's access rules; never itself.
+
+| | |
+| --- | --- |
+| Key | `answer_bots` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Most specific wins |
 
 ## Typed mentions

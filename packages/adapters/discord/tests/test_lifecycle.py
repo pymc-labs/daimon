@@ -3535,3 +3535,12 @@ async def test_a_failed_model_mark_read_still_starts_the_turn() -> None:
     await lc.post_initial()
     assert not lc.model_marked and lc.model_marks == ()
     message.add_reaction.assert_not_awaited()
+
+
+async def test_an_answer_never_pings_a_bot_that_asked() -> None:
+    """A ping only sets a bot off; two agents pinging each other would never stop."""
+    lc, _sends, _edits = _make_lifecycle(notify_on_completion=True)
+    lc._trigger_message = types.SimpleNamespace(author=types.SimpleNamespace(bot=True))  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    assert await lc._requester_opted_out() is True  # pyright: ignore[reportPrivateUsage]
+    lc._trigger_message = types.SimpleNamespace(author=types.SimpleNamespace(bot=False))  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    assert await lc._requester_opted_out() is False, "a person is pinged"  # pyright: ignore[reportPrivateUsage]

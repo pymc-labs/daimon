@@ -88,6 +88,7 @@ _NARROWED: dict[str, str] = {
     "thread_auto_archive": "read when a thread opens for its agent, before the thread exists",
     "status_reactions": "read per message and agent, before a thread setting could apply",
     "protected_notice_reaction": "read when a mention is refused, before a thread is chosen",
+    "answer_bots": "read per message and agent, before a thread setting could apply",
     "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
     "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
     "support_escalation": "set where credits apply: the workspace, an agent or a channel",

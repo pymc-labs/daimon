@@ -17,14 +17,22 @@ def should_process_message(
     guild_id: str | None,
     self_user_id: str | None = None,
     qa_bot_user_ids: Collection[str] = (),
+    answer_bots: bool = False,
 ) -> bool:
-    """Pre-DB gate checks for on_message. Returns True if message passes all non-DB filters."""
+    """Pre-DB gate checks for on_message. Returns True if message passes all non-DB filters.
+
+    ``answer_bots`` lets any other bot's mention through, for the `answer_bots` feature
+    to decide once the agent is known. Only a mention: a bot's reply to an answer may be
+    another agent answering, and two agents answering each other never stop.
+    """
     if author_is_webhook:
         return False
-    if author_is_bot and not _is_allowed_bot_author(
-        author_id=author_id,
-        self_user_id=self_user_id,
-        qa_bot_user_ids=qa_bot_user_ids,
+    other_bot = self_user_id is not None and author_id != self_user_id
+    if author_is_bot and not (
+        _is_allowed_bot_author(
+            author_id=author_id, self_user_id=self_user_id, qa_bot_user_ids=qa_bot_user_ids
+        )
+        or (answer_bots and bot_mentioned and other_bot)
     ):
         return False
     if not (bot_mentioned or reply_to_recorded_post):

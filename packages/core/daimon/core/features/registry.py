@@ -611,6 +611,20 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         platforms=_DISCORD,
     ),
     _shown(
+        "card_timer",
+        "Working card timer",
+        "The card shows Working or Thinking with the time, and the model in its footer.",
+        platforms=_DISCORD,
+    ),
+    _shown(
+        "answer_bots",
+        "Answer bots",
+        "Answer a bot that mentions the agent, under people's access rules; never itself.",
+        tiers=("deployment", "workspace", "agent"),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
         "plain_text_mentions",
         "Typed mentions",
         'A message with "@" and the agent\'s name typed as plain text is answered like a real '

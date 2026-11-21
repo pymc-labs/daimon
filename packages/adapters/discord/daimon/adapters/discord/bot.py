@@ -2951,6 +2951,18 @@ class DaimonBot(commands.Bot):
             return None
         return None if binding is None else binding.responder_ma_agent_id
 
+    async def _answers_bot(self, message: discord.Message, guild_id: str) -> bool:
+        """Whether a bot's mention is answered: a QA driver's always (with its auto-approve),
+        any other bot's only with `answer_bots` on for the agent here, then as a person's."""
+        discord_settings = self.runtime.settings.discord
+        if (
+            discord_settings is not None
+            and str(message.author.id) in discord_settings.qa_bot_user_ids
+        ):
+            return True
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        return await self._message_feature_on(message, tenant_id, "answer_bots", per_agent=True)
+
     async def working_mark(self, message: discord.Message, tenant_id: uuid.UUID) -> str:
         """The reaction a message shows while its turn runs: ⏳ with status reactions, else 👀."""
         if await self._message_feature_on(message, tenant_id, "status_reactions", per_agent=True):
@@ -3254,6 +3266,7 @@ class DaimonBot(commands.Bot):
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
             qa_bot_user_ids=discord_settings.qa_bot_user_ids if discord_settings else (),
+            answer_bots=may_turn_on(self.runtime.settings, "answer_bots", "discord"),
         ):
             # Not a mention. The only other way a message starts a turn is
             # organic thread participation, which has its own gates.
@@ -3270,6 +3283,8 @@ class DaimonBot(commands.Bot):
         assert message.guild is not None
         guild = message.guild
         guild_id = str(guild.id)
+        if message.author.bot and not await self._answers_bot(message, guild_id):
+            return
         bot_display_name = _resolve_bot_display_name(self.runtime.settings)
         # For /billing's top spenders; in the background, never failing the turn.
         remember_guild_user(self.runtime.sessionmaker, guild_id=guild.id, user=message.author)
@@ -4795,6 +4810,7 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
@@ -4975,6 +4991,7 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
@@ -5958,6 +5975,7 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 model_marks=marks_to_show,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
@@ -6507,6 +6525,7 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=turn_send,
                 edit=_edit_message,

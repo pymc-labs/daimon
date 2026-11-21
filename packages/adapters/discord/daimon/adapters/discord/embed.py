@@ -150,22 +150,20 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         elapsed_seconds=elapsed_seconds,
         bold=lambda word: word,
         waiting=state.waiting,
+        timed=state.timed,
     )
     draft_lines = draft_log(state.earlier_drafts, state.text_preview)
+    if state.timed:
+        footer = f"{state.model_label}{SUMMARY_GAP}/model to change" if state.model_label else None
+    else:
+        elapsed = format_duration(elapsed_seconds) if elapsed_seconds is not None else None
+        footer = SUMMARY_GAP.join(part for part in (elapsed, state.model_label) if part) or None
     return EmbedData(
         phase=state.phase,
         title=title,
         description="\n".join(f"> {_escape_markdown(line)}" for line in draft_lines),
         color=color,
-        footer=SUMMARY_GAP.join(
-            part
-            for part in (
-                format_duration(elapsed_seconds) if elapsed_seconds is not None else None,
-                state.model_label,
-            )
-            if part
-        )
-        or None,
+        footer=footer,
         plan=_code_lines(state.plan_lines),
         details=_code_lines(state.tool_lines),
     )
