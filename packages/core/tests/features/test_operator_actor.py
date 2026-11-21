@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core.admin_actions import DelegatedAction
@@ -24,7 +25,7 @@ from daimon.core.features.service import FeatureActor, OperatorActor, change_fea
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.settings_panel import chat_actor
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import ChangeSurface
+from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
@@ -129,6 +130,25 @@ async def test_dm_approvals_is_stored_as_a_feature_and_leaves_the_approval_gate_
     assert len(await _audit_rows(db_session, tenant.id)) == audits, "the gate was not written"
 
 
+async def test_dm_approvals_changes_are_audited_with_who_and_why(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    await _dm_approvals(db_session_factory, _operator(tenant.id, "dm rollout"), "off")
+    admin = AsyncMock(return_value=Subject(is_admin=True, platform_user_id="u1"))
+    monkeypatch.setattr(service, "approval_admin", admin)
+    chat = FeatureActor(tenant.id, None, "web", admin_for=_yes, native_user_id="u1")
+    await _dm_approvals(db_session_factory, chat, "on")
+    rows = await list_events(db_session, tenant_id=tenant.id, tool_name="dm_approvals")
+    assert [(e.platform_user_id, e.reason) for e in rows] == [
+        ("operator:ops", "workspace:default->off (dm rollout)"),
+        ("u1", "workspace:off->on"),
+    ]
+
+
 async def test_dm_approvals_still_needs_a_native_admin(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -159,6 +179,7 @@ async def test_only_approvals_writes_the_approval_gate(
     assert others
     for spec in others:
         tier = next(tier for tier in spec.tiers if tier != "deployment")
+        platform = next(p for p in CHAT_PLATFORMS if spec.on_platform(p))
         await change_feature(
             db_session_factory,
             _settings(),
@@ -166,7 +187,7 @@ async def test_only_approvals_writes_the_approval_gate(
             key=spec.key,
             tier=tier,  # pyright: ignore[reportArgumentType]
             value=next(iter(spec.values)),
-            place=FeaturePlace.of(tenant.id, "discord", None),
+            place=FeaturePlace.of(tenant.id, platform, None),
         )
 
 
