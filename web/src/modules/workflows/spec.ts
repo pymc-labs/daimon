@@ -1,7 +1,7 @@
 // Pure spec logic shared by the canvas and the mock server: edges, references, validation, diffs and edits.
 import type { AnswerShape, Change, Field, Grant, Kind, Node, Problem, RuleClass, Spec, Validation } from "./types"
 
-export type EdgeKind = "next" | "route" | "case" | "else" | "error" | "max"
+export type EdgeKind = "next" | "route" | "case" | "else" | "error" | "max" | "otherwise"
 /** One edge of the graph. `slot` says where `from` points at `to`, so edits can rewire it. */
 export type FlowEdge = { from: string; to: string; kind: EdgeKind; label?: string; slot: string }
 
@@ -14,6 +14,7 @@ export function edgesOf(id: string, n: Node): FlowEdge[] {
   for (const [label, r] of Object.entries(n.routes ?? {})) out.push({ from: id, to: routeTo(r), kind: "route", label, slot: `routes.${label}` })
   n.cases?.forEach((c, i) => out.push({ from: id, to: c.to, kind: "case", label: caseLabel(c.when), slot: `cases.${i}` }))
   if (n.else) out.push({ from: id, to: n.else, kind: "else", label: "else", slot: "else" })
+  if (n.otherwise) out.push({ from: id, to: n.otherwise, kind: "otherwise", label: "otherwise", slot: "otherwise" })
   if (n.on_error && n.on_error !== "fail") out.push({ from: id, to: n.on_error, kind: "error", label: "error", slot: "on_error" })
   if (n.on_max_visits) out.push({ from: id, to: n.on_max_visits, kind: "max", label: `after ${n.max_visits ?? 3} visits`, slot: "on_max_visits" })
   return out
@@ -88,7 +89,7 @@ export const edgeKey = (e: FlowEdge) => `${e.from}:${e.slot}`
 // ---------- References ----------
 
 const EXPR = /\$\{\{\s*([\s\S]+?)\s*\}\}/g
-const REF = /\b(steps\.\w+(?:\.\w+)*|inputs(?:\.\w+)?|trigger(?:\.\w+)*|item(?:\.\w+)*)/g
+const REF = /\b(steps\.\w+(?:\.\w+)*|inputs(?:\.\w+)?|trigger(?:\.\w+)*|item(?:\.\w+)*|workflow(?:\.\w+)*)/g
 
 /** Every expression string a node carries, with where it sits. */
 function exprsOf(n: Node): string[] {
@@ -97,7 +98,9 @@ function exprsOf(n: Node): string[] {
     if (typeof v === "string") out.push(v)
     else if (v && typeof v === "object") Object.values(v).forEach(add)
   }
-  add([n.inputs, n.args, n.show, n.attach, n.set, n.items, n.until, n.event?.match, finishDeliver(n)?.message, n.cases?.map((c) => c.when)])
+  const d = finishDeliver(n) ?? n
+  add([n.inputs, n.args, n.show, n.attach, n.set, n.items, n.until, n.event?.match, n.poll?.args, n.state, n.cases?.map((c) => c.when)])
+  add([d.to, d.thread, d.also, d.mention, d.message])
   if (typeof n.output === "string") add(n.output)
   if (n.form) add(Object.values(n.form).map((f) => f.default))
   if (n.do) out.push(...exprsOf(n.do))
@@ -133,7 +136,10 @@ const UNTRUSTED_OUT: Kind[] = ["action", "wait"]
 export const humanAnswer = (n: Node) =>
   n.kind === "approval" && (Object.keys(n.form ?? {}).length > 0 || n.answer === "text" || n.answer === "form") && [n.approvers ?? []].flat().some((a) => a !== "owner" && a !== "editors")
 const untrustedOut = (n?: Node) => !!n && (UNTRUSTED_OUT.includes(n.kind) || humanAnswer(n))
-const hasUntrustedTrigger = (spec: Spec) => (spec.triggers ?? []).some((t) => t.kind === "webhook" || t.kind === "event")
+const UNTRUSTED_TRIGGERS = ["webhook", "event", "mention", "poll"]
+const hasUntrustedTrigger = (spec: Spec) => (spec.triggers ?? []).some((t) => UNTRUSTED_TRIGGERS.includes(t.kind))
+/** Saved state and the last run's result were written by earlier runs that read outside data. */
+const fromRuns = (r: string) => r === "workflow" || r.startsWith("workflow.state") || r.startsWith("workflow.last_run")
 
 /** Steps upstream that produce files, as references an ask can attach. */
 export function fileRefs(spec: Spec, id: string): RefGroup[] {
@@ -213,20 +219,37 @@ export function validate(spec: Spec): Validation {
   for (const e of allEdges(spec)) {
     if (!back.has(edgeKey(e))) continue
     const loop = [e.to, ...[...ancestors(spec, e.from)].filter((x) => ancestors(spec, x).has(e.to) || x === e.to), e.from]
-    if (!loop.some((x) => nodes[x]?.max_visits)) err("loop_limit", "Loop needs max visits", e.to)
+    if (!loop.some((x) => nodes[x]?.max_visits) && !gated(spec, new Set(loop))) err("loop_limit", "Loop needs max visits", e.to)
     if (!spec.limits?.budget_usd && !spec.defaults?.budget_usd && loop.some((x) => nodes[x]?.kind === "agent")) warn("cost", "Agent loop without budget", e.to)
   }
   const { classes, grants } = safety(spec)
   for (const [id, c] of Object.entries(classes)) {
-    if (c.includes("U") && c.includes("W") && !boundBy(spec, id) && !nodes[id]!.untrusted_waiver) err("rule_of_two", "Untrusted input reaches a write", id)
+    // Scoped writes pin their destination, so only unscoped ones break the Rule of Two.
+    if (c.includes("U") && writes(nodes[id]!) && !boundBy(spec, id) && !nodes[id]!.untrusted_waiver) err("rule_of_two", "Untrusted input reaches a write", id)
   }
   return { errors, warnings, grants, classes }
+}
+
+/** Every cycle through `loop` passes an approval: a person answers before each lap. */
+function gated(spec: Spec, loop: Set<string>) {
+  const rest = new Set([...loop].filter((x) => spec.nodes[x] && spec.nodes[x].kind !== "approval"))
+  const state = new Map<string, 1 | 2>()
+  const cycles = (id: string): boolean => {
+    state.set(id, 1)
+    for (const e of edgesOf(id, spec.nodes[id]!)) if (rest.has(e.to) && (state.get(e.to) === 1 || (!state.has(e.to) && cycles(e.to)))) return true
+    state.set(id, 2)
+    return false
+  }
+  return ![...rest].some((x) => !state.has(x) && cycles(x))
 }
 
 const boundBy = (spec: Spec, id: string) =>
   Object.entries(spec.nodes).find(([, n]) => n.kind === "approval" && [n.binds ?? []].flat().includes(id))?.[0]
 
-export const writes = (n: Node) => (n.kind === "action" && toolWrites(n.tool)) || (n.kind === "agent" && n.writes === "allow")
+/** A write beyond the step's `writes_to` scopes. */
+export const writes = (n: Node) =>
+  (n.kind === "action" && toolWrites(n.tool) && !(n.writes_to ?? []).some((s) => s.tool === n.tool)) || (n.kind === "agent" && n.writes === "allow")
+const scopesOf = (n: Node) => (n.kind === "for_each" && n.do ? n.do : n).writes_to ?? []
 
 /** Rule of Two classes per step and the grants the spec needs. */
 export function safety(spec: Spec) {
@@ -241,12 +264,12 @@ export function safety(spec: Spec) {
       if (tainted.has(id)) continue
       const n = spec.nodes[id]!
       const refs = refsOf(n)
-      const fromInputs = u0 && refs.some((r) => r.startsWith("inputs") || r.startsWith("trigger"))
+      const fromInputs = (u0 && refs.some((r) => r.startsWith("inputs") || r.startsWith("trigger"))) || refs.some(fromRuns)
       const fromSteps = refs.some((r) => {
         const sid = r.split(".")[1]!
         return r.startsWith("steps.") && (tainted.has(sid) || untrustedOut(spec.nodes[sid]))
       })
-      const web = (n.builtins && n.builtins !== "none") || (n.do?.builtins && n.do.builtins !== "none") || (n.kind === "wait" && !!n.event)
+      const web = (n.builtins && n.builtins !== "none") || (n.do?.builtins && n.do.builtins !== "none") || (n.kind === "wait" && !!(n.event || n.poll))
       if (fromInputs || fromSteps || web) { tainted.add(id); changed = true }
     }
   }
@@ -255,7 +278,8 @@ export function safety(spec: Spec) {
     const c: RuleClass[] = []
     if (tainted.has(id)) c.push("U")
     if (n.kind === "agent" || n.kind === "for_each" || (n.kind === "action" && !toolWrites(n.tool))) c.push("S")
-    if (writes(n)) c.push("W")
+    if (writes(n) || scopesOf(n).length) c.push("W")
+    for (const s of scopesOf(n)) grants.push({ kind: "scoped_write", node: id, detail: s.tool })
     classes[id] = c
     if (writes(n) && !boundBy(spec, id)) grants.push({ kind: "unattended_write", node: id, detail: n.tool ?? "Agent writes" })
     const b = n.builtins ?? n.do?.builtins
@@ -299,7 +323,7 @@ export function newId(spec: Spec, base: string) {
 
 const DEFAULT_ID: Record<Kind, string> = {
   agent: "agent", branch: "branch", transform: "transform", code: "code", action: "action", approval: "approval",
-  wait: "wait", for_each: "each", workflow: "call", finish: "done",
+  wait: "wait", for_each: "each", workflow: "call", post: "post", finish: "done",
 }
 
 /** `ask`: an approval that takes a free-text answer from someone and carries on. */
@@ -318,6 +342,7 @@ export function blankNode(kind: Kind, next?: string, preset?: Preset): Node {
     case "wait": return { kind, title: "Wait", for: "1h", next }
     case "for_each": return { kind, title: "For each", items: "", as: "item", do: { kind: "agent", instructions: "" }, concurrency: 3, next }
     case "workflow": return { kind, title: "Run workflow", workflow: "", version: "live", next }
+    case "post": return { kind, title: "Post", to: "home", message: "", next }
     case "finish": return { kind, title: "Finish", outcome: "succeeded" }
   }
 }

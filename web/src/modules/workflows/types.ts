@@ -1,7 +1,7 @@
 // The workflow spec (schema daimon.workflow/v1) and the shapes the workflows API returns.
 import type { AgentRef } from "@/lib/types"
 
-export const KINDS = ["agent", "branch", "transform", "code", "action", "approval", "wait", "for_each", "workflow", "finish"] as const
+export const KINDS = ["agent", "branch", "transform", "code", "action", "approval", "wait", "for_each", "workflow", "post", "finish"] as const
 export type Kind = (typeof KINDS)[number]
 
 /** A JSON Schema subset: one field of inputs, outputs and approval forms. */
@@ -14,9 +14,15 @@ export type ObjectSchema = { type: "object"; required?: string[]; properties: Re
 /** An agent route: target and when to pick it. Approval and wait routes are bare targets. */
 export type Route = { to: string; when?: string }
 export type Case = { when: string; to: string }
+/** A `writes_to` rule on one argument: allowed values, prefixes, mail domains, or ids this run created. */
+export type ArgRule = { in?: (string | number | boolean)[]; prefix?: string[]; domains?: string[]; created_by?: { tool: string; id: string } }
+/** A write a step may make unattended: its tool, fixed rules per argument and the arguments left free. */
+export type WriteScope = { tool: string; where?: Record<string, ArgRule>; free?: string[] }
+/** Where a Finish result or a post goes: a target, a thread title, extra DMs and mentions. */
+export type Deliver = { to: string; thread?: string; also?: string[]; mention?: string[]; message?: string; files?: string }
 
 export type Node = {
-  kind: Kind; title?: string; description?: string
+  kind: Kind; title?: string; description?: string; stage?: string
   next?: string | string[]; on_error?: string; retry?: { attempts: number }; timeout?: string | { after: string; route: string }
   budget_usd?: number; max_visits?: number; on_max_visits?: string; join?: "all" | "first"
   // agent
@@ -25,6 +31,8 @@ export type Node = {
   output?: Record<string, Field> | string
   routes?: Record<string, string | Route>; tools?: "inherit" | string[]; writes?: "refuse" | "propose" | "allow"
   builtins?: "none" | "read" | "all"; session?: string; can_ask?: boolean; can_finish_early?: boolean; untrusted_waiver?: string
+  /** Agent, action: writes that go out unattended. Agent: skills from the library. */
+  writes_to?: WriteScope[]; skills?: string[]
   // branch
   cases?: Case[]; else?: string
   // transform
@@ -37,16 +45,21 @@ export type Node = {
   approvers?: string[]; min_approvals?: number; allow_self_approval?: boolean; show?: string; form?: Record<string, Field>; binds?: string | string[]; remind_every?: string
   /** Where the ask is posted (`deliver`, with the channel for a thread), what it attaches (a files reference) and the shape of the answer. */
   channel?: string; attach?: string; answer?: AnswerShape
+  /** Where a reply with no option word goes. */
+  otherwise?: string
   // wait
   for?: string; until?: string; event?: { source: string; match?: string }
+  poll?: { agent?: string; tool: string; args?: Record<string, unknown>; every: string; until: string }
+  // post (also Deliver's fields)
+  to?: string; thread?: string; also?: string[]; mention?: string[]; message?: string; files?: string
   // for_each
   items?: string; as?: string; do?: Node; concurrency?: number; tolerate_failures?: number
   // workflow
   workflow?: string; version?: "live" | number
   // finish
-  outcome?: "succeeded" | "failed"
+  outcome?: "succeeded" | "failed"; state?: Record<string, string>
   /** Finish: where the result goes. Approval: where the ask is posted. */
-  deliver?: { to: string; message?: string } | AskWhere | null
+  deliver?: Deliver | AskWhere | null
 }
 
 /** Where an approval is asked: the inbox only, a direct message, or a thread in a channel. */
@@ -54,12 +67,17 @@ export type AskWhere = "inbox" | "dm" | "thread"
 export type AnswerShape = "approve" | "choice" | "text" | "form"
 export type Platform = "discord" | "slack" | "teams"
 
-export type TriggerKind = "manual" | "schedule" | "webhook" | "event" | "call"
+export type TriggerKind = "manual" | "schedule" | "webhook" | "event" | "call" | "mention" | "poll"
 export type Trigger = {
   id: string; kind: TriggerKind
-  cron?: string; timezone?: string; catch_up?: "skip" | "run-once"
+  cron?: string; timezone?: string; catch_up?: "skip" | "run-once"; every_weeks?: number; anchor?: string; at?: string
   verify?: string; start_when?: string; inputs?: string | Record<string, string>; respond?: "accepted" | "result"
   source?: string; match?: string
+  // mention
+  channels?: string[]
+  // poll
+  agent?: string; tool?: string; args?: Record<string, unknown>; every?: string; items?: string; key?: string
+  rule?: "added" | "updated"; watch?: string[]; once?: boolean; spend_cap_usd?: number
 }
 
 export type Spec = {
@@ -67,6 +85,8 @@ export type Spec = {
   inputs?: ObjectSchema; triggers?: Trigger[]
   concurrency?: { key?: string; limit?: number; on_conflict?: "queue" | "skip" | "replace" | "debounce"; debounce?: string }
   defaults?: { agent?: string; budget_usd?: number }; limits?: { deadline?: string; max_steps?: number; budget_usd?: number }
+  /** Channels and people templated targets may reach; the board card; business days count in `timezone`. */
+  destinations?: string[]; card?: { fields: Record<string, string>; date?: string }; timezone?: string
   start: string; nodes: Record<string, Node>
 }
 
@@ -104,7 +124,7 @@ export type WorkflowPatch = Partial<Pick<Workflow, "name" | "visibility" | "mont
 
 export type Severity = "error" | "warning"
 export type Problem = { severity: Severity; code: string; message: string; node?: string }
-export type GrantKind = "unattended_write" | "builtins" | "code_network" | "unverified_webhook" | "budget_over_default" | "untrusted_waiver"
+export type GrantKind = "unattended_write" | "builtins" | "code_network" | "unverified_webhook" | "budget_over_default" | "untrusted_waiver" | "scoped_write"
 export type Grant = { kind: GrantKind; node?: string; detail: string }
 /** Rule of Two: Untrusted input, Sensitive data, Writes. */
 export type RuleClass = "U" | "S" | "W"

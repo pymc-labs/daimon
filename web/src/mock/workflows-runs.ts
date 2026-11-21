@@ -60,7 +60,7 @@ function seal(c: Ctx) {
 // ---------- the walk ----------
 
 const DUR: Record<Node["kind"], number> = {
-  agent: 42 * S, action: 3 * S, transform: 400, branch: 300, code: 5 * S, finish: 400, approval: 0, wait: 0, for_each: 0, workflow: 50 * S,
+  agent: 42 * S, action: 3 * S, transform: 400, branch: 300, code: 5 * S, finish: 400, approval: 0, wait: 0, for_each: 0, workflow: 50 * S, post: 2 * S,
 }
 const agentOf = (spec: Spec, n: Node) => n.agent ?? spec.defaults?.agent ?? "daimon"
 /** As `lanes.lane_key`: `main:<agent>`, `<lane>:<agent>`, or `fresh:<node>#<visit>`. */
@@ -289,7 +289,7 @@ function finish(c: Ctx, id: string, n: Node, at: number) {
 
 // ---------- runs ----------
 
-const TRIGGER_TEXT: Record<TriggerKind, string> = { manual: "Run by", schedule: "Schedule", webhook: "Webhook delivery", event: "Event", call: "Called by" }
+const TRIGGER_TEXT: Record<TriggerKind, string> = { manual: "Run by", schedule: "Schedule", webhook: "Webhook delivery", event: "Event", call: "Called by", mention: "Mentioned by", poll: "Poll" }
 
 /** Starts a run at `at`; a fork reuses the parent's finished upstream steps and starts at `from`. */
 export function start(run: Run, at: number, fork?: { parent: Run; from: string }) {

@@ -1,5 +1,5 @@
 import {
-  Bot, CircleCheck, CircleDashed, CircleHelp, CircleMinus, CircleSlash, CircleX, Clock, Code, Flag, Hand, Hourglass, LoaderCircle, Repeat, Shuffle, Split, TimerOff, UserCheck, Webhook,
+  AtSign, Bot, CircleCheck, CircleDashed, CircleHelp, CircleMinus, CircleSlash, CircleX, Clock, Code, Flag, Hand, Hourglass, LoaderCircle, RefreshCw, Repeat, Send, Shuffle, Split, TimerOff, UserCheck, Webhook,
   Minus, Pencil, Plus, Workflow as WorkflowIcon, Wrench, Zap, type LucideIcon,
 } from "lucide-react"
 
@@ -18,12 +18,14 @@ export const KIND: Record<Kind, { icon: LucideIcon; label: string; strip: string
   wait: { icon: Hourglass, label: "Wait", strip: "bg-warning", text: "text-warning" },
   for_each: { icon: Repeat, label: "For each", strip: "bg-chart-2", text: "text-chart-2" },
   workflow: { icon: WorkflowIcon, label: "Workflow", strip: "bg-faint", text: "text-muted-foreground" },
+  post: { icon: Send, label: "Post", strip: "bg-chart-3", text: "text-chart-3" },
   finish: { icon: Flag, label: "Finish", strip: "bg-success", text: "text-success" },
 }
 
 export const TRIGGER: Record<TriggerKind, { icon: LucideIcon; label: string }> = {
   manual: { icon: Hand, label: "Manual" }, schedule: { icon: Clock, label: "Schedule" }, webhook: { icon: Webhook, label: "Webhook" },
   event: { icon: Zap, label: "Event" }, call: { icon: WorkflowIcon, label: "Called" },
+  mention: { icon: AtSign, label: "Mention" }, poll: { icon: RefreshCw, label: "Poll" },
 }
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -90,6 +92,11 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
     case "transform": { const k = Object.keys(n.set ?? {}).length; return [`${k} ${k === 1 ? "field" : "fields"}`] }
     case "code": return ["Python", `Network ${n.network ?? "off"}`]
     case "workflow": return [n.workflow || "No workflow"]
+    case "post": {
+      const to = n.to === "home" ? spec.home?.channel : n.to
+      const channel = catalog?.channels.find((c) => c.id === to)?.name
+      return [channel ? `#${channel}` : to || "No target"]
+    }
     case "finish": {
       const to = finishDeliver(n)?.to === "home" ? spec.home?.channel : finishDeliver(n)?.to
       const channel = catalog?.channels.find((c) => c.id === to)?.name
@@ -100,7 +107,7 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
 
 export const GRANT: Record<GrantKind, string> = {
   unattended_write: "Writes without approval", builtins: "Built-in tools", code_network: "Code with network", unverified_webhook: "Unverified webhook",
-  budget_over_default: "Budget over default", untrusted_waiver: "Untrusted input waiver",
+  budget_over_default: "Budget over default", untrusted_waiver: "Untrusted input waiver", scoped_write: "Writes within limits",
 }
 export const EFFECT: Record<Effect, { icon: typeof Plus; cls: string; label: string }> = {
   added: { icon: Plus, cls: "text-success", label: "Added" }, changed: { icon: Pencil, cls: "text-muted-foreground", label: "Changed" }, removed: { icon: Minus, cls: "text-destructive", label: "Removed" },
