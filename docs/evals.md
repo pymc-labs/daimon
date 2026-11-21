@@ -90,7 +90,15 @@ To scrub many bundles one after another, pass the same `--learned names-found.js
 model finds in a run are added to it at the end, so a name found in one bundle is replaced in
 every later one. It holds real names in plain text (created mode 600): keep it private and
 delete it with the raw bundles. The map and that file are saved before the bundle is
-written, under a lock; run batches one at a time, not side by side.
+written, under a lock; run batches one at a time, not side by side. Only what looks like a
+name is learned: no code or JSON fragments, and a word that is no everyday word (from the
+spaCy model's dictionary when installed), acronym, number or kept name.
+
+A `keep` list in the dictionary holds public names (the platforms and products you use, your
+suites' own ids). They are never faked, learned or reported as leftovers, in any field, ids,
+tool names and effect verbs included; a private name next to one is still faked
+(`acme` in `notion_acme_sync`). Daimon's own name, its effect verbs and the services they
+name are always kept.
 
 A one-word name that is also an everyday word ("Will", "Hope", "Young") is replaced only when
 it is written as in the dictionary, capitalized; the sweep cannot see the lowercase form. Add
