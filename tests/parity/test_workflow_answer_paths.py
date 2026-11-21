@@ -1,7 +1,8 @@
 """Every chat message handler checks a workflow ask's answer before it admits a turn.
 
 `daimon.core.workflows.answers.claim_reply` decides; each adapter's `workflow_asks`
-claim runs it. In every listed handler the claim is an `if` that only returns, ahead of
+claim runs it. In every listed handler the claim is an `if` that only returns (or, in a
+restart's catch-up loop, moves on to the next message), ahead of
 the call that starts admission, so a message answering no ask goes on as ordinary chat
 (each adapter's `test_workflow_asks` shows chat in another thread is not claimed).
 """
@@ -22,6 +23,7 @@ HANDLERS = [
     ("slack/daimon/adapters/slack/app.py", "_handle_app_mention", "protection_state"),
     ("slack/daimon/adapters/slack/direct_messages.py", "handle_direct_message", "bursts.join"),
     ("teams/daimon/adapters/teams/app.py", "_answer_or_admit", "_admit"),
+    ("teams/daimon/adapters/teams/app.py", "catch_up_graph_messages", "_claim"),
 ]
 
 
@@ -64,7 +66,8 @@ def test_the_ask_claim_returns_before_admission(path: str, handler: str, admits:
     ]
     assert claims, f"{path}:{handler} never checks a workflow ask's answer"
     [claim] = claims
-    assert isinstance(claim.body[-1], ast.Return) and not claim.orelse, ast.unparse(claim)
+    ends = isinstance(claim.body[-1], ast.Return | ast.Continue)
+    assert ends and not claim.orelse, ast.unparse(claim)
     later = [
         call.lineno
         for call in ast.walk(func)
