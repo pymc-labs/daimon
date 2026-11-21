@@ -838,13 +838,15 @@ async def step_detail(
     done = step.status == "succeeded"
     agent = node.get("agent") or obj(spec.get("defaults")).get("agent")
     route = step.route
+    way = obj(node.get("routes")).get(route) if route else None
+    activity = await runs_store.list_activity(session, step.id)
     return StepDetail(
         key=key,
         attempt=chosen.number if chosen else 0,
         agent=agent if node.get("kind") == "agent" else None,
         model=node.get("model") if node.get("kind") == "agent" else None,
         summary=step.summary if done else None,
-        route={"name": route, "reason": ""} if route else None,
+        route={"name": route, "reason": str(obj(way).get("when") or "")} if route else None,
         files=[file_view(run.id, f) for f in step.files] if done else [],
         input=shown,
         output=step.output if done else None,
@@ -855,7 +857,10 @@ async def step_detail(
             if e.type == "step.contract_rejected" and e.step_key == key
         ],
         proposals=[],
-        activity=[],
+        activity=[
+            ActivityLine(at=at.isoformat(), kind=kind, text=text, tool=tool)
+            for at, kind, text, tool in activity
+        ],
         plan=[],
     )
 

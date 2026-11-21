@@ -667,13 +667,21 @@ async def add_activity(
     )
 
 
-async def list_activity(session: AsyncSession, step_id: uuid.UUID) -> list[tuple[str, str]]:
+async def list_activity(
+    session: AsyncSession, step_id: uuid.UUID
+) -> list[tuple[datetime, str, str, str | None]]:
+    """The step's activity lines (at, kind, text, tool), oldest first."""
     rows = await session.execute(
-        select(WorkflowStepActivity.kind, WorkflowStepActivity.text)
+        select(
+            WorkflowStepActivity.at,
+            WorkflowStepActivity.kind,
+            WorkflowStepActivity.text,
+            WorkflowStepActivity.tool,
+        )
         .where(WorkflowStepActivity.step_id == step_id)
         .order_by(WorkflowStepActivity.id)
     )
-    return [(k, t) for k, t in rows.tuples()]
+    return list(rows.tuples())
 
 
 async def list_attempts(session: AsyncSession, step_id: uuid.UUID) -> list[AttemptRow]:
