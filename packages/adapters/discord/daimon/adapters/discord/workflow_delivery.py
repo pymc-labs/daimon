@@ -7,11 +7,14 @@ the person core named. The rules every workflow post passes come from
 `daimon.core.workflows.delivery`. A notice is a red notice card; a result is text, with
 only the people it tags pinged, then files. An ask carries its buttons on its last message,
 opens its thread when asked to, and records where it landed; a reminder replies there and
-an update edits the ask, its buttons gone.
+an update edits the ask, its buttons gone. A titled post finds its thread by record, then by
+exact name among the channel's active and archived threads (unarchived), else opens one; an
+origin message not in a thread gets the thread on it.
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import cast
 
 from anthropic import AsyncAnthropic
@@ -41,6 +44,7 @@ from daimon.core.workflows.delivery import (
     post_refusal,
     post_text,
     reach_limits,
+    titled_thread,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,6 +58,30 @@ _Placed = discord.TextChannel | discord.Thread | discord.DMChannel
 
 def _skipped(note: str) -> DeliveryOutcome:
     return DeliveryOutcome(status="skipped", note=note)
+
+
+async def find_thread(channel: discord.TextChannel, title: str) -> str | None:
+    """The channel's thread named exactly `title`, active or archived, else None."""
+    for thread in await channel.guild.active_threads():
+        if thread.parent_id == channel.id and thread.name == title:
+            return str(thread.id)
+    async for thread in channel.archived_threads(limit=None):
+        if thread.name == title:
+            return str(thread.id)
+    return None
+
+
+def _placed(sent: discord.Message, opened: bool) -> dict[str, str | bool | None]:
+    """Where a post landed, as the run's step output reads it."""
+    at = sent.channel
+    thread = isinstance(at, discord.Thread)
+    return {
+        "channel": str(at.parent_id if thread else at.id),
+        "thread": str(at.id) if thread else None,
+        "message": str(sent.id),
+        "link": sent.jump_url,
+        "opened": opened,
+    }
 
 
 def make_discord_workflow_poster(
@@ -118,6 +146,36 @@ def make_discord_workflow_poster(
         assert isinstance(channel, discord.abc.Messageable)
         return channel
 
+    async def threaded(post: WorkflowPost, channel: discord.abc.Messageable) -> _Placed:
+        """The thread on the origin message, or the one titled `post.title` under the channel."""
+        assert isinstance(channel, discord.TextChannel)
+        if post.open_on is not None:
+            with suppress(discord.NotFound):
+                if isinstance(made := await fetch_channel(int(post.open_on)), discord.Thread):
+                    return made
+            name = post.title or str(post.row.payload.get("workflow") or "Workflow")
+            message = channel.get_partial_message(int(post.open_on))
+            return await message.create_thread(name=name[:100])
+
+        async def create(title: str) -> str:
+            made = await channel.create_thread(name=title, type=discord.ChannelType.public_thread)
+            return str(made.id)
+
+        async def find(title: str) -> str | None:
+            return await find_thread(channel, title)
+
+        found = await fetch_channel(
+            int(
+                await titled_thread(
+                    sessionmaker, post, platform="discord", create=create, find=find
+                )
+            )
+        )
+        assert isinstance(found, discord.Thread)
+        if found.archived:
+            found = await found.edit(archived=False)
+        return found
+
     async def placed_post(post: WorkflowPost, text: str) -> DeliveryOutcome:
         """A reminder in the ask's thread or DM, or the ask edited to say how it ended."""
         channel = cast(
@@ -147,6 +205,11 @@ def make_discord_workflow_poster(
             if post.placed:
                 return await placed_post(post, rendered.text)
             channel = await place(post)
+            opened = isinstance(channel, discord.TextChannel) and (
+                post.title is not None or post.open_on is not None
+            )
+            if opened:
+                channel = await threaded(post, channel)
         except (discord.HTTPException, LookupError):
             return _skipped("destination_unavailable")
         pings = discord.AllowedMentions(
@@ -160,6 +223,7 @@ def make_discord_workflow_poster(
             return DeliveryOutcome(status="delivered")
         ask = asks.ask_of(row.payload) if row.kind == "ask" else None
         chunks = split_fenced(rendered.text, _DISCORD_MAX_CHARS, word_boundary=True)
+        first: discord.Message | None = None
         for index, chunk in enumerate(chunks):
             if index and (refused := await checked(post, rendered.user_ids)) is not None:
                 return _skipped(refused)
@@ -168,9 +232,13 @@ def make_discord_workflow_poster(
                 sent = await channel.send(content=chunk, allowed_mentions=pings, view=ask_view(ask))
                 await recorded(row, post, sent, ask)
             else:
-                await channel.send(content=chunk, allowed_mentions=pings)
+                sent = await channel.send(content=chunk, allowed_mentions=pings)
+            first = first or sent
+        done = DeliveryOutcome(
+            status="delivered", placed=None if first is None else _placed(first, opened)
+        )
         if not job_payload(row).files:
-            return DeliveryOutcome(status="delivered")
+            return done
         if output_client is None:
             raise RuntimeError("Generated file delivery is unavailable; it will not be retried.")
 
@@ -192,13 +260,14 @@ def make_discord_workflow_poster(
             notice=notice,
             may_post=may_post,
         )
-        return DeliveryOutcome(status="delivered")
+        return done
 
     async def recorded(
         row: DeliveryRow, post: WorkflowPost, sent: discord.Message, ask: dict[str, object]
     ) -> None:
         """Where the ask landed; a thread ask opens its thread from the post."""
-        thread_id: str | None = None
+        in_thread = post.dm_to is None and isinstance(sent.channel, discord.Thread)
+        thread_id = str(sent.channel.id) if in_thread else None
         if row.target.get("open_thread") and isinstance(sent.channel, discord.TextChannel):
             title = str(ask.get("title") or post.row.payload.get("workflow") or "Answer")
             thread_id = str((await sent.create_thread(name=title[:100])).id)

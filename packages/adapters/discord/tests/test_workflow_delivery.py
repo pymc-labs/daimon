@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any, cast
 
 import discord
 import pytest
@@ -92,3 +94,31 @@ async def test_a_failed_run_sends_the_owner_a_notice_card(
     posted = await _delivered(db_session, nodes, monkeypatch)
     assert posted.embed_texts[0] == "Workflow run failed", posted
     assert posted.embed_texts[1].startswith('Run 1 of "T" failed.'), posted
+
+
+async def test_a_titled_post_finds_its_thread_active_or_archived(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def thread(id_: int, name: str, parent: int = 1) -> SimpleNamespace:
+        return SimpleNamespace(id=id_, name=name, parent_id=parent)
+
+    active = [thread(5, "Week", parent=2), thread(6, "Week 7"), thread(7, "Week")]
+    archived = [thread(8, "Old"), thread(9, "Week 8")]
+
+    async def active_threads() -> list[SimpleNamespace]:
+        return active
+
+    async def archived_threads(limit: int | None) -> AsyncIterator[SimpleNamespace]:
+        for t in archived:
+            yield t
+
+    channel = SimpleNamespace(
+        id=1,
+        guild=SimpleNamespace(active_threads=active_threads),
+        archived_threads=archived_threads,
+    )
+    find = workflow_delivery.find_thread
+    as_channel = cast("discord.TextChannel", channel)
+    assert await find(as_channel, "Week") == "7", "an active thread under this channel only"
+    assert await find(as_channel, "Week 8") == "9", "then the archived ones"
+    assert await find(as_channel, "week 8") is None, "the name must match exactly"
