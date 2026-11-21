@@ -77,12 +77,16 @@ def web_role(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def no_sandbox_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These tests read no database; a routine's sandbox status has its own tests."""
+    """These tests read no database; a routine's sandbox status and move have their own tests."""
 
     async def off(_session: Any, rows: list[RoutineRow], _platform: str) -> dict[Any, None]:
         return {row.id: None for row in rows}
 
+    async def never_moved(_session: Any, _ids: Any) -> dict[Any, Any]:
+        return {}
+
     monkeypatch.setattr(routines_tools, "opted_in_by_many", off)
+    monkeypatch.setattr(routines_tools.routines_store, "migrated_workflows", never_moved)
 
 
 _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-arg]

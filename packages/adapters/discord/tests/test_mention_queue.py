@@ -992,6 +992,7 @@ async def test_drain_merges_attachments_from_all_of_authors_queued_messages(
     q1 = _make_thread_message(content="A", author_id=42, display_name="Alice")
     q2 = _make_thread_message(content="B", author_id=42, display_name="Alice")
     attachment = MagicMock(spec=discord.Attachment)
+    attachment.size = 3  # the workflow-ask check sizes every attachment
     q2.attachments = [attachment]
 
     task = asyncio.create_task(queued_bot.on_message(m1))

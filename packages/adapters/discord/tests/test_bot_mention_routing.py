@@ -378,6 +378,9 @@ class TestEveryoneMentionIgnored:
         mock_derive_tenant: MagicMock,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        # The workflow-ask check resolves the tenant for every guild message, so the
+        # patch hands it a real id; the turn gate is what must stay shut.
+        mock_derive_tenant.return_value = _derive_tenant_uuid(platform="discord", workspace_id="1")
         runtime = _make_runtime(db_session_factory)
         bot = make_bot(runtime)
         # @everyone ping: discord populates mention_everyone but the bot is NOT in
@@ -390,7 +393,6 @@ class TestEveryoneMentionIgnored:
 
         await bot.on_message(message)
 
-        mock_derive_tenant.assert_not_called(), "@everyone must not reach tenant resolution"  # pyright: ignore[reportUnusedExpression]
         mock_resolve_config.assert_not_called(), "@everyone must not start a turn"  # pyright: ignore[reportUnusedExpression]
         message.create_thread.assert_not_awaited()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
 
