@@ -949,6 +949,35 @@
         'type': 'object',
       }),
     }),
+    'change_issue_state': dict({
+      'description': '''
+        Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). Resolve
+        hides it until a newer event arrives; mute hides it until it is reopened. Only a
+        workspace admin or owner may do this; an operator token never can.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'action': dict({
+            'enum': list([
+              'resolve',
+              'mute',
+              'reopen',
+            ]),
+            'type': 'string',
+          }),
+          'fingerprint': dict({
+            'maxLength': 64,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'fingerprint',
+          'action',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'change_setting': dict({
       'description': '''
         Change one setting where you are, after the person presses Approve.
