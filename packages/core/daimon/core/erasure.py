@@ -20,6 +20,7 @@ from typing import Literal
 from daimon.core.stores import (
     accounts,
     agent_posts,
+    artifact_pages,
     credential_requests,
     direct_messages,
     dm_access,
@@ -506,6 +507,10 @@ ERASABLE: tuple[Erasable, ...] = (
     by_account("dm_picks", (dm_access.count_picks_for_account, dm_access.delete_picks_for_account)),
     by_dm_user("dm_rules", dm_access.count_user_rules, dm_access.delete_user_rules),
     by_dm_user("dm_grant_users", dm_access.count_grants_listing, dm_access.scrub_user_from_grants),
+    # The person's artifact pages go; they leave other people's pages and the data they
+    # wrote there, which stays with the page.
+    by_account("artifacts", (artifact_pages.count_owned, artifact_pages.delete_owned)),
+    by_account("artifact_mentions", (artifact_pages.count_mentions, artifact_pages.scrub_account)),
     # Their identities, tokens and browser sessions cascade from the person.
     by_account("web_people", (web_people.count_for_account, web_people.delete_for_account)),
     by_account(

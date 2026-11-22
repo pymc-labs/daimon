@@ -195,6 +195,9 @@ class PurgeReport(BaseModel):
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
     lead_intakes: int = 0
+    artifacts: int = 0
+    # Erased from other people's pages: sharing lists and who wrote their data.
+    artifact_mentions: int = 0
     web_people: int = 0
     monitored_events: int = 0
     web_admin_grants: int = 0

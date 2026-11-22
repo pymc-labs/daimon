@@ -1047,6 +1047,8 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
         "microsoft_user_tokens": "microsoft_user_tokens",
+        "artifacts": "artifacts",
+        "artifact_mentions": "artifact_mentions",
         "web_people": "web_people",
         "web_admin_grants": "web_admin_grants",
         "monitored_events": "monitored_events",
@@ -1121,6 +1123,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "direct_message_conversations": "account_id FK -> accounts.id",
         # The web app: a person, with their identities, tokens and browser sessions, and
         # the admin grants of the account.
+        "artifacts": "owner_account_id FK cascade; artifact_pages.delete_owned drops page watches",
+        "artifact_documents": "updated_by_account_id SET NULL; artifact_pages.scrub_account",
         "web_people": "account_id FK -> accounts.id",
         "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
@@ -1140,6 +1144,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Not an erasure gap.
             "channel_config",
             "tenant_config",
+            # A page's version history: who published it is SET NULL, the page's own.
+            "artifact_versions",
             # Shared setup binding attribution uses SET NULL on creator erasure;
             # deleting the conversation would destroy other participants' work.
             "thread_agent_bindings",
