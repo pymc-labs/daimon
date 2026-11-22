@@ -21,7 +21,8 @@ A login proves one platform identity and its workspaces. Daimon intersects
 those with the workspaces where it is installed and ready, on every call. It
 then finds or creates your account in each, as in chat. A turn started from
 Claude Code is permission-checked and billed as you in that workspace. Slack
-reads run with your own Slack visibility.
+reads run with your own Slack visibility. The `artifact_*` tools publish and
+manage [pages](artifacts.md) as you, under the daimon you name.
 
 If you see no daimons, the plugin is rarely the cause. You may not have
 authenticated that server with `/mcp`, Daimon may not be installed in any of
