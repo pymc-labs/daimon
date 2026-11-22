@@ -249,7 +249,12 @@ class ConnectorRelay:
             return _error(request_id, -32001, REFUSED_TEXT)
         token = await self._token_for(turn, connector)
         if token is None:
-            log.info("connector_relay.reconnect_needed", server_key=key)
+            log.info(
+                "connector_relay.reconnect_needed",
+                server_key=key,
+                tenant_id=str(turn.tenant_id),
+                account_id=str(turn.requester),
+            )
             return _error(request_id, -32001, RECONNECT_TEXT)
         try:
             if method == "tools/list":
@@ -257,7 +262,13 @@ class ConnectorRelay:
                 return _reply(request_id, {"tools": cast(JsonValue, list(listed))})
             return _reply(request_id, await self._call(turn, origin, connector, token, params))
         except McpCallError as error:
-            log.warning("connector_relay.call_failed", server_key=key, kind=error.kind)
+            log.warning(
+                "connector_relay.call_failed",
+                server_key=key,
+                kind=error.kind,
+                tenant_id=str(turn.tenant_id),
+                account_id=str(turn.requester),
+            )
             if method == "tools/list":
                 return _error(request_id, -32002, FAILED_TEXT)
             return _reply(request_id, _tool_text(FAILED_TEXT))
