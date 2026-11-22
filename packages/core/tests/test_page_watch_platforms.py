@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
@@ -125,7 +126,12 @@ async def test_a_web_watch_polls_a_pages_data(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     binding = await _web_owner(db_session, monkeypatch)
-    query = {"slug": "votes", "collection": "_events", "order_by": "at", "limit": 50}
+    query: dict[str, Any] = {
+        "slug": "votes",
+        "collection": "_events",
+        "order_by": "at",
+        "limit": 50,
+    }
     watch = await watches.register_poll_watch(
         db_session,
         binding,
