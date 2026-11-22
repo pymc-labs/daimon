@@ -269,6 +269,7 @@ EXEMPT: dict[str, str] = {
     "cancel_long_job": _SCHEDULED,
     "cancel_timer": _SCHEDULED,
     "cancel_turn": _TURN,
+    "change_issue_state": _TENANT,
     "change_workspace_settings": _TENANT,
     "check_server_skill": _NEW,
     "connect_microsoft": _LIVE,

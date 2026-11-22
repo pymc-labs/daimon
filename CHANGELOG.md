@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issue, without message content, and read on the Overview and Issues pages. An issue can
   be resolved (it returns if it happens again) or muted. `daimon issues` reads and changes
   them from the command line, and operator tokens with the new `issues:read` scope read
-  them over MCP. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
+  them over MCP. Admins and owners can also resolve, mute or reopen an issue by asking
+  in chat, from the command line (`--account` names who did it) and from the issue page,
+  which has a link to copy. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
 
 - **A routine's owner hears about a failed run, and runs can say what blocked them.**
   On Discord, the first failure of a routine after a success reaches its owner by

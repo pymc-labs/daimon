@@ -2,12 +2,13 @@
 
 The shapes are `daimon.core.ops_overview`'s, the same the web app and `daimon issues` return.
 Reading needs the `issues:read` scope for an operator token and a workspace admin behind it.
+Resolving, muting or reopening is for a person who holds `workspace.manage`, never a token.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, get_args
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -17,10 +18,19 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.adapters.mcp.tools._web_admin import agent_names
+from daimon.adapters.mcp.tools._web_admin import agent_names, web_actor_of
 from daimon.core import ops_overview as ops
+from daimon.core.config import WebModuleKey
 from daimon.core.ops_catalog import OpsArea, OpsSeverity
-from daimon.core.ops_overview import Issue, IssueDetail, IssueEvent, OpsOverview, OpsPeriod
+from daimon.core.ops_overview import (
+    Issue,
+    IssueAction,
+    IssueDetail,
+    IssueEvent,
+    OpsOverview,
+    OpsPeriod,
+)
+from daimon.core.web_roles_rules import capabilities_for
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
@@ -141,3 +151,31 @@ def register_ops_issues_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 limit=events_limit,
             )
         return IssueView(issue=detail, events=[event for _, event in rows])
+
+    @mcp.tool
+    async def change_issue_state(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, fingerprint: Annotated[str, Field(max_length=64)], action: IssueAction
+    ) -> Issue:
+        """Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). Resolve
+        hides it until a newer event arrives; mute hides it until it is reopened. Only a
+        workspace admin or owner may do this; an operator token never can."""
+        auth = await _auth(ctx)
+        actor = await web_actor_of(runtime, auth)
+        web = runtime.settings.web
+        modules = web.modules if web else get_args(WebModuleKey)
+        if auth.is_operator or "workspace.manage" not in capabilities_for(actor.role, modules):
+            raise ToolError("You can't change issues. Ask an admin or an owner.")
+        names = await _names(runtime, auth)
+        async with runtime.session_factory.begin() as session:
+            changed = await ops.change_issue_state(
+                session,
+                tenant_id=auth.tenant_id,
+                fingerprint=fingerprint,
+                action=action,
+                by_account_id=auth.account_id,
+                now=datetime.now(UTC),
+                agent_names=names,
+            )
+        if changed is None:
+            raise ToolError("No such issue here.")
+        return changed

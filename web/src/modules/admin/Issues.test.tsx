@@ -39,4 +39,14 @@ describe("Issues", () => {
     expect(await screen.findByRole("button", { name: "Resolve" })).toBeInTheDocument()
     expect(vi.mocked(api.get)).toHaveBeenCalledWith("/api/admin/issues/f_fire_r2")
   })
+
+  it("copies the issue link from a drawer whose subject has no page to open", async () => {
+    const user = userEvent.setup()
+    const copy = vi.spyOn(navigator.clipboard, "writeText")
+    view("/admin/issues?issue=f_watch_inbox")
+    await screen.findByRole("button", { name: "Resolve" })
+    expect(screen.queryByRole("link", { name: /^Open (routine|agent)$/ })).toBeNull()
+    await user.click(screen.getAllByRole("button", { name: "Copy link" }).at(-1)!)
+    expect(copy).toHaveBeenCalledTimes(1)
+  })
 })
