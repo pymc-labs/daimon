@@ -31,3 +31,15 @@ def model_marks(model_id: str | None, effort: str | None) -> tuple[str, ...]:
     model = next((mark for word, mark in _MODELS if word in (model_id or "").lower()), None)
     level = _EFFORTS.get((effort or "").lower())
     return tuple(mark for mark in (model, level) if mark is not None)
+
+
+_EFFORT_MARKS: Final[frozenset[str]] = frozenset(_EFFORTS.values())
+
+
+def swapped_marks(
+    shown: tuple[str, ...], model_id: str | None, effort: str | None
+) -> tuple[str, ...]:
+    """`shown` with the emoji of a newly picked model or effort; one not picked keeps its own."""
+    model = model_marks(model_id, None) or tuple(m for m in shown if m not in _EFFORT_MARKS)
+    level = model_marks(None, effort) or tuple(m for m in shown if m in _EFFORT_MARKS)
+    return (*model, *level)

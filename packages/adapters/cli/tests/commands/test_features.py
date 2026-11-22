@@ -30,7 +30,8 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.security_audit import list_events
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_routine, make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -151,6 +152,42 @@ async def test_set_writes_the_tier_the_place_names_and_default_clears_it(
     )
     cleared = _row(await _rows(rt, selector, channel="c1"), "progress_plans")
     assert cleared["source"] != "channel"
+
+
+async def test_set_with_a_routine_writes_its_own_tier_and_refuses_another_place(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    kw: dict[str, Any] = {"rt": rt, "console": console, "selector": selector}
+    async with db_session_factory.begin() as session:
+        routine = await make_routine(
+            session, tenant=await get_tenant(session, uuid.UUID(selector.tenant_id or ""))
+        )
+    place: dict[str, Any] = {"agent": None, "channel": None, "thread": None}
+
+    await features_set(
+        **kw, key="routine_result_header", value="off", tier=None, routine=routine.id, **place
+    )
+
+    console, out = _console()
+    await features_list(
+        rt=rt, console=console, selector=selector, agent=None, channel=None, thread=None,
+        routine=routine.id, keys=["routine_result_header"], as_json=True,
+    )  # fmt: skip
+    (view,) = json.loads(out.getvalue())
+    assert [t["text"] for t in view["tiers"] if t["tier"] == "routine"] == ["off"]
+    assert (view["value"], view["source"]) == ("off", "routine")
+    with pytest.raises(StoreError, match="--routine takes no"):
+        await features_set(
+            **kw, key="routine_result_header", value="off", tier=None, routine=routine.id,
+            agent=None, channel="c1", thread=None,
+        )  # fmt: skip
+    with pytest.raises(StoreError, match="no routine"):
+        await features_set(
+            **kw, key="routine_result_header", value="off", tier=None, routine=uuid.uuid4(), **place
+        )
 
 
 async def test_a_thread_needs_its_channel(

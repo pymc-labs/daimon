@@ -40,7 +40,12 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import AnswerMessage
-from daimon.adapters.discord.reactions import DONE, WORKING, arrange_reactions
+from daimon.adapters.discord.reactions import (
+    DONE,
+    WORKING,
+    arrange_reactions,
+    remember_model_message,
+)
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.adapters.discord.thread_gone import ThreadStopped
@@ -405,8 +410,10 @@ class DiscordTurnLifecycle(OutputGate):
         answer_message_cap: int = ANSWER_MESSAGES,
         model_marks: tuple[str, ...] = (),
         model_marks_for: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
+        conversation_id: str | None = None,
         status_reactions: bool = False,
         post_pre_tool_text: bool = True,
+        card_timer: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         adopt_pending_progress: DiscordTurnLifecycle | None = None,
@@ -440,6 +447,7 @@ class DiscordTurnLifecycle(OutputGate):
         self._model_marks = model_marks
         # Read when the card starts, for a caller that builds the card synchronously.
         self._model_marks_for = model_marks_for
+        self._conversation_id = conversation_id
         self._model_marked = False
         self._status_reactions = status_reactions and not unprompted
         self._post_pre_tool_text = post_pre_tool_text
@@ -469,6 +477,7 @@ class DiscordTurnLifecycle(OutputGate):
             agent_name=agent_name,
             started_at=self._clock(),
             model_label=model_label(model_id) if model_id else "",
+            timed=card_timer,
         )
         # Seeded only by dead-session recovery, which hands over the message the
         # failed attempt already posted. Without this the recovery lifecycle
@@ -555,7 +564,11 @@ class DiscordTurnLifecycle(OutputGate):
         self._revealed_first_chunk: str | None = None
 
     async def _requester_opted_out(self) -> bool:
-        """A person who asked never to be tagged gets the reply without the ping."""
+        """A person who asked never to be tagged gets the reply without the ping, and so
+        does a bot: a ping only sets it off, and two agents pinging each other never stop."""
+        author = getattr(self._trigger_message, "author", None)
+        if getattr(author, "bot", False) is True:
+            return True
         if self._tenant_id is None or self._requester_id is None:
             return False
         try:
@@ -638,16 +651,16 @@ class DiscordTurnLifecycle(OutputGate):
                 self._trigger_message, status=WORKING, model=self._model_marks
             )
             self._model_marked = arranged and bool(self._model_marks)
-            return
-        if not self._model_marks:
-            return
-        for mark in self._model_marks:
-            try:
-                await self._trigger_message.add_reaction(mark)
-            except discord.HTTPException:
-                log.warning("turn.model_reaction_failed", exc_info=True)
-                return
-        self._model_marked = True
+        elif self._model_marks:
+            for mark in self._model_marks:
+                try:
+                    await self._trigger_message.add_reaction(mark)
+                except discord.HTTPException:
+                    log.warning("turn.model_reaction_failed", exc_info=True)
+                    return
+            self._model_marked = True
+        if self._model_marked and self._conversation_id is not None:
+            remember_model_message(self._conversation_id, self._trigger_message)
 
     @property
     def model_marked(self) -> bool:

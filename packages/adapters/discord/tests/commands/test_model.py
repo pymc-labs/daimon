@@ -175,7 +175,7 @@ async def test_a_cross_provider_pick_applies_at_once_and_says_what_is_off(
 
     sent = interaction.edit_original_response.call_args.kwargs
     assert sent["content"] == note, "the change, then what is off, as information"
-    assert "view" not in sent, "no Switch button to press"
+    assert sent.get("view") is None, "no Switch button to press"
     picked.assert_awaited_once()
 
 
@@ -197,7 +197,7 @@ async def test_a_refused_pick_says_why_and_offers_no_confirm(
     assert sent["content"] == "Ask the agent's owner or an admin to move it. Nothing changed.", (
         "the refusal and that nothing changed"
     )
-    assert "view" not in sent, "a refusal offers no button"
+    assert sent.get("view") is None, "a refusal offers no button"
     assert await _stored(db_session_factory, guild_id) is None
 
 
@@ -378,3 +378,47 @@ async def test_a_guild_off_the_lane_allowlist_changes_nothing(
         in (interaction.edit_original_response.call_args.kwargs["content"])
     )
     assert await _stored(db_session_factory, guild_id) is None
+
+
+async def test_the_menus_switch_the_thread_and_redraw_the_emoji_the_last_turn_shows(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/model` alone shows a model and an effort menu; a pick swaps the emoji in place."""
+    from daimon.core.stores.thread_sessions import last_model_marks, record_model_marks
+    from daimon.testing.factories import make_thread_session
+
+    guild_id = 720000099
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(guild_id))
+        await make_thread_session(session, tenant=tenant, thread_id=str(_THREAD_ID))
+        await record_model_marks(
+            session, tenant_id=tenant.id, platform="discord", thread_id=str(_THREAD_ID),
+            marks=("🎼", "🌓"),
+        )  # fmt: skip
+    redrawn: list[tuple[str, tuple[str, ...]]] = []
+
+    async def redraw(conversation_id: str, marks: tuple[str, ...]) -> bool:
+        redrawn.append((conversation_id, marks))
+        return True
+
+    monkeypatch.setattr(model_command, "redraw_model_marks", redraw)
+    runtime = _runtime(db_session_factory)
+    shown = _interaction(runtime, guild_id=guild_id)
+    await _run(shown, None)
+    picker = shown.edit_original_response.call_args.kwargs["view"]
+    models, efforts = picker.children
+    assert [o.value for o in models.options] == ["haiku", "sonnet", "opus", "default"]
+    assert [o.value for o in efforts.options][-2:] == ["max", "default"]
+
+    picked = _interaction(runtime, guild_id=guild_id)
+    picked.channel_id = _THREAD_ID
+    await picker.chose(picked, "effort", "max")
+    assert "at max effort" in picked.edit_original_response.call_args.kwargs["content"]
+    assert redrawn == [(str(_THREAD_ID), ("🎼", "🌕"))], (
+        "the model emoji stays, the moon is swapped"
+    )
+    async with db_session_factory() as session:
+        marks = await last_model_marks(
+            session, tenant_id=tenant.id, platform="discord", thread_id=str(_THREAD_ID)
+        )
+    assert marks == ("🎼", "🌕"), "the next turn on this pair adds no second set"

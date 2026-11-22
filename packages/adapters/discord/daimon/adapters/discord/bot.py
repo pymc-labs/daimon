@@ -46,6 +46,7 @@ from daimon.adapters.discord.errors import (
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import (
     HintCooldown,
+    bot_message_answerable,
     is_participation_candidate,
     is_plain_text_mention_candidate,
     should_process_message,
@@ -2951,6 +2952,18 @@ class DaimonBot(commands.Bot):
             return None
         return None if binding is None else binding.responder_ma_agent_id
 
+    async def _answers_bot(self, message: discord.Message, guild_id: str) -> bool:
+        """Whether a bot's mention is answered: a QA driver's always (with its auto-approve),
+        any other bot's only with `answer_bots` on for the agent here, then as a person's."""
+        discord_settings = self.runtime.settings.discord
+        if (
+            discord_settings is not None
+            and str(message.author.id) in discord_settings.qa_bot_user_ids
+        ):
+            return True
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        return await self._message_feature_on(message, tenant_id, "answer_bots", per_agent=True)
+
     async def working_mark(self, message: discord.Message, tenant_id: uuid.UUID) -> str:
         """The reaction a message shows while its turn runs: ⏳ with status reactions, else 👀."""
         if await self._message_feature_on(message, tenant_id, "status_reactions", per_agent=True):
@@ -3254,6 +3267,14 @@ class DaimonBot(commands.Bot):
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
             qa_bot_user_ids=discord_settings.qa_bot_user_ids if discord_settings else (),
+            answer_bots=message.author.bot
+            and bot_message_answerable(
+                typed_mention=self.user is not None and self.user.id in message.raw_mentions,
+                is_reply=isinstance(reference, discord.MessageReference)
+                and reference.type is discord.MessageReferenceType.reply,
+                reply_to_other=isinstance(resolved, discord.Message) and not resolved_is_ours,
+            )
+            and may_turn_on(self.runtime.settings, "answer_bots", "discord"),
         ):
             # Not a mention. The only other way a message starts a turn is
             # organic thread participation, which has its own gates.
@@ -3270,6 +3291,8 @@ class DaimonBot(commands.Bot):
         assert message.guild is not None
         guild = message.guild
         guild_id = str(guild.id)
+        if message.author.bot and not await self._answers_bot(message, guild_id):
+            return
         bot_display_name = _resolve_bot_display_name(self.runtime.settings)
         # For /billing's top spenders; in the background, never failing the turn.
         remember_guild_user(self.runtime.sessionmaker, guild_id=guild.id, user=message.author)
@@ -4429,7 +4452,11 @@ class DaimonBot(commands.Bot):
             deliver_dm_report,
             open_report_thread,
         )
-        from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_watch
+        from daimon.core.direct_messages import (
+            DirectMessageAccessRevoked,
+            dm_watch_source,
+            run_dm_watch,
+        )
         from daimon.core.stores.watches import get_firing, get_watch, pause_watch
         from daimon.core.turn.admission import DmSource
 
@@ -4450,20 +4477,31 @@ class DaimonBot(commands.Bot):
                         resolver=self.membership_resolver,
                     )
                 try:
+                    if current.thread_id.startswith(DM_SCOPE_PREFIX):
+                        # Made in a DM: the rules of the conversation it was made in.
+                        source, budget = await dm_watch_source(
+                            self.runtime.turn_deps,
+                            tenant_id=row.tenant_id,
+                            scope_id=current.thread_id,
+                            owner=current.owner_external_id,
+                        )
+                    else:
+                        source = DmSource(
+                            channel_id=current.parent_channel_id, thread_id=current.thread_id
+                        )
+                        budget = current.parent_channel_id
                     reply = await run_dm_watch(
                         self.runtime.turn_deps,
                         row,
                         requester_org=standing,
                         owner_user_id=current.owner_external_id,
                         prompt=seed,
-                        source=DmSource(
-                            channel_id=current.parent_channel_id, thread_id=current.thread_id
-                        ),
-                        budget_channel_id=current.parent_channel_id,
+                        source=source,
+                        budget_channel_id=budget,
                     )
                 except DirectMessageAccessRevoked as error:
                     log.info("watch_report.dm_refused", reason=error.reason)
-                    if error.reason in ("dm_disabled", "source_sealed"):
+                    if error.reason in ("dm_disabled", "source_sealed", "dm_gone"):
                         async with self.runtime.sessionmaker.begin() as db:
                             await pause_watch(
                                 db,
@@ -4795,6 +4833,7 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
@@ -4975,6 +5014,7 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
@@ -5958,8 +5998,10 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 model_marks=marks_to_show,
+                conversation_id=str(thread.id),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -6507,6 +6549,7 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),
                 post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=turn_send,
                 edit=_edit_message,

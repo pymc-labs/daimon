@@ -527,15 +527,28 @@ async def test_a_wake_watch_follows_the_conversation_to_its_newest_session(
     assert bound == ["sess_next"], "the wake watch moved to the thread's newest session"
 
 
-@pytest.mark.parametrize("case", ["dm", "unattended", "owner limit", "helper"])
+async def test_a_wake_link_made_in_a_dm_wakes_that_dm(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    """A DM's jobs get links too: each post runs a fresh private turn in the owner's DM,
+    so the watch holds no session, and a later job's link shares its one watch."""
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "dm:scope-1", channel="chan-1")
+    first, second = await _wake_urls(db_session_factory, token, _tool_call(), _tool_call())
+    assert isinstance(first, str) and isinstance(second, str), "a DM's job gets a wake link"
+    assert first.rsplit("/", 2)[1] == second.rsplit("/", 2)[1], "both jobs share one watch"
+    async with db_session_factory() as db:
+        rows = (await db.execute(text("SELECT delivery, session_id FROM watches"))).all()
+    assert [tuple(row) for row in rows] == [("dm", None)], "it reports in the owner's DM"
+
+
+@pytest.mark.parametrize("case", ["unattended", "owner limit", "helper"])
 async def test_a_wake_tool_call_that_cannot_have_a_link_still_runs_without_one(
     db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None, case: str
 ) -> None:
     person = await _person(db_session_factory)
-    thread = "dm:scope-1" if case == "dm" else "thread-1"
-    channel = thread if case == "dm" else "chan-1"
     token, _ = await _chat_session(
-        db_session_factory, person, thread, channel=channel, human=case != "unattended"
+        db_session_factory, person, "thread-1", channel="chan-1", human=case != "unattended"
     )
     if case == "owner limit":
         await _fill_owner_watches(db_session_factory, person)

@@ -101,7 +101,7 @@ async def _wake_link(
 ) -> str | None:
     """A fresh link to the conversation's wake watch for `server` (`watches.wake_link`);
     None when watches or callbacks are off here, or the watch cannot be made (a helper's
-    turn, a DM, the owner's limit). It skips the approval card, as
+    turn, a Slack DM, the owner's limit). It skips the approval card, as
     `test_a_wake_link_is_made_without_the_approval_card` records. The link is a secret:
     it goes only into the forwarded call, never into a log."""
     settings = load_watches_settings()

@@ -356,6 +356,7 @@ source_modules = [
     "daimon.core.roster",
     "daimon.core.routine_delivery",
     "daimon.core.routine_destinations",
+    "daimon.core.routine_header",
     "daimon.core.routine_sandbox",
     "daimon.core.routine_move",
     "daimon.core.routine_hold",

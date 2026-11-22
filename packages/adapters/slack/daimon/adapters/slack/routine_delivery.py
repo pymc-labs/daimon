@@ -51,6 +51,7 @@ from daimon.core.routine_delivery import (
 )
 from daimon.core.routine_destinations import slack_may_deliver
 from daimon.core.routine_files import deliver_routine_files, payload_for
+from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
@@ -336,6 +337,9 @@ def make_slack_routine_poster(
                             runtime.sessionmaker, row, "slack"
                         ),
                         agent_name=await routine_agent_name(runtime.sessionmaker, row),
+                        header=await routine_header_shown(
+                            runtime.sessionmaker, row, "slack", runtime.settings
+                        ),
                     ),
                 )
             )

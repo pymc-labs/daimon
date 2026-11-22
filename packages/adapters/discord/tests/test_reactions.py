@@ -45,3 +45,21 @@ async def test_two_arrangements_of_one_message_run_one_after_the_other() -> None
         arrange_reactions(message, status=WORKING), arrange_reactions(message, status=DONE)
     )
     assert order == [f"start {WORKING}", f"end {WORKING}", f"start {DONE}", f"end {DONE}"]
+
+
+async def test_a_pick_redraws_the_model_emoji_on_the_message_that_last_showed_them() -> None:
+    from daimon.adapters.discord.reactions import redraw_model_marks, remember_model_message
+
+    fetched = MagicMock(reactions=[SimpleNamespace(emoji=e, me=True) for e in (DONE, "🎼", "🌓")])
+    fetched.remove_reaction, fetched.add_reaction = AsyncMock(), AsyncMock()
+    message = MagicMock(
+        id=9, channel=SimpleNamespace(id=90), guild=SimpleNamespace(me="bot"),
+        fetch=AsyncMock(return_value=fetched),
+    )  # fmt: skip
+    assert await redraw_model_marks("55", ("🪶", "🌓")) is False, "nothing shown there yet"
+    # The trigger sits in the parent channel (90); the conversation is its thread (55).
+    remember_model_message("55", message)
+    assert await redraw_model_marks("55", ("🪶", "🌓")) is True
+    assert [c.args[0] for c in fetched.add_reaction.await_args_list] == ["🪶", "🌓"], (
+        "the status stays first; the new model and effort follow it"
+    )

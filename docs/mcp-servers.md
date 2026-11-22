@@ -178,8 +178,9 @@ conversation once, in a turn that reads and reports. Keep the link out of logs.
 
 Each call gets its own link to one watch per conversation and server. The watch
 follows the conversation to its newest session and lasts a day after the latest call.
-It needs the `watches` feature and `DAIMON_WATCHES__CALLBACK_BASE_URL`. A DM, a
-helper or an owner at the watch limit gets none.
+It needs the `watches` feature and `DAIMON_WATCHES__CALLBACK_BASE_URL`. In a Discord
+DM each post runs as a fresh private turn in that DM. A Slack DM, a helper or an owner
+at the watch limit gets none.
 
 A request body that is not JSON, repeats a key, cannot be re-encoded, or holds
 a tool call without object `params` is refused with a 400. GET and DELETE

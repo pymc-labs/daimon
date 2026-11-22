@@ -54,10 +54,13 @@ Where each feature can be set, and its default.
 | Status reactions | `status_reactions` | Chat | Off | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
 | Lock reaction | `protected_notice_reaction` | Chat | On | ✓ | ✓ | ✓ | ✓ |  |  | Only Discord |
 | Text before tool calls | `pre_tool_messages` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
+| Working card timer | `card_timer` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord |
+| Answer bots | `answer_bots` | Chat | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  |  | Only Discord |
+| Routine result header | `routine_result_header` | Chat | On | ✓ | ✓ | ✓ | ✓ |  | ✓ |  |
 | Tool server names | `tool_server_names` | Chat | On |  | ✓ | ✓ |  |  |  |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |  |
@@ -256,7 +259,7 @@ Instructions at the top of the agent's prompt on where its keys, repo, memory an
 
 ## Run commands
 
-The agent can run commands. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can run commands. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -270,7 +273,7 @@ The agent can run commands. Off removes it here; On never gives more than the ag
 
 ## Read files
 
-The agent can read files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can read files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -284,7 +287,7 @@ The agent can read files. Off removes it here; On never gives more than the agen
 
 ## Edit files
 
-The agent can edit files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can edit files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -298,7 +301,7 @@ The agent can edit files. Off removes it here; On never gives more than the agen
 
 ## Write files
 
-The agent can write new files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can write new files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -312,7 +315,7 @@ The agent can write new files. Off removes it here; On never gives more than the
 
 ## Search file contents
 
-The agent can search inside files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can search inside files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -326,7 +329,7 @@ The agent can search inside files. Off removes it here; On never gives more than
 
 ## Find files
 
-The agent can find files by name. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can find files by name. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -340,7 +343,7 @@ The agent can find files by name. Off removes it here; On never gives more than 
 
 ## Open web pages
 
-The agent can open web pages. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can open web pages. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -354,7 +357,7 @@ The agent can open web pages. Off removes it here; On never gives more than the 
 
 ## Search the web
 
-The agent can search the web. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation. Each search is billed at the provider's list price, past any free allowance.
+The agent can search the web. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message. Each search is billed at the provider's list price, past any free allowance.
 
 | | |
 | --- | --- |
@@ -368,7 +371,7 @@ The agent can search the web. Off removes it here; On never gives more than the 
 
 ## Web app
 
-The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
+The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves it out.
 
 | | |
 | --- | --- |
@@ -407,7 +410,7 @@ A short note in front of a message that did not come from chat, such as a routin
 
 ## Keys file
 
-The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message in a conversation. Claude agents only.
+The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message. Claude agents only.
 
 | | |
 | --- | --- |
@@ -590,6 +593,30 @@ Text written before a tool call is posted as its own message. Off keeps it on th
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 
+## Working card timer
+
+The card shows Working or Thinking with the time, and the model in its footer.
+
+| | |
+| --- | --- |
+| Key | `card_timer` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
+## Answer bots
+
+Answer a bot that mentions the agent, under people's access rules; never itself.
+
+| | |
+| --- | --- |
+| Key | `answer_bots` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Most specific wins |
+
 ## Typed mentions
 
 A message with "@" and the agent's name typed as plain text is answered like a real mention. Direct messages and bots are unchanged.
@@ -637,6 +664,18 @@ The first message in a thread, and the first after the model or effort changes, 
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Routine result header
+
+Off drops the "Result from" line above a routine's result.
+
+| | |
+| --- | --- |
+| Key | `routine_result_header` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel, Routine |
 | Combines | Most specific wins |
 
 ## Tool server names
@@ -969,7 +1008,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; an admin can set limits, a menu and their own channel.
+Answers offer a way to ask a person for help, posted in the support channel. Off removes the button and the form. The operator sets the default channel and credits; an admin sets limits, a menu and their own channel.
 
 | | |
 | --- | --- |
@@ -981,7 +1020,7 @@ Answers offer a way to ask a person for help, which posts the request in the sup
 
 ## Feedback to support
 
-A submitted thumbs-down form (the reasons, the text, the person, the agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
+A submitted thumbs-down form (reasons, text, person, agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
 
 | | |
 | --- | --- |
@@ -1068,7 +1107,7 @@ How long a callback watch lasts, new or moved in, before it must be renewed. The
 
 ## Answer time limit
 
-The longest one answer may take before it is stopped when someone is talking to the agent in a chat, a direct message or the web app: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
+The longest an answer may take before it is stopped when someone is talking to the agent: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
 
 | | |
 | --- | --- |
@@ -1242,7 +1281,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before the agent makes or resumes a watch. Skip makes it without the card, reporting in the same thread for the default duration. Editing a watch, long jobs, watch key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and Fly launches keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1279,7 +1318,7 @@ Keeps what people ask this agent in direct messages and web chat, and what it an
 
 ## Monitor coding tools
 
-Keeps what people ask this agent from their coding tools and what it answers, and the name, time and outcome of each other tool they call on it, never what the call sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
+Keeps what people ask this agent from their coding tools and what it answers, plus the name, time and outcome of their other tool calls, never what they sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
 
 | | |
 | --- | --- |

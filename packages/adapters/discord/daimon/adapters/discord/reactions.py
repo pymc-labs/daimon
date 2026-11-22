@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import weakref
+from collections import OrderedDict
 
 import structlog
 from daimon.core.model_reactions import MODEL_MARKS
@@ -73,6 +74,27 @@ async def arrange_reactions(
             log.warning("turn.reactions_arrange_failed", error_type=type(exc).__name__)
             return False
     return True
+
+
+# The message that last showed each conversation's model emoji, by the conversation's thread
+# or DM scope id (the trigger may sit in the parent channel), so a /model pick can redraw
+# them. In memory: after a restart the next turn shows the new pair instead.
+_MODEL_MESSAGES: OrderedDict[str, discord.Message] = OrderedDict()
+_MODEL_MESSAGES_MAX = 1024
+
+
+def remember_model_message(conversation_id: str, message: discord.Message) -> None:
+    """Note `message` as the one showing the conversation's model emoji."""
+    _MODEL_MESSAGES[conversation_id] = message
+    _MODEL_MESSAGES.move_to_end(conversation_id)
+    while len(_MODEL_MESSAGES) > _MODEL_MESSAGES_MAX:
+        _MODEL_MESSAGES.popitem(last=False)
+
+
+async def redraw_model_marks(conversation_id: str, marks: tuple[str, ...]) -> bool:
+    """Show `marks` on the message that last showed the conversation's model emoji."""
+    message = _MODEL_MESSAGES.get(conversation_id)
+    return message is not None and bool(marks) and await arrange_reactions(message, model=marks)
 
 
 async def remove_own_reaction(message: discord.Message, emoji: str) -> None:

@@ -85,6 +85,8 @@ class CardState:
     """The model the turn runs on, in the working card's footer."""
     waiting: bool = False
     """The model is rate limited and the turn waits for it."""
+    timed: bool = False
+    """`card_timer` is on: the headline carries the time so far, the footer the model."""
 
 
 _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})

@@ -248,7 +248,7 @@ def _builtin(tool: str) -> FeatureSpec:
         binds="session_mutable",
         doc=(
             f"The agent can {does}. Off removes it here; On never gives more than the "
-            "agent's own tool settings allow. Applies from the next message in a conversation."
+            "agent's own tool settings allow. Applies from the next message."
             + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
         backend_tiers=_PROVIDER_ONLY,
@@ -288,7 +288,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "The agent knows about the web app: messages, routine runs and tool results carry "
             "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+            "and Daimon's cards show buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -338,7 +338,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         binds="session_mutable",
         doc=(
             "The agent's saved keys as a .env file in its working files. Off leaves the file "
-            "out; the keys stay saved. Applies from the next message in a conversation. "
+            "out; the keys stay saved. Applies from the next message. "
             "Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
@@ -611,6 +611,20 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         platforms=_DISCORD,
     ),
     _shown(
+        "card_timer",
+        "Working card timer",
+        "The card shows Working or Thinking with the time, and the model in its footer.",
+        platforms=_DISCORD,
+    ),
+    _shown(
+        "answer_bots",
+        "Answer bots",
+        "Answer a bot that mentions the agent, under people's access rules; never itself.",
+        tiers=("deployment", "workspace", "agent"),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
         "plain_text_mentions",
         "Typed mentions",
         'A message with "@" and the agent\'s name typed as plain text is answered like a real '
@@ -640,6 +654,13 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "an emoji for the model and one for the effort it runs on.",
         tiers=("workspace", "agent"),
         platforms=frozenset({"discord"}),
+    ),
+    _shown(
+        "routine_result_header",
+        "Routine result header",
+        'Off drops the "Result from" line above a routine\'s result.',
+        tiers=("deployment", "workspace", "agent", "channel", "routine"),
+        default="on",
     ),
     _shown(
         "tool_server_names",
@@ -918,10 +939,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card with the destination and duration before the agent makes "
-            "or resumes a watch. Skip makes it without the card, reporting in the same "
-            "thread for the default duration. Editing a watch, long jobs, watch key "
-            "rotation and Fly launches keep asking. Only a server admin can change it."
+            "Ask shows a card with the destination and duration before a watch is made "
+            "or resumed. Skip makes it without the card, in the same thread for the "
+            "default duration. Editing a watch, long jobs, key rotation and Fly launches "
+            "keep asking. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -974,8 +995,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
                 "monitor_mcp",
                 "Monitor coding tools",
                 "Keeps what people ask this agent from their coding tools and what it answers, "
-                "and the name, time and outcome of each other tool they call on it, never what "
-                "the call sent or returned. People are told in the conversation or their first "
+                "plus the name, time and outcome of their other tool calls, never what they "
+                "sent or returned. People are told in the conversation or their first "
                 "tool result. Kept from when it is turned on, for the retention period.",
             ),
         )
@@ -1157,9 +1178,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "Answers offer a way to ask a person for help, which posts the request in the "
-            "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "default channel and credits; an admin can set limits, a menu and their own channel."
+            "Answers offer a way to ask a person for help, posted in the "
+            "support channel. Off removes the button and the form. The operator sets the "
+            "default channel and credits; an admin sets limits, a menu and their own channel."
         ),
         requires=("support_channel", "support_credits"),
         authority=_SETTINGS,
@@ -1174,7 +1195,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "A submitted thumbs-down form (the reasons, the text, the person, the agent and a "
+            "A submitted thumbs-down form (reasons, text, person, agent and a "
             "link to the answer) is also posted where Ask a person requests go, and the form "
             "says so first. It spends no credits. Off keeps the form in the database only."
         ),
@@ -1248,10 +1269,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "turn_time_limit",
         "Answer time limit",
         (
-            "The longest one answer may take before it is stopped when someone is talking to "
-            "the agent in a chat, a direct message or the web app: the standard 45 minutes, "
-            "or shorter. The smallest setting wins. Routines and watches use "
-            "the unattended run limit."
+            "The longest an answer may take before it is stopped when someone is talking to "
+            "the agent: the standard 45 minutes, or shorter. The smallest setting wins. "
+            "Routines and watches use the unattended run limit."
         ),
         _TIME_LIMITS,
         default="45",

@@ -491,10 +491,12 @@ def render_fallback_post(
     platform: str | None = None,
     requester_name: str | None = None,
     agent_name: str | None = None,
+    header: bool = True,
 ) -> str:
     """The message posted for a routine whose agent did not post itself.
 
-    `agent_name` is the agent as people see it (`routine_agent_name`).
+    `agent_name` is the agent as people see it (`routine_agent_name`). `header` False
+    (`routine_header_shown`) posts a result without its "Result from" line.
 
     `as_agent` is for a post that carries the agent's own name and face, which
     already say who it is from; the schedule is kept either way, in words
@@ -508,9 +510,8 @@ def render_fallback_post(
         owner = "The" if as_agent else f"{name}'s"
         return f"{owner} {phrase} failed, so there's no result this time.\n\n{payload}"
     owner = "the" if as_agent else f"{name}'s"
-    return _attributed(
-        f"Result from {owner} {phrase}:\n\n{payload}", row, platform, requester_name, name
-    )
+    text = f"Result from {owner} {phrase}:\n\n{payload}" if header else payload
+    return _attributed(text, row, platform, requester_name, name)
 
 
 async def routine_requester_name(

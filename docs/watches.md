@@ -225,9 +225,13 @@ DAIMON_WATCHES__CALLBACK_BASE_URL=https://hooks.example.com
 Only a SHA-256 of each token is stored and compared in constant time. Every
 refusal answers the same `403`; oversized bodies get `413` and a body with a NUL
 byte `400`. A retried post of the same body within five minutes wakes the agent
-once and still answers `202`. A callback watch cannot be made in a DM. Wakes share the
-per-watch and per-owner limits above, and a flood of bad links is rate limited
-per address and in the database. Keep the proxy from logging paths.
+once and still answers `202`. Wakes share the per-watch and per-owner limits above,
+and a flood of bad links is rate limited per address and in the database. Keep the
+proxy from logging paths.
+
+A watch made in a Discord DM, callback or poll, reports in that DM, each fire as a
+fresh private turn. The DM conversation the person carries on in is told what it said.
+Slack refuses one made in a DM.
 
 ## Import watches from another system
 
