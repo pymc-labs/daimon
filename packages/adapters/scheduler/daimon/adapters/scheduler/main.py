@@ -106,6 +106,8 @@ from daimon.core.monitoring_sweep import sweep_monitored_events
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
+from daimon.core.ops_events import drain_ops_events
+from daimon.core.ops_events_sweep import sweep_ops_events
 from daimon.core.pending_carry_over_sweep import sweep_stale_pending_carry_overs
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
@@ -1363,6 +1365,28 @@ async def _sweep_monitored_events(
         log.exception("scheduler.monitoring_sweep.failed")
 
 
+# Retention is counted in days, so an hourly run deletes a row at most an hour late.
+_OPS_EVENTS_PRUNE_INTERVAL = timedelta(hours=1)
+_last_ops_events_prune: dict[str, datetime] = {}
+
+
+@scheduler_step
+async def _sweep_ops_events(
+    sm: async_sessionmaker[AsyncSession], *, retention_days: int, now: datetime | None = None
+) -> None:
+    """Delete ops events past retention at most once per interval. Boundary catch: a sweep
+    failure must not kill the scheduler loop; a failed run waits too."""
+    current = now or datetime.now(UTC)
+    last = _last_ops_events_prune.get("started")
+    if last is not None and current - last < _OPS_EVENTS_PRUNE_INTERVAL:
+        return
+    _last_ops_events_prune["started"] = current
+    try:
+        await sweep_ops_events(sm, now=current, retention_days=retention_days)
+    except SQLAlchemyError:
+        log.exception("scheduler.ops_events_sweep.failed")
+
+
 # Each run reads every idle Gemini row; idleness is counted in days.
 _GEMINI_RETENTION_INTERVAL = timedelta(hours=1)
 _last_gemini_retention: dict[str, datetime] = {}
@@ -2167,6 +2191,7 @@ async def run(
         )
         await client.close()
         await drain_outcomes()
+        await drain_ops_events()
         await engine.dispose()
         return 1
 
@@ -2254,6 +2279,7 @@ async def run(
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
+            await _sweep_ops_events(sm, retention_days=settings.ops_events.retention_days)
             await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
@@ -2296,6 +2322,7 @@ async def run(
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
+            await _sweep_ops_events(sm, retention_days=settings.ops_events.retention_days)
             await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
@@ -2358,6 +2385,7 @@ async def run(
         await lock_conn.close()
         await client.close()
         await drain_outcomes()
+        await drain_ops_events()
         if _engine_override is None:
             await engine.dispose()
 
