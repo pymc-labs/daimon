@@ -31,6 +31,7 @@ from daimon.core.cursor import MAX_PAGE
 from daimon.core.host_calls import WAKE_SEED, wake_prefix
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import dismiss_notice, monitored_notice
+from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_workspace_settings as workspace_settings
@@ -117,37 +118,131 @@ def _live_message(reply_id: uuid.UUID, events: list[Event], created_at: str) -> 
     }
 
 
+async def page_titles(db: AsyncSession, threads: list[WebThreadRow]) -> dict[uuid.UUID, str]:
+    """The title of each page these ask threads were started from."""
+    ids = {t.artifact_id for t in threads if t.artifact_id is not None}
+    found = [await artifact_store.get(db, i) for i in ids]
+    return {a.id: a.title for a in found if a is not None}
+
+
+def turns_of(runtime: WebRuntime) -> WebTurns:
+    if runtime.turns is None:
+        raise HTTPException(status_code=503, detail="Chat is not available right now.")
+    return runtime.turns
+
+
+async def chattable_agents(
+    runtime: WebRuntime, caller: WebCaller, *, only: str | None = None
+) -> list[BetaManagedAgentsAgent]:
+    """The agents this person may chat with on the web, the workspace's default first;
+    with `only`, just that agent if they may."""
+    deps, tenant_id = turns_of(runtime).deps, caller.person.tenant_id
+    listed = await runtime.agents.agents(deps.anthropic, tenant_id)
+    if only is not None:
+        listed = [a for a in listed if a.id == only]
+    async with runtime.sessionmaker() as db:
+        principal = await caller.principal(db)
+        allowed = await directory.chattable(
+            db, listed, person=caller.person, role=caller.role, principal=principal
+        )
+        chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
+    name = deps.deployment_default.agent_name
+
+    def first(agent: BetaManagedAgentsAgent) -> bool:
+        if chosen.default_agent is not None:
+            return agent.id == chosen.default_agent
+        return agent.name == name
+
+    return sorted(allowed, key=lambda a: (not first(a), a.name.lower()))
+
+
+async def open_thread(
+    db: AsyncSession,
+    caller: WebCaller,
+    agent: BetaManagedAgentsAgent,
+    *,
+    title: str,
+    artifact_id: uuid.UUID | None = None,
+) -> WebThreadRow:
+    """A new chat with `agent`, bound so its turns answer as that agent; `artifact_id`
+    makes it the person's ask thread for that page."""
+    thread = await chat_store.create_thread(
+        db,
+        tenant_id=caller.person.tenant_id,
+        person_id=caller.person.id,
+        agent_id=agent.id,
+        agent_name=agent.name,
+        title=title,
+        artifact_id=artifact_id,
+    )
+    await create_binding(
+        db,
+        tenant_id=thread.tenant_id,
+        platform="web",
+        parent_channel_id=place_of(caller.person.id),
+        thread_id=thread_key(thread.id),
+        responder_ma_agent_id=agent.id,
+        responder_name=agent.name,
+        creator_account_id=caller.person.account_id,
+        kind="web",
+    )
+    return thread
+
+
+async def post_message(
+    runtime: WebRuntime,
+    caller: WebCaller,
+    thread: WebThreadRow,
+    *,
+    message_id: uuid.UUID,
+    content: str,
+    attachments: tuple[WebAttachment, ...] = (),
+) -> StreamingResponse:
+    """Save the person's message and stream the turn that answers it, metered and gated
+    as every web chat turn is."""
+    live = turns_of(runtime)
+    if live.draining:
+        raise HTTPException(status_code=503, detail="Restarting. Try again in a moment.")
+    if live.streams.running(thread.id) is not None:
+        raise HTTPException(status_code=409, detail="Wait for the answer to finish.")
+    async with runtime.sessionmaker.begin() as db:
+        try:
+            message, new = await chat_store.insert_user_message(
+                db,
+                tenant_id=thread.tenant_id,
+                thread_id=thread.id,
+                message_id=message_id,
+                content=content,
+                blocks=WebMessageBlocks(attachments=attachments),
+            )
+        except LookupError:
+            raise HTTPException(status_code=409, detail="This message was already sent.") from None
+        if not new:
+            raise HTTPException(status_code=409, detail="This message was already sent.")
+        if thread.title == NEW_TITLE:
+            await chat_store.update_thread(
+                db, thread_id=thread.id, title=_title_of(content, list(attachments))
+            )
+        principal = await caller.principal(db)
+    try:
+        stream = live.start(
+            person=caller.person, principal=principal, thread=thread, message=message
+        )
+    except RuntimeError:
+        raise HTTPException(status_code=409, detail="Wait for the answer to finish.") from None
+    return sse_response(stream)
+
+
 def chat_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/chat")
 
     def turns() -> WebTurns:
-        if runtime.turns is None:
-            raise HTTPException(status_code=503, detail="Chat is not available right now.")
-        return runtime.turns
+        return turns_of(runtime)
 
     async def chattable(
         caller: WebCaller, *, only: str | None = None
     ) -> list[BetaManagedAgentsAgent]:
-        """The agents this person may chat with on the web, the workspace's default first;
-        with `only`, just that agent if they may."""
-        deps, tenant_id = turns().deps, caller.person.tenant_id
-        listed = await runtime.agents.agents(deps.anthropic, tenant_id)
-        if only is not None:
-            listed = [a for a in listed if a.id == only]
-        async with runtime.sessionmaker() as db:
-            principal = await caller.principal(db)
-            allowed = await directory.chattable(
-                db, listed, person=caller.person, role=caller.role, principal=principal
-            )
-            chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
-        name = deps.deployment_default.agent_name
-
-        def first(agent: BetaManagedAgentsAgent) -> bool:
-            if chosen.default_agent is not None:
-                return agent.id == chosen.default_agent
-            return agent.name == name
-
-        return sorted(allowed, key=lambda a: (not first(a), a.name.lower()))
+        return await chattable_agents(runtime, caller, only=only)
 
     async def thread_of(db: AsyncSession, caller: WebCaller, session_id: uuid.UUID) -> WebThreadRow:
         thread = await chat_store.get_thread(db, person_id=caller.person.id, thread_id=session_id)
@@ -209,12 +304,17 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             found = await chat_store.list_threads(
                 db, person_id=caller.person.id, limit=page.limit + 1, before=page.cursor
             )
-        threads = cut(found, page, response, lambda t: (t.updated_at, t.id))
+            threads = cut(found, page, response, lambda t: (t.updated_at, t.id))
+            pages = await page_titles(db, threads)
         listed = {t.id: agent_of(caller, t.agent_id) for t in threads}
         avatars = await faces(caller, list(listed.values()))
         return [
             session_json(
-                t, listed[t.id], running=is_running(t.id), avatar=avatars.get(t.agent_id, "")
+                t,
+                listed[t.id],
+                running=is_running(t.id),
+                avatar=avatars.get(t.agent_id, ""),
+                pages=pages,
             )
             for t in threads
         ]
@@ -225,25 +325,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         if agent is None:
             raise HTTPException(status_code=404, detail="This agent isn't available to you.")
         async with runtime.sessionmaker.begin() as db:
-            thread = await chat_store.create_thread(
-                db,
-                tenant_id=caller.person.tenant_id,
-                person_id=caller.person.id,
-                agent_id=agent.id,
-                agent_name=agent.name,
-                title=NEW_TITLE,
-            )
-            await create_binding(
-                db,
-                tenant_id=thread.tenant_id,
-                platform="web",
-                parent_channel_id=place_of(caller.person.id),
-                thread_id=thread_key(thread.id),
-                responder_ma_agent_id=agent.id,
-                responder_name=agent.name,
-                creator_account_id=caller.person.account_id,
-                kind="web",
-            )
+            thread = await open_thread(db, caller, agent, title=NEW_TITLE)
         return session_json(
             thread,
             agent,
@@ -264,6 +346,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             rows = await chat_store.list_messages(
                 db, thread_id=thread.id, limit=limit + 1, before_seq=before
             )
+            pages = await page_titles(db, [thread])
         earlier = len(rows) > limit
         rows = rows[1:] if earlier else rows
         messages = [message_json(row) for row in rows]
@@ -303,6 +386,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             running="resume_from" in out,
             avatar=(await faces(caller, [agent])).get(thread.agent_id, ""),
             model=await thread_model(runtime, caller, thread, agent),
+            pages=pages,
         )
         return out
 
@@ -329,6 +413,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         async with runtime.sessionmaker.begin() as db:
             thread = await thread_of(db, caller, session_id)
             await chat_store.update_thread(db, thread_id=thread.id, title=title)
+            pages = await page_titles(db, [thread])
         thread = thread.model_copy(update={"title": title})
         agent = agent_of(caller, thread.agent_id)
         return session_json(
@@ -337,6 +422,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             running=is_running(thread.id),
             avatar=(await faces(caller, [agent])).get(thread.agent_id, ""),
             model=await thread_model(runtime, caller, thread, agent),
+            pages=pages,
         )
 
     @router.post("/sessions/{session_id}/switch-back")
@@ -372,8 +458,6 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/sessions/{session_id}/messages")
     async def send(session_id: uuid.UUID, body: NewMessage, caller: Caller) -> StreamingResponse:  # pyright: ignore[reportUnusedFunction]
         live = turns()
-        if live.draining:
-            raise HTTPException(status_code=503, detail="Restarting. Try again in a moment.")
         if not body.content.strip() and not body.attachments:
             raise HTTPException(status_code=422, detail="Write a message first.")
         async with runtime.sessionmaker() as db:
@@ -386,34 +470,14 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         if live.streams.running(thread.id) is not None:
             raise HTTPException(status_code=409, detail="Wait for the answer to finish.")
         await require_own_uploads(caller, body.attachments)
-        async with runtime.sessionmaker.begin() as db:
-            try:
-                message, new = await chat_store.insert_user_message(
-                    db,
-                    tenant_id=thread.tenant_id,
-                    thread_id=thread.id,
-                    message_id=body.id,
-                    content=body.content,
-                    blocks=WebMessageBlocks(attachments=tuple(body.attachments)),
-                )
-            except LookupError:
-                raise HTTPException(
-                    status_code=409, detail="This message was already sent."
-                ) from None
-            if not new:
-                raise HTTPException(status_code=409, detail="This message was already sent.")
-            if thread.title == NEW_TITLE:
-                await chat_store.update_thread(
-                    db, thread_id=thread.id, title=_title_of(body.content, body.attachments)
-                )
-            principal = await caller.principal(db)
-        try:
-            stream = live.start(
-                person=caller.person, principal=principal, thread=thread, message=message
-            )
-        except RuntimeError:
-            raise HTTPException(status_code=409, detail="Wait for the answer to finish.") from None
-        return sse_response(stream)
+        return await post_message(
+            runtime,
+            caller,
+            thread,
+            message_id=body.id,
+            content=body.content,
+            attachments=tuple(body.attachments),
+        )
 
     @router.get("/sessions/{session_id}/stream")
     async def resume(  # pyright: ignore[reportUnusedFunction]

@@ -155,7 +155,6 @@ async def _caller(
         live, person = found
         if person.status == "suspended" and not allow_suspended:
             raise HTTPException(status_code=403, detail="This account is suspended.")
-        chosen = await workspace_settings.get_settings(db, tenant_id=person.tenant_id)
         # The lifetime counts from sign-in, so lowering the setting also ends older sessions.
         ended = now >= live.created_at + ttl_of(runtime)
         if not ended and now - live.roles_checked_at >= _RECHECK_EVERY:
@@ -166,28 +165,33 @@ async def _caller(
             if now - live.last_seen_at >= _TOUCH_EVERY:
                 await sessions_store.touch(db, session_id=live.id, now=now)
                 await people_store.update_person(db, person_id=person.id, last_seen_at=now)
-            standings = await chat_standings(db, [person])
-            left = has_left(standings, person)
-            if left and not (allow_suspended if allow_left is None else allow_left):
+            caller = await build_caller(runtime, db, live, person)
+            if caller.left and not (allow_suspended if allow_left is None else allow_left):
                 raise HTTPException(status_code=403, detail=LEFT_WORKSPACE)
-            identities = await identities_store.list_for_person(db, person_id=person.id)
-            role = (await roles_of(db, [person], standings))[person.id]
-            # A workspace can turn a module off, never on; admin always stays.
-            enabled: list[WebModuleKey] = [
-                m for m in runtime.web.modules if m not in chosen.modules_off
-            ]
-            modules = tuple(modules_for(role, enabled))
-            return WebCaller(
-                session=live,
-                person=person,
-                role=role,
-                modules=modules,
-                capabilities=capabilities_for(
-                    role, modules, files=await may_attach(db, person, role)
-                ),
-                identities=tuple(identities),
-                left=left,
-            )
+            return caller
         await sessions_store.delete_session(db, token_sha256=digest)
     # Raised after the block, which commits the delete; raising inside would roll it back.
     raise _unauthorized()
+
+
+async def build_caller(
+    runtime: WebRuntime, db: AsyncSession, web_session: WebSessionRow, person: WebPersonRow
+) -> WebCaller:
+    """What `person` may do now, signed in through `web_session`; `left` says whether
+    their chat account is gone from the workspace."""
+    chosen = await workspace_settings.get_settings(db, tenant_id=person.tenant_id)
+    standings = await chat_standings(db, [person])
+    identities = await identities_store.list_for_person(db, person_id=person.id)
+    role = (await roles_of(db, [person], standings))[person.id]
+    # A workspace can turn a module off, never on; admin always stays.
+    enabled: list[WebModuleKey] = [m for m in runtime.web.modules if m not in chosen.modules_off]
+    modules = tuple(modules_for(role, enabled))
+    return WebCaller(
+        session=web_session,
+        person=person,
+        role=role,
+        modules=modules,
+        capabilities=capabilities_for(role, modules, files=await may_attach(db, person, role)),
+        identities=tuple(identities),
+        left=has_left(standings, person),
+    )
