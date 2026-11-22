@@ -36,6 +36,7 @@ from slack_sdk.errors import SlackApiError, SlackRequestError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
 from slack_sdk.web.file_upload_v2_result import FileUploadV2Result
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -270,6 +271,7 @@ async def deliver_session_outputs(
     noticed_files: NoticedFiles | None = None,
     requester_user_id: str | None = None,
     requester_label: str | None = None,
+    sessions: async_sessionmaker[AsyncSession] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Sweep the session's outputs into the thread, degrading on abort codes.
@@ -304,8 +306,9 @@ async def deliver_session_outputs(
             sleep=sleep,
             max_bytes=SLACK_MAX_BYTES_PER_FILE,
             noticed=noticed_files,
-            tenant_id=str(derive_tenant_uuid(platform="slack", workspace_id=team_id)),
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
             platform="slack",
+            sessions=sessions,
         )
     except OutputPostingUnavailable as exc:
         code = _abort_code(exc)

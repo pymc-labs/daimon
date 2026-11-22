@@ -432,7 +432,7 @@ def make_discord_routine_poster(
                 routine_id=str(row.id),
                 error_type=type(err).__name__,
             )
-            return DeliveryOutcome(status="skipped", note=reason)
+            return DeliveryOutcome(status="skipped", note=reason, failed=type(err).__name__)
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
     async def _post(row: RoutineRow) -> DeliveryOutcome:

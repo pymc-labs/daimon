@@ -57,6 +57,7 @@ from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.features.model_input import ANSWER_MESSAGES
 from daimon.core.monitoring import MonitoringNotice
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.provider_turn_cost import LATE_TURN_COSTS
@@ -1531,6 +1532,17 @@ class DiscordTurnLifecycle(OutputGate):
                     platform="discord",
                     error_type=type(exc).__name__,
                 )
+                if self._sessionmaker is not None:
+                    report_ops_event(
+                        self._sessionmaker,
+                        OpsEvent(
+                            "delivery.output_failed",
+                            self._tenant_id,
+                            reason=type(exc).__name__,
+                            platform="discord",
+                        ),
+                        logged=False,
+                    )
                 chunks = (
                     _split_with_name_prefix(original_response_text, self._agent_name)
                     if use_name_prefix

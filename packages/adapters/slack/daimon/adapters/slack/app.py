@@ -278,6 +278,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.output_runtime import OutputRuntime
@@ -1101,6 +1102,7 @@ class SlackApp:
                 noticed_files=self._noticed_output_files,
                 requester_user_id=requester_user_id,
                 requester_label=requester_label,
+                sessions=self.runtime.sessionmaker,
             )
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(
@@ -1110,6 +1112,18 @@ class SlackApp:
                 session_id=session_id,
                 thread_id=thread_ts,
                 error_type=type(exc).__name__,
+            )
+            report_ops_event(
+                self.runtime.sessionmaker,
+                OpsEvent(
+                    "delivery.output_failed",
+                    derive_tenant_uuid(platform="slack", workspace_id=team_id),
+                    reason=type(exc).__name__,
+                    platform="slack",
+                    thread_id=thread_ts,
+                    session_id=session_id,
+                ),
+                logged=False,
             )
 
     async def on_request(

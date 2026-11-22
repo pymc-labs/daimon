@@ -80,6 +80,7 @@ from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.monitoring import MonitoringNotice
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.mentions import mentioned_user_ids, untag
 from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE, turn_tally_key
@@ -909,6 +910,17 @@ class SlackTurnLifecycle(OutputGate):
                         platform="slack",
                         error_type=type(exc).__name__,
                     )
+                    if self._sessionmaker is not None:
+                        report_ops_event(
+                            self._sessionmaker,
+                            OpsEvent(
+                                "delivery.output_failed",
+                                self._tenant_id,
+                                reason=type(exc).__name__,
+                                platform="slack",
+                            ),
+                            logged=False,
+                        )
                     # The renderer retains escaped original Markdown alongside
                     # the native table. Avoid double-escaping it on retry, but
                     # seal each part: a split can move code into prose.

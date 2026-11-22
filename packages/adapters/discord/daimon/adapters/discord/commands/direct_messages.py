@@ -86,6 +86,8 @@ from daimon.core.logging_setup import is_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.ops_catalog import OpsCode
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.setup_conversations import BoundAgentUnavailable
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -416,6 +418,7 @@ class DirectMessageCog(commands.Cog):
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )
+            self._report(tenant.id, "dm.failed", "discovery")
             await message.channel.send(
                 _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
             )
@@ -1309,21 +1312,32 @@ class DirectMessageCog(commands.Cog):
                 error_type=type(exc).__name__,
                 user_id=str(first.author.id),
             )
+            self._report(tenant_id, "dm.failed", "reply")
             with contextlib.suppress(discord.HTTPException):
                 await first.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
             return scope_id
 
+    def _report(self, tenant_id: uuid.UUID | None, code: OpsCode, reason: str) -> None:
+        """Record a DM failure as an issue; the caller logs its own line."""
+        report_ops_event(
+            self.bot.runtime.sessionmaker,
+            OpsEvent(code, tenant_id, reason=reason, platform="discord"),
+            logged=False,
+        )
+
     async def _tell_dropped(
         self, channel: discord.abc.Messageable, *, reason: str, tenant_id: uuid.UUID | None
     ) -> None:
         """Tell the person messages taken in for a turn that will not run were not sent."""
+        reason = "process_stopping" if is_shutting_down() else reason
         log.warning(
             "discord.dm.dropped",
             tenant_id=str(tenant_id) if tenant_id is not None else None,
-            reason="process_stopping" if is_shutting_down() else reason,
+            reason=reason,
         )
+        self._report(tenant_id, "dm.failed", reason)
         with contextlib.suppress(discord.HTTPException):
             await channel.send(
                 embed=build_notice_embed(_DROPPED_NOTICE),
@@ -1575,6 +1589,7 @@ class DirectMessageCog(commands.Cog):
                     path="dm",
                     reason="queue_full",
                 )
+                self._report(conversation.tenant_id, "turn.shed", "queue_full")
                 await message.channel.send(
                     embed=build_notice_embed(GLOBAL_CAP_NOTICE),
                     allowed_mentions=discord.AllowedMentions.none(),
