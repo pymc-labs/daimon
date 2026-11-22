@@ -20,7 +20,7 @@ async def _routine(db_session: AsyncSession, **kw: object) -> RoutineRow:
     row = await create_routine(
         db_session,
         tenant_id=tenant.id,
-        created_by_user_id="owner-1",
+        created_by_user_id="123",
         agent_id="agent_a",
         agent_name="daimon",
         cron_expr="0 9 * * *",
@@ -85,9 +85,9 @@ async def test_a_dm_routine_follows_its_agent_and_workspace(
 ) -> None:
     tenant = await make_tenant(db_session)
     row = await create_routine(
-        db_session, tenant_id=tenant.id, created_by_user_id="owner-1", agent_id="agent_a",
+        db_session, tenant_id=tenant.id, created_by_user_id="123", agent_id="agent_a",
         agent_name="daimon", cron_expr="0 9 * * *", timezone_="UTC", trigger_message="nightly",
-        destination_kind="dm", destination_id="owner-1",
+        destination_kind="dm", destination_id="123",
     )  # fmt: skip
     await db_session.commit()
     await _set(db_session_factory, row, FeatureTarget("agent", agent_id="agent_a"), "off")

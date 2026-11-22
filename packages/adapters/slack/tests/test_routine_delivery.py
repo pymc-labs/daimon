@@ -82,7 +82,8 @@ def _poster(
             sessionmaker=sm,
             anthropic=MagicMock(),
             settings=SimpleNamespace(
-                direct_message_policies=dm_policies if dm_policies is not None else {}
+                direct_message_policies=dm_policies if dm_policies is not None else {},
+                features={},
             ),
             deployment_default=DeploymentDefault(),
             group_members=GroupMembersCache(),
