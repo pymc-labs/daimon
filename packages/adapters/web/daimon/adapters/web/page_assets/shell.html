@@ -212,7 +212,8 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
     const msg = event.data;
     if (event.source !== frame.contentWindow || !msg || typeof msg !== "object" || Array.isArray(msg) || msg.daimon !== 1) return;
     const reply = (body) => toFrame({ id: msg.id, ...body });
-    if (msg.nav === "open") return void openLink(msg.url);
+    // Only from a click or key press: a page cannot raise the sheet on load or a timer.
+    if (msg.nav === "open") return void (navigator.userActivation?.isActive && openLink(msg.url));
     if (msg.nav === "thumbnail") return void saveThumbnail(msg.png);
     if (msg.nav === "hash" || msg.nav === "copy") {
       if (typeof msg.hash !== "string" || !validHash(msg.hash)) return;
