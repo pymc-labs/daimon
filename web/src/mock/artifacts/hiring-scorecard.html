@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hiring scorecard</title>
+<style>
+:root{--ink:#0c1f40;--mute:#5b677d;--line:#e4e8ee;--teal:#0c9e82}
+*{box-sizing:border-box}body{margin:0;background:#f6f8fa;color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:28px 24px 40px}h1{margin:0;font-size:22px;letter-spacing:-.01em}.sub{color:var(--mute);font-size:13px}
+.tabs{display:flex;gap:6px;margin:18px 0 12px}.tabs button{font:inherit;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;color:var(--mute)}.tabs button.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.panel{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+table{width:100%;border-collapse:collapse}th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);text-align:left;font-weight:600;padding:10px 14px;background:#fafbfc;border-bottom:1px solid var(--line)}td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle}tr:last-child td{border:0}
+.n{font-weight:600}.r{font-size:12px;color:var(--mute)}
+.dots{display:flex;gap:3px}.dots i{width:14px;height:6px;border-radius:3px;background:#e4e8ee}.dots i.f{background:var(--teal)}
+.avg{font-weight:700;font-size:16px;font-variant-numeric:tabular-nums}.st{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:#edf0f4;color:#3c4a64}.st.Onsite{background:#dff4ee;color:#0a7d68}.st.Offer{background:#fdecd7;color:#a35c0c}
+.form{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.form b{font-size:13px;margin-right:6px}select,button.s{font:inherit;border:1px solid #cfd6e0;border-radius:8px;padding:7px 10px;background:#fff}button.s{background:var(--ink);color:#fff;border-color:var(--ink);font-weight:500;cursor:pointer;margin-left:auto}
+.ok{display:none;font-size:12px;color:#1a7f53}@media(max-width:620px){.h{display:none}}
+</style></head><body><div class="wrap">
+<h1>Hiring scorecard</h1><div class="sub">Data scientist, 4 candidates, 3 scorers</div>
+<div class="tabs" id="tabs"></div>
+<div class="panel"><table><thead><tr><th>Candidate</th><th class="h">Modeling</th><th class="h">Communication</th><th class="h">Product sense</th><th>Average</th><th>Stage</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="form"><b>Submit a score</b><select id="who"></select><select id="area"><option>Modeling</option><option>Communication</option><option>Product sense</option></select><select id="v"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>5</option></select><span class="ok" id="ok">Saved</span><button class="s" id="send">Submit</button></div>
+</div>
+<script>
+const C=[["Ines Carvalho","Ex-Larkspur, 6 yrs",[5,4,4],"Onsite"],["Omar Haddad","Bayesian modeling lead",[4,3,4],"Screen"],["Keiko Mori","Applied scientist",[4,5,3],"Offer"],["Leon Fischer","Analytics engineer",[3,4,3],"Screen"]];
+let f="All";const stages=["All","Screen","Onsite","Offer"];
+const dots=v=>`<div class="dots">${[1,2,3,4,5].map(i=>`<i class="${i<=v?"f":""}"></i>`).join("")}</div>`;
+function draw(){
+ tabs.innerHTML=stages.map(s=>`<button class="${s===f?"on":""}" data-s="${s}">${s}</button>`).join("");
+ rows.innerHTML=C.filter(c=>f==="All"||c[3]===f).map(c=>`<tr><td><div class="n">${c[0]}</div><div class="r">${c[1]}</div></td>${c[2].map(v=>`<td class="h">${dots(v)}</td>`).join("")}<td class="avg">${(c[2].reduce((a,b)=>a+b)/3).toFixed(1)}</td><td><span class="st ${c[3]}">${c[3]}</span></td></tr>`).join("");
+}
+tabs.onclick=e=>{const b=e.target.closest("button");if(b){f=b.dataset.s;draw()}};
+who.innerHTML=C.map((c,i)=>`<option value="${i}">${c[0]}</option>`).join("");
+send.onclick=()=>{const i=+who.value,k=["Modeling","Communication","Product sense"].indexOf(area.value);C[i][2][k]=+v.value;ok.style.display="inline";setTimeout(()=>ok.style.display="none",1500);draw()};
+draw();
+</script></body></html>

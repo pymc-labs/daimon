@@ -46,6 +46,8 @@ const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString
 
 export const SESSIONS: Record<string, ChatSession[]> = {
   p_maya: [
+    { id: "s_ask_runsheet", title: "Content run sheet", agent: agent("ag_default"), updated_at: hoursAgo(0.1), artifact: { id: "k4rm7q2xdn", title: "Content run sheet" } },
+    { id: "s_runsheet", title: "Build a run sheet for the content team", agent: agent("ag_default"), updated_at: hoursAgo(2.5) },
     { id: "s_q3", title: "Q3 media mix readout for Larkspur", agent: agent("ag_mmm"), updated_at: hoursAgo(0.3) },
     { id: "s_churn", title: "Cobalt churn model priors", agent: agent("ag_default"), updated_at: hoursAgo(3) },
     { id: "s_pr", title: "Review PR #412 adstock refactor", agent: agent("ag_review"), updated_at: hoursAgo(26) },
@@ -60,20 +62,20 @@ export const SESSIONS: Record<string, ChatSession[]> = {
 }
 
 const ALL: Capability[] = [
-  "chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "channels.manage", "routines.view", "routines.manage",
+  "chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "channels.manage", "routines.view", "routines.manage", "artifacts.view", "artifacts.manage",
   "credits.view_own", "credits.manage", "integrations.view", "integrations.manage", "people.manage", "audit.view", "workspace.manage",
 ]
 const CAPS: Record<Role, Capability[]> = {
   owner: ALL, admin: ALL,
-  member: ["chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "routines.view", "routines.manage", "credits.view_own"],
+  member: ["chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "routines.view", "routines.manage", "artifacts.view", "credits.view_own"],
   visitor: ["chat.use", "credits.view_own"],
 }
 /** Visitors the demo lets attach files, by person; the default visitor has them off. */
 export const visitorFiles: Record<string, boolean> = { p_jordan: false }
 const MODULES: Record<Role, ModuleKey[]> = {
-  owner: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
-  admin: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
-  member: ["chat", "agents", "channels", "routines", "credits"], visitor: ["chat"],
+  owner: ["chat", "agents", "channels", "routines", "artifacts", "credits", "integrations", "admin"],
+  admin: ["chat", "agents", "channels", "routines", "artifacts", "credits", "integrations", "admin"],
+  member: ["chat", "agents", "channels", "routines", "artifacts", "credits"], visitor: ["chat"],
 }
 const CREDIT: Record<Role, Me["credit"]> = {
   owner: { left_usd: 63.2, total_usd: 100, window: "month", resets_at: "2026-11-01T00:00:00Z" },
