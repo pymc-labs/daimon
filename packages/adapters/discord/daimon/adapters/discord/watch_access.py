@@ -71,11 +71,13 @@ async def _require_bot_may_post(
     if not await bot_access_wait_on(sessions, tenant_id=row.tenant_id, platform="discord"):
         return
     if client.user is None:
-        raise ValueError("Watch bot identity is unavailable")
+        raise BotAccessUnavailable
     try:
         me = await guild.fetch_member(client.user.id)
-    except (discord.Forbidden, discord.NotFound):
-        raise BotAccessUnavailable from None
+    except discord.Forbidden as error:
+        if is_missing_access(error.status, error.code):
+            raise BotAccessUnavailable from None
+        raise
     permissions = channel.permissions_for(me)
     if not all(getattr(permissions, need) for need in needs):
         raise BotAccessUnavailable
