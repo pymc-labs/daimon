@@ -11,6 +11,7 @@ import { api } from "@/lib/api"
 import type { AgentRef, Me } from "@/lib/types"
 import { usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import { ArtifactCard } from "../artifacts/ChatCard"
 import { CardView } from "./Cards"
 import { bytes, inAppPath, secs } from "./format"
 import type { Card, CardAnswer, FileOut, Msg, Step } from "./types"
@@ -150,6 +151,7 @@ export function AssistantMessage({ m, agent, first, last, busy, onAnswer, onSwit
       )}
       {m.streaming && m.content && <span className="mt-2 inline-block size-1.5 animate-pulse rounded-full bg-foreground/60" />}
       {!m.streaming && m.files?.map((f) => <FileCard key={f.id} f={f} />)}
+      {!m.streaming && m.artifacts?.map((a) => <ArtifactCard key={a.id} a={a} />)}
       {m.card && (
         <div className={m.content ? "mt-3" : ""}>
           <CardView card={m.card} busy={busy} onAnswer={(a) => onAnswer(m.card!, a)} onSwitchBack={onSwitchBack} />

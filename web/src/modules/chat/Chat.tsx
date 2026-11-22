@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Loader2, MoreHorizontal, Plus } from "lucide-react"
+import { AppWindow, Loader2, MoreHorizontal, Plus } from "lucide-react"
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router"
 
@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils"
 import { useCan, useChatAgents, useMe, useSessions } from "@/lib/hooks"
 import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
 import { Pill } from "../agents/bits"
+import { ArtifactSplit } from "../artifacts/ChatCard"
 import { AgentPicker } from "./AgentPicker"
 import { MonitoringNotice, Refusal } from "./Cards"
 import { ThreadModel } from "./ThreadModel"
@@ -203,6 +204,7 @@ export function ChatView() {
             <AgentAvatar src={session.agent.avatar} name={session.agent.name} className="size-4 rounded" />
             <span>{session.agent.name}</span>
           </span>
+          {session.artifact && <Link to={`/artifacts/${session.artifact.id}`} className="hidden items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground sm:flex"><AppWindow className="size-3.5" />{session.artifact.title}</Link>}
           <ThreadModel sid={session.id} model={session.agent.model ?? ""} onChanged={() => void detail.refetch()} />
           {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}
@@ -216,7 +218,7 @@ export function ChatView() {
         </>
       )}
     >
-      <div className="flex h-full">
+      <div className="relative flex h-full">
         <div className="flex min-w-0 flex-1 flex-col">
           <div
             ref={scroller}
@@ -265,6 +267,7 @@ export function ChatView() {
             )}
           </div>
         </div>
+        <ArtifactSplit />
       </div>
       <RenameDialog session={renaming} onClose={() => setRenaming(null)} />
     </Page>

@@ -4,6 +4,7 @@ import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type { ChatSession } from "@/lib/types"
 import type { Card, CardAnswer, FileOut, Msg, StreamEvent } from "@/modules/chat/types"
+import { artifactThread } from "./artifacts"
 import { monitoringOn } from "./features"
 import { forbidden, notFound, paged, sleep, sse, unauthorized, wait } from "./util"
 import { agent, AGENTS, me, session, SESSIONS, spend } from "./world"
@@ -77,6 +78,8 @@ const files = (kind: "mmm" | "pricing" | "general"): FileOut[] =>
 function seedThread(s: ChatSession): Msg[] {
   const t = new Date(s.updated_at).getTime()
   const at = (min: number) => new Date(t - min * 60_000).toISOString()
+  const seeded = artifactThread(s.id)
+  if (seeded) return seeded
   if (s.id === "s_q3") {
     return [
       { id: "m_q3_1", role: "user", content: "Summarize the Q3 media mix readout for Larkspur and flag where we should shift budget.", created_at: at(22) },
