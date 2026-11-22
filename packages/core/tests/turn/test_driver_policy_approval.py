@@ -1510,3 +1510,58 @@ async def test_watch_send_stops_on_the_owners_used_up_allowance(db_session_facto
         await send("agent-watch")
     assert denied.value.reason == "allowance_exhausted"
     await send("another-agent")
+
+
+async def test_web_watch_spend_keys_on_the_principal_platform(db_session_factory):
+    from decimal import Decimal
+
+    from daimon.core.stores import identity, spend_allowances, tenant_ledger
+    from daimon.core.turn.admission import require_current_spend
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.testing.factories import make_tenant
+    from daimon.testing.turn_fakes import deps_for
+
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant.id,
+            delta_usd=Decimal(100),
+            reason="trial",
+            idempotency_key=f"initial:{tenant.id}",
+        )
+        linked = await identity.get_or_create_platform_principal(
+            db, tenant_id=tenant.id, platform="discord", external_id="d-owner"
+        )
+        await identity.create_platform_principal(
+            db,
+            tenant_id=tenant.id,
+            platform="web",
+            external_id="w-owner",
+            account_id=linked.account_id,
+        )
+        # The limit names the person's web id; a web watch spends under the linked one.
+        await spend_allowances.create_allowance(
+            db,
+            tenant_id=tenant.id,
+            subject_kind="person",
+            subject_id="w-owner",
+            agent_id=None,
+            amount_usd=Decimal(0),
+            window="month",
+            starts_at=now - timedelta(days=1),
+            is_cap=True,
+        )
+    with pytest.raises(AdmissionDenied) as denied:
+        await require_current_spend(
+            deps_for(sm=db_session_factory),
+            tenant_id=tenant.id,
+            platform="web",
+            external_user_id="d-owner",
+            budget_channel_id="web:place",
+            agent_id="agent-watch",
+            now=now,
+            principal_platform="discord",
+        )
+    assert denied.value.reason == "cap_exceeded"

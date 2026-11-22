@@ -132,6 +132,7 @@ from daimon.core.spend_gate import (
     AFTER_QUEUE_CHECKS,
     SpendPerson,
     SpendRequest,
+    resolve_spend_person,
     spend_gate,
     spend_gate_in_new_session,
 )
@@ -2625,9 +2626,24 @@ async def require_current_spend(
     budget_channel_id: str,
     agent_id: str,
     now: datetime,
+    principal_platform: str | None = None,
 ) -> None:
-    """The fresh spend gate for a watch send or report."""
+    """The fresh spend gate for a watch send or report.
+
+    `principal_platform` names the platform `external_user_id` is on when it is not
+    `platform` (a web watch runs as the owner's linked chat id), so the allowance is that
+    person's; the channel budget stays the thread's."""
     async with deps.sessionmaker() as session:
+        person = (
+            None
+            if principal_platform is None or principal_platform == platform
+            else await resolve_spend_person(
+                session,
+                tenant_id=tenant_id,
+                platform_user_id=external_user_id,
+                platform=principal_platform,
+            )
+        )
         block = await spend_gate(
             session,
             request=SpendRequest(
@@ -2636,6 +2652,7 @@ async def require_current_spend(
                 platform=platform,
                 channel_id=budget_channel_id,
                 agent_id=agent_id,
+                person=person,
             ),
             markup=deps.markup,
             now=now,
