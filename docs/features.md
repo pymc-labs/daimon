@@ -72,13 +72,6 @@ one turned Off since.
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | On by default on Teams |
-| Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |  |
-| Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |  |
-| Web app: channels | `web.channels` | Capability | On | ✓ | ✓ |  |  |  |  |  |
-| Web app: routines | `web.routines` | Capability | On | ✓ | ✓ |  |  |  |  |  |
-| Web app: credits | `web.credits` | Capability | On | ✓ | ✓ |  |  |  |  |  |
-| Web app: integrations | `web.integrations` | Capability | On | ✓ | ✓ |  |  |  |  |  |
-| Web app: evals | `web.evals` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Evals | `evals` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -96,6 +89,13 @@ one turned Off since.
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Web app: chat | `web.chat` | Web page | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: agents | `web.agents` | Web page | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: channels | `web.channels` | Web page | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: routines | `web.routines` | Web page | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: credits | `web.credits` | Web page | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: integrations | `web.integrations` | Web page | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: evals | `web.evals` | Web page | On | ✓ | ✓ |  |  |  |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |
 | Callback watch lifetime | `callback_watch_lifetime` | Limit | 30 days | ✓ | ✓ |  |  |  |  |  |

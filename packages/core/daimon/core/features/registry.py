@@ -29,7 +29,7 @@ Binding = Literal["turn", "session_mutable", "session_identity", "provision", "r
 in place on the next message. ``session_identity``: held by the live session until ``/new`` or a
 replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync.
 ``restart``: read once when the process starts."""
-Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
+Category = Literal["model_input", "chat", "capabilities", "web", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
     "anthropic_key",
@@ -810,7 +810,7 @@ _WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(
     FeatureSpec(
         key=f"web.{module}",
         name=f"Web app: {module}",
-        category="capabilities",
+        category="web",
         effect="capability",
         values=_ON_OFF,
         default="on",
