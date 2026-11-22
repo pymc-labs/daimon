@@ -414,10 +414,10 @@ def build_identity_relay_route(
             if body is None:
                 return Response(status_code=405 if request.method != "POST" else 413)
             try:
-                message: JsonValue = json.loads(body)
+                relayed: JsonValue = json.loads(body)
             except ValueError:
                 return Response(status_code=400)
-            return await answer_relayed(world, claims, server.name, message)
+            return await answer_relayed(world, claims, server.name, relayed)
         platform = str(claims.get("platform") or "")
         if HOLD_CLAIM in claims and await _held_in_audience_mode_on(
             sessionmaker, claims[HOLD_CLAIM], tenant_id=tenant_id, platform=platform
