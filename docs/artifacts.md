@@ -81,7 +81,13 @@ Use a registrable domain of its own, kept for pages. Pages on subdomains of one 
 
 No browser setting closes every channel. The allowed hosts see the address of each file a page loads, and browsers may look up the hosts of links in DNS.
 
-WebRTC can send data to any host, and Chrome ignores the `webrtc` policy. So the page runtime removes it, removes frames the page creates without an `https` address, and strips it from the frames it can reach. That stops the usual routes in Chrome, but is not airtight: on a content host, a page can still add an `https` frame and use WebRTC from its initial blank document before it loads. Keep a page free of data its viewers should not pass on.
+WebRTC can send data to any host, and Chrome ignores the `webrtc` policy. So the page runtime removes it, removes frames the page creates without an `https` address (also inside shadow roots made with `attachShadow`), and strips it from the frames it can reach. That stops the usual routes in Chrome, but is not airtight. What stays open:
+
+- A shadow root made without script, with a declarative `<template shadowrootmode>` or `setHTMLUnsafe`, is not watched, so a `srcdoc` frame inside one can use WebRTC.
+- On a content host, a page can add an `https` frame and use WebRTC from its initial blank window if it reaches it in the same task.
+- A frame whose `src` is set after it is added is removed, so a player must set `src` before adding the frame.
+
+Keep a page free of data its viewers should not pass on.
 
 ### The page API
 

@@ -8,8 +8,9 @@
   // WebRTC reaches any host, past connect-src. CSP `webrtc 'block'` stops it only where
   // browsers support it (Chrome does not), so this is best effort: no constructors here,
   // and none in a child frame, which would bring its own. Frames the page makes without
-  // an https address (srcdoc, about:blank) are removed, and the windows a frame element
-  // hands out are stripped. What it cannot reach is in docs/artifacts.md.
+  // an https address (srcdoc, about:blank) are removed, in shadow roots too, and the
+  // windows a frame element hands out are stripped. What it cannot reach is in
+  // docs/artifacts.md.
   const RTC = ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel",
     "RTCRtpSender", "RTCRtpReceiver", "RTCIceCandidate", "RTCSessionDescription"];
   const hardened = new WeakSet();
@@ -36,11 +37,23 @@
   // Only an iframe with an https address stays; it still starts as about:blank, see the docs.
   const kept = (el) => /^(IFRAME|FRAME)$/.test(el.tagName) && !el.hasAttribute("srcdoc")
     && /^https:/i.test(el.src);
-  const dropFrames = () => document.querySelectorAll("iframe, frame, object, embed")
-    .forEach((el) => { if (!kept(el)) el.remove(); });
-  new MutationObserver(dropFrames).observe(document, {
+  // Open and closed shadow roots hide their frames from the document's queries and
+  // observer, so each root made through attachShadow is watched and swept as well.
+  const roots = new Set([document]);
+  const dropFrames = () => roots.forEach((root) => root.querySelectorAll("iframe, frame, object, embed")
+    .forEach((el) => { if (!kept(el)) el.remove(); }));
+  const watch = (root) => new MutationObserver(dropFrames).observe(root, {
     childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcdoc"],
   });
+  watch(document);
+  const attachShadow = Element.prototype.attachShadow;
+  Object.defineProperty(Element.prototype, "attachShadow", { configurable: true, writable: true,
+    value: function (init) {
+      const root = attachShadow.call(this, init);
+      roots.add(root);
+      watch(root);
+      return root;
+    } });
   const POLL_MS = 3000;
   const FRAGMENT = /^#[A-Za-z0-9_.:-]{1,128}$/;
   const validHash = (hash) => hash === "" || FRAGMENT.exec(hash)?.[0] === hash;
@@ -193,13 +206,16 @@
     }),
   });
 
+  // The thumbnail is stored for everyone who can open the page, so a page that has read
+  // the viewer's identity is not drawn.
+  let readViewer = false;
   const use = (name) => Promise.resolve(name === "db" && config.capabilities.includes("db") ? db : null);
 
   window.daimon = Object.freeze({
     artifact: Object.freeze({ ...config.artifact }),
     capabilities: Object.freeze([...config.capabilities]),
     use,
-    me: () => Promise.resolve(config.viewer),
+    me: () => { readViewer = true; return Promise.resolve(config.viewer); },
     notify: (event, data) => call("notify", { event, data }).then((r) => r.id),
     // Runs a turn as the viewer, in their own thread for this page. Call it from a click.
     ask: (text, options) => call("ask", { text }, options && options.onText),
@@ -287,7 +303,7 @@
   }
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent || event.origin !== config.shellOrigin || event.data?.daimon !== 1
-        || event.data.nav !== "capture") return;
+        || event.data.nav !== "capture" || readViewer) return;
     capture().then((png) => {
       if (png) window.parent.postMessage({ daimon: 1, nav: "thumbnail", png }, config.shellOrigin);
     }, (error) => console.warn("daimon thumbnail", error));

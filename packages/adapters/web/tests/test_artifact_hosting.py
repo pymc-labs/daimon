@@ -272,3 +272,9 @@ async def test_a_page_with_data_or_asks_is_never_captured(
             page = await publish(db_session_factory, t.owner, slug=slug, **change)
             thumbnail = _bridge(await client.get(_path(page)))["thumbnail"]
             assert thumbnail is None, f"a page with {slug} shows data the picture would keep"
+            put = await client.put(
+                f"/api/artifacts/{page.id}/versions/1/thumbnail",
+                content=_png(64, 40),
+                headers={**OWN, "Content-Type": "image/png"},
+            )
+            assert put.status_code == 409, f"a page with {slug} keeps no thumbnail: {put.text}"
