@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import cast
 
 import pytest
@@ -11,10 +12,11 @@ from mux.contracts.resources import AgentSpec
 from mux.drivers.openai._common import Context
 from mux.drivers.openai.agents import agent_body
 from mux.drivers.openai.skill_bindings import decode, encode_metadata
-from mux.drivers.openai.transport import Transport
+from mux.drivers.openai.transport import Object, Transport
 from mux.errors import UnsupportedCapability
 
-# The longest skill id a pin carries, and a few keys of the agent's own metadata.
+# The longest skill id a pin carries (ids share only their type prefix), a long version,
+# and a few keys of the agent's own metadata.
 _ID_LENGTH = 54
 _OWN_METADATA = {f"daimon_key_{i}": "x" * 64 for i in range(3)}
 _NATIVE_METADATA_KEYS = 16
@@ -23,8 +25,8 @@ _NATIVE_METADATA_KEYS = 16
 def _pins(count: int, *, digest: bool) -> tuple[SkillRef, ...]:
     return tuple(
         SkillRef(
-            id=f"skill_{'x' * (_ID_LENGTH - 8)}{n:02}",
-            version="12",
+            id="skill_" + hashlib.sha256(str(n).encode()).hexdigest()[: _ID_LENGTH - 6],
+            version="1234",
             digest="a" * 64 if digest else None,
         )
         for n in range(count)
@@ -53,7 +55,7 @@ def test_openai_agent_metadata_carries_the_cap_of_digest_pinned_skills() -> None
 def test_openai_session_metadata_carries_the_cap_of_skills() -> None:
     """A session's pins carry no digest; its own two keys and the agent's metadata come first."""
     pins = _pins(AGENT_SKILL_CAP, digest=False)
-    metadata = {**_OWN_METADATA, "mux_tenant": "t", "mux_config_revision": "1"}
+    metadata: Object = {**_OWN_METADATA, "mux_tenant": "t", "mux_config_revision": "1"}
     metadata.update(encode_metadata(pins, _context()))
     assert len(metadata) <= _NATIVE_METADATA_KEYS, "the session metadata fits the native keys"
     assert decode(metadata) == pins

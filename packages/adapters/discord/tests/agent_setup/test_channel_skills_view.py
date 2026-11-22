@@ -211,6 +211,37 @@ def test_the_card_lists_every_skill_a_channel_can_hold() -> None:
     assert "more" not in listing, "nothing is cut off at the cap"
 
 
+def test_long_skill_names_stay_within_discords_text_limit() -> None:
+    from daimon.adapters.discord.agent_setup.channel_skills_view import (
+        build_channel_skills_container,
+    )
+    from daimon.core.constants import AGENT_SKILL_CAP
+    from daimon.core.stores.domain import ChannelSkillRow
+
+    rows = [
+        ChannelSkillRow(
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            channel_id="555",
+            skill_id=f"skill_{i}",
+            version="1" * 20,
+            name=f"{i:02}" + "n" * 62,
+            owner_agent_name=None,
+            added_by_account_id=None,
+            added_at=dt.datetime(2026, 10, 10, tzinfo=dt.UTC),
+        )
+        for i in range(AGENT_SKILL_CAP)
+    ]
+    container = build_channel_skills_container(rows, channel_name="team-020")
+    listing = next(
+        i
+        for i in container.children
+        if isinstance(i, discord.ui.TextDisplay) and i.content.startswith("`")
+    )
+    assert len(listing.content) <= 4000, "Discord refuses a longer text display"
+    assert listing.content.endswith("more"), "the rest are counted, not dropped silently"
+
+
 def test_the_add_form_says_which_skills_can_be_named() -> None:
     modal = AddChannelSkillModal(MagicMock(state=MagicMock(channel_name="team-020")))
     (label,) = modal.children

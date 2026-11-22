@@ -39,6 +39,8 @@ ADD_LABEL: Final = "Add skill"
 BACK_LABEL: Final = "◀ Back"
 #: Every skill a channel can hold.
 MAX_LISTED: Final = AGENT_SKILL_CAP
+#: Room for the list in one text display, which Discord caps at 4,000 characters.
+MAX_LIST_CHARS: Final = 3500
 #: Discord's select shows at most 25 options.
 MAX_REMOVE_OPTIONS: Final = 25
 EXPLAINER: Final = (
@@ -54,9 +56,14 @@ def build_channel_skills_container(
     rows: Sequence[ChannelSkillRow], *, channel_name: str | None
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """The panel card for one channel's skills. Pure — no I/O."""
-    lines = [f"`{row.name}` ({row.version})" for row in rows[:MAX_LISTED]]
-    if len(rows) > MAX_LISTED:
-        lines.append(f"-# and {len(rows) - MAX_LISTED} more")
+    lines: list[str] = []
+    for row in rows[:MAX_LISTED]:
+        line = f"`{row.name}` ({row.version})"
+        if sum(len(kept) + 1 for kept in lines) + len(line) > MAX_LIST_CHARS:
+            break
+        lines.append(line)
+    if len(rows) > len(lines):
+        lines.append(f"-# and {len(rows) - len(lines)} more")
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container()
     container.add_item(header(f"{HEADER_LABEL} in #{channel_name or 'this channel'}"))
     container.add_item(discord.ui.TextDisplay("\n".join(lines) or "-# no extra skills"))

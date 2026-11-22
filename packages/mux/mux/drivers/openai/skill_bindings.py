@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 from collections.abc import Sequence
 
@@ -53,18 +54,22 @@ def reserved(key: str) -> bool:
 
 
 def _compact(pins: Sequence[SkillRef], context: Context) -> str:
-    """`id|version|digest` per pin, comma-joined; an unset field is empty, a digest is base64url."""
+    """The ids' shared prefix and `;`, then `id|version|digest` per pin without it, comma-joined.
+
+    An unset field is empty; a digest is base64url.
+    """
+    if any(sep in pin.id for pin in pins for sep in "|,;"):
+        raise context.unsupported("skill_catalogue_or_version")
+    prefix = os.path.commonprefix([pin.id for pin in pins])
     fields: list[str] = []
     for pin in pins:
-        if "|" in pin.id or "," in pin.id:
-            raise context.unsupported("skill_catalogue_or_version")
         digest = (
             base64.urlsafe_b64encode(bytes.fromhex(pin.digest)).decode().rstrip("=")
             if pin.digest is not None
             else ""
         )
-        fields.append(f"{pin.id}|{pin.version or ''}|{digest}")
-    return ",".join(fields)
+        fields.append(f"{pin.id[len(prefix) :]}|{pin.version or ''}|{digest}")
+    return prefix + ";" + ",".join(fields)
 
 
 def encode_metadata(pins: Sequence[SkillRef], context: Context) -> Object:
@@ -102,12 +107,15 @@ def _chunked(raw: Object, chunks: set[str], *, count: int, digest: str) -> str:
 
 def _expand(payload: str) -> str:
     """The JSON the compact form stands for."""
+    prefix, sep, body = payload.partition(";")
+    if not sep:
+        raise ValueError("invalid compact skill pins")
     pins: list[dict[str, str]] = []
-    for item in payload.split(","):
+    for item in body.split(","):
         fields = item.split("|")
         if len(fields) != 3:
             raise ValueError("invalid compact skill pin")
-        pin = {"id": fields[0]}
+        pin = {"id": prefix + fields[0]}
         if fields[1]:
             pin["version"] = fields[1]
         if fields[2]:

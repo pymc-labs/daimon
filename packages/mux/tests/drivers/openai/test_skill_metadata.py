@@ -108,7 +108,9 @@ def test_malformed_chunk_sets_refuse_without_partial_skill_intent(fault: str) ->
 def test_unbounded_pin_list_still_refuses_before_native_io() -> None:
     context = Context(FakeTransport(), "offline", "openai.persistent_workspace", None)
     with pytest.raises(UnsupportedCapability):
-        encode_metadata(tuple(SkillRef(id="x" * 500, version="1") for _ in range(13)), context)
+        encode_metadata(
+            tuple(SkillRef(id=f"{n:02}" + "x" * 498, version="1") for n in range(13)), context
+        )
 
 
 def test_eleven_native_versions_retain_independent_content_pins() -> None:
