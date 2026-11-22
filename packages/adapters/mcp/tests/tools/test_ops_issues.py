@@ -205,7 +205,7 @@ async def test_a_workspace_admin_resolves_mutes_and_reopens_in_chat_with_an_audi
 ) -> None:
     token, tenant_id, account_id, fingerprint = await _person(committing_sessionmaker)
 
-    states = []
+    states: list[str] = []
     for action in ("resolve", "mute", "reopen"):
         refused, issue = await _call(
             committing_sessionmaker,
