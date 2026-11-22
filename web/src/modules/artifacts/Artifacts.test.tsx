@@ -101,7 +101,7 @@ describe("share by email and rules", () => {
 
 describe("watch actions", () => {
   const watch = (mine: boolean, status: "active" | "paused") => ({ id: `w-${mine}-${status}`, name: `${mine ? "Mine" : "Theirs"} ${status}`, owner: "Maya", mine, agent: "Daimon", status, turns_today: 0, max_turns_per_day: 20, thread_url: null })
-  const a = { ...row({}), people: [], editors: [], editors_can_share: true, data_scale: 1, link: null, asks: { threads: 0, turns_7d: 0 },
+  const a = { ...row({}), people: [], editors: [], editors_can_share: true, data_scale: 1, collection_rules: {}, link: null, asks: { threads: 0, turns_7d: 0 },
     usage: { documents: 0, max_documents: 1, bytes: 0, max_bytes: 1 }, can: { edit: true, share: true, delete: true, transfer: true },
     watches: [watch(true, "paused"), watch(false, "paused"), watch(false, "active")] } satisfies ArtifactDetail
 
