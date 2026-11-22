@@ -125,3 +125,39 @@ async def test_a_refusal_is_an_issue_and_tells_the_owner_once(
     ] * 2, "each refusal is an issue"
     assert [log["event"] for log in logs if log["event"].startswith("routine.fire")] == [logged] * 2
     assert told == [("tenant_archived", False)], "the owner is told once per failing streak"
+
+
+async def test_a_refusal_that_rolls_back_tells_nobody(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The owner hears of a refusal only once it is saved, so a retry does not tell twice."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424243")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag_1",
+        agent_name="analyst",
+        name="Weekly readout",
+        cron_expr="0 9 * * 1",
+        timezone_="UTC",
+        trigger_message="summarise",
+        next_fire_at=datetime.now(UTC),
+        destination_kind="channel",
+        destination_id="456",
+    )
+    await db_session.commit()
+    told: list[str] = []
+
+    async def notify(row: RoutineRow, reason: str, channel_told: bool) -> None:
+        told.append(reason)
+
+    with pytest.raises(RuntimeError):
+        async with db_session_factory() as s, s.begin():
+            await record_refusal(
+                s, db_session_factory, row, "tenant_archived", notify_owner=notify, expected_row=row
+            )
+            raise RuntimeError("rolled back")
+    await drain_owner_notices(timeout_s=5)
+
+    assert told == [], "nobody is told of a refusal that was not saved"

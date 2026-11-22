@@ -25,7 +25,9 @@ from daimon.core.stores.routines import (
 )
 from daimon.core.turn.outcomes import TurnObservation
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Session
 
 log = structlog.get_logger(__name__)
 
@@ -208,7 +210,7 @@ async def record_refusal(
     expected_private: RoutineRow | None = None,
     expected_row: RoutineRow | None = None,
 ) -> None:
-    """Record a fire refused before it ran, on `s`, as an issue, and tell the owner.
+    """Record a fire refused before it ran, on `s`, as an issue; tell the owner once `s` commits.
 
     `reason` is a fixed word; `error` the text the routine panel shows, else `reason`. A
     `fault` (Daimon's, not the owner's) is logged as `routine.fire_failed`, which alerting
@@ -243,7 +245,12 @@ async def record_refusal(
         ),
         logged=False,
     )
-    tell_owner(notify_owner, row, reason, channel_told=False)
+
+    # After the commit, so a rolled-back refusal tells nobody and its retry tells once.
+    def told_after_commit(_: Session) -> None:
+        tell_owner(notify_owner, row, reason, channel_told=False)
+
+    event.listen(s.sync_session, "after_commit", told_after_commit, once=True)
 
 
 async def _release_slot(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:
