@@ -25,7 +25,11 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.discord_membership import DiscordRestMembershipResolver
-from daimon.core.mcp_auth import mint_cli_mcp_token, mint_operator_mcp_token
+from daimon.core.mcp_auth import (
+    mint_agent_mcp_token,
+    mint_cli_mcp_token,
+    mint_operator_mcp_token,
+)
 from daimon.core.membership import Membership
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.ops_catalog import OpsCode
@@ -252,3 +256,39 @@ async def test_an_operator_token_stays_read_only(
 
     assert refused, "the issues:read scope cannot change anything"
     assert [i["state"] for i in listed["issues"]] == ["open"]
+
+
+async def test_every_ops_issue_tool_is_admin_tagged_so_members_never_see_one() -> None:
+    """`server.py` hides the `admin` tag; a bare tool would reach every agent's toolset."""
+    mcp = FastMCP(name="ops")
+    register_ops_issues_tools(mcp, MagicMock(spec=McpRuntime))
+
+    tools = await mcp.local_provider.list_tools()
+
+    assert {t.name for t in tools} >= {"change_issue_state"}
+    assert [t.name for t in tools if "admin" not in t.tags] == [], "every ops tool is admin-only"
+
+
+async def test_an_external_agent_key_of_an_admin_cannot_change_an_issue(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An agent key never inherits its owner's authority over the workspace."""
+    async with committing_sessionmaker.begin() as session:
+        tenant_id, account_id, fingerprint = await _seed(session, "turn.failed")
+        token = await mint_agent_mcp_token(
+            session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label=None,
+            secret=SECRET,
+            now=datetime.now(UTC),
+        )
+
+    refused, _ = await _call(
+        committing_sessionmaker, token, "change_issue_state", fingerprint=fingerprint, action="mute"
+    )
+
+    assert refused, "an external agent key is refused"
+    async with committing_sessionmaker() as session:
+        assert await web_audit.list_recent(session, tenant_id=tenant_id) == [], "nothing changed"

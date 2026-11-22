@@ -455,7 +455,7 @@ The workspace's failures and warnings, read from chat or by an operator token.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `change_issue_state` | all callers | Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). |
+| `change_issue_state` | admin only | Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). |
 | `get_issue` | admin only, operator tokens with issues:read | Read one issue by its ``fingerprint`` (from list_issues): what it is about, when it started, who it reached and its latest events. |
 | `get_ops_overview` | admin only, operator tokens with issues:read | Read how the workspace is doing: answers and the share that failed, direct message and routine failures, status (healthy, degraded or failing, from the last hour), failures per area, an answers chart and the issues that need attention. |
 | `list_issues` | admin only, operator tokens with issues:read | List the workspace's failures and warnings, grouped into issues, newest first. |

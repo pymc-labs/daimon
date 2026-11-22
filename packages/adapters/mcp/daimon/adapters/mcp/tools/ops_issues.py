@@ -152,18 +152,22 @@ def register_ops_issues_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             )
         return IssueView(issue=detail, events=[event for _, event in rows])
 
-    @mcp.tool
+    @mcp.tool(tags={"admin"})
     async def change_issue_state(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, fingerprint: Annotated[str, Field(max_length=64)], action: IssueAction
     ) -> Issue:
         """Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). Resolve
-        hides it until a newer event arrives; mute hides it until it is reopened. Only a
-        workspace admin or owner may do this; an operator token never can."""
+        hides it until a newer event arrives; mute hides it until it is reopened. Only an
+        admin or owner may do this; an operator token never can."""
         auth = await _auth(ctx)
         actor = await web_actor_of(runtime, auth)
         web = runtime.settings.web
         modules = web.modules if web else get_args(WebModuleKey)
-        if auth.is_operator or "workspace.manage" not in capabilities_for(actor.role, modules):
+        if (
+            auth.is_operator
+            or not auth.holds_own_authority
+            or "workspace.manage" not in capabilities_for(actor.role, modules)
+        ):
             raise ToolError("You can't change issues. Ask an admin or an owner.")
         names = await _names(runtime, auth)
         async with runtime.session_factory.begin() as session:

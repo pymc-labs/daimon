@@ -952,8 +952,8 @@
     'change_issue_state': dict({
       'description': '''
         Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). Resolve
-        hides it until a newer event arrives; mute hides it until it is reopened. Only a
-        workspace admin or owner may do this; an operator token never can.
+        hides it until a newer event arrives; mute hides it until it is reopened. Only an
+        admin or owner may do this; an operator token never can.
       ''',
       'parameters': dict({
         'additionalProperties': False,
