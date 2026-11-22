@@ -37,6 +37,7 @@ CATEGORIES: Final[Mapping[Category, str]] = {
     "model_input": "What the agent sees",
     "chat": "Chat",
     "capabilities": "Capabilities",
+    "web": "Web app pages",
     "limits": "Limits",
     "guardrails": "Safety",
 }
