@@ -274,6 +274,7 @@ EXEMPT: dict[str, str] = {
     "retry_workflow_run": _WORKFLOW,
     "fork_workflow_run": _WORKFLOW,
     "set_workflow_paused": _WORKFLOW,
+    "clear_workflow_state": _WORKFLOW,
     "complete_step": _STEP,
     "fail_step": _STEP,
     "finish_early": _STEP,

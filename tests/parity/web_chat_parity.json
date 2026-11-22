@@ -68,6 +68,9 @@
   "DELETE /api/workflows/{workflow_id}/draft": {
    "gap": "discarding a draft back to the live version; no chat tool yet"
   },
+  "DELETE /api/workflows/{workflow_id}/state": {
+   "tool": "clear_workflow_state"
+  },
   "DELETE /api/workflows/{workflow_id}/triggers/{key}/listen": {
    "gap": "turning a trigger's webhook off; no chat tool yet"
   },

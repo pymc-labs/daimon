@@ -19,6 +19,7 @@ WORKFLOW_AUTHORING_TOOLS: Final = frozenset(
         "retry_workflow_run",
         "fork_workflow_run",
         "set_workflow_paused",
+        "clear_workflow_state",
     }
 )
 """What a person's chat uses to build and run workflows; a workflow step never calls them."""

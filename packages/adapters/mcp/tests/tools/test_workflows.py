@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -22,6 +23,7 @@ from daimon.core.posted_controls import PostedCard
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.workflow_runs import get_run
+from daimon.core.stores.workflows import merge_state
 from daimon.core.web_links import WebLinks
 from daimon.core.workflows.chat_cards import ChatPlace
 from daimon.core.workflows.edits import AddNode, Connect
@@ -38,6 +40,7 @@ _edit = tools._edit_workflow_draft_impl  # pyright: ignore[reportPrivateUsage]
 _publish = tools._publish_workflow_impl  # pyright: ignore[reportPrivateUsage]
 _validate = tools._validate_workflow_impl  # pyright: ignore[reportPrivateUsage]
 _run = tools._run_workflow_impl  # pyright: ignore[reportPrivateUsage]
+_clear_state = tools._clear_workflow_state_impl  # pyright: ignore[reportPrivateUsage]
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
@@ -197,3 +200,32 @@ async def test_in_a_chat_turn_a_card_links_the_web_only_where_the_turn_is_aware(
         await _run(runtime, auth, workflow_id=world.workflow_id, inputs={}, test=False)
         for card in posted[-2:]:
             assert ("Open in web" in [b.label for b in card.buttons]) is shown, (aware, card)
+
+
+async def test_clear_workflow_state_when_the_owner_asks_empties_what_runs_saved(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    runtime, auth = await _person(committing_sessionmaker, db_session)
+    made = await _create(runtime, auth, name="Tidy", template=None, spec=None)
+    workflow_id = uuid.UUID(made["id"])
+    async with committing_sessionmaker.begin() as session:
+        await merge_state(
+            session,
+            tenant_id=auth.tenant_id,
+            workflow_id=workflow_id,
+            patch={"seen": 1},
+            now=datetime.now(UTC),
+        )
+
+    cleared = await _clear_state(runtime, auth, workflow_id)
+
+    assert cleared["state"] == {}, "what runs saved is gone"
+
+
+async def test_clear_workflow_state_when_there_is_no_such_workflow_says_so_plainly(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    runtime, auth = await _person(committing_sessionmaker, db_session)
+
+    with pytest.raises(ToolError, match="is gone"):
+        await _clear_state(runtime, auth, uuid.uuid4())

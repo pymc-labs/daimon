@@ -317,6 +317,16 @@ async def _get_workflow_run_impl(
     }
 
 
+async def _clear_workflow_state_impl(
+    runtime: McpRuntime, auth: AuthIdentity, workflow_id: uuid.UUID
+) -> Json:
+    env = _env(runtime, auth)
+    with _errors():
+        await service.ensure_on(env)
+        cleared = await service.clear_state(env, workflow_id)
+    return cleared.model_dump(mode="json")
+
+
 async def _control_impl(run: run_views.RunSummary) -> Json:
     return _run_line(run)
 
@@ -466,6 +476,11 @@ def register_workflow_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 _env(runtime, await _auth(ctx)), workflow_id, Patch(paused=paused)
             )
         return _listed(changed)
+
+    @mcp.tool
+    async def clear_workflow_state(ctx: Context, workflow_id: uuid.UUID) -> Json:  # pyright: ignore[reportUnusedFunction]
+        """Clear what a workflow's runs saved between runs (`workflow.state`). Owner or editor."""
+        return await _clear_workflow_state_impl(runtime, await _auth(ctx), workflow_id)
 
 
 __all__ = ["register_workflow_tools"]

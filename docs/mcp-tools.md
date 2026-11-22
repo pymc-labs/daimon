@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 252 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 253 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -789,6 +789,7 @@ Workflow tools: read, draft, validate, publish and run workflows from chat.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `cancel_workflow_run` | all callers | Stop a run that has not ended. |
+| `clear_workflow_state` | all callers | Clear what a workflow's runs saved between runs (`workflow.state`). |
 | `create_workflow` | all callers | Create a workflow as a private draft owned by this person. |
 | `edit_workflow_draft` | all callers | Change a workflow's draft from the revision you read; nothing goes live. |
 | `fork_workflow_run` | all callers | Start a new run from an earlier one: with `step`, from that step on with the earlier steps' results reused; without, the whole run again. |
