@@ -6,6 +6,7 @@ not a claim that the provider agent resource has that field.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -21,6 +22,12 @@ from mux.drivers.openai.transport import Object, object_json, segment
 KEY = "mux_skill_pins"
 _PINS = TypeAdapter(tuple[SkillRef, ...])
 _VERSION = re.compile(r"[1-9][0-9]*\Z")
+#: OpenAI caps each metadata value at 512 characters.
+_VALUE = 512
+#: The legacy chunk form (JSON pins) holds 8 chunks; the compact form up to 12, within
+#: the 16 metadata keys a native object has, and the agent path still refuses past 15.
+_CHUNKS_V2 = 12
+_DIGEST_B64 = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 
 
 def encode(pins: Sequence[SkillRef], context: Context) -> str:
@@ -45,19 +52,73 @@ def reserved(key: str) -> bool:
     return key == KEY or key.startswith(KEY + "_")
 
 
+def _compact(pins: Sequence[SkillRef], context: Context) -> str:
+    """`id|version|digest` per pin, comma-joined; an unset field is empty, a digest is base64url."""
+    fields: list[str] = []
+    for pin in pins:
+        if "|" in pin.id or "," in pin.id:
+            raise context.unsupported("skill_catalogue_or_version")
+        digest = (
+            base64.urlsafe_b64encode(bytes.fromhex(pin.digest)).decode().rstrip("=")
+            if pin.digest is not None
+            else ""
+        )
+        fields.append(f"{pin.id}|{pin.version or ''}|{digest}")
+    return ",".join(fields)
+
+
 def encode_metadata(pins: Sequence[SkillRef], context: Context) -> Object:
-    """Retain the legacy single value; larger lists use integrity-checked chunks."""
+    """A short list as one legacy JSON value; a longer one as integrity-checked chunks.
+
+    The chunks hold the compact form (`chunks2:`), so a list of digest-pinned skills fits;
+    `decode` still reads the JSON chunks (`chunks:`) that existing agents carry.
+    """
     value = encode(pins, context)
-    if len(value) <= 512:
+    if len(value) <= _VALUE:
         return {KEY: value}
-    chunks = [value[i : i + 512] for i in range(0, len(value), 512)]
-    if len(chunks) > 8:
+    payload = _compact(pins, context)
+    chunks = [payload[i : i + _VALUE] for i in range(0, len(payload), _VALUE)]
+    if len(chunks) > _CHUNKS_V2:
         raise context.unsupported("skill_metadata_size")
-    digest = hashlib.sha256(value.encode()).hexdigest()
+    digest = hashlib.sha256(payload.encode()).hexdigest()
     return {
-        KEY: f"chunks:{len(chunks)}:{digest}",
+        KEY: f"chunks2:{len(chunks)}:{digest}",
         **{f"{KEY}_{i}": chunk for i, chunk in enumerate(chunks)},
     }
+
+
+def _chunked(raw: Object, chunks: set[str], *, count: int, digest: str) -> str:
+    keys = tuple(f"{KEY}_{i}" for i in range(count))
+    if chunks != set(keys):
+        raise ValueError("missing or extra skills chunks")
+    values = tuple(text(raw[key]) for key in keys)
+    if any(len(chunk) > _VALUE for chunk in values):
+        raise ValueError("oversized skills chunk")
+    joined = "".join(values)
+    if hashlib.sha256(joined.encode()).hexdigest() != digest:
+        raise ValueError("changed skills chunks")
+    return joined
+
+
+def _expand(payload: str) -> str:
+    """The JSON the compact form stands for."""
+    pins: list[dict[str, str]] = []
+    for item in payload.split(","):
+        fields = item.split("|")
+        if len(fields) != 3:
+            raise ValueError("invalid compact skill pin")
+        pin = {"id": fields[0]}
+        if fields[1]:
+            pin["version"] = fields[1]
+        if fields[2]:
+            if _DIGEST_B64.fullmatch(fields[2]) is None:
+                raise ValueError("invalid compact skill digest")
+            raw = base64.urlsafe_b64decode(fields[2] + "=")
+            if base64.urlsafe_b64encode(raw).decode().rstrip("=") != fields[2] or len(raw) != 32:
+                raise ValueError("invalid compact skill digest")
+            pin["digest"] = raw.hex()
+        pins.append(pin)
+    return json.dumps(pins, separators=(",", ":"))
 
 
 def decode(metadata: JsonValue) -> tuple[SkillRef, ...] | None:
@@ -74,16 +135,12 @@ def decode(metadata: JsonValue) -> tuple[SkillRef, ...] | None:
         marker = re.fullmatch(r"chunks:([1-8]):([a-f0-9]{64})", value)
         if marker is None:
             raise ValueError("invalid skills chunk marker")
-        count, digest = int(marker[1]), marker[2]
-        keys = tuple(f"{KEY}_{i}" for i in range(count))
-        if chunks != set(keys):
-            raise ValueError("missing or extra skills chunks")
-        values = tuple(text(raw[key]) for key in keys)
-        if any(len(chunk) > 512 for chunk in values):
-            raise ValueError("oversized skills chunk")
-        value = "".join(values)
-        if hashlib.sha256(value.encode()).hexdigest() != digest:
-            raise ValueError("changed skills chunks")
+        value = _chunked(raw, chunks, count=int(marker[1]), digest=marker[2])
+    elif value.startswith("chunks2:"):
+        marker = re.fullmatch(r"chunks2:([1-9][0-9]?):([a-f0-9]{64})", value)
+        if marker is None or int(marker[1]) > _CHUNKS_V2:
+            raise ValueError("invalid skills chunk marker")
+        value = _expand(_chunked(raw, chunks, count=int(marker[1]), digest=marker[2]))
     elif chunks:
         raise ValueError("unexpected skills chunks")
     pins = _PINS.validate_json(value)

@@ -21,7 +21,8 @@ from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
+from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, remove_label
+from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.panel_audit import record_panel_write
@@ -36,7 +37,10 @@ CHANNEL_SKILLS_LABEL: Final = "Channel skills"
 HEADER_LABEL: Final = "Extra skills"
 ADD_LABEL: Final = "Add skill"
 BACK_LABEL: Final = "◀ Back"
-MAX_LISTED: Final = 20
+#: Every skill a channel can hold.
+MAX_LISTED: Final = AGENT_SKILL_CAP
+#: Discord's select shows at most 25 options.
+MAX_REMOVE_OPTIONS: Final = 25
 EXPLAINER: Final = (
     "-# These skills apply only here, from the next message.\n\n"
     "-# Only server admins can change them."
@@ -89,10 +93,14 @@ class ChannelSkillsView(PanelViewBase):
         container = build_channel_skills_container(self.rows, channel_name=state.channel_name)
         if self.rows:
             self.remove_select: discord.ui.Select[discord.ui.LayoutView] = discord.ui.Select(
-                placeholder="Remove a skill",
+                placeholder=(
+                    "Remove a skill"
+                    if len(self.rows) <= MAX_REMOVE_OPTIONS
+                    else remove_label(MAX_REMOVE_OPTIONS, len(self.rows))
+                ),
                 options=[
                     discord.SelectOption(label=row.name[:100], value=row.skill_id)
-                    for row in self.rows[:25]
+                    for row in self.rows[:MAX_REMOVE_OPTIONS]
                 ],
             )
             self.remove_select.callback = self._on_remove  # type: ignore[method-assign]  # per-instance callback
