@@ -10,6 +10,7 @@ import structlog
 import uvicorn
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.boot_sweep import (
+    sweep_expired_artifacts_forever,
     sweep_expired_web_sessions_forever,
     sweep_orphaned_web_turns,
     sweep_stale_web_uploads_forever,
@@ -111,6 +112,7 @@ async def _serve(settings: Settings, web: WebSettings) -> None:
         sweepers = [
             asyncio.create_task(sweep_expired_web_sessions_forever(runtime.sessionmaker)),
             asyncio.create_task(sweep_stale_web_uploads_forever(runtime.sessionmaker)),
+            asyncio.create_task(sweep_expired_artifacts_forever(runtime.sessionmaker)),
         ]
         node = server_skills_node(runtime)
         if node is not None:
