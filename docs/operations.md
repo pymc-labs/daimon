@@ -235,7 +235,15 @@ These events carry identifiers, counts and durations, never message text:
 | `runtime.started` | info | `process`, `release`; once per process start |
 | `runtime.health` | info | `process` and the window's measurements, every [`DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`](configuration.md#daimon_observability__health_interval_s) seconds |
 | `scheduler.tick_completed` | info | `duration_ms`; at most once a minute |
-| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `provider`, `release`, `turn_id`, `tenant_id`; once for a turn that ended without an answer |
+| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `provider`, `release`, `turn_id`, `tenant_id`, `is_dm`, `agent_id`; once for a turn that ended without an answer |
+| `turn.finished` | info | `tenant_id`, `platform`, `origin`, `reason`, `failed`, `is_dm`, `agent_id`, `duration_ms`, `recovered`, `tool_errors`; once per answered turn, so a failure rate has its denominator |
+| `turn.shed` | warning | `tenant_id`, `reason`, `channel_id` or `path`; a turn turned away at a concurrency cap or a full queue |
+| `routine.fire_failed` | warning | `tenant_id`, `routine_id`, `agent_id`, `reason`, `error_class`; a fire that did not start a turn. A benign skip logs `routine.fire_skipped` at info |
+| `routine.finished` | info | `tenant_id`, `routine_id`, `agent_id`, `outcome`, `skip_reason`, `duration_ms`; once per fire |
+| `routine.delivery_failed` | warning | `tenant_id`, `routine_id`, `status`, `note` or `error_type`; a result that could not be posted |
+| `watch.poll_failed` | warning | `tenant_id`, `watch_id`, `kind`, `error_class`, `consecutive_errors`; info when the source was only busy or capped |
+| `watch.paused_failing` | warning | `tenant_id`, `watch_id`, `consecutive_errors`; a watch paused after repeated errors |
+| `wake.abandoned`, `wake.lease_lost`, `continuation.dispatch_failed`, `watch_report.dispatch_failed` | warning | `tenant_id`, `kind`, `thread_id` or `row_id`, `skip_reason` or `error_type`; a follow-up that will not run, shown on the Issues page as `wake.failed` |
 | `turn.would_stall` | warning | `step_s`, `silent_s`, `frame_silent_s`, `tool_open`, `last_status`, `session_id`; once per step (5, 10, 15, 30 minutes) since the turn's provider last sent an event; usage-only frames do not count. Measurement only: it never ends a turn. `tool_open` false does not rule out an OpenAI provider-side tool, whose previews Daimon never sees; `last_status` is the last status Daimon read while the turn was quiet, not the current one |
 
 `turn.user_failure` covers upstream errors, lost connections, the turn
@@ -257,18 +265,22 @@ build argument. An image built without it reports the package version.
 Daimon records each failed answer, routine, delivery, watch, follow-up and bridged-tool call
 once per issue, with no message content, and keeps it for
 `DAIMON_OPS_EVENTS__RETENTION_DAYS` days. Admins read the issues on the Overview and Issues
-pages of the web app, and can resolve or mute them there. From the command line:
+pages of the web app, and can resolve or mute them there or by asking an agent. The
+operator can use the command line:
 
 ```bash
 daimon issues summary <tenant-uuid> [--period 1h|24h|7d|30d] [--json]
 daimon issues list <tenant-uuid> [--since 24h] [--area routine] [--severity error] [--active] [--json]
 daimon issues show <tenant-uuid> <fingerprint> [--events 50] [--json]
-daimon issues resolve|mute|reopen <tenant-uuid> <fingerprint>
+daimon issues resolve|mute|reopen <tenant-uuid> <fingerprint> [--account <member>]
 ```
 
 A resolved issue returns as open when it happens again. A muted one stays hidden until
 reopened. An operator token with the `issues:read` scope reads the same data through the
 `get_ops_overview`, `list_issues` and `get_issue` tools.
+
+The change commands record the `--account` member as the actor, or Daimon via the CLI
+without one. An operator token never changes issues.
 
 ## Audit security events
 
