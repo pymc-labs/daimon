@@ -214,3 +214,22 @@ async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
     }
     with pytest.raises(PollAccessRevoked):
         await read_page_data(runtime, watch(other))
+
+
+@pytest.mark.parametrize("platform", ["web", "slack", "teams"])
+async def test_an_admin_proven_in_the_turn_may_raise_the_daily_limit_off_discord(
+    platform: str,
+) -> None:
+    runtime = cast(Any, SimpleNamespace())
+    account, tenant = uuid.uuid4(), uuid.uuid4()
+    admin = auth_identity(account, tenant, platform=platform)
+    member = auth_identity(account, tenant, Role.USER, platform=platform)
+    for auth, ok in ((admin, True), (member, False)):
+        raised = tools.admin_approval(
+            runtime, auth, permanent=False, max_turns_per_day=48, check_ceiling=False
+        )
+        if ok:
+            assert await raised == account
+        else:
+            with pytest.raises(ToolError, match="Only an admin"):
+                await raised

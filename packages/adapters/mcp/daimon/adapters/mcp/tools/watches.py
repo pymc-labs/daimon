@@ -250,8 +250,11 @@ async def private_key_delivery(
 
 
 async def fresh_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """An admin now: Discord looks it up afresh; web, Slack and Teams prove it in the turn."""
     if not auth.admin_for():
         return False
+    if auth.platform in ("web", "slack", "teams"):
+        return True
     if auth.platform != "discord" or auth.platform_user_id is None:
         return False
     subject = await resolve_subject(
