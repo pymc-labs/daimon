@@ -13,12 +13,13 @@ import secrets
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import discord
+import structlog
 from anthropic import NotFoundError, PermissionDeniedError
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -597,10 +598,43 @@ async def listed_read_tool(
     return entry
 
 
+log = structlog.get_logger(__name__)
+
+
+def _log_poll_failed(
+    emit: Callable[..., None],
+    watch_id: uuid.UUID,
+    watch: WatchRow | None,
+    *,
+    kind: str,
+    error_class: str | None = None,
+    consecutive_errors: int | None = None,
+) -> None:
+    """Fixed fields only: the watch's source, arguments and exception text stay out."""
+    emit(
+        "watch.poll_failed",
+        tenant_id=str(watch.tenant_id) if watch is not None else None,
+        watch_id=str(watch_id),
+        kind=kind,
+        error_class=error_class,
+        consecutive_errors=consecutive_errors,
+    )
+
+
+def _log_paused(watch_id: uuid.UUID, watch: WatchRow | None, reason: str) -> None:
+    log.info(
+        "watch.paused",
+        tenant_id=str(watch.tenant_id) if watch is not None else None,
+        watch_id=str(watch_id),
+        reason=reason,
+    )
+
+
 async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool:
     if not load_watches_settings().enabled:
         return False
     floor = 0
+    watch: WatchRow | None = None
     try:
         async with asyncio.timeout(25):
             async with runtime.session_factory() as db:
@@ -695,7 +729,13 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 )
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
-    except (SourceBusy, BotAccessUnavailable):
+    except (SourceBusy, BotAccessUnavailable) as exc:
+        _log_poll_failed(
+            log.info if isinstance(exc, SourceBusy) else log.warning,
+            watch_id,
+            watch,
+            kind=type(exc).__name__,
+        )
         # This server's own budget is spent, or the bot cannot read the source yet (not an
         # error, not a revocation). Step back in the claim queue, or due
         # watches on one busy server would fill every claim and starve the rest.
@@ -704,24 +744,34 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             await defer_busy_poll(db, watch_id, lease, until=until)
         return False
     except WatchFeatureUnreadable:
+        _log_poll_failed(log.warning, watch_id, watch, kind="WatchFeatureUnreadable")
         # The feature could not be read, which is not Off: keep the watch, retry next claim.
         async with runtime.session_factory.begin() as db:
             await release_poll_lease(db, watch_id, lease)
         return False
     except ToolUnlisted:
+        _log_poll_failed(log.warning, watch_id, watch, kind="ToolUnlisted")
         # The operator took the tool off the registry: pause and tell the owner.
         async with runtime.session_factory.begin() as db:
-            await pause_unlisted(db, watch_id, lease)
+            paused = await pause_unlisted(db, watch_id, lease)
+        if paused:
+            _log_paused(watch_id, watch, "tool_unlisted")
         return False
     except SourceChanged:
+        _log_poll_failed(log.warning, watch_id, watch, kind="SourceChanged")
         # The server no longer offers what the owner approved: pause and tell them.
         async with runtime.session_factory.begin() as db:
-            await pause_unlisted(db, watch_id, lease, reason="source_changed")
+            paused = await pause_unlisted(db, watch_id, lease, reason="source_changed")
+        if paused:
+            _log_paused(watch_id, watch, "source_changed")
         return False
     except CredentialMissing:
+        _log_poll_failed(log.warning, watch_id, watch, kind="CredentialMissing")
         # The owner forgot or never sent their key: pause and tell them how to send it.
         async with runtime.session_factory.begin() as db:
-            await pause_unlisted(db, watch_id, lease, reason="credential_missing")
+            paused = await pause_unlisted(db, watch_id, lease, reason="credential_missing")
+        if paused:
+            _log_paused(watch_id, watch, "credential_missing")
         return False
     except Exception as exc:
         # Never log remote content, arguments, credentials, lease capabilities or
@@ -731,7 +781,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
 
         capped = isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "54000"
         async with runtime.session_factory.begin() as db:
-            await poll_failed(
+            failure = await poll_failed(
                 db,
                 watch_id,
                 lease,
@@ -754,6 +804,23 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             )
             if floor:
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
+        _log_poll_failed(
+            log.info if capped else log.warning,
+            watch_id,
+            watch,
+            kind="daily_cap" if capped else "other",
+            error_class=type(exc).__name__,
+            consecutive_errors=failure.consecutive_errors if failure else None,
+        )
+        if failure is not None and failure.paused_reason == "failed":
+            log.warning(
+                "watch.paused_failing",
+                tenant_id=str(failure.tenant_id),
+                watch_id=str(watch_id),
+                consecutive_errors=failure.consecutive_errors,
+            )
+        elif failure is not None and failure.paused_reason is not None:
+            _log_paused(watch_id, watch, failure.paused_reason)
         return False
 
 

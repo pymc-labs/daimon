@@ -330,7 +330,11 @@ async def _explain_no_private_chat(
         )
     except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
         _COLD_DM_NOTICES.forget(person)
-        log.warning("slack.dm.cold_notice_failed", error_type=type(exc).__name__)
+        log.warning(
+            "slack.dm.cold_notice_failed",
+            tenant_id=str(derive_tenant_uuid(platform="slack", workspace_id=team_id)),
+            error_type=type(exc).__name__,
+        )
 
 
 async def _react(client: AsyncWebClient, channel_id: str, event: dict[str, Any], add: bool) -> None:
@@ -381,7 +385,12 @@ async def handle_direct_message(
     finally:
         # An error no turn handled, or a cancellation: nothing left goes unheard.
         if left := await bursts.end(key, burst):
-            log.warning("slack.dm.not_sent", messages=len(left), client=client is not None)
+            log.warning(
+                "slack.dm.not_sent",
+                tenant_id=str(derive_tenant_uuid(platform="slack", workspace_id=team_id)),
+                messages=len(left),
+                client=client is not None,
+            )
             if client is not None:
                 with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]

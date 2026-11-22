@@ -115,6 +115,8 @@ class TurnObservation:
     alertable: bool = field(default=True, kw_only=True)
     """False for a turn nobody asked for (an unprompted reply): its failure is
     recorded in the outcome row but never logged as `turn.user_failure`."""
+    is_dm: bool = field(default=False, kw_only=True)
+    """Set at session binding; logged on `turn.finished` and `turn.user_failure`."""
     eval_key: dict[str, JsonValue] | None = field(default=None, kw_only=True)
     """`EvalKey.to_json()` of what the turn ran with; None where nothing set it."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
@@ -289,25 +291,39 @@ class TurnObservation:
             or termination_reason(error or (state.error if state else None))
         )
         terminal_error = error or (state.error if state else None)
-        if (
-            resolved in USER_VISIBLE_FAILURES
-            and self.alertable
-            and not fallback
-            and self.platform != "cli"
-        ):
-            log.warning(
-                "turn.user_failure",
+        if self.alertable and not fallback and self.platform != "cli":
+            failed = resolved in USER_VISIBLE_FAILURES
+            duration_ms = max(0, int((time.monotonic() - self._started) * 1000))
+            tenant = str(self.tenant_id) if self.tenant_id is not None else None
+            # The denominator for failure-rate alerts: every answered turn, not only failures.
+            log.info(
+                "turn.finished",
+                tenant_id=tenant,
                 platform=self.platform,
-                reason=resolved.value,
-                error_class=type(terminal_error).__name__ if terminal_error else None,
-                causes=backend_refusal_causes(terminal_error),
                 origin=self.origin,
-                backend=self.backend or "unknown",
-                provider=(self.backend or "unknown").partition("/")[0],
-                release=current_release(),
-                turn_id=str(self.id),
-                tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
+                reason=resolved.value,
+                failed=failed,
+                is_dm=self.is_dm,
+                agent_id=self.agent_id,
+                duration_ms=duration_ms,
+                recovered=recovered,
             )
+            if failed:
+                log.warning(
+                    "turn.user_failure",
+                    platform=self.platform,
+                    reason=resolved.value,
+                    error_class=type(terminal_error).__name__ if terminal_error else None,
+                    causes=backend_refusal_causes(terminal_error),
+                    origin=self.origin,
+                    backend=self.backend or "unknown",
+                    provider=(self.backend or "unknown").partition("/")[0],
+                    release=current_release(),
+                    turn_id=str(self.id),
+                    tenant_id=tenant,
+                    is_dm=self.is_dm,
+                    agent_id=self.agent_id,
+                )
         samples = self._counted_samples()
 
         def total(getter: Callable[[UsageSample], int | None]) -> int | None:

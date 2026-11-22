@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
     MAX_BYTES_CEILING,
@@ -188,6 +189,11 @@ async def deliver_session_outputs(
             sleep=sleep,
             max_bytes=max_bytes,
             noticed=noticed_files,
+            # A DM has no guild, hence no tenant here.
+            tenant_id=str(derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id)))
+            if thread.guild is not None
+            else None,
+            platform="discord",
         )
     except OutputPostingUnavailable as exc:
         reason = str(exc)

@@ -268,7 +268,9 @@ async def dispatch_pending_continuations(
             if not await start_wake(sessionmaker, claim, now=now()):
                 continue  # Another dispatcher took the row over while this one decided.
             try:
-                async with keep_wake(sessionmaker, claim, now=now):
+                async with keep_wake(
+                    sessionmaker, claim, now=now, tenant_id=row.tenant_id, kind=row.reason
+                ):
                     if run_decision is not None:
                         await run_decision(row, decision)
                     else:
@@ -313,7 +315,9 @@ async def dispatch_pending_continuations(
                 log.warning(
                     "continuation.dispatch_failed",
                     row_id=str(row.id),
-                    error=str(exc),
+                    tenant_id=str(row.tenant_id),
+                    kind=row.reason,
+                    error_type=type(exc).__name__,
                     causes=backend_refusal_causes(exc),
                 )
                 await _settle(sessionmaker, claim, "dispatch_failed", now)
