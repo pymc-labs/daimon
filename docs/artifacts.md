@@ -61,7 +61,7 @@ Capabilities belong to the page, so every viewer gets the same ones. A public pa
 
 ## Where a page runs
 
-A page runs in a sandboxed frame with no network. `fetch`, WebSocket and WebRTC calls fail, and cookies and form submits are unavailable. A link to another site, or `window.open`, asks the viewer before opening it in a new tab; links within the page stay in it. Scripts, styles, fonts and images load only from these hosts, besides inline code and `data:` or `blob:` images:
+A page runs in a sandboxed frame with no network. `fetch` and WebSocket calls fail, WebRTC is blocked as far as browsers allow (see below), and cookies and form submits are unavailable. A link to another site, or `window.open`, asks the viewer before opening it in a new tab; links within the page stay in it. Scripts, styles, fonts and images load only from these hosts, besides inline code and `data:` or `blob:` images:
 
 - `fonts.googleapis.com` and `fonts.gstatic.com`
 - `cdn.jsdelivr.net`, `cdnjs.cloudflare.com` and `unpkg.com`
@@ -71,13 +71,17 @@ The frame cannot read the web session or another page, so a page's code cannot a
 
 ### Video and storage on a content host
 
-By default a page has no origin of its own: `localStorage` fails and no other site can be framed. Set [`DAIMON_WEB__ARTIFACT_CONTENT_URL`](configuration.md#daimon_web__artifact_content_url) to serve pages from another domain, such as `https://{id}.pages.example.net`. Each page then gets its own origin and storage, and can embed YouTube and Google Drive players.
+By default a page has no origin of its own: `localStorage` fails and no other site can be framed. Set [`DAIMON_WEB__ARTIFACT_CONTENT_URL`](configuration.md#daimon_web__artifact_content_url) to serve pages from another domain, such as `https://{id}.pages.example.net`. Each page then gets its own origin and storage, and can embed YouTube (`/embed/`) and Google Drive (`/file/`) players; no other path on those hosts, which would let a page fetch any address through them.
 
-For that template, point a wildcard DNS record, `*.pages.example.net`, at the web service and give it a wildcard TLS certificate. The domain must not share the app's registrable domain, or Daimon refuses to start. A single host such as `https://pages.example.net` needs no wildcard, but its pages share storage.
+Point a wildcard DNS record, `*.pages.example.net`, at the web service and give it a wildcard TLS certificate. Only the `{id}` form is accepted: a single host would share storage across every page and workspace, so Daimon refuses to start with one. It also refuses a domain that shares the app's registrable domain.
+
+Use a registrable domain of its own, kept for pages. Pages on subdomains of one domain can still share a cookie that a page sets on that parent domain, unless the parent is on the [Public Suffix List](https://publicsuffix.org/). Cookies hold nothing of the app's, but one page could read another's.
 
 ### What a page can still reach
 
-No browser setting closes every channel. The allowed hosts see the address of each file a page loads, and browsers may look up the hosts of links in DNS. On a content host, a frame the page creates can still use WebRTC in browsers that ignore the `webrtc` policy, Chrome among them. Keep a page free of data its viewers should not pass on.
+No browser setting closes every channel. The allowed hosts see the address of each file a page loads, and browsers may look up the hosts of links in DNS.
+
+WebRTC can send data to any host, and Chrome ignores the `webrtc` policy. So the page runtime removes it, removes frames the page creates without an `https` address, and strips it from the frames it can reach. That stops the usual routes in Chrome, but is not airtight: on a content host, a page can still add an `https` frame and use WebRTC from its initial blank document before it loads. Keep a page free of data its viewers should not pass on.
 
 ### The page API
 

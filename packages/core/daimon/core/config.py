@@ -1093,8 +1093,8 @@ def _split_csv(value: object) -> object:
     return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
-# `https://pages.example.com`, or `https://{id}.pages.example.com` for a host per page.
-_CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
+# `https://{id}.pages.example.com`: a host per page.
+_CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
 # A CSP host source an operator adds: scheme, host (a leading `*.` allowed), optional port.
 _ASSET_HOST = re.compile(r"https://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
 
@@ -1222,10 +1222,10 @@ class WebSettings(BaseModel):
     artifact_content_url: str | None = Field(
         default=None,
         description=(
-            "Where artifact page code runs, on a site other than the public URL's: a host "
-            "(`https://pages.example.com`) or, recommended, a host per page "
-            "(`https://{id}.pages.example.com`, a wildcard DNS record and certificate). "
-            "Pages can then embed YouTube and Drive players. Unset: an opaque sandbox."
+            "Where artifact page code runs: a host per page "
+            "(`https://{id}.pages.example.com`, a wildcard DNS record and certificate) on a "
+            "domain of its own, other than the public URL's. Pages can then keep storage and "
+            "embed YouTube and Drive players. Unset: an opaque sandbox."
         ),
     )
     artifact_asset_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
@@ -1287,7 +1287,8 @@ class WebSettings(BaseModel):
         found = _CONTENT_URL.fullmatch(url)
         if found is None or (found[1] != "https" and not self.dev):
             raise ValueError(
-                "DAIMON_WEB__ARTIFACT_CONTENT_URL must be https://host or https://{id}.host"
+                "DAIMON_WEB__ARTIFACT_CONTENT_URL must be https://{id}.host, one host per page: "
+                "a single host would share storage across every page"
             )
         if _site_of(found[3]) == _site_of((self.public_url.host or "").lower()):
             raise ValueError(
