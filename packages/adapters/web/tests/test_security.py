@@ -18,7 +18,7 @@ async def test_every_response_carries_the_security_headers(web_client: WebClient
     assert "max-age" in headers["strict-transport-security"]
     csp = headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp and "script-src 'self'" in csp
-    assert "frame-src 'none'" in csp, "nothing may be framed"
+    assert "frame-src 'self'" in csp, "only this site's artifact pages may be framed"
 
 
 async def test_api_and_auth_responses_are_not_cached(web_client: WebClientFactory) -> None:

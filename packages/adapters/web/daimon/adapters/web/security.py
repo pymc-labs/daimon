@@ -14,12 +14,14 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 # Sent by the app on every request and by no cross-site form.
 CSRF_HEADER = "x-daimon-web"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-_GUARDED_PREFIXES = ("/api/", "/auth/")
-_NO_STORE_PREFIXES = ("/api/", "/auth/")
+_GUARDED_PREFIXES = ("/api/", "/auth/", "/a/")
+_NO_STORE_PREFIXES = ("/api/", "/auth/", "/a/")
+# Artifact pages: their routes set their own policy, framing and referrer headers.
+_PAGES_PREFIX = "/a/"
 
 
 def content_security_policy() -> str:
-    """The page policy: own scripts only, no frames."""
+    """The page policy: own scripts only; frames only of this site's artifact pages."""
     return "; ".join(
         (
             "default-src 'self'",
@@ -28,7 +30,7 @@ def content_security_policy() -> str:
             "img-src 'self' data: blob:",
             "font-src 'self' data:",
             "connect-src 'self'",
-            "frame-src 'none'",
+            "frame-src 'self'",
             "frame-ancestors 'none'",
             "object-src 'none'",
             "base-uri 'self'",
@@ -50,7 +52,7 @@ def _headers(web: WebSettings) -> dict[str, str]:
 
 
 class SecurityMiddleware:
-    """Adds the security headers and refuses cross-site writes to `/api` and `/auth`."""
+    """Adds the security headers and refuses cross-site writes to `/api`, `/auth` and `/a`."""
 
     def __init__(self, app: ASGIApp, *, web: WebSettings) -> None:
         self._app = app
@@ -65,17 +67,23 @@ class SecurityMiddleware:
         if scope["method"] not in _SAFE_METHODS and path.startswith(_GUARDED_PREFIXES):
             refusal = self._refusal(scope)
             if refusal is not None:
-                await JSONResponse({"detail": refusal}, status_code=403, headers=self._headers)(
+                body = {"detail": refusal}
+                if path.startswith(_PAGES_PREFIX):
+                    body = {"error": {"code": "forbidden", "message": refusal}}
+                await JSONResponse(body, status_code=403, headers=self._headers)(
                     scope, receive, send
                 )
                 return
         no_store = path.startswith(_NO_STORE_PREFIXES)
+        page = path.startswith(_PAGES_PREFIX)
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 out = MutableHeaders(scope=message)
                 for name, value in self._headers.items():
-                    if name == "Content-Security-Policy" and name in out:
+                    if page:
+                        out.setdefault(name, value)
+                    elif name == "Content-Security-Policy" and name in out:
                         # A route's own policy (a download's sandbox) is enforced as well.
                         out.append(name, value)
                     else:

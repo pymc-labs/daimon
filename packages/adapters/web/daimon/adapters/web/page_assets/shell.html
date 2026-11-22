@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>$title</title>
+<style nonce="$nonce">
+html, body { margin: 0; height: 100%; background: #fff; }
+iframe { display: block; border: 0; width: 100%; height: 100%; }
+#signin { display: none; position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  padding: 10px 16px; border-radius: 8px; background: #111; color: #fff;
+  font: 14px/1.4 system-ui, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+#signin a { color: #9cf; }
+</style>
+</head>
+<body>
+<iframe id="page" data-src="$src" title="$title" sandbox="$sandbox"
+  allow="clipboard-write; fullscreen; autoplay; encrypted-media; picture-in-picture"></iframe>
+<div id="signin">Your sign-in ended. <a id="signin-link" href="$signin" target="_top">Sign in again</a></div>
+<script nonce="$nonce">
+(() => {
+  "use strict";
+  // The page's only way out: each message from its sandboxed frame becomes one call to
+  // this page's API, which re-checks access and capability every time. The frame has an
+  // opaque origin, so it never holds the sign-in; this shell sends it.
+  const bridge = $bridge;
+  const frame = document.getElementById("page");
+  const banner = document.getElementById("signin");
+  const signIn = document.getElementById("signin-link");
+  const FRAGMENT = /^#[A-Za-z0-9_.:-]{1,128}$$/;
+  const validHash = (hash) => hash === "" || FRAGMENT.exec(hash)?.[0] === hash;
+  // Deep links: the address bar's #fragment is the page's, both ways.
+  frame.src = frame.dataset.src + (validHash(location.hash) ? location.hash : "");
+  const syncSignIn = () => { signIn.hash = validHash(location.hash) ? location.hash : ""; };
+  syncSignIn();
+  window.addEventListener("hashchange", () => {
+    syncSignIn();
+    if (validHash(location.hash)) frame.contentWindow.postMessage({ daimon: 1, nav: "hash", hash: location.hash }, "*");
+  });
+  const METHODS = new Set(["db.get", "db.list", "db.set", "db.add", "db.delete", "db.revision", "notify", "thread", "ask"]);
+  const headers = { "Content-Type": "application/json", "X-Daimon-Web": "1", ...(bridge.link ? { "X-Daimon-Link": bridge.link } : {}) };
+  const unreachable = { code: "unavailable", message: "Daimon could not be reached." };
+  async function post(method, params) {
+    const response = await fetch(bridge.api + method, { method: "POST", headers, body: JSON.stringify(params ?? {}), credentials: "same-origin" });
+    if (response.status === 401) banner.style.display = "block";
+    return response;
+  }
+  const failure = async (response) => ((await response.json().catch(() => ({}))).error || unreachable);
+  // An ask streams the turn's text as it grows; the frame gets each step, then the reply.
+  async function ask(params, progress) {
+    const response = await post("ask", params);
+    if (!response.ok || !response.body) throw await failure(response);
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "", text = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return text;
+      buffer += value;
+      let end;
+      while ((end = buffer.indexOf("\n\n")) >= 0) {
+        const frameText = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        const data = frameText.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
+        if (!data) continue;
+        const event = JSON.parse(data);
+        if (event.type === "delta") text += event.text;
+        else if (event.type === "text") text = event.text;
+        else if (event.type === "done") return event.message?.content ?? text;
+        else continue;
+        progress(text);
+      }
+    }
+  }
+  window.addEventListener("message", async (event) => {
+    const msg = event.data;
+    if (event.source !== frame.contentWindow || !msg || typeof msg !== "object" || Array.isArray(msg) || msg.daimon !== 1) return;
+    // "*": the frame's origin is opaque; frame-src keeps this page's content in it.
+    const reply = (body) => frame.contentWindow.postMessage({ daimon: 1, id: msg.id, ...body }, "*");
+    if (msg.nav === "hash" || msg.nav === "copy") {
+      if (typeof msg.hash !== "string" || !validHash(msg.hash)) return;
+      history.replaceState(null, "", location.pathname + location.search + msg.hash);
+      syncSignIn();
+      if (msg.nav !== "copy" || !Number.isSafeInteger(msg.id)) return;
+      const url = bridge.share + msg.hash;
+      try {
+        await navigator.clipboard.writeText(url);
+        reply({ result: url });
+      } catch {
+        reply({ error: { code: "unavailable", message: "Copy the link from the address bar." } });
+      }
+      return;
+    }
+    if (!Number.isSafeInteger(msg.id) || !METHODS.has(msg.method)) return;
+    try {
+      if (msg.method === "ask") {
+        // A turn runs only on a click or key press, never on page load or a timer.
+        if (!navigator.userActivation?.isActive) {
+          reply({ error: { code: "forbidden", message: "Ask the agent from a click." } });
+          return;
+        }
+        reply({ result: await ask(msg.params, (text) => reply({ progress: text })) });
+        return;
+      }
+      const response = await post(msg.method, msg.params);
+      if (!response.ok) throw await failure(response);
+      reply({ result: await response.json() });
+    } catch (error) {
+      reply({ error: error && error.code ? error : unreachable });
+    }
+  });
+})();
+</script>
+</body>
+</html>

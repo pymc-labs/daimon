@@ -13,6 +13,7 @@ from daimon.adapters.web.agent_lifecycle import agent_lifecycle_router
 from daimon.adapters.web.agent_people import agent_people_router
 from daimon.adapters.web.agent_tool_rules import agent_tool_rules_router
 from daimon.adapters.web.agents import agents_router
+from daimon.adapters.web.artifacts import artifacts_router
 from daimon.adapters.web.auth import auth_router
 from daimon.adapters.web.avatars import avatars_router
 from daimon.adapters.web.channel_settings import channel_settings_router
@@ -24,6 +25,7 @@ from daimon.adapters.web.integrations import integrations_router
 from daimon.adapters.web.invites import invites_router
 from daimon.adapters.web.me import me_router
 from daimon.adapters.web.nodes import nodes_router
+from daimon.adapters.web.pages import pages_router
 from daimon.adapters.web.profile import profile_router
 from daimon.adapters.web.routines import routines_router
 from daimon.adapters.web.runtime import WebRuntime
@@ -73,7 +75,14 @@ async def _provider_unreachable(request: Request, exc: anthropic.APIConnectionEr
 
 
 # Files people download and avatars: already packed, so gzip would only stall the event loop.
-_UNCOMPRESSED = ("/api/chat/attachments/", "/api/chat/files/", "/avatars/")
+# Artifact pages and their API: a public page's link sits beside text its page chose.
+_UNCOMPRESSED = (
+    "/api/chat/attachments/",
+    "/api/chat/files/",
+    "/avatars/",
+    "/a/",
+    "/api/artifacts",
+)
 
 
 class _Compress:
@@ -129,5 +138,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(integrations_router(runtime))
     app.include_router(invites_router(runtime))
     app.include_router(admin_router(runtime))
+    app.include_router(artifacts_router(runtime))
+    app.include_router(pages_router(runtime))
     app.include_router(spa_router(runtime.web))
     return app
