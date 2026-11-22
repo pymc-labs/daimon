@@ -4,7 +4,7 @@ else stays ordinary chat and records nothing."""
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from daimon.core._models import Account, PlatformPrincipal, WorkflowRun, WorkflowTriggerEvent
@@ -145,3 +145,27 @@ async def test_a_held_concurrency_key_leaves_the_mention_to_chat(db_session: Asy
     event = await db_session.scalar(select(WorkflowTriggerEvent))
     assert event is not None and (event.status, event.reason) == ("skipped", "skipped"), event
     assert (await _counts(db_session))[1] == 1, "no second run"
+
+
+@pytest.mark.parametrize("verdict", ["skipped", "started"])
+async def test_a_mention_the_starts_loop_took_first_goes_on_as_chat_when_it_refuses(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    verdict: Literal["skipped", "started"],
+) -> None:
+    sm, tenant_id, _ = await _setup(db_session)
+
+    async def loop_first(
+        session: AsyncSession, *, limit: int, event_id: uuid.UUID | None = None
+    ) -> list[object]:
+        """The starts loop holds the event and settles it before our claim reads it."""
+        assert event_id is not None, "the mention claims its own event"
+        await mentions.store.mark_event(session, event_id, status=verdict, reason=verdict)
+        return []
+
+    monkeypatch.setattr(mentions.store, "claim_accepted_events", loop_first)
+    claimed = await mentions.claim_mention(sm, _on(), _mention(tenant_id), NO_LINKS, NOW)
+    if verdict == "skipped":
+        assert claimed is None, "the loop's refusal leaves the message to chat"
+    else:
+        assert claimed == mentions.Claimed(), "the loop started the run, so nothing is posted"

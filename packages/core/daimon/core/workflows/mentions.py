@@ -159,7 +159,11 @@ async def _start(
     async with sm.begin() as session:
         claimed = await store.claim_accepted_events(session, limit=1, event_id=event.id)
         if not claimed:
-            return Claimed()  # the starts loop took it first
+            # The starts loop took it first: wait for its verdict. A refusal leaves chat.
+            settled = await store.get_event(
+                session, trigger_id=trigger.id, event_id=event.id, lock=True
+            )
+            return None if settled and settled.status in ("skipped", "rejected") else Claimed()
         run = await triggers.settle_event(sm, settings, session, *claimed[0], now)
     if run is None:
         return None

@@ -32,8 +32,8 @@ Writes = Literal["refuse", "propose", "allow", "routine"]
 Verdict = Literal["allow", "propose", "refuse"]
 #: Ledger event: ids an allowed call returned that a `created_by` rule may name later.
 CREATED: Final = "write.created"
-#: One plain address: no display name, quotes, comments, routes or second address.
-_ADDRESS: Final = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+)")
+#: One plain address: exactly one `@`, and no display name, quotes, comments, `%` or `!` routes.
+_ADDRESS: Final = re.compile(r"[A-Za-z0-9.#$&*+/=?^_{|}~-]+@([A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+)")
 
 
 @dataclass(frozen=True)

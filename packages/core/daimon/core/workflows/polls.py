@@ -119,9 +119,11 @@ def _rows(result: JsonValue, config: PollTrigger) -> list[_Row]:
     return list(rows.values())
 
 
-def _delivery(trigger: TriggerRow, row: _Row, *, once: bool) -> str:
+def _delivery(trigger: TriggerRow, row: _Row, config: PollTrigger) -> str:
+    """A key alone, unless `updated` counts each change: an added row that leaves a listing
+    and returns edited is not new."""
     base = f"poll:{trigger.id}:{row.key}"
-    return base if once else f"{base}:{row.content}"
+    return base if config.once or config.rule != "updated" else f"{base}:{row.content}"
 
 
 async def poll_triggers(
@@ -208,7 +210,7 @@ async def _record(
         "payload": row.item,
         "trigger": {"id": config.id},
     }
-    delivery = _delivery(trigger, row, once=bool(config.once))
+    delivery = _delivery(trigger, row, config)
     try:
         if not passes(config.start_when, context, now=now):
             return 0

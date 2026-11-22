@@ -9,6 +9,7 @@ codes it shares are listed in the shared fixtures
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Final, Literal
@@ -43,6 +44,7 @@ from daimon.core.workflows.spec import (
     AgentNode,
     AnyNode,
     ApprovalNode,
+    ArgRule,
     BranchNode,
     CodeNode,
     Deliver,
@@ -58,6 +60,7 @@ from daimon.core.workflows.spec import (
     TransformNode,
     WaitNode,
     WebhookTrigger,
+    WriteScope,
     business_days,
     parse_duration,
     parse_spec,
@@ -362,20 +365,56 @@ def _check_action(node_id: str, node: ActionNode, catalog: Catalog | None, repor
         report.error("unknown_tool", f"Unknown tool: {node.tool}", node_id)
     if any(s.tool != node.tool for s in node.writes_to or []):
         report.error("scope_tool", "A scoped write names a tool this Action does not call", node_id)
-    _check_scopes(node_id, node, report)
+    _check_scopes(node_id, node, catalog, report)
 
 
-def _check_scopes(node_id: str, node: AgentNode | ActionNode, report: _Report) -> None:
+def _check_scopes(
+    node_id: str, node: AgentNode | ActionNode, catalog: Catalog | None, report: _Report
+) -> None:
     for scope in node.writes_to or []:
         if not scope.where:
             report.error("scope_unbounded", f"{scope.tool} needs at least one where rule", node_id)
+        for free in scope.free or []:
+            if any(p == free or p.startswith(f"{free}.") for p in scope.where):
+                report.error("scope_free", f"{free} is free but holds a limited value", node_id)
         for rule in scope.where.values():
             # A template could carry untrusted text into the allowlist.
             fixed = [*(rule.in_ or []), *(rule.prefix or []), *(rule.domains or [])]
             if any(isinstance(x, str) and expressions_in(x) for x in fixed):
                 report.error("scope_literal", "Allowed values are fixed text", node_id)
+            # "" matches every string.
+            if "" in fixed:
+                report.error("scope_empty", "An allowed value cannot be empty", node_id)
             if rule.created_by and not _is_path(rule.created_by.id):
                 report.error("scope_path", f"Not a path: {rule.created_by.id}", node_id)
+            if rule.created_by and not tool_writes(rule.created_by.tool, catalog):
+                report.error(
+                    "scope_created_by",
+                    f"{rule.created_by.tool} is not a write tool, so it makes nothing",
+                    node_id,
+                )
+
+
+def _rule_text(rule: ArgRule) -> str:
+    parts = [
+        *(f"is {_plain(x)}" for x in rule.in_ or []),
+        *(f"starts with {x}" for x in rule.prefix or []),
+        *(f"is an address at {x}" for x in rule.domains or []),
+        *([f"was made by this run with {rule.created_by.tool}"] if rule.created_by else []),
+    ]
+    return " or ".join(parts)
+
+
+def _plain(value: str | int | float | bool) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def scope_text(scope: WriteScope) -> str:
+    """What a reviewer approves for a scoped write, in plain words: the tool, each limited
+    argument, and the arguments left free to carry any text."""
+    limits = "; ".join(f"{path} {_rule_text(rule)}" for path, rule in scope.where.items())
+    free = f" Any text in {', '.join(scope.free)}." if scope.free else ""
+    return f"{scope.tool}: {limits}.{free}"
 
 
 def _is_path(text: str) -> bool:
@@ -421,7 +460,7 @@ def _check_agent(
     agent = node.agent or (spec.defaults.agent if spec.defaults else None)
     if agent is None:
         report.error("no_agent", "Choose an agent", node_id)
-    _check_scopes(node_id, node, report)
+    _check_scopes(node_id, node, catalog, report)
     if catalog is not None and catalog.skills is not None:
         for skill in node.skills or []:
             if skill not in catalog.skills:
@@ -537,8 +576,9 @@ def _check_loops(spec: Spec, report: _Report) -> None:
 
 def _gated(spec: Spec, loop: set[str]) -> bool:
     """Every cycle through `loop` passes an Approval: a person answers before each lap, and
-    the run's step, budget and deadline limits bound it."""
-    rest = {x for x in loop if x in spec.nodes and not isinstance(spec.nodes[x], ApprovalNode)}
+    the run's step, budget and deadline limits bound it. An Approval whose timeout route stays
+    in the loop is no gate: a lap can run on the timeout with no answer."""
+    rest = {x for x in loop if x in spec.nodes and not _person_gate(spec.nodes[x], loop)}
     state: dict[str, int] = {}
 
     def cycles(node_id: str) -> bool:
@@ -552,6 +592,13 @@ def _gated(spec: Spec, loop: set[str]) -> bool:
         return False
 
     return not any(x not in state and cycles(x) for x in rest)
+
+
+def _person_gate(node: AnyNode, loop: set[str]) -> bool:
+    if not isinstance(node, ApprovalNode):
+        return False
+    route = node.timeout and node.routes and node.routes.get(node.timeout.route)
+    return not route or route not in loop
 
 
 def _check_durations(spec: Spec, report: _Report) -> None:
@@ -658,7 +705,7 @@ def _classes_and_grants(
             c.append("S")
         if writes or scopes:
             c.append("W")
-        grants += [Grant(kind="scoped_write", node=node_id, detail=s.tool) for s in scopes]
+        grants += [Grant(kind="scoped_write", node=node_id, detail=scope_text(s)) for s in scopes]
         classes[node_id] = c
         if writes and not bound_by(spec, node_id):
             detail = node.tool if isinstance(node, ActionNode) else "Agent writes"

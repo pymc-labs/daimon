@@ -1090,7 +1090,7 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Workflows
 
-People can run workflows.
+Run workflows.
 
 | | |
 | --- | --- |
@@ -1102,7 +1102,7 @@ People can run workflows.
 
 ## Workflow webhooks
 
-Webhooks can start workflows.
+Start runs from webhooks.
 
 | | |
 | --- | --- |
@@ -1114,7 +1114,7 @@ Webhooks can start workflows.
 
 ## Workflow code steps
 
-Workflows can run code steps.
+Run code steps.
 
 | | |
 | --- | --- |
@@ -1126,7 +1126,7 @@ Workflows can run code steps.
 
 ## Workflow mentions
 
-Mentions can start workflows.
+Start runs from mentions.
 
 | | |
 | --- | --- |
@@ -1138,7 +1138,7 @@ Mentions can start workflows.
 
 ## Workflow polls
 
-Polls can start workflows.
+Start runs from polls.
 
 | | |
 | --- | --- |
@@ -1150,7 +1150,7 @@ Polls can start workflows.
 
 ## Workflow scoped writes
 
-Steps can write unattended within approved limits.
+Write unattended within limits.
 
 | | |
 | --- | --- |
@@ -1162,7 +1162,7 @@ Steps can write unattended within approved limits.
 
 ## Workflow run budget
 
-The most one workflow run may spend.
+The most a run may spend.
 
 | | |
 | --- | --- |
@@ -1174,7 +1174,7 @@ The most one workflow run may spend.
 
 ## Workflow run history
 
-How long finished runs keep steps.
+How long runs keep steps.
 
 | | |
 | --- | --- |

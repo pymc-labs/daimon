@@ -1238,7 +1238,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflows",
         "Workflows",
-        "People can run workflows.",
+        "Run workflows.",
         tiers=_WORKFLOW_TIERS,
         default="off",
         authority=_ADMIN,
@@ -1246,7 +1246,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_webhooks",
         "Workflow webhooks",
-        "Webhooks can start workflows.",
+        "Start runs from webhooks.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1255,7 +1255,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_code",
         "Workflow code steps",
-        "Workflows can run code steps.",
+        "Run code steps.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1264,7 +1264,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_mentions",
         "Workflow mentions",
-        "Mentions can start workflows.",
+        "Start runs from mentions.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1273,7 +1273,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_polls",
         "Workflow polls",
-        "Polls can start workflows.",
+        "Start runs from polls.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1282,7 +1282,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_scoped_writes",
         "Workflow scoped writes",
-        "Steps can write unattended within approved limits.",
+        "Write unattended within limits.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1291,7 +1291,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "workflow_run_budget",
         "Workflow run budget",
-        "The most one workflow run may spend.",
+        "The most a run may spend.",
         {"50": "$50", "20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
         default="5",
         tiers=("deployment", "workspace"),
@@ -1301,7 +1301,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "workflow_retention_days",
         "Workflow run history",
-        "How long finished runs keep steps.",
+        "How long runs keep steps.",
         {"400": "400 days", "180": "180 days", "90": "90 days", "30": "30 days"},
         default="90",
         tiers=("deployment", "workspace"),

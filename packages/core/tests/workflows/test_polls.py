@@ -121,6 +121,22 @@ async def test_updated_rows_start_a_run_per_change_unless_once(
     assert started == expected, f"once={once}: a changed watched field starts a run"
 
 
+async def test_an_added_row_that_leaves_and_returns_edited_starts_no_second_run(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, owner = await _workspace(db_session)
+    await _publish(db_session, tenant_id, owner)
+    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    client = Fake(
+        rows(("a", 2, "Todo")),
+        rows(("a", 2, "Todo"), ("b", 3, "Todo")),
+        rows(("a", 2, "Todo")),
+        rows(("b", 3, "Edited"), ("a", 2, "Todo")),
+    )
+    started = [await _pass(sm, client, NOW + step * 5 * MINUTE) for step in range(4)]
+    assert started == [0, 1, 0, 0], "a returning row is found by its key, not its content"
+
+
 async def test_a_changed_tool_pauses_the_trigger_until_it_is_published_again(
     db_session: AsyncSession,
 ) -> None:

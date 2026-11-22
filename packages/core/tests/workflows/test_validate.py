@@ -192,3 +192,91 @@ def test_skills_past_the_sessions_room_are_a_warning() -> None:
 
     assert warned(AGENT_SKILL_CAP - 2) == [], "both fit"
     assert warned(AGENT_SKILL_CAP - 1) == ["skill_room:a", "skill_room:b"], "one would drop"
+
+
+def _scoped(scope: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "daimon.workflow/v1",
+        "name": "scoped",
+        "start": "act",
+        "nodes": {
+            "act": {
+                "kind": "action",
+                "tool": "mail/send_reply",
+                "args": {},
+                "writes_to": [{"tool": "mail/send_reply", **scope}],
+                "next": "done",
+            },
+            "done": {"kind": "finish"},
+        },
+    }
+
+
+_TO = {"to": {"domains": ["example.com"]}}
+
+
+@pytest.mark.parametrize(
+    ("scope", "code"),
+    [
+        ({"where": {"message.to": _TO["to"]}, "free": ["message"]}, "scope_free"),
+        ({"where": {"to": _TO["to"]}, "free": ["to"]}, "scope_free"),
+        ({"where": _TO, "free": ["message.subject", "body"]}, None),
+        ({"where": {"to": {"prefix": [""]}}}, "scope_empty"),
+        ({"where": {"to": {"domains": [""]}}}, "scope_empty"),
+        ({"where": {"to": {"in": ["", "a@x.org"]}}}, "scope_empty"),
+        (
+            {"where": {"id": {"created_by": {"tool": "mail/list_threads", "id": ".id"}}}},
+            "scope_created_by",
+        ),
+        ({"where": {"id": {"created_by": {"tool": "mail/create_draft", "id": ".id"}}}}, None),
+    ],
+)
+def test_a_scope_that_bounds_nothing_is_refused(scope: dict[str, Any], code: str | None) -> None:
+    result = validate_document(_scoped(scope), None)
+    assert [p.code for p in result.errors if p.code.startswith("scope_")] == [code] * bool(code), (
+        "each unbounded shape is refused and a bounded one passes"
+    )
+
+
+def test_the_grant_a_reviewer_approves_shows_the_limits_in_words() -> None:
+    scope = {
+        "where": {"to": {"domains": ["example.com"], "in": ["a@x.org"]}},
+        "free": ["subject", "body"],
+    }
+    [grant] = [
+        g for g in validate_document(_scoped(scope), None).grants if g.kind == "scoped_write"
+    ]
+    assert grant.detail == (
+        "mail/send_reply: to is a@x.org or is an address at example.com. Any text in subject, body."
+    ), "the grant names the tool, each limit and the free arguments"
+
+
+@pytest.mark.parametrize(
+    ("timeout", "limited"),
+    [
+        (None, False),
+        ({"after": "1d", "route": "stop"}, False),
+        ({"after": "1d", "route": "fail"}, False),
+        ({"after": "1d", "route": "again"}, True),
+    ],
+)
+def test_an_approval_that_times_out_back_into_the_loop_is_no_person_gate(
+    timeout: dict[str, str] | None, limited: bool
+) -> None:
+    ask: dict[str, Any] = {
+        "kind": "approval",
+        "answer": "choice",
+        "routes": {"again": "work", "stop": "done"},
+    }
+    spec: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "loop",
+        "start": "work",
+        "nodes": {
+            "work": {"kind": "agent", "agent": "a", "instructions": "Go", "next": "ask"},
+            "ask": {**ask, **({"timeout": timeout} if timeout else {})},
+            "done": {"kind": "finish"},
+        },
+    }
+    codes = [p.code for p in validate_document(spec, None).errors]
+    assert ("loop_limit" in codes) is limited, f"{timeout}: {codes}"

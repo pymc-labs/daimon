@@ -273,8 +273,10 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
         _SHAPES,
         _POLLS + "test_polls_off_stops_polling_and_refuses_runs",
     ),
-    "Each new row starts a run": _POLLS
-    + "test_the_first_poll_sets_a_baseline_and_each_new_row_starts_one_run",
+    "Each new row starts a run": (
+        _POLLS + "test_the_first_poll_sets_a_baseline_and_each_new_row_starts_one_run",
+        _POLLS + "test_an_added_row_that_leaves_and_returns_edited_starts_no_second_run",
+    ),
     "The first check only records": _POLLS
     + "test_the_first_poll_sets_a_baseline_and_each_new_row_starts_one_run",
     "With `rule: updated` and `watch`": _POLLS

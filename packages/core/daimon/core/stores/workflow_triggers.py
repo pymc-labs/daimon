@@ -539,13 +539,13 @@ async def list_events(
 
 
 async def get_event(
-    session: AsyncSession, *, trigger_id: uuid.UUID, event_id: uuid.UUID
+    session: AsyncSession, *, trigger_id: uuid.UUID, event_id: uuid.UUID, lock: bool = False
 ) -> EventRow | None:
-    orm = await session.scalar(
-        select(WorkflowTriggerEvent).where(
-            WorkflowTriggerEvent.id == event_id, WorkflowTriggerEvent.trigger_id == trigger_id
-        )
+    """The event; `lock` waits for a transaction settling it, and reads what it left."""
+    query = select(WorkflowTriggerEvent).where(
+        WorkflowTriggerEvent.id == event_id, WorkflowTriggerEvent.trigger_id == trigger_id
     )
+    orm = await session.scalar(query.with_for_update() if lock else query)
     return None if orm is None else EventRow.model_validate(orm)
 
 
