@@ -16,7 +16,7 @@ from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.stores.turn_origins import get_active_origin
-from daimon.core.stores.watches import get_firing, get_watch, watch_seed
+from daimon.core.stores.watches import get_firing, get_watch, pause_watch, watch_seed
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy, classify_tool
 from daimon.core.turn import unattended_capabilities as capabilities
 from daimon.core.turn.admission import Admission
@@ -174,3 +174,19 @@ async def watch_capabilities(
     return capabilities.ConstrainedSession(
         send=send, original=constrained.original, changed=send != constrained.original
     )
+
+
+#: What the owner reads when a watch pauses because they lost the place it reports in.
+LOST_ACCESS = "Watch paused: you can no longer post where it reports."
+
+
+async def pause_for_lost_access(
+    sessions: async_sessionmaker[AsyncSession], row: TaskContinuationRow
+) -> AdmissionDenied:
+    """Pause the watch `row` fired for: its owner proved to lose the reporting place.
+    Returns the refusal that settles the wake; a chat adapter's per-report recheck raises it."""
+    async with sessions.begin() as db:
+        firing = await get_firing(db, row.idempotency_key)
+        if firing is not None:
+            await pause_watch(db, firing.watch_id, reason=LOST_ACCESS)
+    return AdmissionDenied(reason="invoker_not_allowed")

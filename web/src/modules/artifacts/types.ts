@@ -17,7 +17,7 @@ export type ArtifactDetail = ArtifactSummary & {
   collection_rules: Record<string, CollectionRule>
   link: string | null   // public: full secret link
   usage: { documents: number; max_documents: number; bytes: number; max_bytes: number }
-  watches: { id: string; name: string; owner: string; agent: string; status: "active" | "paused"; turns_today: number; max_turns_per_day: number; thread_url: string | null }[]
+  watches: ArtifactWatch[]
   asks: { threads: number; turns_7d: number }
   can: { edit: boolean; share: boolean; delete: boolean; transfer: boolean }
 }
@@ -34,3 +34,6 @@ export type ArtifactChange = Partial<{
 }>
 /** What `POST /api/artifacts/:id/people` answers: a new visitor's sign-in link, shown once. */
 export type EmailShare = ArtifactDetail & { invite_link: string | null }
+
+/** A watch on a page; `mine` when the caller made it, the only one who may resume it. */
+export type ArtifactWatch = { id: string; name: string; owner: string; mine: boolean; agent: string; status: "active" | "paused"; turns_today: number; max_turns_per_day: number; thread_url: string | null }

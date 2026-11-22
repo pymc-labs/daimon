@@ -196,3 +196,26 @@ async def install_poll_ports(session: AsyncSession) -> None:
     )
     await session.execute(text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar"))
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
+    # 0225 replaces the page and poll ports: principal platform, non-thread page delivery.
+    platforms = runpy.run_path(
+        str(
+            Path(__file__).resolve().parents[3]
+            / "core/alembic/versions/0225_page_watch_platforms.py"
+        )
+    )
+    for key in ("PAGE_SQL", "POLL_SQL"):
+        await session.execute(text(cast(str, platforms[key]).format(schema=quoted)))
+    await session.execute(
+        text(
+            f"REVOKE ALL ON FUNCTION {quoted}.accept_watch_poll_result(uuid,text,jsonb,text) "
+            "FROM PUBLIC,daimon_sidecar,daimon_watch_ingress_owner"
+        )
+    )
+    page = "accept_watch_page_event(uuid,uuid,text,bigint,uuid,text,text,text)"
+    await session.execute(text(f"GRANT CREATE ON SCHEMA {quoted} TO daimon_watch_ingress_owner"))
+    await session.execute(text(f"REVOKE ALL ON FUNCTION {quoted}.{page} FROM PUBLIC"))
+    await session.execute(
+        text(f"ALTER FUNCTION {quoted}.{page} OWNER TO daimon_watch_ingress_owner")
+    )
+    await session.execute(text(f"GRANT EXECUTE ON FUNCTION {quoted}.{page} TO daimon_sidecar"))
+    await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))

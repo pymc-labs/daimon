@@ -5,11 +5,25 @@ changes. Polling itself spends no AI turn. Read this to turn watches on, choose
 what they may read and manage them for a deployment.
 
 Watches are off by default. Polling works for Discord `read_thread` and
-`read_channel`, and for read tools on MCP servers an operator lists. A callback
-watch wakes on posts to a private link instead of polling; see
-[Callback watches](#callback-watches). A page-event watch wakes on the events
-an [artifact](artifacts.md#wake-an-agent-on-events) page sends. It needs no key
-from you, and only Discord can create one.
+`read_channel`, for read tools on MCP servers an operator lists, and for
+`artifact_db_query` on a page's data. A callback watch wakes on posts to a
+private link instead of polling; see [Callback watches](#callback-watches).
+
+## Page watches
+
+A page-event watch wakes on the events an
+[artifact](artifacts.md#wake-an-agent-on-events) page sends. It needs no key
+from you. Discord, Slack, Teams and the web app can create one; the web app
+polls only page data. `select`, such as `.data.vote`, keeps one part of each
+event and skips events without it.
+
+A page watch may be permanent without an admin, and it still ends with its
+page. Someone who does not manage the page holds at most one watch on it.
+Whoever manages the page can pause or delete any of its watches from the
+Activity tab. Only the watch's owner can resume it.
+
+Before every report on Slack or Teams, Daimon rechecks that the owner can still
+post in the destination, and pauses the watch if not.
 
 ## How a watch works
 
@@ -44,8 +58,9 @@ the conversation, never from the request.
 - **This thread**, the default.
 - **The owner's DM** (`delivery="dm"`, Discord only). Each report runs as a
   fresh DM turn under the same read-only rules.
-- **A new public thread per report** (`delivery="new_thread"`, Discord only).
-  Daimon checks the owner may create threads in the parent.
+- **A new thread per report** (`delivery="new_thread"`). On Discord it is a
+  public thread, and Daimon checks the owner may create threads in the parent.
+  On the web app it is a new chat of the owner's own.
 
 Turned-off DMs or lost thread rights pause the watch.
 
@@ -67,7 +82,7 @@ before it are dropped, and the next poll saves a new baseline. Admins may
 show, pause or delete another owner's watch, and `list_watches(scope="all")`
 lists the whole server. Only the owner can resume or edit.
 
-A watch lasts 1 to 30 days, with at most 25 live watches per owner. A permanent
+A watch lasts 1 to 30 days, with at most 25 live watches per owner, permanent page watches included. A permanent
 watch has no end date and expires after 30 days paused. An owner who is an admin
 can make up to 5 polled watches permanent with `permanent=true`; a callback watch
 is permanent only when whoever runs Daimon sets that (below).

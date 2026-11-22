@@ -4,7 +4,7 @@ import { http, HttpResponse, type HttpHandler } from "msw"
 import type { Msg } from "@/modules/chat/types"
 import { publicRefusal } from "@/modules/artifacts/rules"
 import type {
-  ArtifactChange, ArtifactDetail, ArtifactEvent, ArtifactSummary, ArtifactVersion, DataCollection, DataDocument, PersonRef,
+  ArtifactChange, ArtifactDetail, ArtifactEvent, ArtifactSummary, ArtifactVersion, ArtifactWatch, DataCollection, DataDocument, PersonRef,
 } from "@/modules/artifacts/types"
 import runSheetThumb from "./artifacts/thumbs/content-run-sheet.png"
 import pricingThumb from "./artifacts/thumbs/q3-pricing-review.png"
@@ -28,7 +28,7 @@ const MARCO = ref("p_marco")!, SOFIA = ref("p_sofia")!, TOM = ref("p_tom")!
 const PEOPLE_ALL = [MAYA, JONAS, PRIYA, MARCO, SOFIA, TOM, JORDAN]
 
 type Docs = Record<string, DataDocument[]>
-type Stored = Omit<ArtifactDetail, "mine" | "role" | "people_count" | "can" | "usage" | "url"> & { docs: Docs; events_log: ArtifactEvent[]; versions: ArtifactVersion[] }
+type Stored = Omit<ArtifactDetail, "mine" | "role" | "people_count" | "can" | "usage" | "url" | "watches"> & { docs: Docs; events_log: ArtifactEvent[]; versions: ArtifactVersion[]; watches: Omit<ArtifactWatch, "mine">[] }
 
 const doc = (id: string, data: unknown, h: number, by: string): DataDocument => ({ id, data, updated_at: ago(h), updated_by: by, size_bytes: JSON.stringify(data).length })
 const ev = (event: string, data: unknown, by: PersonRef | null, sender: ArtifactEvent["sender"], h: number, delivered = 1): ArtifactEvent =>
@@ -82,6 +82,7 @@ const artifacts: Stored[] = [
     watches: [
       { id: "w_req", name: "New run requests", owner: "Maya Lindqvist", agent: "Daimon", status: "active", turns_today: 3, max_turns_per_day: 50, thread_url: "/chat/s_runsheet" },
       { id: "w_stage", name: "Stage changes to Review", owner: "Jonas Weber", agent: "Daimon", status: "paused", turns_today: 0, max_turns_per_day: 20, thread_url: null },
+      { id: "w_done", name: "Requests marked done", owner: "Maya Lindqvist", agent: "Daimon", status: "paused", turns_today: 0, max_turns_per_day: 20, thread_url: null },
     ],
     asks: { threads: 4, turns_7d: 17 },
   }),
@@ -143,6 +144,13 @@ export function artifactThread(sid: string): Msg[] | null {
       },
     ]
   }
+  if (sid === "s_watch_req") {
+    return [{
+      id: "m_wr_1", role: "assistant", created_at: at(4), cost_usd: 0.03, ms: 3_900, feedback: null,
+      content: "Tom Okafor requested a new run on the **Content run sheet**: \"Add a podcast clip run for the pricing episode\".\n\nIt is the only open request from this week. No run is planned for the pricing episode yet.",
+      steps: [{ id: "a", label: "Read page data", detail: "requests, 3 documents", status: "done", ms: 410 }],
+    }]
+  }
   if (sid === "s_ask_runsheet") {
     return [
       { id: "m_ask_1", role: "user", content: "Which runs are waiting on review?", created_at: at(12) },
@@ -188,7 +196,7 @@ function detail(a: Stored): ArtifactDetail {
   return {
     ...summary(a), people: a.people, editors: a.editors, editors_can_share: a.editors_can_share, data_scale: a.data_scale, link: a.link,
     collection_rules: a.collection_rules,
-    watches: can(a).edit ? a.watches : [], asks: a.asks, can: can(a),
+    watches: can(a).edit ? a.watches.map((w) => ({ ...w, mine: w.owner === me()!.name })) : [], asks: a.asks, can: can(a),
     usage: { documents: all.length, max_documents: 5_000 * a.data_scale, bytes: all.reduce((n, d) => n + d.size_bytes, 0), max_bytes: 20 * 1_048_576 * a.data_scale },
   }
 }
@@ -276,6 +284,26 @@ export const artifactsHandlers: HttpHandler[] = [
     if (!a.people.some((p) => p.id === person.id)) a.people = [...a.people, person]
     const invite_link = known ? null : `${ORIGIN}/invite/${secret()}?next=${encodeURIComponent(`/a/${a.id}/${a.slug}`)}`
     return HttpResponse.json({ ...detail(a), invite_link })
+  }),
+  http.post("/api/artifacts/:id/watches/:wid", async ({ params, request }) => {
+    await wait(180)
+    const { a, res } = guard(params.id, "edit")
+    if (!a) return res
+    const w = a.watches.find((x) => x.id === params.wid)
+    if (!w) return notFound()
+    const { action } = (await request.json()) as { action: "pause" | "resume" }
+    if (action === "resume" && w.owner !== me()!.name) return forbidden("Only the person who made this watch can resume it.")
+    w.status = action === "pause" ? "paused" : "active"
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.delete("/api/artifacts/:id/watches/:wid", async ({ params }) => {
+    await wait(180)
+    const { a, res } = guard(params.id, "edit")
+    if (!a) return res
+    const i = a.watches.findIndex((x) => x.id === params.wid)
+    if (i < 0) return notFound()
+    a.watches.splice(i, 1)
+    return new HttpResponse(null, { status: 204 })
   }),
   http.delete("/api/artifacts/:id", async ({ params }) => {
     await wait(200)

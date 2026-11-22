@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Page watches report wherever their owner chats.** Slack, Teams and the web app
+  can make page-event watches, and Daimon rechecks a Slack or Teams owner before
+  every report. Page watches can be permanent, keep one part of each event with
+  `select`, and report in a new thread or web chat per event. `artifact_db_query`
+  can be a poll source. A page's managers pause or delete its watches from the
+  Activity tab, and someone who does not manage a page holds one watch on it.
+
 - **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
   With the new Wait for bot access setting on (off by default, set per
   workspace by a server admin), a routine, timer or watch whose channel Daimon
@@ -69,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turned on. Eight `artifact_*` tools publish, list, read and write a page's
   data, fetch its source, delete and transfer it; routines may only list, query
   and write. `create_watch(source="page_event", page=...)` wakes an agent on a
-  page's events from Discord, and `rotate_watch_key` no longer sends a key for
+  page's events from any chat or the web app, and `rotate_watch_key` no longer sends a key for
   such a watch. The new Artifacts feature is on wherever the web app is, and the
   seeded agent gets an `artifacts` skill. Sharers can invite an email address
   as a page-only visitor, managers can limit viewers to their own documents per

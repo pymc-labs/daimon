@@ -208,6 +208,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                     if w.watch.instructions.strip()
                     else "Watch",
                     "owner": _person(w.watch.owner_account_id, people)["name"],
+                    "mine": w.watch.owner_account_id == caller.person.account_id,
                     "agent": w.watch.agent_name,
                     "status": "paused"
                     if w.watch.status == "paused" or w.watch.paused_at

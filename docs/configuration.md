@@ -2002,7 +2002,7 @@ explicitly enabled by an operator.
 
 ### `DAIMON_WATCHES__POLLABLE_TOOLS`
 
-`list[PollableTool]` · optional · default `[{"server":"daimon-mcp","tool":"read_thread","credential":"none","returns_chat":true,"max_interval_floor_s":60,"label":"Discord thread"},{"server":"daimon-mcp","tool":"read_channel","credential":"none","returns_chat":true,"max_interval_floor_s":60,"label":"Discord channel"}]`
+`list[PollableTool]` · optional · default `[{"server":"daimon-mcp","tool":"read_thread","credential":"none","returns_chat":true,"max_interval_floor_s":60,"label":"Discord thread"},{"server":"daimon-mcp","tool":"read_channel","credential":"none","returns_chat":true,"max_interval_floor_s":60,"label":"Discord channel"},{"server":"daimon-mcp","tool":"artifact_db_query","credential":"none","returns_chat":false,"max_interval_floor_s":60,"label":"Page data"}]`
 
 JSON list of the tools a watch may poll in this deployment. Only a listed tool can be
 polled: a watch on a tool taken off the list pauses at its next poll and its owner is
@@ -2011,16 +2011,17 @@ server URL, never a server name), tool (exact name), credential ("none" for nati
 readers; "agent", "owner" or "relay" for MCP servers), returns_chat (required: true only
 for native readers, which drop Daimon's own messages), max_interval_floor_s (shortest
 interval, at least 60, default 300) and label (shown on the approval card). Native
-entries must be read_thread or read_channel. Daimon's chat readers and chat_tools are
-refused on MCP servers. Credential owner polls with each watch owner's own read-only
-key, which they send once through a private form: for example a read-scoped API key the
-person creates on that server. Credential relay polls a signed-identity relay server
-(&lt;root&gt;/mcp-identity/&lt;name&gt;) as the watch owner, marked unattended, at the
-place the watch reports to. A server's read-only annotation never allows a poll; only
-this list does, and a server can still write when it says it only reads. A watch below a
-raised floor polls at the floor. Default (also used when the value is empty):
-read_thread and read_channel on daimon-mcp, credential none, returns_chat true, floor
-60. Set [] to allow no polls.
+entries must be read_thread, read_channel or artifact_db_query (a page's data, read as
+the watch owner). Daimon's chat readers and chat_tools are refused on MCP servers.
+Credential owner polls with each watch owner's own read-only key, which they send once
+through a private form: for example a read-scoped API key the person creates on that
+server. Credential relay polls a signed-identity relay server (&lt;root&gt;/mcp-
+identity/&lt;name&gt;) as the watch owner, marked unattended, at the place the watch
+reports to. A server's read-only annotation never allows a poll; only this list does,
+and a server can still write when it says it only reads. A watch below a raised floor
+polls at the floor. Default (also used when the value is empty): read_thread and
+read_channel on daimon-mcp, credential none, returns_chat true, floor 60, and
+artifact_db_query with returns_chat false. Set [] to allow no polls.
 
 ### `DAIMON_WATCHES__CALLBACK_BASE_URL`
 

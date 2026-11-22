@@ -14,6 +14,7 @@ from daimon.adapters.web.agent_people import agent_people_router
 from daimon.adapters.web.agent_tool_rules import agent_tool_rules_router
 from daimon.adapters.web.agents import agents_router
 from daimon.adapters.web.artifact_viewing import artifact_viewing_router
+from daimon.adapters.web.artifact_watches import artifact_watches_router
 from daimon.adapters.web.artifacts import artifacts_router
 from daimon.adapters.web.auth import auth_router
 from daimon.adapters.web.avatars import avatars_router
@@ -143,6 +144,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(admin_router(runtime))
     app.include_router(artifact_viewing_router(runtime))
     app.include_router(artifacts_router(runtime))
+    app.include_router(artifact_watches_router(runtime))
     app.include_router(pages_router(runtime))
     app.include_router(spa_router(runtime.web))
     return app

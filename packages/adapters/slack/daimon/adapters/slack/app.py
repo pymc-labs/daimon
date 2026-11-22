@@ -242,6 +242,7 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.adapters.slack.watch_access import require_watch_post_access
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
     AgentIdentity,
@@ -254,6 +255,7 @@ from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
+    WATCH_REASONS,
     check_wake_responder,
     continuation_attended,
     load_asking_agent_id,
@@ -3443,6 +3445,9 @@ class SlackApp:
                 thread_id=thread_id,
             )
             raise AdmissionDenied(reason="invoker_not_allowed")
+        if row.reason in WATCH_REASONS:
+            # Every report rechecks the owner may still post here; a proved loss pauses it.
+            await require_watch_post_access(self.runtime.sessionmaker, row, web_client)
         standing = decide_requester_org(requester)
         role = Role.ADMIN if standing.is_admin else Role.USER
         in_dm = thread_id.startswith(DM_SCOPE_PREFIX)

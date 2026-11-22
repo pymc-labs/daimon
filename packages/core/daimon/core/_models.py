@@ -4604,13 +4604,14 @@ class Watch(Base):
             "(delivery = 'thread') = (session_id IS NOT NULL)", name="ck_watches_delivery_session"
         ),
         CheckConstraint(
-            "delivery = 'thread' OR source IN ('poll', 'mcp_poll', 'callback')",
+            "delivery = 'thread' OR source IN ('poll', 'mcp_poll', 'callback') "
+            "OR (source = 'page_event' AND delivery = 'new_thread')",
             name="ck_watches_delivery_source",
         ),
-        # No expiry: an admin-approved polled watch, or a callback watch where the
-        # `callback_watch_lifetime` feature is `0` (permanent).
+        # No expiry: an admin-approved polled watch, a page watch (it ends with its
+        # page), or a callback watch where `callback_watch_lifetime` is `0` (permanent).
         CheckConstraint(
-            "expires_at IS NOT NULL OR source = 'callback' OR "
+            "expires_at IS NOT NULL OR source IN ('callback', 'page_event') OR "
             "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",
             name="ck_watches_permanent",
         ),
@@ -4621,6 +4622,9 @@ class Watch(Base):
     owner_account_id: Mapped[AccountFK]
     owner_external_id: Mapped[str]
     platform: Mapped[str]
+    # The owner principal's platform when it is not `platform`: a web watch runs as the
+    # owner's linked chat principal. NULL is `platform`.
+    principal_platform: Mapped[str | None]
     parent_channel_id: Mapped[str]
     thread_id: Mapped[str]
     agent_id: Mapped[str]
