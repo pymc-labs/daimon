@@ -21,7 +21,8 @@ passes untouched, as does a NULL owner (a shared slot). The statements are plain
 the migration that installs them can carry its own copy; a test keeps the two equal.
 
 Not covered by a trigger: a write into a shared conversation, which names no account
-in its row. Migration 0142 installs `INSTALL`; 0217 adds `MONITORING_INSTALL`.
+in its row. Migration 0142 installs `INSTALL`; 0217 adds `MONITORING_INSTALL`; 0224
+adds `OPS_EVENTS_INSTALL`.
 """
 
 from __future__ import annotations
@@ -92,8 +93,12 @@ GUARDED_TABLES: Final[dict[str, tuple[str, str]]] = {
     "usage_observation": ("mux_reject_erased_usage", "INSERT"),
     # A monitored question, answer or tool call names its person's account (a uuid).
     "monitored_events": ("mux_reject_erased_account", "INSERT"),
+    # An ops event may name the person it reached; a queued write lands after the purge.
+    "ops_events": ("mux_reject_erased_account", "INSERT"),
 }
-_MUX_TABLES: Final = tuple(table for table in GUARDED_TABLES if table != "monitored_events")
+_MUX_TABLES: Final = tuple(
+    table for table in GUARDED_TABLES if table not in ("monitored_events", "ops_events")
+)
 ALL_FUNCTIONS: Final[tuple[str, ...]] = (*FUNCTIONS, _MONITORING_FUNCTION)
 
 
@@ -137,3 +142,5 @@ MONITORING_REMOVE: Final[tuple[str, ...]] = (
     drop_trigger("monitored_events"),
     "DROP FUNCTION IF EXISTS mux_reject_erased_account()",
 )
+OPS_EVENTS_INSTALL: Final[tuple[str, ...]] = (create_trigger("ops_events"),)
+OPS_EVENTS_REMOVE: Final[tuple[str, ...]] = (drop_trigger("ops_events"),)

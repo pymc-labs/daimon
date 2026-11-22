@@ -20,6 +20,18 @@ down_revision: str | None = "0223_dm_watch_delivery"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# A frozen copy of `daimon.core._erasure_guards.OPS_EVENTS_INSTALL`, which a test keeps equal:
+# a queued event naming an erased person is refused (the function comes from 0217).
+GUARD_STATEMENTS: tuple[str, ...] = (
+    """CREATE OR REPLACE TRIGGER ops_events_erased_account_guard
+    BEFORE INSERT ON ops_events
+    FOR EACH ROW EXECUTE FUNCTION mux_reject_erased_account()""",
+)
+GUARD_REMOVAL: tuple[str, ...] = (
+    """DROP TRIGGER IF EXISTS ops_events_erased_account_guard
+    ON ops_events""",
+)
+
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
@@ -100,10 +112,14 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("state IN ('resolved', 'muted')", name="ck_ops_issue_states_state"),
     )
+    for statement in GUARD_STATEMENTS:
+        op.execute(statement)
 
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    for statement in GUARD_REMOVAL:
+        op.execute(statement)
     op.drop_table("ops_issue_states")
     op.drop_table("ops_events")
     op.drop_column("turn_outcomes", "is_dm")

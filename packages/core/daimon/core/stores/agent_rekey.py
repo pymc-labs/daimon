@@ -66,6 +66,7 @@ REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
         # the "told they are monitored" notices must too, or admins lose the past and
         # people are told again.
         ("monitored_events", "agent_id"),
+        ("ops_events", "agent_id"),
         ("mcp_oauth_flows", "agent_id"),
         ("mcp_tokens", "agent_id"),
         ("pending_skill_adds", "ma_agent_id"),
@@ -99,7 +100,6 @@ KEPT: Final[dict[tuple[str, str], str]] = {
     ("long_job_policy_history", "agent_id"): "history",
     ("long_job", "agent_id"): "history; running jobs block the move",
     ("turn_outcomes", "agent_id"): "history",
-    ("ops_events", "agent_id"): "history",
     ("security_audit_events", "agent_id"): "audit trail",
     ("neutral_agent_revisions", "agent"): "per-account native catalog, keyed by name",
     ("channel_config_revision", "agent_backend_ref"): "a kept revision re-resolves by name",
