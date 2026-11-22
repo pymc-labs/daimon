@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from urllib.parse import unquote
 
+from daimon.core.config import ArtifactPagesSettings
+from daimon.core.stores import web_invites, web_people
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN
-from .artifact_support import page_client, publish, team
+from .artifact_support import COOKIE, page_client, page_settings, publish, team
 
 
 async def test_a_public_page_is_listed_only_to_those_who_manage_it(
@@ -101,3 +104,48 @@ async def test_a_data_write_over_the_document_cap_is_refused(
 
     assert saved.status_code == 200 and saved.json()["updated_by"] == "Ada"
     assert refused.status_code == 422 and "limit" in refused.json()["detail"]
+
+
+async def test_sharing_by_email_makes_a_visitor_who_reaches_only_the_page(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A new address becomes a visitor with no agents and a sign-in link that lands on the
+    page; a known address is added with no link; the sharer's daily cap holds."""
+    t = await team(db_session_factory)
+    page = await publish(db_session_factory, t.owner, access="people")
+    board = await publish(db_session_factory, t.owner, slug="board")
+    capped = page_settings().model_copy(
+        update={"artifact_pages": ArtifactPagesSettings(shares_per_day=2)}  # team() invited one
+    )
+    url = f"/api/artifacts/{page.id}/people"
+    async with page_client(db_session_factory, t.owner, settings=capped) as client:
+        made = await client.post(url, json={"email": " New@Example.com "}, headers=OWN)
+        known = await client.post(url, json={"email": "BEA@example.com"}, headers=OWN)
+        over = await client.post(url, json={"email": "other@example.com"}, headers=OWN)
+        public = await client.post(
+            f"/api/artifacts/{board.id}/people", json={"email": "x@example.com"}, headers=OWN
+        )
+
+    assert made.status_code == 200, made.text
+    link = made.json()["invite_link"]
+    token, next_page = link.split("/invite/")[1].split("?next=")
+    assert unquote(next_page) == f"/a/{page.public_id}/poll", link
+    assert known.status_code == 200 and known.json()["invite_link"] is None, known.text
+    assert sorted(p["kind"] for p in known.json()["people"]) == ["member", "visitor"]
+    assert over.status_code == 429 and public.status_code == 422, (over.text, public.text)
+
+    async with db_session_factory() as db:
+        [guest] = await web_people.list_people(db, tenant_id=t.tenant_id, search="new@example.com")
+        assert guest.invite_id is not None, guest
+        agents = await web_invites.invited_agent_ids(
+            db, tenant_id=t.tenant_id, invite_id=guest.invite_id
+        )
+    assert (guest.kind, agents) == ("visitor", frozenset()), (guest, agents)
+    async with page_client(db_session_factory) as client:
+        assert (await client.get(f"/api/invites/{token}")).json()["agents"] == []
+        accepted = await client.post(f"/api/invites/{token}/accept", headers=OWN)
+        assert accepted.status_code == 200, accepted.text
+        client.cookies.set(COOKIE, accepted.cookies[COOKIE], domain="web.example.com")
+        assert (await client.get(f"/a/{page.public_id}/poll")).status_code == 200
+        assert (await client.get(f"/a/{board.public_id}/board")).status_code == 404
+        assert (await client.get("/api/artifacts")).status_code == 403

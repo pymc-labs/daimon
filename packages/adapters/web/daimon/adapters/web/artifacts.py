@@ -6,14 +6,19 @@ is listed only to those who manage it; a page nobody may see here is not found.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Collection
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from daimon.adapters.web.admin_common import listed_agents
+from daimon.adapters.web.audit import audit, person_target
 from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.cookies import token_sha256
 from daimon.adapters.web.faces import avatars_of
+from daimon.adapters.web.invites import SIGN_IN_LINK_TTL, issue_link, join_invite, link_url
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.viewer import page_on, viewer_of
 from daimon.core.artifact_pages.access import (
@@ -38,6 +43,7 @@ from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, page_url
 from daimon.core.permissions import WEB_PLACE_PREFIX
 from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import watches as watches_store
+from daimon.core.stores import web_invites
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import ArtifactDocumentRow, ArtifactRow, WebPersonRow
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -60,6 +66,7 @@ _NOT_FOUND = "This page doesn't exist or isn't shared with you."
 _DOCS_PAGE = 200
 _EVENTS_SHOWN = 200
 _WATCH_NAME = 60
+_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
 def _refused(error: ArtifactError) -> HTTPException:
@@ -292,6 +299,89 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
             except ArtifactError as exc:
                 raise _refused(exc) from exc
             return await detail(db, artifact, role, caller)
+
+    @router.post("/{artifact_id}/people")
+    async def share_by_email(  # pyright: ignore[reportUnusedFunction]
+        artifact_id: uuid.UUID,
+        caller: Caller,
+        email: Annotated[str, Body(embed=True, max_length=254)],
+    ) -> dict[str, Any]:
+        """Add the workspace's person with this email, or a new visitor who can open only
+        the pages shared with them. A new visitor's sign-in link is returned once; an
+        existing person gets none, since it would sign in as them."""
+        address, now = email.strip().lower(), runtime.now()
+        if not _EMAIL.fullmatch(address):
+            raise HTTPException(status_code=422, detail="Enter an email address.")
+        async with runtime.sessionmaker.begin() as db:
+            artifact, role = await load(db, caller, artifact_id)
+            require(can_share(artifact, role))
+            if artifact.access != "people":
+                raise HTTPException(status_code=422, detail="Share with specific people first.")
+            tenant_id, sharer = artifact.tenant_id, caller.person.account_id
+            found = [
+                p
+                for p in await people_store.list_people(db, tenant_id=tenant_id, search=address)
+                if (p.email or "").lower() == address
+            ]
+            link = None
+            if found:
+                person = found[0]
+                if person.status != "active":
+                    raise HTTPException(status_code=422, detail="This person can't be added.")
+            else:
+                made = await web_invites.count_visitor_invites_by(
+                    db, tenant_id=tenant_id, account_id=sharer, since=now - timedelta(days=1)
+                )
+                if made >= limits.shares_per_day:
+                    raise HTTPException(
+                        status_code=429, detail="You've invited many people today. Try tomorrow."
+                    )
+                invite, token = await issue_link(
+                    db,
+                    tenant_id=tenant_id,
+                    kind="invite",
+                    expires_at=now + SIGN_IN_LINK_TTL,
+                    email=address,
+                    created_by_account_id=sharer,
+                )
+                claimed = await web_invites.claim_invite(
+                    db, token_sha256=token_sha256(token), now=now
+                )
+                assert claimed is not None, "a link just made is open"
+                person = await join_invite(db, claimed, now)
+                await web_invites.set_accepted_by(db, invite_id=invite.id, person_id=person.id)
+                _, token = await issue_link(
+                    db,
+                    tenant_id=tenant_id,
+                    kind="sign_in",
+                    expires_at=now + SIGN_IN_LINK_TTL,
+                    email=address,
+                    person_id=person.id,
+                    created_by_account_id=sharer,
+                )
+                page = page_url("", artifact.public_id, artifact.slug)
+                link = f"{link_url(runtime.web, token)}?next={quote(page, safe='')}"
+                await audit(
+                    db,
+                    tenant_id=tenant_id,
+                    actor_account_id=sharer,
+                    action="Invited by email to a page",
+                    target=person_target(person.id),
+                    at=now,
+                )
+            if person.account_id not in artifact.people:
+                try:
+                    artifact = await artifact_store.update_settings(
+                        db,
+                        artifact,
+                        PageChange(people=(*artifact.people, person.account_id)),
+                        role=role,
+                        account_id=sharer,
+                        now=now,
+                    )
+                except ArtifactError as exc:
+                    raise _refused(exc) from exc
+            return {**await detail(db, artifact, role, caller), "invite_link": link}
 
     @router.delete("/{artifact_id}", status_code=204)
     async def delete(artifact_id: uuid.UUID, caller: Caller) -> Response:  # pyright: ignore[reportUnusedFunction]
