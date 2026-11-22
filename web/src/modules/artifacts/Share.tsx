@@ -96,7 +96,7 @@ function Form({ a, close }: { a: ArtifactDetail; close: () => void }) {
       <div role="radiogroup" aria-label="Who can open" className="space-y-2">
         <AccessCard access="workspace" selected={access === "workspace"} fact={`Everyone in ${me?.workspace.name ?? "the workspace"}`} reason={null} onSelect={() => pick("workspace")} />
         <AccessCard access="people" selected={access === "people"} fact="Only the people you add" reason={null} onSelect={() => pick("people")} />
-        <AccessCard access="public" selected={access === "public"} fact="Anyone with the link, no sign in" reason={why} onSelect={() => pick("public")} />
+        <AccessCard access="public" selected={access === "public"} fact="No sign-in" reason={why} onSelect={() => pick("public")} />
       </div>
       <div className="space-y-4">
         {access !== "public" && <Field label={access === "people" ? "People" : "Also share with"}><People value={people} onChange={setPeople} label="Search people" /></Field>}

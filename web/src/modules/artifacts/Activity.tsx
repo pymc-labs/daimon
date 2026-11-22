@@ -11,6 +11,7 @@ import { KEY } from "./bits"
 import type { ArtifactDetail, ArtifactEvent } from "./types"
 
 const preview = (d: unknown) => (typeof d === "string" ? d : JSON.stringify(d)).slice(0, 90)
+const SENDER: Record<ArtifactEvent["sender"], string> = { member: "Member", visitor: "Visitor", anonymous: "Anonymous" }
 
 export function Activity({ a }: { a: ArtifactDetail }) {
   const q = useQuery({ queryKey: [...KEY, "events", a.id], queryFn: () => api.get<ArtifactEvent[]>(`/api/artifacts/${a.id}/events`), enabled: a.events })
@@ -32,7 +33,7 @@ export function Activity({ a }: { a: ArtifactDetail }) {
                     </div>
                     <div className="mt-0.5 truncate font-mono text-xs text-faint">{preview(e.data)}</div>
                     <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Tag>{e.sender}</Tag>
+                      <Tag>{SENDER[e.sender]}</Tag>
                       <span className="truncate">{e.by ?? "Anonymous"}</span>
                       <span className="ml-auto shrink-0 tabular">{plural(e.delivered, "delivery", "deliveries")}</span>
                     </div>
