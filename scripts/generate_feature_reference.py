@@ -28,6 +28,7 @@ _CATEGORY = {
     "model_input": "Model input",
     "chat": "Chat",
     "capabilities": "Capability",
+    "web": "Web page",
     "limits": "Limit",
     "guardrails": "Guardrail",
 }
