@@ -2861,8 +2861,8 @@ class DaimonBot(commands.Bot):
                     reason="unprompted_at_cap",
                 )
             else:
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(tenant_id),
                     guild_id=guild_id,
                     channel_id=str(thread_id),
@@ -3444,8 +3444,8 @@ class DaimonBot(commands.Bot):
                     )
                     await message.channel.send(embed=build_notice_embed(TENANT_CAP_NOTICE))
                     return
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(tenant_id),
                     guild_id=guild_id,
                     channel_id=str(thread_id),

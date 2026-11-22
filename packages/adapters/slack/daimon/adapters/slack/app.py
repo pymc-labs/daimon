@@ -1105,9 +1105,11 @@ class SlackApp:
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(
                 "slack.output_delivery.unhandled_error",
+                tenant_id=str(derive_tenant_uuid(platform="slack", workspace_id=team_id)),
+                platform="slack",
                 session_id=session_id,
                 thread_id=thread_ts,
-                error=str(exc)[:300],
+                error_type=type(exc).__name__,
             )
 
     async def on_request(

@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import structlog
 from daimon.adapters.slack.blockkit import notice_attachments
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.output_delivery import (
     MAX_BYTES_CEILING,
@@ -303,6 +304,8 @@ async def deliver_session_outputs(
             sleep=sleep,
             max_bytes=SLACK_MAX_BYTES_PER_FILE,
             noticed=noticed_files,
+            tenant_id=str(derive_tenant_uuid(platform="slack", workspace_id=team_id)),
+            platform="slack",
         )
     except OutputPostingUnavailable as exc:
         code = _abort_code(exc)

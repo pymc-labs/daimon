@@ -928,6 +928,18 @@ async def tenant_dm_still_open(
         )
 
 
+#: Skip notes that mean a post was attempted and failed; every other skip is deliberate.
+_POST_FAILURE_NOTES = frozenset(
+    {
+        "post_failed",
+        "Delivery was interrupted; it will not be retried.",
+        "The DM could not be delivered; it will not be retried.",
+        "access_policy_unreadable",
+        "The server access settings could not be read.",
+    }
+)
+
+
 @dataclass(frozen=True)
 class DeliveryOutcome:
     status: Literal["delivered", "skipped"]
@@ -959,6 +971,7 @@ async def poll_deliveries_once(
         )
     for row in claimed:
         payload = decode_payload(payload_for(row))
+        raised = False
         if not (payload.text.strip() or payload.files):
             outcome = DeliveryOutcome(status="skipped", note="no_result")
         else:
@@ -968,8 +981,13 @@ async def poll_deliveries_once(
                 # Named boundary: the poster is adapter code talking to a chat
                 # API. Settling `skipped` (not back to pending) keeps delivery
                 # at most once — a failure may have landed after the post.
+                raised = True
                 log.warning(
-                    "routine.delivery_failed", routine_id=str(row.id), error_type=type(err).__name__
+                    "routine.delivery_failed",
+                    tenant_id=str(row.tenant_id),
+                    routine_id=str(row.id),
+                    status="post_failed",
+                    error_type=type(err).__name__,
                 )
                 outcome = DeliveryOutcome(
                     status="skipped",
@@ -995,6 +1013,16 @@ async def poll_deliveries_once(
             note=outcome.note,
             settled=settled,
         )
+        if outcome.status == "skipped" and outcome.note != "no_result" and not raised:
+            # Real post failures page; deliberate skips (policy, archive, ...) only log.
+            failed = outcome.note in _POST_FAILURE_NOTES
+            (log.warning if failed else log.info)(
+                "routine.delivery_failed" if failed else "routine.delivery_skipped",
+                tenant_id=str(row.tenant_id),
+                routine_id=str(row.id),
+                status="skipped",
+                note=outcome.note,
+            )
     return len(claimed)
 
 
