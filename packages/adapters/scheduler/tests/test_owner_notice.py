@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 from daimon.adapters.scheduler import owner_notice
 from daimon.core.config import DirectMessagePolicy
@@ -20,13 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .test_main import _make_test_settings  # pyright: ignore[reportPrivateUsage]
 
 
-@pytest.mark.parametrize("turn_runs", [True, False])
+@pytest.mark.parametrize("case", ["agent", "turn_fails", "budget_refused", "send_fails"])
 async def test_owner_gets_the_agents_message_or_the_plain_card(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    turn_runs: bool,
+    case: str,
 ) -> None:
+    """A refusal over budget gets the card with no turn; a failed send is never resent."""
     tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
     row = await create_routine(
         db_session,
@@ -51,7 +53,7 @@ async def test_owner_gets_the_agents_message_or_the_plain_card(
 
     async def dm_turn(*_args: Any, prompt: str, **_kwargs: Any) -> SimpleNamespace:
         prompts.append(prompt)
-        if not turn_runs:
+        if case == "turn_fails":
             raise TurnError(kind="upstream", message="provider down")
         return SimpleNamespace(text="Your weekly readout failed.")
 
@@ -64,6 +66,8 @@ async def test_owner_gets_the_agents_message_or_the_plain_card(
 
     async def send_text(user: str, text: str) -> None:
         texts.append((user, text))
+        if case == "send_fails":
+            raise httpx.ConnectError("down")
 
     async def send_card(user: str, title: str, body: str) -> None:
         cards.append((user, title, body))
@@ -75,10 +79,13 @@ async def test_owner_gets_the_agents_message_or_the_plain_card(
         send_card=send_card,
         send_text=send_text,
     )
-    await notify(row, TerminationReason.UPSTREAM, True)
+    refused = case == "budget_refused"
+    reason = TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED if refused else None
+    await notify(row, reason or TerminationReason.UPSTREAM, True)
 
-    assert len(prompts) == 1 and "Weekly readout" in prompts[0], "the agent gets the facts"
-    if turn_runs:
+    assert len(prompts) == (0 if refused else 1), "no agent turn after a budget refusal"
+    assert not prompts or "Weekly readout" in prompts[0], "the agent gets the facts"
+    if case in ("agent", "send_fails"):
         assert texts == [("123", "Your weekly readout failed.")] and not cards, "agent's words"
     else:
         assert not texts and [c[:2] for c in cards] == [
