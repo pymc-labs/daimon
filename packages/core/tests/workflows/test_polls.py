@@ -144,6 +144,8 @@ async def test_a_changed_tool_pauses_the_trigger_until_it_is_published_again(
     flow = await _publish(db_session, tenant_id, owner)
     sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
     await _pass(sm, Fake(rows(("a", 2, "Todo"))), NOW)
+    pinned = await db_session.scalar(select(WorkflowTrigger))
+    assert pinned is not None and (pinned.state or {}).get("digest") == "d1", "the first poll pins"
     changed = Fake(rows(("a", 2, "Todo"), ("b", 3, "Todo")), digest="d2")
     assert await _pass(sm, changed, NOW + 5 * MINUTE) == 0, "nothing starts on a changed tool"
     trigger = await db_session.scalar(select(WorkflowTrigger))

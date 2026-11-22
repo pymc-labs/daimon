@@ -46,8 +46,8 @@ held concurrency key, stays an ordinary chat message.
 A poll trigger calls another service's read tool every `every`, from 1 minute to 1 day.
 Each new row starts a run, found by its `key`. The first check only records what is
 there. With `rule: updated` and `watch`, a change to a watched field starts a run for
-each change, or one ever with `once`. A tool that changed since publishing pauses the
-trigger until you publish again.
+each change, or one ever with `once`. The first poll pins the tool. A tool that changed since then pauses the
+trigger until you publish again, which clears the pin.
 
 A Wait step can also `poll`: it calls a read tool every `every` until `until` holds, or
 its `timeout` route runs. A poll wait's result is untrusted input. While `workflow_polls` is

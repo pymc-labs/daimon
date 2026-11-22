@@ -281,7 +281,9 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     + "test_the_first_poll_sets_a_baseline_and_each_new_row_starts_one_run",
     "With `rule: updated` and `watch`": _POLLS
     + "test_updated_rows_start_a_run_per_change_unless_once",
-    "A tool that changed since publishing": _POLLS
+    "The first poll pins the tool": _POLLS
+    + "test_a_changed_tool_pauses_the_trigger_until_it_is_published_again",
+    "A tool that changed since then": _POLLS
     + "test_a_changed_tool_pauses_the_trigger_until_it_is_published_again",
     "A Wait step can also `poll`": (
         _POLLS + "test_a_poll_wait_keeps_checking_until_its_condition_holds",
