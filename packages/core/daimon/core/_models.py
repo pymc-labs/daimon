@@ -3058,6 +3058,8 @@ class TurnOutcome(Base):
     eval_key: Mapped[dict[str, Any] | None]
     # A turn in a private direct message; false for every turn recorded before this column.
     is_dm: Mapped[bool] = mapped_column(server_default=text("false"))
+    # Counted as an answer, as `turn.finished` is logged (the alert denominator); NULL before.
+    alertable: Mapped[bool | None]
 
 
 class TenantGitHubRepo(Base):

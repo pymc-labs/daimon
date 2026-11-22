@@ -15,7 +15,7 @@ from daimon.core.context_prompt import TurnContext
 if TYPE_CHECKING:
     from daimon.core.turn.termination import TerminationReason
 from pydantic import JsonValue
-from sqlalchemy import ColumnElement, DateTime, and_, func, literal, not_, select
+from sqlalchemy import ColumnElement, DateTime, and_, func, literal, not_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,6 +50,7 @@ class OutcomeRecord:
     billing_posture: str | None = None
     eval_key: dict[str, JsonValue] | None = None
     is_dm: bool = False
+    alertable: bool | None = None
 
 
 async def record(session: AsyncSession, outcome: OutcomeRecord) -> None:
@@ -117,12 +118,17 @@ async def last_started_at(session: AsyncSession, tenant_id: UUID, agent_id: str)
     ).scalar_one()
 
 
-# A turn counts as an answer the way `turn.user_failure` gates it: not a command-line run,
-# and not a boundary's catch-all (reason unknown with no error class).
+# A turn counts as an answer when `turn.finished` was logged for it (the alert denominator).
+# A row from before `alertable` was stored falls back to the old reading: not a command-line
+# run, and not a boundary's catch-all (reason unknown with no error class).
 def _counted() -> ColumnElement[bool]:
-    return and_(
-        TurnOutcome.platform != "cli",
-        not_(and_(TurnOutcome.reason == "unknown", TurnOutcome.error_class.is_(None))),
+    return or_(
+        TurnOutcome.alertable.is_(True),
+        and_(
+            TurnOutcome.alertable.is_(None),
+            TurnOutcome.platform != "cli",
+            not_(and_(TurnOutcome.reason == "unknown", TurnOutcome.error_class.is_(None))),
+        ),
     )
 
 

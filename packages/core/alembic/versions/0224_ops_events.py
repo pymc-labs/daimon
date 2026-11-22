@@ -3,8 +3,8 @@
 `ops_events` is append-only and content-free (fixed reason vocabulary; `note` is the only free
 text), coalesced in the emitter, deleted with the person's account and pruned after
 `DAIMON_OPS_EVENTS__RETENTION_DAYS`. `ops_issue_states` keeps an admin's resolve or mute of one
-issue by fingerprint. `turn_outcomes.is_dm` marks turns in a private direct message. Downgrading
-drops both tables and the column.
+issue by fingerprint. `turn_outcomes.is_dm` marks turns in a private direct message and
+`turn_outcomes.alertable` the turns counted as answers. Downgrading drops both tables and columns.
 
 downgrade: destructive
 """
@@ -39,6 +39,7 @@ def upgrade() -> None:
         "turn_outcomes",
         sa.Column("is_dm", sa.Boolean(), nullable=False, server_default=sa.text("false")),
     )
+    op.add_column("turn_outcomes", sa.Column("alertable", sa.Boolean(), nullable=True))
     op.create_table(
         "ops_events",
         sa.Column(
@@ -122,4 +123,5 @@ def downgrade() -> None:
         op.execute(statement)
     op.drop_table("ops_issue_states")
     op.drop_table("ops_events")
+    op.drop_column("turn_outcomes", "alertable")
     op.drop_column("turn_outcomes", "is_dm")

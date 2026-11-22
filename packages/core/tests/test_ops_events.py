@@ -25,6 +25,7 @@ from daimon.core.ops_overview import (
 )
 from daimon.core.stores import ops_events as store
 from daimon.core.stores.domain import OpsIssueGroupRow, OpsIssueStateRow
+from daimon.core.stores.turn_outcomes import answer_stats
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
@@ -215,7 +216,11 @@ async def test_failed_bridged_tool_calls_make_one_event_per_server_per_turn(
         call("docs", failed=False),
         call(DAIMON_SERVER_NAME, failed=True),
     ]
-    TurnObservation(sm, tenant.id, "discord").finish(state=TurnState(content=content))
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    TurnObservation(sm, tenant.id, "discord", account_id=account.id).finish(
+        state=TurnState(content=content)
+    )
     await drain_outcomes()
     await drain_ops_events()
     async with sm() as session:
@@ -223,9 +228,36 @@ async def test_failed_bridged_tool_calls_make_one_event_per_server_per_turn(
             session, tenant_id=tenant.id, since=datetime.now(UTC) - timedelta(hours=1)
         )
 
-    assert [(g.latest.code, g.latest.subject_key, g.events) for g in groups] == [
-        ("bridge.tool_errors", "crm", 1)
-    ], "one event for the failing server; working servers and daimon's own refusals add none"
+    assert [(g.latest.code, g.latest.subject_key, g.events, g.people) for g in groups] == [
+        ("bridge.tool_errors", "crm", 1, 1)
+    ], "one event for the failing server, with its person; daimon's own refusals add none"
+
+
+async def test_answers_count_only_the_turns_logged_as_turn_finished(
+    db_session: AsyncSession, db_engine: AsyncEngine
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    TurnObservation(sm, tenant.id, "discord").finish(reason=TerminationReason.UPSTREAM)
+    TurnObservation(sm, tenant.id, "discord").finish(reason=TerminationReason.COMPLETED)
+    # Not in the GCP denominator: an unprompted turn, a CLI run and a boundary's catch-all.
+    TurnObservation(sm, tenant.id, "discord", alertable=False).finish(
+        reason=TerminationReason.UPSTREAM
+    )
+    TurnObservation(sm, tenant.id, "cli").finish(reason=TerminationReason.UPSTREAM)
+    TurnObservation(sm, tenant.id, "slack").finish(reason=TerminationReason.CEILING, fallback=True)
+    await drain_outcomes()
+    await drain_ops_events()
+    async with sm() as session:
+        stats = await answer_stats(
+            session,
+            tenant_id=tenant.id,
+            since=datetime.now(UTC) - timedelta(hours=1),
+            until=datetime.now(UTC) + timedelta(minutes=1),
+        )
+
+    assert (stats.answers, stats.failed) == (2, 1), "only turns logged as turn.finished count"
 
 
 async def test_an_event_that_cannot_be_written_is_swallowed(

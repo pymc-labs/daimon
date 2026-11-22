@@ -292,7 +292,8 @@ class TurnObservation:
             or termination_reason(error or (state.error if state else None))
         )
         terminal_error = error or (state.error if state else None)
-        if self.alertable and not fallback and self.platform != "cli":
+        alertable = self.alertable and not fallback and self.platform != "cli"
+        if alertable:
             failed = resolved in USER_VISIBLE_FAILURES
             duration_ms = max(0, int((time.monotonic() - self._started) * 1000))
             tenant = str(self.tenant_id) if self.tenant_id is not None else None
@@ -319,6 +320,7 @@ class TurnObservation:
                         "bridge.tool_errors",
                         self.tenant_id,
                         agent_id=self.agent_id,
+                        account_id=self.account_id,
                         platform=self.platform,
                         channel_id=self.channel_id,
                         thread_id=self.thread_id,
@@ -431,6 +433,7 @@ class TurnObservation:
             billing_posture=posture,
             eval_key=self.eval_key,
             is_dm=self.is_dm,
+            alertable=alertable,
         )
         if not self.usage_available:
             # SDK polling/dispatch paths have outcomes but do not consume model spans.
