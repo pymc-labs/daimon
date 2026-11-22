@@ -11,6 +11,8 @@ from daimon.core.stores.agent_avatars import get_or_create_avatar
 from daimon.core.stores.agent_rename import (
     _KEYED_NAME_COLUMNS,  # pyright: ignore[reportPrivateUsage]
     _LIVE_NAME_COLUMNS,  # pyright: ignore[reportPrivateUsage]
+    count_agent_references,
+    policy_keys_to_move,
     rename_agent_references,
     rename_policy_keys,
     rename_selfhosted_agent,
@@ -322,3 +324,41 @@ def test_kept_json_columns_when_schema_walked_then_still_exist() -> None:
     assert set(_KEPT_JSON_COLUMNS) <= found, (
         f"drop entries for columns that are gone: {set(_KEPT_JSON_COLUMNS) - found}"
     )
+
+
+async def test_count_references_when_dry_running_then_matches_what_the_rename_moves(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session, workspace_id="guild-other")
+    account = await make_account(db_session, tenant=tenant)
+    await make_routine(db_session, tenant=tenant, agent_name="Daimon")
+    await make_routine(db_session, tenant=tenant, agent_name="daimon")
+    await make_routine(db_session, tenant=other, agent_name="daimon")
+    await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="daimon")
+    await get_or_create_avatar(db_session, tenant_id=tenant.id, agent_name="default")
+    await db_session.execute(
+        text("INSERT INTO user_config (account_id, agent_name) VALUES (:a, 'daimon')"),
+        {"a": account.id},
+    )
+    db_session.add(
+        TenantAccessPolicyRecord(tenant_id=tenant.id, policy={"agent_rules": {"daimon": {}}})
+    )
+    await db_session.flush()
+    tid = tenant.id
+
+    counts = await count_agent_references(db_session, tenant_id=tid, old="daimon", new="default")
+    keys = await policy_keys_to_move(db_session, tenant_id=tid, old="daimon", new="default")
+
+    expected = {f"{t}.{c}" for t, c in _LIVE_NAME_COLUMNS}
+    expected |= {f"{t}.{c}" for t, c, _ in _KEYED_NAME_COLUMNS} | {"user_config.agent_name"}
+    assert set(counts) == expected, "every column the rename moves is counted"
+    nonzero = {label: n for label, n in counts.items() if n}
+    assert nonzero == {"routines.agent_name": 2, "user_config.agent_name": 1}, (
+        "the avatar is taken under the new name, so it does not move; another tenant's row is not counted"
+    )
+    assert keys == ["agent_rules"], "the policy key would move"
+
+    await rename_agent_references(db_session, tenant_id=tid, old="daimon", new="default")
+    after = await count_agent_references(db_session, tenant_id=tid, old="daimon", new="default")
+    assert not any(after.values()), "nothing is left to move after the rename"

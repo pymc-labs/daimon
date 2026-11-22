@@ -8,6 +8,8 @@ export type FeatureSchema = {
   categoryName: string
   values: { value: string; label: string }[]
   default: string
+  /** Above 0, the feature also takes a name of up to this many characters. */
+  maxLength?: number
   tiers: Tier[]
   lockable: Tier[]
   platforms: string[]

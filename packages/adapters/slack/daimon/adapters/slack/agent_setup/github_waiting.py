@@ -425,6 +425,7 @@ async def handle(
                         platform="slack",
                         workspace_id=meta.team_id,
                         agent_name=request.agent_name,
+                        agent_id=request.ma_agent_id,
                     ),
                 )
                 if changed:

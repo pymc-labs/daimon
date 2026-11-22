@@ -495,7 +495,7 @@ async def test_a_queued_follow_up_behind_a_gone_turn_never_starts(
     follow_up.add_reaction.assert_awaited_once()  # the hourglass went on while the thread lived
     follow_up.remove_reaction.assert_not_awaited()  # and no reaction call after it was lost
     other.remove_reaction.assert_not_awaited()
-    assert world.bot._queued_reactions == set()  # pyright: ignore[reportPrivateUsage]
+    assert not world.bot._queued_reactions  # pyright: ignore[reportPrivateUsage]
     assert world.bot._pending.get(_THREAD_ID) is None  # pyright: ignore[reportPrivateUsage]
     assert any(e["event"] == "thread_gone.queued_dropped" for e in logs)
     assert len([e for e in logs if e["event"] == "turn.thread_gone"]) == 1

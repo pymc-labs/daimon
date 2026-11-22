@@ -39,7 +39,7 @@ async def _marks(
 
     By default each turn runs on a fresh session row, as after a reset or a new agent.
     """
-    marks = await bot._model_marks(admission, tenant_id=tenant.id, thread_id=thread_id)  # pyright: ignore[reportPrivateUsage]
+    marks = await bot.turn_model_marks(admission, tenant_id=tenant.id, thread_id=thread_id)
     if marks:
         async with sessions.begin() as session:
             if new_session:

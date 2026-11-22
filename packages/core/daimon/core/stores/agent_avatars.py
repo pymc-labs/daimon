@@ -63,6 +63,12 @@ def normalize_agent_name(name: str) -> str:
     return unicodedata.normalize("NFKC", name).casefold()
 
 
+async def avatar_names(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[str]:
+    """Every agent name with an avatar in the tenant, normalized."""
+    stmt = select(AgentAvatar.agent_name).where(AgentAvatar.tenant_id == tenant_id)
+    return list((await session.scalars(stmt)).all())
+
+
 def generate_default_png(name: str) -> bytes:
     words = name.replace("-", " ").replace("_", " ").split()
     glyphs = [word[0].upper() for word in words[:2]]

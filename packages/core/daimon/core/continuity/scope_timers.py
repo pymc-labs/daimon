@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.anthropic_guard import AnthropicDisabled, independent_wake_provider_context
+from daimon.core.bot_access import BOT_ACCESS_RETRY_DELAY, BotAccessUnavailable
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.messages import render_timer_seed
 from daimon.core.continuity.wakes import (
@@ -81,6 +82,13 @@ async def dispatch_scope_timer(
         except SessionBusyError as busy:
             # Nothing ran: the row goes back to pending with its claim refunded.
             retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
+            await release_wake(sessionmaker, claim, retry_at=retry_at)
+            return
+        except BotAccessUnavailable:
+            # The bot cannot reach the channel yet: nothing ran, so the claim is refunded and
+            # the timer looks again later, as often as it takes for the bot to be let in.
+            log.info("scope_timer.bot_access_unavailable", row_id=str(row.id))
+            retry_at = busy_retry_at(row, now=now(), delay=BOT_ACCESS_RETRY_DELAY)
             await release_wake(sessionmaker, claim, retry_at=retry_at)
             return
         except DeliveryRetry:

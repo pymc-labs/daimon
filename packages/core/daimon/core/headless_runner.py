@@ -563,6 +563,22 @@ async def run_turn_impl(
             if agent_invoker_roles(access, ref.names) and not await principal_check(access, ref):
                 # Unattended: only a run-as owner freshly verified to hold the roles.
                 raise AdmissionDenied(reason="invoker_not_allowed")
+        if session_factory is not None and hold is not None:
+            from daimon.core.audience_gate import read_audience_mode
+            from daimon.core.relay_scope import without_identity_relays
+
+            # A held fire answers a destination that outsiders may read, or that nobody can
+            # vouch for. In `on` its session mounts no signed-identity server.
+            if (
+                await read_audience_mode(
+                    session_factory,
+                    tenant_id=tenant_id,
+                    platform=hold.platform,
+                    channel_id=hold.channel_id,
+                )
+                == "on"
+            ):
+                agent = without_identity_relays(agent, public_url=public_url)[0]
         environment = sdk_environment(
             await legacy_call(
                 backend.environments.retrieve(

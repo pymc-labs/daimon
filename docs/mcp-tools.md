@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 253 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 254 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -577,6 +577,14 @@ The Settings group from chat: `get_settings` (anyone) and `change_setting` (card
 | --- | --- | --- |
 | `change_setting` | Discord callers, Slack callers, Teams callers | Change one setting where you are, after the person presses Approve. |
 | `get_settings` | Discord callers, Slack callers, Teams callers | Report this conversation's settings (features set up here or with a saved value). |
+
+## `secret_shares`
+
+`share_secret_with`: send one of the agent's keys to a person's DMs, revealed once.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `share_secret_with` | Discord callers | Send one of this agent's saved keys to a person's Discord DMs, where they can reveal it once within a day. |
 
 ## `self_edit`
 

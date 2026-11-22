@@ -4,20 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
+import os
 from dataclasses import dataclass
 from typing import Any, cast
 
 import discord
 import pytest
 from daimon.adapters.discord.vision import (
-    MAX_VISION_IMAGE_BYTES,
-    MAX_VISION_IMAGE_DIMENSION,
-    MAX_VISION_IMAGES,
     build_image_url_prefix,
     build_skipped_image_prefix,
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from daimon.core.media.vision import (
+    MAX_DOWNSCALE_SOURCE_BYTES,
+    MAX_VISION_IMAGE_BYTES,
+    MAX_VISION_IMAGE_DIMENSION,
+    MAX_VISION_IMAGES,
+    UNFIT_REASON,
+)
+from daimon.testing import images
+from PIL import Image
 
 
 @dataclass
@@ -65,12 +73,12 @@ class TestIsVisionImageAttachment:
             "missing content_type should route to the notebook path"
         )
 
-    def test_oversized_image_is_not_vision(self) -> None:
+    def test_image_too_big_to_downscale_is_not_vision(self) -> None:
         att = FakeAttachment(
-            filename="huge.png", content_type="image/png", size=MAX_VISION_IMAGE_BYTES + 1
+            filename="huge.png", content_type="image/png", size=MAX_DOWNSCALE_SOURCE_BYTES + 1
         )
         assert is_vision_image_attachment(_as_attachment(att)) is False, (
-            "image over the API size cap should route to the notebook path"
+            "image over the downscale cap should route to the notebook path"
         )
 
     def test_image_at_exact_cap_is_vision(self) -> None:
@@ -85,56 +93,30 @@ class TestIsVisionImageAttachment:
             "image exactly at the cap should still route to vision"
         )
 
-    def test_oversized_width_is_not_vision(self) -> None:
+    @pytest.mark.parametrize(
+        ("width", "height"),
+        [
+            (MAX_VISION_IMAGE_DIMENSION + 1, 100),
+            (100, MAX_VISION_IMAGE_DIMENSION + 1),
+            (None, None),
+        ],
+        ids=["wide", "tall", "unknown"],
+    )
+    def test_an_image_past_the_edge_cap_or_of_unknown_size_is_resized_not_routed_away(
+        self, width: int | None, height: int | None
+    ) -> None:
         att = FakeAttachment(
-            filename="wide.png",
-            content_type="image/png",
-            size=1024,
-            width=MAX_VISION_IMAGE_DIMENSION + 1,
-            height=100,
-        )
-        assert is_vision_image_attachment(_as_attachment(att)) is False, (
-            "image wider than the API dimension cap should route to the notebook path"
-        )
-
-    def test_oversized_height_is_not_vision(self) -> None:
-        att = FakeAttachment(
-            filename="tall.png",
-            content_type="image/png",
-            size=1024,
-            width=100,
-            height=MAX_VISION_IMAGE_DIMENSION + 1,
-        )
-        assert is_vision_image_attachment(_as_attachment(att)) is False, (
-            "image taller than the API dimension cap should route to the notebook path"
-        )
-
-    def test_dimension_at_exact_cap_is_vision(self) -> None:
-        att = FakeAttachment(
-            filename="edge.png",
-            content_type="image/png",
-            size=1024,
-            width=MAX_VISION_IMAGE_DIMENSION,
-            height=MAX_VISION_IMAGE_DIMENSION,
+            filename="big.png", content_type="image/png", size=1024, width=width, height=height
         )
         assert is_vision_image_attachment(_as_attachment(att)) is True, (
-            "image exactly at the dimension cap should still route to vision"
-        )
-
-    def test_unknown_dimensions_is_not_vision(self) -> None:
-        att = FakeAttachment(
-            filename="photo.png", content_type="image/png", size=1024, width=None, height=None
-        )
-        assert is_vision_image_attachment(_as_attachment(att)) is False, (
-            "unknown dimensions must fail closed — an over-cap block poisons the "
-            "session on replay, so the image falls back to the URL path"
+            "the pixels are checked on the fetched bytes, where an over-cap image is resized"
         )
 
 
 class TestDownloadAsImageBlocks:
     @pytest.mark.asyncio
     async def test_downloads_and_encodes_base64_block(self) -> None:
-        webp_bytes = b"RIFF\x24\x00\x00\x00WEBPVP8 payload"
+        webp_bytes = images.webp_bytes()
         att = FakeAttachment(
             filename="photo.webp",
             content_type="image/webp",
@@ -161,7 +143,7 @@ class TestDownloadAsImageBlocks:
         # Discord labeled the attachment image/webp but the bytes are PNG —
         # a declared-vs-actual mismatch is rejected by the API and, once MA
         # replays the block, permanently terminates the session.
-        png_bytes = b"\x89PNG\r\n\x1a\npayload"
+        png_bytes = images.png_bytes()
         att = FakeAttachment(
             filename="screenshot.webp",
             content_type="image/webp",
@@ -221,7 +203,7 @@ class TestDownloadAsImageBlocks:
                     message="Service Unavailable",
                 )
 
-        png_bytes = b"\x89PNG\r\n\x1a\nok"
+        png_bytes = images.png_bytes()
         good = FakeAttachment(
             filename="ok.png",
             content_type="image/png",
@@ -281,7 +263,7 @@ class TestDownloadAsImageBlocks:
                 return b""
 
         big = TrackingAttachment(
-            filename="huge.png", content_type="image/png", size=MAX_VISION_IMAGE_BYTES + 1
+            filename="huge.png", content_type="image/png", size=MAX_DOWNSCALE_SOURCE_BYTES + 1
         )
 
         blocks, skipped = await download_as_image_blocks([_as_attachment(big)])
@@ -293,43 +275,71 @@ class TestDownloadAsImageBlocks:
         assert fetched == [], "oversized image should be skipped before the CDN fetch"
 
     @pytest.mark.asyncio
-    async def test_oversized_dimension_skipped_without_download(self) -> None:
-        fetched: list[str] = []
+    async def test_image_over_the_byte_cap_is_downscaled(self) -> None:
+        buffer = io.BytesIO()
+        Image.frombytes("RGB", (1500, 1500), os.urandom(1500 * 1500 * 3)).save(buffer, "PNG")
+        noise = buffer.getvalue()
+        assert len(noise) > MAX_VISION_IMAGE_BYTES
+        att = FakeAttachment(
+            filename="photo.png",
+            content_type="image/png",
+            size=len(noise),
+            width=1500,
+            height=1500,
+            _content=noise,
+        )
 
-        @dataclass
-        class TrackingAttachment:
-            filename: str
-            content_type: str
-            size: int
-            width: int | None = None
-            height: int | None = None
+        blocks, skipped = await download_as_image_blocks([_as_attachment(att)])
 
-            async def read(self) -> bytes:
-                fetched.append(self.filename)
-                return b""
+        assert skipped == [], "an image over 5 MiB is downscaled, not refused"
+        source = blocks[0]["source"]
+        assert source["type"] == "base64" and source["media_type"] == "image/jpeg"
+        assert len(base64.standard_b64decode(source["data"])) <= MAX_VISION_IMAGE_BYTES
 
-        wide = TrackingAttachment(
+    @pytest.mark.asyncio
+    async def test_an_image_past_the_edge_cap_is_resized_not_refused(self) -> None:
+        buffer = io.BytesIO()
+        Image.new("RGB", (MAX_VISION_IMAGE_DIMENSION + 1000, 200), "navy").save(buffer, "PNG")
+        wide = FakeAttachment(
             filename="panorama.png",
             content_type="image/png",
-            size=1024,
-            width=MAX_VISION_IMAGE_DIMENSION + 1,
-            height=1024,
+            size=buffer.tell(),
+            width=MAX_VISION_IMAGE_DIMENSION + 1000,
+            height=200,
+            _content=buffer.getvalue(),
         )
 
         blocks, skipped = await download_as_image_blocks([_as_attachment(wide)])
 
-        assert blocks == [], "image over the dimension cap must not become a block"
-        assert len(skipped) == 1
-        assert skipped[0][0].filename == "panorama.png"
-        assert "dimension" in skipped[0][1].lower()
-        assert fetched == [], "oversized-by-dimension image should be skipped before the CDN fetch"
+        assert skipped == [], "a panorama under 25 MiB is resized, not sent to the link path"
+        shown = Image.open(io.BytesIO(base64.standard_b64decode(blocks[0]["source"]["data"])))
+        assert max(shown.size) <= MAX_VISION_IMAGE_DIMENSION, "the block carries the resized copy"
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_image_is_skipped_not_raised(self) -> None:
+        buffer = io.BytesIO()
+        Image.new("L", (MAX_VISION_IMAGE_DIMENSION + 1000, 200)).save(buffer, "PNG")
+        data = buffer.getvalue()
+        broken = FakeAttachment(
+            filename="cut.png",
+            content_type="image/png",
+            size=len(data),
+            width=MAX_VISION_IMAGE_DIMENSION + 1000,
+            height=200,
+            _content=data[:-30],
+        )
+
+        blocks, skipped = await download_as_image_blocks([_as_attachment(broken)])
+
+        assert blocks == [], "an image that cannot be decoded is never a block"
+        assert skipped[0][1] == UNFIT_REASON, "it falls back to the link with a plain reason"
 
     @pytest.mark.asyncio
     async def test_count_cap_limits_blocks_and_reports_overflow(self) -> None:
         # MAX_VISION_IMAGES + 1 small, valid images: the cap keeps the first
         # MAX_VISION_IMAGES (the API tightens the dimension limit to 2000px once
         # a request carries more than 20, so we never send that many).
-        png_bytes = b"\x89PNG\r\n\x1a\nok"
+        png_bytes = images.png_bytes()
         atts = [
             FakeAttachment(
                 filename=f"img{i}.png",
@@ -522,7 +532,7 @@ class _TrackedAttachment:
 
     @property
     def payload(self) -> bytes:
-        return b"\x89PNG\r\n\x1a\n" + self.filename.encode()
+        return images.png_bytes(width=4 + int(self.filename[3:-4]))
 
     @property
     def size(self) -> int:
@@ -571,3 +581,21 @@ async def test_a_failed_download_frees_its_slot_for_a_later_image() -> None:
         ("img1.png", True),
         (f"img{MAX_VISION_IMAGES + 1}.png", False),
     ], "the failed image and the one past the cap are skipped, in message order"
+
+
+def test_a_resized_image_is_announced_as_a_resized_copy() -> None:
+    plain = FakeAttachment("a.png", "image/png", 1000, 100, 100, url="https://cdn.example/a.png")
+    heavy = FakeAttachment(
+        "b.png", "image/png", MAX_VISION_IMAGE_BYTES + 1, 100, 100, url="https://cdn.example/b.png"
+    )
+    wide = FakeAttachment(
+        "c.png",
+        "image/png",
+        1000,
+        MAX_VISION_IMAGE_DIMENSION + 1,
+        100,
+        url="https://cdn.example/c.png",
+    )
+    lines = build_image_url_prefix([_as_attachment(f) for f in (plain, heavy, wide)]).splitlines()
+
+    assert ["resized" in line for line in lines] == [False, True, True], lines

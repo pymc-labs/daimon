@@ -34,19 +34,26 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from daimon.adapters.discord.member_sync import tenant_of
 from daimon.adapters.discord.outsiders import guild_rooms
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores import audience_facts as facts_store
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    load_access_policy,
+    lock_policy_writes_shared,
+)
 from daimon.core.stores.audience_facts import StoredRoom
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
+from discord.channel import _guild_channel_factory  # pyright: ignore[reportPrivateUsage]
 
 log = structlog.get_logger(__name__)
 
@@ -66,6 +73,38 @@ CHUNK_TIMEOUT_S = 300.0
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+async def _fetch_known_channels(guild: discord.Guild) -> list[discord.abc.GuildChannel]:
+    """The server's channels by REST, leaving out any type discord.py does not know.
+
+    `Guild.fetch_channels` raises `InvalidData` for one unknown type (a server can hold a
+    type newer than the library), which would fail every reconcile and publish nothing.
+    On that error the raw list is read again and built with the library's own factory,
+    skipping the unknown. A skipped channel gets no fact, so it reads unknown and fails
+    closed; discord.py cannot host a turn there either. Only the count and the types are
+    logged, never a name.
+    """
+    try:
+        return list(await guild.fetch_channels())
+    except discord.InvalidData:
+        pass
+    raw: list[Any] = await guild._state.http.get_all_guild_channels(guild.id)  # pyright: ignore[reportPrivateUsage]
+    channels: list[discord.abc.GuildChannel] = []
+    skipped: list[int] = []
+    for data in raw:
+        factory, _ = _guild_channel_factory(data["type"])
+        if factory is None:
+            skipped.append(data["type"])
+            continue
+        channels.append(factory(guild=guild, state=guild._state, data=data))  # pyright: ignore[reportPrivateUsage]
+    log.warning(
+        "discord.audience.channel_type_skipped",
+        guild_id=str(guild.id),
+        count=len(skipped),
+        types=sorted(set(skipped)),
+    )
+    return channels
 
 
 @dataclass(frozen=True)
@@ -115,6 +154,9 @@ class AudienceSync:
         self._epoch = 0
         self._locks: dict[uuid.UUID, asyncio.Lock] = {}
         self._pending: dict[uuid.UUID, asyncio.Task[None]] = {}
+        # Servers whose facts were retired because their role lists moved or a policy write
+        # was in progress: never renewed, computed again at the next tick.
+        self._dirty: set[uuid.UUID] = set()
         # The roles each server's facts were last computed with.
         self._roles: dict[uuid.UUID, tuple[tuple[str, ...], tuple[str, ...]]] = {}
 
@@ -206,6 +248,15 @@ class AudienceSync:
             fresh_until = now + self._fresh_for
             if reconciled_at is not None:
                 fresh_until = min(fresh_until, reconciled_at + self._reconcile_limit)
+            # The only place the policy fence is held, and only to the end of this transaction:
+            # a policy write cannot commit between the role lists checked here and the facts
+            # written from them. A busy fence or changed role lists retire the facts.
+            try:
+                await lock_policy_writes_shared(session, tenant_id=tenant_id)
+            except FenceUnavailable:
+                return await self._retire_stale(session, tenant_id, now, why="policy_busy")
+            if await _policy_roles(session, tenant_id) != policy_roles:
+                return await self._retire_stale(session, tenant_id, now, why="roles_changed")
             generation = await facts_store.publish_facts(
                 session,
                 tenant_id=tenant_id,
@@ -214,6 +265,7 @@ class AudienceSync:
                 fresh_until=fresh_until,
             )
         self._live.add(tenant_id)
+        self._dirty.discard(tenant_id)
         self._roles[tenant_id] = policy_roles
         if reconciled:
             self._reconciled[tenant_id] = now
@@ -228,6 +280,21 @@ class AudienceSync:
         )
         return True
 
+    async def _retire_stale(
+        self, session: AsyncSession, tenant_id: uuid.UUID, now: datetime, *, why: str
+    ) -> bool:
+        """Facts computed from role lists that may be out of date must not stand: make every
+        room unknown now (this needs no policy fence) and mark the server dirty. A dirty
+        server is never renewed; the next tick computes it again."""
+        self._live.discard(tenant_id)
+        self._dirty.add(tenant_id)
+        self._roles.pop(tenant_id, None)
+        self._baseline.pop(tenant_id, None)
+        self._members_loaded.discard(tenant_id)
+        await facts_store.mark_unknown(session, tenant_id=tenant_id, now=now)
+        log.warning("discord.audience.publish_stale", tenant_id=str(tenant_id), why=why)
+        return False
+
     async def reconcile(self, guild: discord.Guild) -> bool:
         """Read the server's roles and channels by REST and re-chunk its members, then
         recompute and publish. Returns whether it published from a full read.
@@ -236,7 +303,7 @@ class AudienceSync:
         epoch = self._epoch
         try:
             roles = await guild.fetch_roles()
-            channels = await guild.fetch_channels()
+            channels = await _fetch_known_channels(guild)
             # The chunk is the full member list: a member whose leave event was missed
             # is not in it, while the cache would keep them.
             members = await asyncio.wait_for(guild.chunk(cache=True), self._chunk_timeout_s)
@@ -279,6 +346,7 @@ class AudienceSync:
         self._members_loaded.clear()
         self._baseline.clear()
         self._reconciled.clear()
+        self._dirty.clear()
         for task in self._pending.values():
             task.cancel()
         self._pending.clear()
@@ -346,6 +414,7 @@ class AudienceSync:
                 or last is None
                 or now - last >= self._reconcile_every
                 or self._roles.get(tenant_id) != roles
+                or tenant_id in self._dirty
             ) and await self.reconcile(guild):
                 reconciled_now.add(tenant_id)
         await self._renew(by_tenant, reconciled_now)
@@ -359,6 +428,7 @@ class AudienceSync:
             for tenant_id in self._live
             if tenant_id in by_tenant
             and tenant_id not in skip
+            and tenant_id not in self._dirty
             and (last := self._reconciled.get(tenant_id)) is not None
         }
         limits = {t: limit for t, limit in limits.items() if limit > now}

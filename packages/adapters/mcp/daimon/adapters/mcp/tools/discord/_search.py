@@ -16,6 +16,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._client import (
+    _fetch_known_channels,  # pyright: ignore[reportPrivateUsage]
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
     _require_guild_channel,  # pyright: ignore[reportPrivateUsage]
@@ -183,7 +184,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
 
         # 5. Build per-channel visibility data from fetch_channels.
         #    Absence does NOT mean invisible — it means "resolve it".
-        channels = await guild.fetch_channels()
+        channels = await _fetch_known_channels(guild)
         view_by_channel_id: dict[str, bool] = {}
         manage_threads_by_channel_id: dict[str, bool] = {}
         for ch in channels:

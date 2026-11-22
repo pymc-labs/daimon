@@ -1,15 +1,24 @@
 import asyncio
 import base64
+import io
 
 import httpx
 import pytest
 from daimon.adapters.slack.vision import (
-    MAX_VISION_IMAGE_BYTES,
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGES,
     SlackFile,
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.testing import images
+from PIL import Image
+
+PNG = images.png_bytes()
+
+
+def _width(block: dict) -> int:
+    return Image.open(io.BytesIO(base64.standard_b64decode(block["source"]["data"]))).width
 
 
 def _file(**over: object) -> SlackFile:
@@ -34,11 +43,11 @@ def test_is_vision_image_false_for_unsupported_mimetype():
 
 
 def test_is_vision_image_false_when_oversized():
-    assert is_vision_image(_file(size=MAX_VISION_IMAGE_BYTES + 1)) is False, "over the byte cap"
+    assert is_vision_image(_file(size=MAX_DOWNSCALE_SOURCE_BYTES + 1)) is False, "too big to shrink"
 
 
-def test_is_vision_image_false_when_dimension_exceeds_cap():
-    assert is_vision_image(_file(original_w=9000, original_h=10)) is False, "over the pixel cap"
+def test_is_vision_image_true_when_dimension_exceeds_cap():
+    assert is_vision_image(_file(original_w=9000, original_h=10)) is True, "resized once fetched"
 
 
 @pytest.mark.asyncio
@@ -47,7 +56,7 @@ async def test_download_as_image_blocks_sends_bearer_and_encodes_base64():
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["auth"] = request.headers.get("authorization", "")
-        return httpx.Response(200, content=b"PNGBYTES")
+        return httpx.Response(200, content=PNG)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     blocks, skipped = await download_as_image_blocks(
@@ -58,7 +67,7 @@ async def test_download_as_image_blocks_sends_bearer_and_encodes_base64():
     assert captured["auth"] == "Bearer xoxb-abc", "download authenticates with the bot token"
     assert skipped == [], "the supported image is not skipped"
     assert len(blocks) == 1, "one image block produced"
-    assert blocks[0]["source"]["data"] == base64.standard_b64encode(b"PNGBYTES").decode(), (
+    assert blocks[0]["source"]["data"] == base64.standard_b64encode(PNG).decode(), (
         "bytes are base64-encoded into the block"
     )
 
@@ -112,7 +121,7 @@ def _overlap_handler(
         file_id = request.url.path.rsplit("/", 1)[-1]
         if file_id in failing:
             return httpx.Response(500, content=b"boom")
-        return httpx.Response(200, content=file_id.encode())
+        return httpx.Response(200, content=images.png_bytes(width=4 + int(file_id[1:])))
 
     return httpx.MockTransport(handler)
 
@@ -124,8 +133,8 @@ async def test_download_as_image_blocks_overlaps_downloads_in_file_order():
     async with httpx.AsyncClient(transport=_overlap_handler(tracker)) as client:
         blocks, skipped = await download_as_image_blocks(files, token="xoxb", http_client=client)
 
-    decoded = [base64.standard_b64decode(b["source"]["data"]).decode() for b in blocks]
-    assert decoded == [f["id"] for f in files], "blocks keep the files' order"
+    decoded = [_width(b) for b in blocks]
+    assert decoded == [4 + int(f["id"][1:]) for f in files], "blocks keep the files' order"
     assert skipped == [], "every image fits under the cap"
     assert 1 < tracker["peak"] <= 4, f"fetches should overlap, at most four at once: {tracker}"
 
@@ -139,8 +148,8 @@ async def test_download_as_image_blocks_failed_fetch_frees_its_slot():
     async with httpx.AsyncClient(transport=transport) as client:
         blocks, skipped = await download_as_image_blocks(files, token="xoxb", http_client=client)
 
-    kept = [f["id"] for f in files if f["id"] != "F1"][:MAX_VISION_IMAGES]
-    decoded = [base64.standard_b64decode(b["source"]["data"]).decode() for b in blocks]
+    kept = [4 + int(f["id"][1:]) for f in files if f["id"] != "F1"][:MAX_VISION_IMAGES]
+    decoded = [_width(b) for b in blocks]
     assert decoded == kept, "the cap fills in order past the failure"
     assert [(f["id"], "fetch" in reason) for f, reason in skipped] == [
         ("F1", True),

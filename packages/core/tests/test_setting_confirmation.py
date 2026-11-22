@@ -14,7 +14,8 @@ _CARDS = [
     ({"key": "cost_footer", "tier": "thread", "value": "hidden"}, "Cost footer: Hidden for this thread"),
     ({"key": "cost_footer", "tier": "thread", "value": "default"}, "Cost footer: the default for this thread"),
     ({"key": "cost_footer", "tier": "channel", "value": "hidden", "locked": True}, "Cost footer: Hidden, locked for this channel"),
-    ({"key": "approvals", "tier": "agent", "value": "off"}, None),
+    ({"key": "approvals", "tier": "agent", "value": "off"}, "Approvals: Allow writes for this agent"),
+    ({"key": "approvals", "tier": "deployment", "value": "off"}, None),
 ]  # fmt: skip
 
 

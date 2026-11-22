@@ -218,6 +218,7 @@ class WatchDiscordRest:
         self.roles_error = None
         self.guild_error = None
         self.parent_error = None
+        self.bot_roles = ["77"]
         self.http = client.http
         self.http.get_guild = AsyncMock(side_effect=self.guild)
         self.http.get_roles = AsyncMock(side_effect=self.roles)
@@ -248,10 +249,10 @@ class WatchDiscordRest:
     def member(self, guild_id, user_id):
         if self.member_error:
             raise self.member_error
-        assert (guild_id, user_id) == (710000099, 555)
+        assert guild_id == 710000099 and user_id in (555, 999)
         return {
-            "user": {"id": "555", "username": "owner", "discriminator": "0", "avatar": None},
-            "roles": ["77"],
+            "user": {"id": str(user_id), "username": "owner", "discriminator": "0", "avatar": None},
+            "roles": ["77"] if user_id == 555 else self.bot_roles,
             "flags": 0,
         }
 

@@ -2,8 +2,9 @@
 
 Attachments the Anthropic API can consume as vision content blocks are
 downloaded from Discord's CDN and forwarded inline on the ``user.message``
-event. Everything else — unsupported media types, oversized images, and
-non-image files — belongs on the notebook-host upload path, which has its
+event, downscaled first when over the byte cap. Everything else — unsupported
+media types, images over 25 MiB, and non-image files — belongs on the
+notebook-host upload path, which has its
 own size cap and skip reporting. ``is_vision_image_attachment`` is the
 single routing predicate for that split.
 """
@@ -15,11 +16,14 @@ import asyncio
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.media.vision import (
-    MAX_VISION_IMAGE_BYTES,
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGE_DIMENSION,
     MAX_VISION_IMAGES,
+    UNFIT_REASON,
     VISION_MEDIA_TYPES,
     build_image_block,
+    fit_vision_image,
+    resized_for_vision,
     sniff_image_media_type,
 )
 
@@ -60,12 +64,11 @@ def is_oversized_image(attachment: discord.Attachment) -> bool:
 
 
 def is_vision_image_attachment(attachment: discord.Attachment) -> bool:
-    """True when the attachment can be sent as an API vision content block."""
+    """True when the attachment can be sent as an API vision content block, resized
+    first when it is over the byte or pixel cap (the bytes are checked once fetched)."""
     return (
-        (attachment.content_type or "") in VISION_MEDIA_TYPES
-        and attachment.size <= MAX_VISION_IMAGE_BYTES
-        and not _exceeds_dimension_cap(attachment)
-    )
+        attachment.content_type or ""
+    ) in VISION_MEDIA_TYPES and attachment.size <= MAX_DOWNSCALE_SOURCE_BYTES
 
 
 def build_image_url_prefix(attachments: list[discord.Attachment]) -> str:
@@ -79,9 +82,14 @@ def build_image_url_prefix(attachments: list[discord.Attachment]) -> str:
     """
     return "\n".join(
         f"[attachment] image `{attachment.filename}` ({attachment.size} bytes), uploaded by "
-        f"the user with this message and forwarded to you inline as a vision block. Signed "
-        f"Discord CDN URL (fetchable with curl or passable to external APIs; expires ~24h): "
-        f"{attachment.url}"
+        f"the user with this message and forwarded to you inline as a vision block"
+        + (
+            ", resized to fit the model's image limits (the URL below serves the original)"
+            if resized_for_vision(attachment.size, attachment.width, attachment.height)
+            else ""
+        )
+        + f". Signed Discord CDN URL (fetchable with curl or passable to external APIs; "
+        f"expires ~24h): {attachment.url}"
         for attachment in attachments
     )
 
@@ -203,17 +211,9 @@ def _static_skip_reason(attachment: discord.Attachment) -> str | None:
     if media_type not in VISION_MEDIA_TYPES:
         log.warning("image_attachment.skipped.media_type", name=name, media_type=media_type)
         return f"unsupported image media type: {media_type or 'unknown'}"
-    if attachment.size > MAX_VISION_IMAGE_BYTES:
+    if attachment.size > MAX_DOWNSCALE_SOURCE_BYTES:
         log.warning("image_attachment.skipped.oversize", name=name, size=attachment.size)
-        return f"exceeds vision size cap ({attachment.size} > {MAX_VISION_IMAGE_BYTES})"
-    if _exceeds_dimension_cap(attachment):
-        log.warning(
-            "image_attachment.skipped.dimensions",
-            name=name,
-            width=attachment.width,
-            height=attachment.height,
-        )
-        return f"image dimensions unknown or exceed {MAX_VISION_IMAGE_DIMENSION}px"
+        return f"exceeds vision size cap ({attachment.size} > {MAX_DOWNSCALE_SOURCE_BYTES})"
     return None
 
 
@@ -248,4 +248,8 @@ async def _fetch_image_block(
             declared_media_type=media_type,
             sniffed_media_type=sniffed_media_type,
         )
-    return build_image_block(data, sniffed_media_type)
+    fitted = await asyncio.to_thread(fit_vision_image, data)
+    if fitted is None:
+        log.warning("image_attachment.skipped.unfittable", name=name, size=len(data))
+        return UNFIT_REASON
+    return build_image_block(*fitted)

@@ -722,10 +722,11 @@ def _all_embeds(sends: list[Any], edits: list[Any]) -> list[discord.Embed]:
 
 def _assert_stopped_card(edit_kwargs: dict[str, Any]) -> None:
     """The last card write is the red Stopped embed with its next step, and no reply text."""
-    assert not edit_kwargs.get("content"), "no plain text: the card is the whole notice"
+    content = edit_kwargs.get("content") or ""
+    assert content in ("", "<@123>"), "no plain text past the asker's mention: the card is it"
     (card,) = edit_kwargs["embeds"]
     assert card.title == "Stopped."
-    assert card.description == "Send a message to start again."
+    assert card.description.startswith("Send a message to start again.\n\n-# Stopped after ")
     assert card.colour is not None and card.colour.value == COLOR_RED
     assert edit_kwargs.get("view") is None, "the Stop button is gone"
 
@@ -946,7 +947,8 @@ class TestDebounce:
         await lc.on_render(running)
 
         assert len(sends) == 1
-        assert [e[1]["embeds"][0].footer.text for e in edits] == ["12s", "24s"]
+        footers = [e[1]["embeds"][0].footer.text for e in edits]
+        assert [text.split("\u2003")[0] for text in footers] == ["12s", "24s"]
 
     async def test_terminal_flushes_immediately_with_no_render_tick(self) -> None:
         """Terminal success bypasses on_render and the debounce entirely --
@@ -1474,8 +1476,8 @@ class TestErrorEmbed:
         last_edit = edits[-1]
         assert last_edit[0] is _SENTINEL_REF, "edit should use stored message ref"
         assert "embeds" in last_edit[1], "error embed should be present"
-        assert last_edit[1].get("content") is None or "content" not in last_edit[1], (
-            "error path should NOT clean replace (embed stays visible)"
+        assert last_edit[1].get("content") in (None, "<@123>"), (
+            "error path should NOT clean replace (embed stays visible); it only pings the asker"
         )
 
     async def test_error_embed_has_red_color(self) -> None:
@@ -2670,7 +2672,7 @@ async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
     await lifecycle.post_initial()
     await lifecycle.on_terminal_success(_make_success_state("Done <@456> @everyone"))
     assert len(sends) == 2
-    assert sends[-1]["content"] == "<@123>\nDone <@456> @everyone"
+    assert sends[-1]["content"] == "<@123> Done <@456> @everyone"
     mentions = sends[-1]["allowed_mentions"].to_dict()
     assert mentions["users"] == [123]
     assert "everyone" not in mentions["parse"]
@@ -2746,8 +2748,7 @@ async def test_final_table_is_attached_to_answer(notify):
     )
     answer = sends[-1] if notify else edits[-1][1]
     attachment_key = "files" if notify else "attachments"
-    assert "table-1.png" in answer["content"]
-    assert "| ---" not in answer["content"]
+    assert "| ---" not in answer["content"] and "table-1.png" not in answer["content"]
     assert len(answer[attachment_key]) == 1
     assert answer[attachment_key][0].fp.read(8) == b"\x89PNG\r\n\x1a\n"
     assert len(sends) == (2 if notify else 1)
@@ -2925,7 +2926,8 @@ async def test_missing_card_is_replaced_before_answer_delivery(missing_at, rende
     assert lifecycle.card_message_id == "1000", "retire the original durable card intent"
     assert lifecycle.was_answered
     answer = sent[-1][1] if missing_at == "answer" else sent[-1][0].kwargs
-    assert ("table-1.png" if render_tables else text) in answer["content"]
+    if not render_tables:
+        assert text in answer["content"]
     if missing_at == "answer":
         assert answer["embeds"], "a replacement answer must keep its summary"
         assert "attachments" not in answer and "view" not in answer
@@ -3463,3 +3465,82 @@ async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpi
     delivered = rendered + "\n".join(str(kwargs) for _, kwargs in edits)
     assert "Here you go" in delivered, "the answer is delivered"
     assert "<@123>" not in rendered, "an unchecked requester is not pinged"
+
+
+async def test_a_card_edit_refused_by_a_contained_room_is_not_retried_every_tick() -> None:
+    """The output gate refused a progress edit (the room became contained mid-turn): the card
+    stops editing at once, with no retry on later render ticks, and the turn is not failed."""
+    from daimon.core.audience_refusal import AUDIENCE_CONTAINED
+    from daimon.core.turn.errors import AdmissionDenied
+
+    now = [0.0]
+    lc, sends, edits = _make_lifecycle(clock=lambda: now[0])
+    attempts: list[object] = []
+
+    async def refused_edit(ref: Any, **kwargs: Any) -> None:
+        attempts.append(ref)
+        raise AdmissionDenied(reason="invoker_not_allowed", detail=AUDIENCE_CONTAINED)
+
+    lc._edit = refused_edit  # pyright: ignore[reportPrivateUsage]
+    state = _make_success_state("working")
+
+    await lc.on_render(state)  # the first post, before the room changed
+    assert len(sends) == 1
+    for _ in range(5):  # five render ticks, each past the debounce
+        now[0] += 10.0
+        await lc.on_render(state)
+
+    assert len(attempts) == 1, "the refused edit is not retried"
+    assert edits == []
+
+
+async def test_a_stop_card_that_pings_the_asker_is_a_new_message() -> None:
+    """Discord never notifies an edit, so the pinged card replaces the old one."""
+    lc, sends, _edits = _make_lifecycle(notify_on_completion=True)
+    lc._delete = AsyncMock()  # pyright: ignore[reportPrivateUsage]
+    await lc.post_initial()
+    await lc.on_terminal_success(
+        TurnState(content=_running_tool_turn().content, termination=TerminationReason.INTERRUPTED)
+    )
+    lc._delete.assert_awaited_once()  # pyright: ignore[reportPrivateUsage]
+    assert sends[-1]["content"] == "<@123>"
+    _assert_stopped_card(sends[-1])
+
+
+async def test_with_pre_tool_messages_off_the_text_before_a_tool_joins_the_answer() -> None:
+    lc, sends, edits = _make_lifecycle()
+    lc._post_pre_tool_text = False  # pyright: ignore[reportPrivateUsage]
+    await lc.post_initial()
+    early = "Findings so far. " * 40
+    call = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    state = TurnState(
+        content=[TextBlock(kind="text", text=early), call, TextBlock(kind="text", text="Done.")]
+    )
+    await lc.on_terminal_success(state)
+    posted = "\n".join(str(kw.get("content", "")) for kw in [*sends, *[e[1] for e in edits]])
+    assert early.strip() in posted and "Done." in posted
+    assert posted.index(early.strip()) < posted.rindex("Done.")
+
+
+async def test_a_failed_model_mark_read_still_starts_the_turn() -> None:
+    message = MagicMock(add_reaction=AsyncMock())
+    lc = DiscordTurnLifecycle(
+        send=AsyncMock(return_value=_SENTINEL_REF),
+        edit=AsyncMock(),
+        agent_name="test",
+        model_id="m",
+        trigger_message=message,
+        model_marks_for=AsyncMock(side_effect=RuntimeError("down")),
+    )
+    await lc.post_initial()
+    assert not lc.model_marked and lc.model_marks == ()
+    message.add_reaction.assert_not_awaited()
+
+
+async def test_an_answer_never_pings_a_bot_that_asked() -> None:
+    """A ping only sets a bot off; two agents pinging each other would never stop."""
+    lc, _sends, _edits = _make_lifecycle(notify_on_completion=True)
+    lc._trigger_message = types.SimpleNamespace(author=types.SimpleNamespace(bot=True))  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    assert await lc._requester_opted_out() is True  # pyright: ignore[reportPrivateUsage]
+    lc._trigger_message = types.SimpleNamespace(author=types.SimpleNamespace(bot=False))  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    assert await lc._requester_opted_out() is False, "a person is pinged"  # pyright: ignore[reportPrivateUsage]
