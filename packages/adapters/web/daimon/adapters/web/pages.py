@@ -43,7 +43,6 @@ from daimon.core.artifact_pages.documents import (
     check_page_collection,
 )
 from daimon.core.artifact_pages.events import build_event
-from daimon.core.artifact_pages.keys import new_key_id, page_event_key
 from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, Limits, page_url
 from daimon.core.artifact_pages.tickets import Ticket, link_digest, open_ticket, seal
 from daimon.core.config import origin_of
@@ -61,6 +60,7 @@ from fastapi.responses import (
     Response,
 )
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
@@ -477,27 +477,11 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             # The rule creating a watch applies: its owner must still be able to use the page.
             owner = watch.owner_account_id
             if await artifact_store.tool_role(db, artifact, owner, chat_admin=False) == "none":
+                log.info("web.artifacts.event_refused", watch_id=str(watch.id), reason="owner")
                 continue
             try:
                 async with db.begin_nested():
-                    key_id = await watches_store.live_key_id(db, watch.id, now=now)
-                    key = None if key_id is None else page_event_key(keys, watch.id, key_id)
-                    if key_id is None or key is None:
-                        # Expired, or derived from a crypto key no longer listed: enroll anew.
-                        key_id = new_key_id(keys)
-                        key = page_event_key(keys, watch.id, key_id)
-                        assert key is not None
-                        end = now + watches_store.MAX_LIFETIME
-                        await watches_store.rotate_signing_key(
-                            db,
-                            watch.id,
-                            key_id=key_id,
-                            key=key,
-                            expires_at=end
-                            if watch.expires_at is None
-                            else min(end, watch.expires_at),
-                            now=now,
-                        )
+                    key_id, key = await watches_store.ensure_page_key(db, watch, keys, now=now)
                     signed = sign_page_event(
                         key=key,
                         watch_id=watch.id,
@@ -509,8 +493,10 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
                     )
                     await watches_store.accept_page_event(db, signed, key=key)
                 delivered += 1
-            except ValueError as exc:
-                log.info("web.artifacts.event_refused", watch_id=str(watch.id), reason=str(exc))
+            except (ValueError, DBAPIError) as exc:
+                # A refused delivery (its caps, a changed watch) is logged; the event stays.
+                reason = getattr(getattr(exc, "orig", None), "sqlstate", None) or str(exc)
+                log.info("web.artifacts.event_refused", watch_id=str(watch.id), reason=reason)
         await artifact_store.mark_event_delivered(db, artifact.id, event.id, delivered=delivered)
         return str(event.id)
 
