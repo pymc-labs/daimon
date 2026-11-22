@@ -5665,7 +5665,17 @@ class WebThread(Base):
     """One web chat: a person's conversation with the agent it was started with."""
 
     __tablename__ = "web_threads"
-    __table_args__ = (Index("ix_web_threads_person_updated", "person_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_web_threads_person_updated", "person_id", "updated_at"),
+        # One ask thread per person and page (`daimon.ask` on an artifact).
+        Index(
+            "uq_web_threads_person_artifact",
+            "person_id",
+            "artifact_id",
+            unique=True,
+            postgresql_where=text("artifact_id IS NOT NULL AND deleted_at IS NULL"),
+        ),
+    )
 
     id: Mapped[UuidPk]
     tenant_id: Mapped[TenantFK]
@@ -5676,6 +5686,9 @@ class WebThread(Base):
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
     deleted_at: Mapped[datetime | None]
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL", name="fk_web_threads_artifact")
+    )
 
 
 class WebMessage(Base):
@@ -5711,6 +5724,124 @@ class WebMessage(Base):
     feedback: Mapped[str | None]
     seq: Mapped[int] = mapped_column(BigInteger, Identity())
     created_at: Mapped[TsNow]
+
+
+class Artifact(Base):
+    """A web page an agent published (`daimon.core.artifact_pages`), served at
+    `/a/<public_id>/<slug>`. `link_secret` is Fernet ciphertext of a public page's link
+    secret. The checks hold a public page's hard rules: its viewers are anonymous."""
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        UniqueConstraint("public_id", name="uq_artifacts_public_id"),
+        UniqueConstraint("tenant_id", "slug", name="uq_artifacts_tenant_slug"),
+        Index("ix_artifacts_owner", "owner_account_id"),
+        Index(
+            "ix_artifacts_expires_at", "expires_at", postgresql_where=text("expires_at IS NOT NULL")
+        ),
+        CheckConstraint("public_id ~ '^[a-z2-7]{10}$'", name="ck_artifacts_public_id"),
+        CheckConstraint(
+            "slug ~ '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'", name="ck_artifacts_slug"
+        ),
+        CheckConstraint("length(title) BETWEEN 1 AND 120", name="ck_artifacts_title"),
+        CheckConstraint("access IN ('workspace', 'people', 'public')", name="ck_artifacts_access"),
+        CheckConstraint("data IN ('off', 'read', 'write')", name="ck_artifacts_data"),
+        CheckConstraint("data_scale BETWEEN 1 AND 10", name="ck_artifacts_data_scale"),
+        CheckConstraint(
+            "(access = 'public') = (link_secret IS NOT NULL)", name="ck_artifacts_link"
+        ),
+        CheckConstraint(
+            "access <> 'public' OR (data <> 'write' AND NOT (data = 'read' AND events)"
+            " AND NOT ask AND expires_at IS NOT NULL)",
+            name="ck_artifacts_public",
+        ),
+        CheckConstraint(
+            "NOT (owner_account_id = ANY (editors))", name="ck_artifacts_owner_not_editor"
+        ),
+        CheckConstraint(
+            "cardinality(people) <= 200 AND cardinality(editors) <= 50", name="ck_artifacts_sizes"
+        ),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    public_id: Mapped[str]
+    slug: Mapped[str]
+    title: Mapped[str]
+    agent_id: Mapped[str]
+    owner_account_id: Mapped[AccountFK]
+    access: Mapped[str] = mapped_column(server_default="workspace")
+    people: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), server_default="{}")
+    editors: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), server_default="{}")
+    editors_can_share: Mapped[bool] = mapped_column(server_default=text("true"))
+    data: Mapped[str] = mapped_column(server_default="off")
+    events: Mapped[FalseFlag]
+    ask: Mapped[FalseFlag]
+    data_scale: Mapped[int] = mapped_column(server_default="1")
+    link_secret: Mapped[bytes | None]
+    expires_at: Mapped[datetime | None]
+    current_version: Mapped[int] = mapped_column(server_default="0")
+    size_bytes: Mapped[int] = mapped_column(server_default="0")
+    # Bumped on every page data write: pages poll this one number for changes.
+    data_revision: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
+
+
+class ArtifactVersion(Base):
+    """One published version of an artifact's HTML, and where it was published from."""
+
+    __tablename__ = "artifact_versions"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "version", name="uq_artifact_versions_version"),
+        Index(
+            "ix_artifact_versions_origin",
+            "origin_platform",
+            "origin_thread_id",
+            "origin_message_id",
+        ),
+        Index("ix_artifact_versions_publisher", "published_by_account_id"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    artifact_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("artifacts.id", ondelete="CASCADE"))
+    version: Mapped[int]
+    html: Mapped[str]
+    size_bytes: Mapped[int]
+    published_by_account_id: Mapped[AccountSetNull]
+    agent_id: Mapped[str]
+    origin_platform: Mapped[str | None]
+    origin_thread_id: Mapped[str | None]
+    origin_message_id: Mapped[str | None]
+    created_at: Mapped[TsNow]
+
+
+class ArtifactDocument(Base):
+    """One JSON document of a page's shared data. `_`-prefixed collections are Daimon's
+    own (`_events`); `updated_by` is who wrote it, as shown, erased with their account."""
+
+    __tablename__ = "artifact_documents"
+    __table_args__ = (
+        Index("ix_artifact_documents_account", "updated_by_account_id"),
+        CheckConstraint(
+            "collection ~ '^[A-Za-z0-9_-]{1,64}$'", name="ck_artifact_documents_collection"
+        ),
+        CheckConstraint("doc_id ~ '^[A-Za-z0-9_.:-]{1,128}$'", name="ck_artifact_documents_doc_id"),
+    )
+
+    tenant_id: Mapped[TenantFK]
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), primary_key=True
+    )
+    collection: Mapped[str] = mapped_column(primary_key=True)
+    doc_id: Mapped[str] = mapped_column(primary_key=True)
+    data: Mapped[dict[str, Any]]
+    size_bytes: Mapped[int]
+    updated_by: Mapped[str | None]
+    updated_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class AgentDraft(Base):

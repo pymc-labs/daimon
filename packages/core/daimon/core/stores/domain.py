@@ -1860,6 +1860,101 @@ class WebOutputFile(BaseModel):
     kind: Literal["csv", "xlsx", "pdf", "png"]
 
 
+ArtifactAccess = Literal["workspace", "people", "public"]
+"""Who may open a page: every member plus `people`, only `people`, or anyone with its link."""
+DataAccess = Literal["off", "read", "write"]
+"""What a page's own code may do with its shared data; tools may always read and write."""
+
+
+class ArtifactRow(BaseModel):
+    """An artifact page. `link_secret` is the decrypted secret of a public page's link."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    public_id: str
+    slug: str
+    title: str
+    agent_id: str
+    owner_account_id: uuid.UUID
+    access: ArtifactAccess
+    people: tuple[uuid.UUID, ...]
+    editors: tuple[uuid.UUID, ...]
+    editors_can_share: bool
+    data: DataAccess
+    events: bool
+    ask: bool
+    data_scale: int
+    link_secret: str | None = Field(default=None, repr=False)
+    expires_at: datetime | None
+    current_version: int
+    size_bytes: int
+    data_revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ArtifactVersionRow(BaseModel):
+    """One published version; `html` is left empty by listings."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    artifact_id: uuid.UUID
+    version: int
+    html: str
+    size_bytes: int
+    published_by_account_id: uuid.UUID | None
+    agent_id: str
+    origin_platform: str | None
+    origin_thread_id: str | None
+    origin_message_id: str | None
+    created_at: datetime
+
+
+class ArtifactDocumentRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    artifact_id: uuid.UUID
+    collection: str
+    doc_id: str
+    data: dict[str, JsonValue]
+    size_bytes: int
+    updated_by: str | None
+    updated_by_account_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ArtifactUsage(BaseModel):
+    """A page's own data (Daimon's `_` collections excluded), in documents and bytes."""
+
+    model_config = ConfigDict(frozen=True)
+
+    documents: int
+    bytes: int
+
+
+class ArtifactCollectionRow(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    documents: int
+    bytes: int
+
+
+class WebArtifactRef(BaseModel):
+    """An artifact a web reply published, for its chat card."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: uuid.UUID
+    title: str
+    url: str
+    version: int
+    access: ArtifactAccess
+
+
 class WebApprovalCard(BaseModel):
     """A write waiting on its requester's approval."""
 
@@ -1917,6 +2012,8 @@ class WebMessageBlocks(BaseModel):
     files: tuple[WebOutputFile, ...] = ()
     attachments: tuple[WebAttachment, ...] = ()
     card: WebCard | None = None
+    # Artifacts this reply's turn published (`artifact_pages.published_in`).
+    artifacts: tuple[WebArtifactRef, ...] = ()
 
 
 WebMessageStatus = Literal["running", "done", "stopped", "interrupted"]
@@ -1934,6 +2031,7 @@ class WebThreadRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None
+    artifact_id: uuid.UUID | None = None
 
 
 class WebMessageRow(BaseModel):
