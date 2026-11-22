@@ -59,63 +59,79 @@ def build_owner_notifier(
                 or not await dm_enabled(s, tenant_id=row.tenant_id)
             ):
                 return
-        links = await routine_links(sm, settings, row, "discord")
-        facts = owner_notice_facts(
-            row,
-            reason,
-            agent_name=await routine_agent_name(sm, row),
-            channel_told=channel_told,
-            now=datetime.now(UTC),
-            link=links.routine(row.id) if links is not None else None,
-        )
+        turn_error: str | None = None
         try:
-            async with asyncio.timeout(_TURN_TIMEOUT_S):
-                async with sm() as s:
-                    standing = await requester_standing(
-                        s,
-                        tenant_id=row.tenant_id,
-                        user_id=owner,
-                        is_dm=True,
-                        resolver=deps.membership_resolver,
-                    )
-                reply = await run_dm_routine(
-                    deps,
-                    requester_org=standing,
-                    tenant_id=row.tenant_id,
-                    owner_user_id=owner,
-                    agent_name=row.agent_name,
-                    prompt=owner_notice_prompt(facts),
-                    source=None,
-                    budget_channel_id=None,
-                )
-            if not reply.text.strip():
-                raise ValueError("the notice turn wrote nothing")
-            await send_text(owner, reply.text.strip())
-            log.info("routine.owner_notified", routine_id=str(row.id), written_by="agent")
-            return
+            links = await routine_links(sm, settings, row, "discord")
+            facts = owner_notice_facts(
+                row,
+                reason,
+                agent_name=await routine_agent_name(sm, row),
+                channel_told=channel_told,
+                now=datetime.now(UTC),
+                link=links.routine(row.id) if links is not None else None,
+            )
+            if reason in _NO_TURN:
+                turn_error = "refused"  # a turn would be refused, or spend what is out
+            else:
+                text = await _agent_text(row, owner, facts)
+                # Once sending starts, a failure is not retried as a card: no second DM.
+                await send_text(owner, text)
+                log.info("routine.owner_notified", routine_id=str(row.id), written_by="agent")
+                return
+        except _SendFailed as exc:
+            return _report_failed(row, exc.__cause__ or exc)
         except Exception as exc:
-            # Boundary: any reason the agent could not tell the owner falls back to the card.
+            # Boundary: any reason the agent could not write it falls back to the card.
+            if "facts" not in locals():
+                return _report_failed(row, exc)
             turn_error = type(exc).__name__
         try:
             await send_card(owner, *owner_notice_card(facts))
         except (httpx.HTTPError, ValueError) as exc:
-            report_ops_event(
-                sm,
-                OpsEvent(
-                    "routine.owner_notice_failed",
-                    row.tenant_id,
-                    reason=type(exc).__name__,
-                    routine_id=row.id,
-                    agent_id=row.agent_id,
-                    platform="discord",
-                ),
-            )
-            return
+            return _report_failed(row, exc)
         log.info(
             "routine.owner_notified",
             routine_id=str(row.id),
             written_by="plain",
             turn_error_class=turn_error,
+        )
+
+    async def _agent_text(row: RoutineRow, owner: str, facts: OwnerNoticeFacts) -> str:
+        async with asyncio.timeout(_TURN_TIMEOUT_S):
+            async with sm() as s:
+                standing = await requester_standing(
+                    s,
+                    tenant_id=row.tenant_id,
+                    user_id=owner,
+                    is_dm=True,
+                    resolver=deps.membership_resolver,
+                )
+            reply = await run_dm_routine(
+                deps,
+                requester_org=standing,
+                tenant_id=row.tenant_id,
+                owner_user_id=owner,
+                agent_name=row.agent_name,
+                prompt=owner_notice_prompt(facts),
+                source=None,
+                budget_channel_id=None,
+                origin="routine_notice",
+            )
+        if not (text := reply.text.strip()):
+            raise ValueError("the notice turn wrote nothing")
+        return text
+
+    def _report_failed(row: RoutineRow, exc: BaseException) -> None:
+        report_ops_event(
+            sm,
+            OpsEvent(
+                "routine.owner_notice_failed",
+                row.tenant_id,
+                reason=type(exc).__name__,
+                routine_id=row.id,
+                agent_id=row.agent_id,
+                platform="discord",
+            ),
         )
 
     return notify

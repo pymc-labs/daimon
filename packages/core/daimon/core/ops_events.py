@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Final
 
@@ -137,7 +137,7 @@ def _log(event: OpsEvent, record: OpsEventRecord) -> None:
 async def _write(
     sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, window: _Window
 ) -> None:
-    row = OpsEventRecord(**{**window.record.__dict__, "count": window.count})
+    row = replace(window.record, count=window.count)
     try:
         # Always own a connection, even for a caller bound to a checked-out one.
         bind = sm.kw.get("bind")
