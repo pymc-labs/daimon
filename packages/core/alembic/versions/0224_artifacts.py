@@ -3,7 +3,8 @@
 `artifacts.link_secret` is Fernet ciphertext, set exactly when the page is public. The
 checks hold the hard rules for anonymous viewers of a public page: no data writes, not
 both data reads and events, no ask, and always an expiry. `web_threads.artifact_id`
-marks a viewer's ask thread for a page, one per person and page.
+marks a viewer's ask thread for a page, one per person and page. A version's thumbnail
+and a viewer's consent to a page's asks are rows of their own.
 
 downgrade: destructive
 """
@@ -157,9 +158,40 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("artifact_id IS NOT NULL AND deleted_at IS NULL"),
     )
+    # Hosting: version thumbnails and viewers' consent to a page's asks.
+    op.create_table(
+        "artifact_thumbnails",
+        sa.Column("tenant_id", _UUID, nullable=False),
+        sa.Column("artifact_id", _UUID, nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        sa.Column("png", sa.LargeBinary(), nullable=False),
+        _now("created_at"),
+        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["artifact_id", "version"],
+            ["artifact_versions.artifact_id", "artifact_versions.version"],
+            ondelete="CASCADE",
+            name="fk_artifact_thumbnails_version",
+        ),
+        sa.PrimaryKeyConstraint("artifact_id", "version"),
+    )
+    op.create_table(
+        "artifact_ask_consents",
+        sa.Column("tenant_id", _UUID, nullable=False),
+        sa.Column("artifact_id", _UUID, nullable=False),
+        sa.Column("person_id", _UUID, nullable=False),
+        sa.Column("version", sa.Integer(), nullable=False),
+        _now("created_at"),
+        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["artifact_id"], ["artifacts.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["person_id"], ["web_people.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("artifact_id", "person_id"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table("artifact_ask_consents")
+    op.drop_table("artifact_thumbnails")
     op.drop_index("uq_web_threads_person_artifact", table_name="web_threads")
     op.drop_constraint("fk_web_threads_artifact", "web_threads", type_="foreignkey")
     op.drop_column("web_threads", "artifact_id")

@@ -31,6 +31,8 @@ class PageVisitor:
     viewer: Viewer
     caller: WebCaller | None = None
     signed_in: bool = False
+    # Their sign-in's email, for `me()` and the page that says who cannot open it.
+    email: str | None = None
 
 
 def _viewer(person: WebPersonRow, *, admin: bool, link: str | None) -> Viewer:
@@ -51,7 +53,7 @@ def viewer_of(caller: WebCaller, link: str | None = None) -> Viewer:
 
 async def person_viewer(
     db: AsyncSession, artifact: ArtifactRow, person_id: uuid.UUID | None, *, link: str | None
-) -> Viewer:
+) -> PageVisitor:
     """A content ticket's viewer as they stand now: anonymous once the person is gone,
     suspended or out of the workspace."""
     person = (
@@ -64,12 +66,14 @@ async def person_viewer(
         or person.status != "active"
         or not await signin_allowed_in(db, tenant_id=artifact.tenant_id)
     ):
-        return Viewer(link=link)
+        return PageVisitor(Viewer(link=link))
     standings = await chat_standings(db, [person])
     if has_left(standings, person):
-        return Viewer(link=link)
+        return PageVisitor(Viewer(link=link))
     role = (await roles_of(db, [person], standings))[person.id]
-    return _viewer(person, admin=is_admin(role), link=link)
+    return PageVisitor(
+        _viewer(person, admin=is_admin(role), link=link), signed_in=True, email=person.email
+    )
 
 
 async def _live_session(
@@ -84,15 +88,14 @@ async def _live_session(
 
 
 async def _caller_in(
-    runtime: WebRuntime, db: AsyncSession, live: WebSessionRow, artifact: ArtifactRow
+    runtime: WebRuntime,
+    db: AsyncSession,
+    live: WebSessionRow,
+    people: list[WebPersonRow],
+    artifact: ArtifactRow,
 ) -> WebCaller | None:
     """The sign-in's active person in the page's workspace, or None."""
-    person_ids = await sessions_store.list_session_people(db, session_id=live.id)
-    found = [
-        p
-        for p in await people_store.get_people(db, person_ids=person_ids)
-        if p.tenant_id == artifact.tenant_id and p.status == "active"
-    ]
+    found = [p for p in people if p.tenant_id == artifact.tenant_id and p.status == "active"]
     if not found or not await signin_allowed_in(db, tenant_id=artifact.tenant_id):
         return None
     caller = await build_caller(runtime, db, live, found[0])
@@ -108,12 +111,15 @@ async def resolve_viewer(
     link: str | None = None,
 ) -> PageVisitor:
     live = await _live_session(runtime, db, request)
-    caller = (
-        None if live is None or artifact is None else await _caller_in(runtime, db, live, artifact)
-    )
+    if live is None:
+        return PageVisitor(Viewer(link=link))
+    person_ids = await sessions_store.list_session_people(db, session_id=live.id)
+    people = await people_store.get_people(db, person_ids=person_ids)
+    caller = None if artifact is None else await _caller_in(runtime, db, live, people, artifact)
     if caller is None:
-        return PageVisitor(Viewer(link=link), signed_in=live is not None)
-    return PageVisitor(viewer_of(caller, link), caller, signed_in=True)
+        email = next((p.email for p in people if p.email), None)
+        return PageVisitor(Viewer(link=link), signed_in=True, email=email)
+    return PageVisitor(viewer_of(caller, link), caller, signed_in=True, email=caller.person.email)
 
 
 async def page_on(runtime: WebRuntime, db: AsyncSession, artifact: ArtifactRow) -> bool:

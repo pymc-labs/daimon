@@ -5,6 +5,12 @@
   "use strict";
   const config = window.__daimon_boot;
   if (!config || window.daimon) return;
+  // WebRTC reaches any host, past connect-src. CSP `webrtc 'block'` stops it where
+  // browsers support that; elsewhere this is a speed bump only (docs/artifacts.md).
+  for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel",
+    "RTCRtpSender", "RTCRtpReceiver", "RTCIceCandidate", "RTCSessionDescription"]) {
+    try { delete window[name]; } catch { /* not configurable here */ }
+  }
   const POLL_MS = 3000;
   const FRAGMENT = /^#[A-Za-z0-9_.:-]{1,128}$/;
   const validHash = (hash) => hash === "" || FRAGMENT.exec(hash)?.[0] === hash;
@@ -185,14 +191,75 @@
     && window.parent.postMessage({ daimon: 1, nav: "hash", hash: location.hash }, config.shellOrigin);
   window.addEventListener("hashchange", sendHash);
 
-  // The frame may not navigate: open links in a new tab instead.
+  // The frame may neither navigate nor open popups: links and window.open go to the
+  // shell, which asks the viewer before opening another site. #section links stay here.
+  const openOutside = (href) => {
+    const url = new URL(href, location.href);
+    if (framed && /^(https?|mailto):$/.test(url.protocol)) {
+      window.parent.postMessage({ daimon: 1, nav: "open", url: url.href }, config.shellOrigin);
+    }
+  };
+  window.open = (href) => { if (href) openOutside(String(href)); return null; };
   window.addEventListener("click", (event) => {
     const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
     if (!link || event.defaultPrevented || link.hasAttribute("download")) return;
     const url = new URL(link.href, location.href);
-    const here = location.href.split("#")[0];
-    if (url.href.split("#")[0] === here || !/^(https?|mailto):$/.test(url.protocol)) return;
+    if (url.href.split("#")[0] === location.href.split("#")[0]) return;
     event.preventDefault();
-    window.open(url.href, "_blank", "noopener,noreferrer");
+    openOutside(url.href);
+  });
+
+  // A thumbnail for the shell: the top of the page drawn as an SVG foreignObject, the way
+  // dom-to-image (MIT) does it, with computed styles inlined. Images from other hosts and
+  // web fonts do not load inside it, so the thumbnail shows the page's layout and text.
+  const THUMB_W = 640, THUMB_H = 400, MAX_PNG = 200 * 1024;
+  function inline(source, height) {
+    const copy = source.cloneNode(false);
+    if (source.nodeType !== Node.ELEMENT_NODE) return copy;
+    if (/^(SCRIPT|NOSCRIPT|STYLE|LINK|IFRAME|TEMPLATE)$/.test(source.tagName)) return null;
+    if (source.getBoundingClientRect().top + scrollY > height) return null;
+    const style = getComputedStyle(source);
+    for (const name of style) copy.style.setProperty(name, style.getPropertyValue(name));
+    if (source instanceof HTMLCanvasElement) {
+      try { const img = document.createElement("img"); img.src = source.toDataURL(); img.style.cssText = copy.style.cssText; return img; } catch { return copy; }
+    }
+    if (source instanceof HTMLInputElement || source instanceof HTMLTextAreaElement) copy.setAttribute("value", source.value);
+    for (const child of source.childNodes) {
+      const inner = inline(child, height);
+      if (inner) copy.appendChild(inner);
+    }
+    return copy;
+  }
+  async function capture() {
+    const width = Math.min(document.documentElement.clientWidth || 1280, 1280);
+    const height = Math.round(width * THUMB_H / THUMB_W);
+    const body = inline(document.body, height);
+    const page = getComputedStyle(document.body).backgroundColor;
+    const root = getComputedStyle(document.documentElement).backgroundColor;
+    body.style.margin = getComputedStyle(document.body).margin;
+    const html = new XMLSerializer().serializeToString(body);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px;height:${height}px;overflow:hidden;background:${root}">${html}</div></foreignObject></svg>`;
+    const image = new Image();
+    image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    await image.decode();
+    for (const scale of [1, 0.75, 0.5]) {
+      const canvas = document.createElement("canvas");
+      canvas.width = THUMB_W * scale;
+      canvas.height = THUMB_H * scale;
+      const context = canvas.getContext("2d");
+      context.fillStyle = page === "rgba(0, 0, 0, 0)" ? (root === "rgba(0, 0, 0, 0)" ? "#fff" : root) : page;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const png = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      if (png && png.size <= MAX_PNG) return png;
+    }
+    return null;
+  }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent || event.origin !== config.shellOrigin || event.data?.daimon !== 1
+        || event.data.nav !== "capture") return;
+    capture().then((png) => {
+      if (png) window.parent.postMessage({ daimon: 1, nav: "thumbnail", png }, config.shellOrigin);
+    }, (error) => console.warn("daimon thumbnail", error));
   });
 })();

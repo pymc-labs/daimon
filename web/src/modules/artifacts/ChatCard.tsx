@@ -1,4 +1,4 @@
-import { AppWindow, ExternalLink, Eye, X } from "lucide-react"
+import { ExternalLink, Eye, X } from "lucide-react"
 import { Link } from "react-router"
 
 import { Tag } from "@/components/panel"
@@ -7,13 +7,14 @@ import { useParam } from "@/lib/filters"
 import type { Msg } from "../chat/types"
 import { ACCESS, useArtifact } from "./bits"
 import { Preview } from "./Preview"
+import { Thumb } from "./Viewing"
 
 /** The card under a reply that published a page. */
 export function ArtifactCard({ a }: { a: NonNullable<Msg["artifacts"]>[number] }) {
   const [open, setOpen] = useParam("preview")
   return (
     <div className="mt-4 flex w-full max-w-md items-center gap-3 rounded-lg border p-3">
-      <span className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><AppWindow className="size-4" /></span>
+      <Thumb id={a.id} version={a.version} className="w-16" />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium">{a.title}</span>
         <span className="mt-0.5 flex gap-1"><Tag>Version {a.version}</Tag><Tag>{ACCESS[a.access].label}</Tag></span>

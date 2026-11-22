@@ -1216,6 +1216,37 @@ Let admins add credit by hand instead of paying, for staging deployments.
 Local development only: serves the fake sign-in and dev routes. Refused unless the
 public URL is localhost or a loopback address.
 
+### `DAIMON_WEB__ARTIFACT_CONTENT_URL`
+
+`str | None` · optional · default unset
+
+Where artifact page code runs, on a site other than the public URL's: a host
+(`https://pages.example.com`) or, recommended, a host per page
+(`https://{id}.pages.example.com`, a wildcard DNS record and certificate). Pages can
+then embed YouTube and Drive players. Unset: an opaque sandbox.
+
+### `DAIMON_WEB__ARTIFACT_ASSET_HOSTS`
+
+`tuple[str, ...]` · optional · default unset
+
+More hosts artifact pages may load scripts, styles, fonts and images from, comma-
+separated (`https://cdn.example.com`). Never list a host that fetches or redirects to
+any URL it is given: pages could send data out through it.
+
+### `DAIMON_WEB__ARTIFACT_DB_POOL_SIZE`
+
+`int` · optional · default `5`
+
+Database connections kept for artifact page calls, apart from chat's.
+
+### `DAIMON_WEB__FORWARDED_ALLOW_IPS`
+
+`str` · optional · default `127.0.0.1`
+
+Proxy addresses whose X-Forwarded-For and X-Forwarded-Proto are trusted, comma-
+separated, or `*`. Set it to your reverse proxy so per-address limits see the client's
+address.
+
 ## GitHub
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.

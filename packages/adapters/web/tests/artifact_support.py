@@ -105,10 +105,11 @@ async def page_client(
 ) -> AsyncIterator[httpx.AsyncClient]:
     """The app signed in as `person` (anonymous without one)."""
     settings = extra.pop("settings", None) or page_settings()
+    web = extra.pop("web", None) or web_settings()
     async with httpx.AsyncClient() as http:
         runtime = WebRuntime(
             settings=settings,
-            web=web_settings(),
+            web=web,
             sessionmaker=factory,
             http_client=http,
             fernet=build_multifernet(KEYS),

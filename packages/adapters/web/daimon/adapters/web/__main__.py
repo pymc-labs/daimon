@@ -102,6 +102,9 @@ async def _serve(settings: Settings, web: WebSettings) -> None:
                 host="0.0.0.0",
                 port=web.port,
                 log_config=None,  # JSON chain already configured; uvicorn uses structlog.
+                # The client's address behind a reverse proxy, for per-address limits.
+                proxy_headers=True,
+                forwarded_allow_ips=web.forwarded_allow_ips,
                 timeout_graceful_shutdown=int(DRAIN_S) + 20,
             ),
             runtime.turns,

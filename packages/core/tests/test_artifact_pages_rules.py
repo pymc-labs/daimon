@@ -210,7 +210,7 @@ def test_build_event_carries_server_facts_and_refuses_oversize() -> None:
 
 
 def test_policies_keep_page_code_sandboxed_and_offline() -> None:
-    policy = content.content_policy()
+    policy = content.content_policy(ancestor="https://daimon.example")
     assert "connect-src 'none'" in policy and "allow-same-origin" not in policy, policy
     shell = content.shell_policy("n0nce", "https://daimon.example/a/abcdefgh23/_content")
     assert "frame-src https://daimon.example/a/abcdefgh23/_content;" in shell, shell

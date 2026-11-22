@@ -25,6 +25,7 @@ from urllib.parse import quote
 import structlog
 from daimon.adapters.web.chat import chattable_agents, open_thread, post_message
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.adapters.web.security import content_host_of
 from daimon.adapters.web.viewer import PageVisitor, page_on, person_viewer, resolve_viewer
 from daimon.core.artifact_pages.access import (
     Role,
@@ -48,7 +49,9 @@ from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, Limits, p
 from daimon.core.artifact_pages.tickets import Ticket, link_digest, open_ticket, seal
 from daimon.core.config import origin_of
 from daimon.core.continuity.page_events import sign_page_event
+from daimon.core.stores import artifact_consents as consents_store
 from daimon.core.stores import artifact_pages as artifact_store
+from daimon.core.stores import artifact_thumbnails as thumbnails_store
 from daimon.core.stores import watches as watches_store
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import ArtifactRow
@@ -67,6 +70,7 @@ log = structlog.get_logger(__name__)
 
 _ASSETS: Final = files("daimon.adapters.web") / "page_assets"
 _SHELL: Final = Template((_ASSETS / "shell.html").read_text(encoding="utf-8"))
+_NOTICE: Final = Template((_ASSETS / "notice.html").read_text(encoding="utf-8"))
 _RUNTIME_JS: Final = (_ASSETS / "runtime.js").read_text(encoding="utf-8")
 # As long as a tab stays open on a page that reloads its frame; each load re-admits.
 CONTENT_TTL: Final = timedelta(hours=12)
@@ -98,6 +102,8 @@ _HEADERS: Final = {
 }
 _WRITES: Final = frozenset({"db.set", "db.add", "db.delete"})
 _NO_PAGE = "There is no page here, or you can't open it."
+_NO_LINK = "This link doesn't work"
+_ASK_FIRST = "Allow this page to ask first."
 
 _METHODS: Final = frozenset(
     {"db.get", "db.list", "db.set", "db.add", "db.delete", "db.revision", "notify", "thread"}
@@ -156,23 +162,49 @@ class RateLimiter:
         return True
 
 
-def _page(title: str, text: str, status: int) -> HTMLResponse:
+def _page(
+    title: str, text: str, status: int, *, next: str | None = None, switch: bool = False
+) -> HTMLResponse:
+    """A card in the sign-in page's look. With `next`, it signs the reader in to land on
+    `next` and the address bar's #section: at once, or after `switch` signs them out."""
+    nonce = secrets.token_urlsafe(16)
+    action = ""
+    if switch:
+        action = '<button class="action" id="switch" type="button">Use another account</button>'
+    elif next is not None:
+        href = html.escape(f"/signin?next={quote(next, safe='')}")
+        action = f'<a class="action" href="{href}">Sign in</a>'
+    body = _NOTICE.substitute(
+        title=html.escape(title),
+        text=html.escape(text),
+        nonce=nonce,
+        action=action,
+        next=json.dumps(next).replace("<", "\\u003c"),
+    )
     return HTMLResponse(
-        f'<!doctype html><meta charset="utf-8"><meta name="viewport" '
-        f'content="width=device-width"><title>{title}</title><body style="font:16px/1.5 '
-        f'system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem">'
-        f"<h1>{title}</h1><p>{html.escape(text)}</p>",
+        body,
         status_code=status,
         headers={
             **_HEADERS,
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+            "Content-Security-Policy": "; ".join(
+                (
+                    "default-src 'none'",
+                    f"script-src 'nonce-{nonce}'",
+                    f"style-src 'nonce-{nonce}'",
+                    "img-src 'self'",
+                    "connect-src 'self'",
+                    "frame-ancestors 'self'",
+                    "base-uri 'none'",
+                    "form-action 'none'",
+                )
+            ),
         },
     )
 
 
-def _error(error: ArtifactError) -> JSONResponse:
+def _error(error: ArtifactError, **extra: JsonValue) -> JSONResponse:
     return JSONResponse(
-        {"error": {"code": error.code, "message": str(error)}},
+        {"error": {"code": error.code, "message": str(error), **extra}},
         status_code=_STATUS[error.code],
         headers=_HEADERS,
     )
@@ -216,6 +248,8 @@ async def _read_capped(request: Request) -> bytes:
 def pages_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter()
     origin = origin_of(str(runtime.web.public_url))
+    content_host = content_host_of(runtime.web)
+    asset_hosts = runtime.web.artifact_asset_hosts
     limiter = RateLimiter()
 
     async def open_page(
@@ -261,7 +295,7 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         """On the shell's ticket, never the cookie: the frame's origin is opaque."""
         now = runtime.now()
         ticket = open_ticket(runtime.fernet, t, purpose="content", ttl=CONTENT_TTL, now=now)
-        async with runtime.sessionmaker() as db:
+        async with runtime.pages_db() as db:
             artifact = await artifact_store.get_by_public_id(db, public_id)
             if ticket is None or artifact is None or ticket.artifact_id != artifact.id:
                 return _page("Page not found", _NO_PAGE, 404)
@@ -274,7 +308,8 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
                 and hmac.compare_digest(link_digest(current), ticket.link_digest)
                 else None
             )
-            viewer = await person_viewer(db, artifact, ticket.person_id, link=link)
+            visitor = await person_viewer(db, artifact, ticket.person_id, link=link)
+            viewer = visitor.viewer
             version = await artifact_store.get_version(db, artifact.id, ticket.version)
             role = admit(artifact, viewer, now)
             # An older version only for those who manage the page, as the shell mints it.
@@ -294,12 +329,23 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
                 "ask": artifact.ask,
             },
             "capabilities": list(capabilities),
-            "viewer": {"name": viewer.name, "kind": viewer.kind} if shown else None,
+            "viewer": {"name": viewer.name, "email": visitor.email, "kind": viewer.kind}
+            if shown
+            else None,
             "shellOrigin": origin,
         }
+        policy = content_policy(
+            ancestor=origin, asset_hosts=asset_hosts, content_host=content_host is not None
+        )
         return HTMLResponse(
             inject_runtime(version.html, _RUNTIME_JS, boot),
-            headers={**_HEADERS, "Content-Security-Policy": content_policy()},
+            headers={
+                "Cache-Control": "no-store",
+                # A player sees the content host, never the ticket in the frame's address.
+                "Referrer-Policy": "no-referrer" if content_host is None else "strict-origin",
+                "X-DNS-Prefetch-Control": "off",
+                "Content-Security-Policy": policy,
+            },
         )
 
     @router.get("/a/{public_id}/_source", response_model=None)
@@ -307,7 +353,7 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         """A version's HTML as text, behind the short-lived link the source tool gives."""
         now = runtime.now()
         ticket = open_ticket(runtime.fernet, t, purpose="source", ttl=SOURCE_TTL, now=now)
-        async with runtime.sessionmaker() as db:
+        async with runtime.pages_db() as db:
             artifact = await artifact_store.get_by_public_id(db, public_id)
             version = (
                 None
@@ -328,17 +374,24 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         """A turn as the viewer in their own thread for this page, streamed as chat is."""
         try:
             params = _Ask.model_validate_json(await _read_capped(request))
-            async with runtime.sessionmaker() as db:
+            async with runtime.pages_db() as db:
                 artifact, visitor = await admitted(db, request, public_id)
+                caller = visitor.caller
+                consented = caller is not None and await consents_store.has_consent(
+                    db, artifact, caller.person.id
+                )
             _check_capability(artifact, "ask")
-            caller = visitor.caller
             if caller is None or "chat.use" not in caller.capabilities:
                 raise ArtifactError("forbidden", "You can't chat here. Ask an admin.")
             throttle(request, artifact, visitor, ask=True)
             agents = await chattable_agents(runtime, caller, only=artifact.agent_id)
             if not agents:
                 raise ArtifactError("forbidden", "This page's agent isn't available to you.")
-            async with runtime.sessionmaker.begin() as db:
+            if not consented:
+                # The viewer allows each version once, in the shell, outside the page's
+                # reach; the shell shows them this agent's name.
+                return _error(ArtifactError("forbidden", _ASK_FIRST), consent=agents[0].name)
+            async with runtime.pages_db.begin() as db:
                 thread = await chat_store.get_ask_thread(
                     db, person_id=caller.person.id, artifact_id=artifact.id
                 )
@@ -365,11 +418,25 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         except HTTPException as exc:
             return _error(ArtifactError(_CODE_OF.get(exc.status_code, "invalid"), str(exc.detail)))
 
+    @router.post("/a/{public_id}/_api/consent", response_model=None)
+    async def consent(public_id: str, request: Request) -> Response:  # pyright: ignore[reportUnusedFunction]
+        """The viewer's Allow on the shell's own sheet: page code has no way to call this."""
+        try:
+            async with runtime.pages_db.begin() as db:
+                artifact, visitor = await admitted(db, request, public_id)
+                _check_capability(artifact, "ask")
+                if visitor.caller is None:
+                    raise ArtifactError("forbidden", "Sign in to ask the agent.")
+                await consents_store.record_consent(db, artifact, visitor.caller.person.id)
+            return JSONResponse({}, headers=_HEADERS)
+        except ArtifactError as exc:
+            return _error(exc)
+
     @router.post("/a/{public_id}/_api/{method}", response_model=None)
     async def api(public_id: str, method: str, request: Request) -> Response:  # pyright: ignore[reportUnusedFunction]
         try:
             body = await _read_capped(request)
-            async with runtime.sessionmaker.begin() as db:
+            async with runtime.pages_db.begin() as db:
                 artifact, visitor = await admitted(db, request, public_id)
                 throttle(request, artifact, visitor, ask=False)
                 return JSONResponse(
@@ -529,6 +596,17 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             {"role": m.role, "text": m.content, "at": m.created_at.isoformat()} for m in messages
         ]
 
+    def refused(public_id: str, slug: str | None, k: str | None, visitor: PageVisitor) -> Response:
+        """Missing, expired and no access answer alike, so no page shows it exists: a link
+        that does not work, else a sign-in, else who is signed in."""
+        if k is not None:
+            return _page(_NO_LINK, "Ask the owner for a new link.", 404)
+        path = f"/a/{public_id}" + (f"/{slug}" if slug else "")
+        if not visitor.signed_in:
+            return _page("Sign in to open this page", "", 401, next=path)
+        who = f"{visitor.email} can't" if visitor.email else "You can't"
+        return _page("No access", f"{who} open this page.", 404, next=path, switch=True)
+
     @router.get("/a/{public_id}", response_model=None)
     @router.get("/a/{public_id}/{slug}", response_model=None)
     async def shell(  # pyright: ignore[reportUnusedFunction]
@@ -540,13 +618,10 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         download: str | None = None,
     ) -> Response:
         now = runtime.now()
-        async with runtime.sessionmaker() as db:
+        async with runtime.pages_db() as db:
             artifact, visitor, role = await open_page(db, request, public_id, k)
             if artifact is None or role == "none":
-                if visitor.signed_in:
-                    return _page("Page not found", _NO_PAGE, 404)
-                path = quote(f"/a/{public_id}" + (f"/{slug}" if slug else ""), safe="")
-                return RedirectResponse(f"/signin?next={path}", 303, headers=_HEADERS)
+                return refused(public_id, slug, k, visitor)
             if slug != artifact.slug:
                 query = f"?{request.url.query}" if request.url.query else ""
                 return RedirectResponse(
@@ -555,6 +630,12 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             # An older version is for those who manage the page (its version history).
             number = v if v is not None and can_edit(role) else artifact.current_version
             version = await artifact_store.get_version(db, artifact.id, number)
+            # A manager's preview captures a version's thumbnail once.
+            capture = (
+                version is not None
+                and can_edit(role)
+                and not await thumbnails_store.has_thumbnail(db, artifact.id, version.version)
+            )
         if version is None:
             return _page("Page not found", "There is no such version.", 404)
         if download is not None:
@@ -575,18 +656,27 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             person_id=visitor.viewer.person_id,
             link_digest=None if link is None else link_digest(link),
         )
+        content_origin = origin if content_host is None else content_host.origin(public_id)
         content_path = f"/a/{public_id}/_content"
         nonce = secrets.token_urlsafe(16)
         bridge = {
             "api": f"/a/{public_id}/_api/",
             "link": link,
             "share": page_url(origin, public_id, artifact.slug, link),
+            # postMessage's target: an opaque frame has no origin to name.
+            "content": "*" if content_host is None else content_origin,
+            "title": artifact.title,
+            "thumbnail": f"/api/artifacts/{artifact.id}/versions/{version.version}/thumbnail"
+            if capture
+            else None,
         }
         body = _SHELL.substitute(
             title=html.escape(artifact.title),
             nonce=nonce,
-            src=html.escape(f"{content_path}?t={seal(runtime.fernet, ticket, now=now)}"),
-            sandbox=SANDBOX,
+            src=html.escape(
+                f"{content_origin}{content_path}?t={seal(runtime.fernet, ticket, now=now)}"
+            ),
+            sandbox=SANDBOX if content_host is None else f"{SANDBOX} allow-same-origin",
             signin=html.escape(
                 f"/signin?next={quote(page_url('', public_id, artifact.slug), safe='')}"
             ),
@@ -596,7 +686,7 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             body,
             headers={
                 **_HEADERS,
-                "Content-Security-Policy": shell_policy(nonce, origin + content_path),
+                "Content-Security-Policy": shell_policy(nonce, content_origin + content_path),
                 # Another page opened from this one cannot reach into its window.
                 "Cross-Origin-Opener-Policy": "same-origin",
             },

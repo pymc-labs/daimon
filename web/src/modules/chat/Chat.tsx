@@ -19,6 +19,7 @@ import { useCan, useChatAgents, useMe, useSessions } from "@/lib/hooks"
 import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
 import { Pill } from "../agents/bits"
 import { ArtifactSplit } from "../artifacts/ChatCard"
+import { RevokeAsks } from "../artifacts/Viewing"
 import { AgentPicker } from "./AgentPicker"
 import { MonitoringNotice, Refusal } from "./Cards"
 import { ThreadModel } from "./ThreadModel"
@@ -205,6 +206,7 @@ export function ChatView() {
             <span>{session.agent.name}</span>
           </span>
           {session.artifact && <Link to={`/artifacts/${session.artifact.id}`} className="hidden items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground sm:flex"><AppWindow className="size-3.5" />{session.artifact.title}</Link>}
+          {session.artifact && <RevokeAsks id={session.artifact.id} />}
           <ThreadModel sid={session.id} model={session.agent.model ?? ""} onChanged={() => void detail.refetch()} />
           {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}

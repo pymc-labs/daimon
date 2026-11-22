@@ -6,44 +6,147 @@
 <meta name="referrer" content="no-referrer">
 <title>$title</title>
 <style nonce="$nonce">
+:root { --bg: #fff; --ink: #0c1f40; --mute: #55627a; --line: #e2e6ec; --strong: #ccd3dd; --soft: #f5f7f9;
+  --fill: #0c1f40; --on-fill: #fff; --ring: #0c9e82; --link: #0a7d68; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0d1c37; --ink: #edf1f6; --mute: #9ca9bf; --line: #1b2c4b;
+  --strong: #2a3c5f; --soft: #0a1931; --fill: #b4e7dd; --on-fill: #0c1f40; --ring: #6fd6c2; --link: #b4e7dd; } }
 html, body { margin: 0; height: 100%; background: #fff; }
 iframe { display: block; border: 0; width: 100%; height: 100%; }
-#signin { display: none; position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
-  padding: 10px 16px; border-radius: 8px; background: #111; color: #fff;
-  font: 14px/1.4 system-ui, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
-#signin a { color: #9cf; }
+.ui { font: 14px/1.5 "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink); -webkit-font-smoothing: antialiased; }
+.toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: none; align-items: center;
+  gap: 12px; max-width: min(440px, calc(100vw - 32px)); box-sizing: border-box; padding: 10px 14px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 4px 16px rgb(0 0 0 / .12); }
+.toast.on { display: flex; }
+.toast .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast .quote { color: var(--mute); }
+.toast a { color: var(--link); font-weight: 500; text-decoration: none; white-space: nowrap; }
+.toast a:hover { text-decoration: underline; }
+#banner { z-index: 2; }
+.scrim { position: fixed; inset: 0; z-index: 3; display: none; align-items: center; justify-content: center;
+  padding: 16px; background: rgb(0 0 0 / .4); }
+.scrim.on { display: flex; }
+.sheet { width: 100%; max-width: 420px; box-sizing: border-box; padding: 24px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--bg); box-shadow: 0 16px 48px rgb(0 0 0 / .2); }
+.sheet h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.sheet p { margin: 6px 0 0; color: var(--mute); overflow-wrap: anywhere; }
+.sheet p.url { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; display: -webkit-box;
+  -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.actions button { height: 36px; padding: 0 14px; border-radius: 8px; font: inherit; font-weight: 500; cursor: pointer;
+  border: 1px solid var(--strong); background: var(--bg); color: var(--ink); }
+.actions button:hover { background: var(--soft); }
+.actions button.fill { border-color: var(--fill); background: var(--fill); color: var(--on-fill); }
+.actions button.fill:hover { opacity: .9; }
+.actions button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.actions button:disabled { opacity: .5; cursor: default; }
+@media (max-width: 480px) { .actions button { flex: 1; } }
 </style>
 </head>
 <body>
 <iframe id="page" data-src="$src" title="$title" sandbox="$sandbox"
   allow="clipboard-write; fullscreen; autoplay; encrypted-media; picture-in-picture"></iframe>
-<div id="signin">Your sign-in ended. <a id="signin-link" href="$signin" target="_top">Sign in again</a></div>
+<div id="banner" class="toast ui" role="status"><span class="text" id="banner-text"></span><a id="signin-link" href="$signin" target="_top">Sign in again</a></div>
+<div id="toast" class="toast ui" role="status"><span class="text"><span id="toast-lead"></span> <span class="quote" id="toast-quote"></span></span></div>
+<div id="scrim" class="scrim ui">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <h2 id="sheet-title"></h2>
+    <p id="sheet-text"></p>
+    <div class="actions"><button id="sheet-no" type="button"></button><button id="sheet-yes" class="fill" type="button"></button></div>
+  </div>
+</div>
 <script nonce="$nonce">
 (() => {
   "use strict";
   // The page's only way out: each message from its sandboxed frame becomes one call to
-  // this page's API, which re-checks access and capability every time. The frame has an
-  // opaque origin, so it never holds the sign-in; this shell sends it.
+  // this page's API, which re-checks access and capability every time. The frame's origin
+  // is opaque or a content host's, so it never holds the sign-in; this shell sends it.
   const bridge = $bridge;
-  const frame = document.getElementById("page");
-  const banner = document.getElementById("signin");
-  const signIn = document.getElementById("signin-link");
+  const $$ = (id) => document.getElementById(id);
+  const frame = $$("page");
+  const signIn = $$("signin-link");
   const FRAGMENT = /^#[A-Za-z0-9_.:-]{1,128}$$/;
   const validHash = (hash) => hash === "" || FRAGMENT.exec(hash)?.[0] === hash;
+  const toFrame = (body) => frame.contentWindow.postMessage({ daimon: 1, ...body }, bridge.content);
   // Deep links: the address bar's #fragment is the page's, both ways.
   frame.src = frame.dataset.src + (validHash(location.hash) ? location.hash : "");
   const syncSignIn = () => { signIn.hash = validHash(location.hash) ? location.hash : ""; };
   syncSignIn();
   window.addEventListener("hashchange", () => {
     syncSignIn();
-    if (validHash(location.hash)) frame.contentWindow.postMessage({ daimon: 1, nav: "hash", hash: location.hash }, "*");
+    if (validHash(location.hash)) toFrame({ nav: "hash", hash: location.hash });
   });
+
+  // Shown on the API's refusals: a sign-in that ended, or a public link that was replaced.
+  function banner(text, withSignIn) {
+    $$("banner-text").textContent = text;
+    signIn.style.display = withSignIn ? "" : "none";
+    $$("banner").classList.add("on");
+  }
+  let toastTimer = null;
+  function toast(lead, quote) {
+    $$("toast-lead").textContent = lead;
+    $$("toast-quote").textContent = quote;
+    $$("toast").classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => $$("toast").classList.remove("on"), 4000);
+  }
+
+  // A sheet of the shell's own, over the frame: page code cannot see or click it. Its
+  // buttons wait a moment, so a click the page lured to that spot does not land on them.
+  let closeSheet = null;
+  function sheet({ title, text, url, yes, no }) {
+    if (closeSheet) closeSheet(false);
+    $$("sheet-title").textContent = title;
+    $$("sheet-text").textContent = text;
+    $$("sheet-text").className = url ? "url" : "";
+    $$("sheet-yes").textContent = yes;
+    $$("sheet-no").textContent = no;
+    const buttons = [$$("sheet-yes"), $$("sheet-no")];
+    buttons.forEach((b) => { b.disabled = true; });
+    $$("scrim").classList.add("on");
+    frame.inert = true;
+    setTimeout(() => { buttons.forEach((b) => { b.disabled = false; }); $$("sheet-no").focus(); }, 600);
+    return new Promise((resolve) => {
+      const done = (answer) => {
+        closeSheet = null;
+        $$("scrim").classList.remove("on");
+        frame.inert = false;
+        $$("sheet-yes").onclick = $$("sheet-no").onclick = document.onkeydown = null;
+        resolve(answer);
+      };
+      closeSheet = done;
+      $$("sheet-yes").onclick = (e) => { if (e.isTrusted) done(true); };
+      $$("sheet-no").onclick = (e) => { if (e.isTrusted) done(false); };
+      document.onkeydown = (e) => { if (e.key === "Escape") done(false); };
+    });
+  }
+
+  // Links leave through here, never from the frame: another site opens only on a yes.
+  async function openLink(raw) {
+    let url;
+    try { url = new URL(raw); } catch { return; }
+    if (!/^(https?|mailto):$$/.test(url.protocol)) return;
+    const mail = url.protocol === "mailto:";
+    const ok = await sheet({
+      title: mail ? "Write an email?" : `Open $${url.host}?`,
+      text: mail ? url.pathname : url.href,
+      url: true,
+      yes: "Open",
+      no: "Cancel",
+    });
+    if (ok) window.open(url.href, "_blank", "noopener,noreferrer");
+  }
+
   const METHODS = new Set(["db.get", "db.list", "db.set", "db.add", "db.delete", "db.revision", "notify", "thread", "ask"]);
   const headers = { "Content-Type": "application/json", "X-Daimon-Web": "1", ...(bridge.link ? { "X-Daimon-Link": bridge.link } : {}) };
   const unreachable = { code: "unavailable", message: "Daimon could not be reached." };
   async function post(method, params) {
     const response = await fetch(bridge.api + method, { method: "POST", headers, body: JSON.stringify(params ?? {}), credentials: "same-origin" });
-    if (response.status === 401) banner.style.display = "block";
+    if (response.status === 401) {
+      if (bridge.link) banner("This link stopped working", false);
+      else banner("Your sign-in expired", true);
+    }
     return response;
   }
   const failure = async (response) => ((await response.json().catch(() => ({}))).error || unreachable);
@@ -51,6 +154,7 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
   async function ask(params, progress) {
     const response = await post("ask", params);
     if (!response.ok || !response.body) throw await failure(response);
+    toast(`$${bridge.title} asked:`, typeof params?.text === "string" ? params.text : "");
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "", text = "";
     for (;;) {
@@ -72,12 +176,45 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
       }
     }
   }
+  // The first ask on a version needs the viewer's yes, which the server checks too; each
+  // later one shows what the page asked.
+  async function askWithConsent(params, progress) {
+    try {
+      return await ask(params, progress);
+    } catch (error) {
+      if (!error || typeof error.consent !== "string") throw error;
+      const ok = await sheet({
+        title: `$${bridge.title} wants to ask $${error.consent} as you`,
+        text: "It sees the answers.",
+        yes: "Allow",
+        no: "Not now",
+      });
+      if (!ok) throw { code: "forbidden", message: "The viewer said not now." };
+      const allowed = await post("consent", {});
+      if (!allowed.ok) throw await failure(allowed);
+      return ask(params, progress);
+    }
+  }
+
+  // A manager's preview of a version with no thumbnail asks the page for one, once.
+  let wantThumbnail = !!bridge.thumbnail;
+  frame.addEventListener("load", () => {
+    if (wantThumbnail) setTimeout(() => toFrame({ nav: "capture" }), 1500);
+  });
+  async function saveThumbnail(png) {
+    if (!wantThumbnail || !(png instanceof Blob) || png.type !== "image/png" || png.size > 200 * 1024) return;
+    wantThumbnail = false;
+    await fetch(bridge.thumbnail, { method: "PUT", headers: { "Content-Type": "image/png", "X-Daimon-Web": "1" }, body: png, credentials: "same-origin" }).catch(() => null);
+  }
+
   let askSpent = false;
   window.addEventListener("message", async (event) => {
     const msg = event.data;
     if (event.source !== frame.contentWindow || !msg || typeof msg !== "object" || Array.isArray(msg) || msg.daimon !== 1) return;
-    // "*": the frame's origin is opaque; frame-src keeps this page's content in it.
-    const reply = (body) => frame.contentWindow.postMessage({ daimon: 1, id: msg.id, ...body }, "*");
+    const reply = (body) => toFrame({ id: msg.id, ...body });
+    // Only from a click or key press: a page cannot raise the sheet on load or a timer.
+    if (msg.nav === "open") return void (navigator.userActivation?.isActive && openLink(msg.url));
+    if (msg.nav === "thumbnail") return void saveThumbnail(msg.png);
     if (msg.nav === "hash" || msg.nav === "copy") {
       if (typeof msg.hash !== "string" || !validHash(msg.hash)) return;
       history.replaceState(null, "", location.pathname + location.search + msg.hash);
@@ -98,7 +235,7 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
         // One turn per click or key press in the page, never on load, a timer or a tab in
         // the background: the activation is fresh, in this frame, and no earlier ask's.
         const active = () => navigator.userActivation?.isActive === true;
-        if (askSpent || !active() || !document.hasFocus() || document.activeElement !== frame) {
+        if (askSpent || closeSheet || !active() || !document.hasFocus() || document.activeElement !== frame) {
           reply({ error: { code: "forbidden", message: "Ask the agent from a click." } });
           return;
         }
@@ -108,14 +245,14 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
           askSpent = false;
           clearInterval(rearm);
         }, 250);
-        reply({ result: await ask(msg.params, (text) => reply({ progress: text })) });
+        reply({ result: await askWithConsent(msg.params, (text) => reply({ progress: text })) });
         return;
       }
       const response = await post(msg.method, msg.params);
       if (!response.ok) throw await failure(response);
       reply({ result: await response.json() });
     } catch (error) {
-      reply({ error: error && error.code ? error : unreachable });
+      reply({ error: error && error.code ? { code: error.code, message: error.message } : unreachable });
     }
   });
 })();

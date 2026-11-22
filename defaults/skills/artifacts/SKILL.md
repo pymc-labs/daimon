@@ -56,9 +56,9 @@ Tools read and write any page's data, whatever `data` says. On a `workspace` pag
 
 ## Where the page runs
 
-A sandboxed frame with no network: `fetch`, XHR and WebSocket fail. Never use `localStorage`, `sessionStorage`, cookies or IndexedDB. Use `db`. Forms do not submit; handle `submit` in JS and call `preventDefault()`. Links open in a new tab. `alert`, `confirm`, downloads (Blob URLs) and `<canvas>` work.
+A sandboxed frame with no network: `fetch`, XHR, WebSocket and WebRTC fail. Never use `localStorage`, `sessionStorage`, cookies or IndexedDB. Use `db`. Forms do not submit; handle `submit` in JS and call `preventDefault()`. A link to another site, or `window.open` from a click, asks the viewer before opening a new tab; `#section` links stay in the page. `alert`, `confirm`, downloads (Blob URLs) and `<canvas>` work.
 
-Scripts, styles, fonts and images load only from: `fonts.googleapis.com`, `fonts.gstatic.com`, `cdn.jsdelivr.net`, `cdnjs.cloudflare.com`, `unpkg.com`, `res.cloudinary.com`, plus `data:` and `blob:` images. Inline `<script>` and `<style>` are fine. Anything else: inline it. No site can be framed.
+Scripts, styles, fonts and images load only from: `fonts.googleapis.com`, `fonts.gstatic.com`, `cdn.jsdelivr.net`, `cdnjs.cloudflare.com`, `unpkg.com`, plus `data:` and `blob:` images and any hosts the operator added. Inline `<script>` and `<style>` are fine. Anything else: inline it. No site can be framed, except YouTube and Google Drive players on a deployment that serves pages from a content host; elsewhere, link to the video.
 
 Size: 2 MiB of HTML. Keep data out of the file; put it in `db`.
 
@@ -67,10 +67,10 @@ Size: 2 MiB of HTML. Keep data out of the file; put it in `db`.
 All methods return promises. Errors are `Error`s with `.code`: `invalid`, `unauthenticated`, `forbidden`, `not_found`, `too_large`, `rate_limited`, `unavailable`.
 
 - `daimon.use(name)`: `'db'`, or `null` when the page's data is off. Always handle null.
-- `daimon.me()`: `{name, kind}` of the viewer, `kind` being `member` or `visitor`; null for an anonymous viewer.
+- `daimon.me()`: `{name, email, kind}` of the viewer, `kind` being `member` or `visitor`; null for an anonymous viewer.
 - `daimon.artifact`: `{id, slug, title, version, data, events, ask}`. `daimon.capabilities`: the subset of `['db', 'events', 'ask']` that is on.
 - `daimon.notify(event, data)`: send an event; resolves to its id. `event`: 1-64 of `A-Z a-z 0-9 _ . : -`; `data`: JSON, up to 4 KiB. `forbidden` unless `events=true`.
-- `daimon.ask(text, {onText})`: the viewer's question, answered by the agent as that viewer in their own conversation, streamed to `onText`. One question per click in the page; `forbidden` unless `ask=true`; `rate_limited` past 10 a minute. The agent reads it as page text, not the viewer's own message, so tools that need a person's own message refuse.
+- `daimon.ask(text, {onText})`: the viewer's question, answered by the agent as that viewer in their own conversation, streamed to `onText`. One question per click in the page. The first on each version asks the viewer to allow it, and `forbidden` if they say not now; `forbidden` unless `ask=true`; `rate_limited` past 10 a minute. The agent reads it as page text, not the viewer's own message, so tools that need a person's own message refuse.
 - `daimon.thread()`: that conversation as `[{role, text, at}]`, the last 50; `[]` before the first ask. Only the page writes in it.
 - `daimon.copyLink(hash)`: copy the page's shareable address ending in `hash` (e.g. `'#pricing'`; may be empty) and resolve to it; call it from a click. Give sections stable `id`s and set `location.hash` when a reader picks one.
 

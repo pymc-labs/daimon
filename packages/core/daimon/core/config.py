@@ -1093,6 +1093,22 @@ def _split_csv(value: object) -> object:
     return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
+# `https://pages.example.com`, or `https://{id}.pages.example.com` for a host per page.
+_CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
+# A CSP host source an operator adds: scheme, host (a leading `*.` allowed), optional port.
+_ASSET_HOST = re.compile(r"https://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
+
+
+def _site_of(host: str) -> str:
+    """At least the registrable domain: the last two labels, or the whole host for an IP
+    or a single label. Two hosts that differ here are never the same site."""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return host
+    except ValueError:
+        return ".".join(host.split(".")[-2:])
+
+
 def _is_loopback_host(host: str | None) -> bool:
     """Whether a URL host is `localhost` or a loopback IP address."""
     if host is None:
@@ -1203,8 +1219,54 @@ class WebSettings(BaseModel):
             "Refused unless the public URL is localhost or a loopback address."
         ),
     )
+    artifact_content_url: str | None = Field(
+        default=None,
+        description=(
+            "Where artifact page code runs, on a site other than the public URL's: a host "
+            "(`https://pages.example.com`) or, recommended, a host per page "
+            "(`https://{id}.pages.example.com`, a wildcard DNS record and certificate). "
+            "Pages can then embed YouTube and Drive players. Unset: an opaque sandbox."
+        ),
+    )
+    artifact_asset_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "More hosts artifact pages may load scripts, styles, fonts and images from, "
+            "comma-separated (`https://cdn.example.com`). Never list a host that fetches "
+            "or redirects to any URL it is given: pages could send data out through it."
+        ),
+    )
+    artifact_db_pool_size: int = Field(
+        default=5,
+        ge=4,
+        description="Database connections kept for artifact page calls, apart from chat's.",
+    )
+    forwarded_allow_ips: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Proxy addresses whose X-Forwarded-For and X-Forwarded-Proto are trusted, "
+            "comma-separated, or `*`. Set it to your reverse proxy so per-address limits "
+            "see the client's address."
+        ),
+    )
 
-    _split_lists = field_validator("modules", mode="before")(_split_csv)
+    _split_lists = field_validator("modules", "artifact_asset_hosts", mode="before")(_split_csv)
+
+    @field_validator("artifact_content_url", mode="before")
+    @classmethod
+    def _blank_content_url(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("artifact_asset_hosts")
+    @classmethod
+    def _check_asset_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for host in value:
+            if not _ASSET_HOST.fullmatch(host):
+                raise ValueError(
+                    f"DAIMON_WEB__ARTIFACT_ASSET_HOSTS: {host!r} is not an https host such as "
+                    "https://cdn.example.com"
+                )
+        return value
 
     @model_validator(mode="after")
     def _check_deployment(self) -> WebSettings:
@@ -1215,7 +1277,23 @@ class WebSettings(BaseModel):
             raise ValueError(
                 "DAIMON_WEB__DEV needs DAIMON_WEB__PUBLIC_URL to be localhost or a loopback address"
             )
+        if self.artifact_content_url is not None:
+            self._check_content_url(self.artifact_content_url)
         return self
+
+    def _check_content_url(self, url: str) -> None:
+        """Page code on the content host must never share the app's site: same-site
+        requests carry the app's cookies and count as the app's own."""
+        found = _CONTENT_URL.fullmatch(url)
+        if found is None or (found[1] != "https" and not self.dev):
+            raise ValueError(
+                "DAIMON_WEB__ARTIFACT_CONTENT_URL must be https://host or https://{id}.host"
+            )
+        if _site_of(found[3]) == _site_of((self.public_url.host or "").lower()):
+            raise ValueError(
+                "DAIMON_WEB__ARTIFACT_CONTENT_URL must be on another site than "
+                "DAIMON_WEB__PUBLIC_URL (another registrable domain)"
+            )
 
 
 def decode_github_app_private_key(value: object) -> object:

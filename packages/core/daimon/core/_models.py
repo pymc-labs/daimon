@@ -5844,6 +5844,44 @@ class ArtifactDocument(Base):
     updated_at: Mapped[TsNow]
 
 
+class ArtifactThumbnail(Base):
+    """A small PNG of one version's page, captured in a manager's browser while they
+    previewed it. Goes with its version."""
+
+    __tablename__ = "artifact_thumbnails"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["artifact_id", "version"],
+            ["artifact_versions.artifact_id", "artifact_versions.version"],
+            ondelete="CASCADE",
+            name="fk_artifact_thumbnails_version",
+        ),
+    )
+
+    tenant_id: Mapped[TenantFK]
+    artifact_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(primary_key=True)
+    png: Mapped[bytes]
+    created_at: Mapped[TsNow]
+
+
+class ArtifactAskConsent(Base):
+    """A viewer let a page ask its agent as them, for the version it was on then. A new
+    version asks again; the person's row going takes it."""
+
+    __tablename__ = "artifact_ask_consents"
+
+    tenant_id: Mapped[TenantFK]
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), primary_key=True
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int]
+    created_at: Mapped[TsNow]
+
+
 class AgentDraft(Base):
     """One person's unsaved web edit of an agent: the whole config, and the
     version it began from. Deleting the account deletes the draft."""

@@ -6,9 +6,10 @@ There is no CORS: the app and its API share one origin, so a browser never needs
 
 from __future__ import annotations
 
+from daimon.core.artifact_pages.content import ContentHost, route_host
 from daimon.core.config import WebSettings, origin_of
-from starlette.datastructures import MutableHeaders
-from starlette.responses import JSONResponse
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # Sent by the app on every request and by no cross-site form.
@@ -81,6 +82,8 @@ class SecurityMiddleware:
             if message["type"] == "http.response.start":
                 out = MutableHeaders(scope=message)
                 for name, value in self._headers.items():
+                    if page and name == "X-Frame-Options" and _framed_by_policy(out):
+                        continue
                     if page:
                         out.setdefault(name, value)
                     elif name == "Content-Security-Policy" and name in out:
@@ -102,3 +105,56 @@ class SecurityMiddleware:
         if sent.get("origin") != self._origin:
             return "Cross-site request refused."
         return None
+
+
+def _framed_by_policy(headers: MutableHeaders) -> bool:
+    """Page code on a content host is framed cross-origin: its `frame-ancestors` says by
+    whom, and X-Frame-Options would forbid it."""
+    return "frame-ancestors" in headers.get("content-security-policy", "")
+
+
+def content_host_of(web: WebSettings) -> ContentHost | None:
+    url = web.artifact_content_url
+    return None if url is None else ContentHost.parse(url)
+
+
+class PageHostsMiddleware:
+    """Holds artifact paths to their hosts (`route_host`): the content host serves page
+    content only, and pages opened on another host move to the public one."""
+
+    def __init__(self, app: ASGIApp, *, web: WebSettings) -> None:
+        self._app = app
+        self._public = origin_of(str(web.public_url))
+        self._netloc = self._public.split("://", 1)[1]
+        self._content = content_host_of(web)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        host = Headers(scope=scope).get("host", "")
+        route = route_host(host, scope["path"], public_netloc=self._netloc, content=self._content)
+        response: Response
+        match route:
+            case "serve":
+                await self._app(scope, receive, send)
+                return
+            case "redirect":
+                path = (scope.get("raw_path") or scope["path"].encode()).decode("latin-1")
+                query = scope["query_string"].decode("latin-1")
+                response = RedirectResponse(
+                    f"{self._public}{path}{'?' + query if query else ''}", status_code=308
+                )
+            case "not_found":
+                # Sandboxed: a page that opened this could otherwise script it, a document
+                # on its own origin without its policy.
+                response = PlainTextResponse(
+                    "Not found",
+                    status_code=404,
+                    headers={
+                        "Content-Security-Policy": "default-src 'none'; sandbox",
+                        "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+        await response(scope, receive, send)

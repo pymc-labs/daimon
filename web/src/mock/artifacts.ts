@@ -6,6 +6,9 @@ import { publicRefusal } from "@/modules/artifacts/rules"
 import type {
   ArtifactChange, ArtifactDetail, ArtifactEvent, ArtifactSummary, ArtifactVersion, DataCollection, DataDocument, PersonRef,
 } from "@/modules/artifacts/types"
+import runSheetThumb from "./artifacts/thumbs/content-run-sheet.png"
+import pricingThumb from "./artifacts/thumbs/q3-pricing-review.png"
+import metricsThumb from "./artifacts/thumbs/weekly-metrics.png"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { agent, me, PEOPLE } from "./world"
 
@@ -208,6 +211,10 @@ const guard = (id: unknown, need?: keyof ArtifactDetail["can"]) => {
   return { a }
 }
 
+// Hosting: the viewer's consent to asks, and version thumbnails (current versions of three pages).
+const consented = new Set(["k4rm7q2xdn"])
+const thumbs = new Map<string, Blob | string>([["k4rm7q2xdn:7", runSheetThumb], ["w3tb5hs6ec:4", pricingThumb], ["h6cz3ydm5u:12", metricsThumb]])
+
 export const artifactsHandlers: HttpHandler[] = [
   http.get("/api/artifacts", async () => {
     await wait()
@@ -331,5 +338,31 @@ export const artifactsHandlers: HttpHandler[] = [
     await wait()
     const { a, res } = guard(params.id, "edit")
     return a ? HttpResponse.json(a.events_log) : res
+  }),
+  http.get("/api/artifacts/:id/consent", async ({ params }) => {
+    await wait()
+    const { a, res } = guard(params.id)
+    return a ? HttpResponse.json({ allowed: consented.has(a.id) }) : res
+  }),
+  http.delete("/api/artifacts/:id/consent", async ({ params }) => {
+    await wait()
+    const { a, res } = guard(params.id)
+    if (!a) return res
+    consented.delete(a.id)
+    return new HttpResponse(null, { status: 204 })
+  }),
+  http.get("/api/artifacts/:id/versions/:v/thumbnail", async ({ params }) => {
+    const { a, res } = guard(params.id)
+    if (!a) return res
+    const png = thumbs.get(`${a.id}:${params.v}`)
+    if (!png) return notFound()
+    const body = typeof png === "string" ? await (await fetch(png)).blob() : png
+    return new HttpResponse(body, { headers: { "Content-Type": "image/png", "X-Content-Type-Options": "nosniff" } })
+  }),
+  http.put("/api/artifacts/:id/versions/:v/thumbnail", async ({ params, request }) => {
+    const { a, res } = guard(params.id, "edit")
+    if (!a) return res
+    thumbs.set(`${a.id}:${params.v}`, await request.blob())
+    return new HttpResponse(null, { status: 204 })
   }),
 ]

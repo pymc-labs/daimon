@@ -15,7 +15,7 @@ Ask the agent for a page, or hand it an HTML file to host. It writes one self-co
 1. `artifact_upload_url` returns a one-time URL. The agent sends the file there from its sandbox, so the page never passes through a tool argument.
 2. `artifact_publish` takes the upload handle, a `slug` and a title, and returns the page address.
 
-A page lives at `/a/<id>/<slug>` under the web address, for example `https://daimon.example.com/a/k3x9q2mwtb/run-sheet`. The slug is the name agents use; it is unique in the workspace. Publishing the same slug again adds a version, and 20 versions are kept. Open pages pick up the new one.
+A page lives at `/a/<id>/<slug>` under the web address, for example `https://daimon.example.com/a/k3x9q2mwtb/run-sheet`. The slug is the name agents use; it is unique in the workspace. Publishing the same slug again adds a version, and 20 versions are kept. Open pages pick up the new one. The list and chat cards show a thumbnail of each version, taken when an owner, editor or admin first opens it.
 
 The agent can change settings without an upload. `artifact_source` gives a link, valid for 15 minutes, to download a page's HTML before editing it. Older versions are for the owner, editors and admins. Publishing needs a person's own message behind the turn.
 
@@ -61,13 +61,23 @@ Capabilities belong to the page, so every viewer gets the same ones. A public pa
 
 ## Where a page runs
 
-A page runs in a sandboxed frame with no network. `fetch` and WebSocket calls fail, and `localStorage`, cookies and form submits are unavailable. Links open in a new tab. Scripts, styles, fonts and images load only from these hosts, besides inline code and `data:` or `blob:` images:
+A page runs in a sandboxed frame with no network. `fetch`, WebSocket and WebRTC calls fail, and cookies and form submits are unavailable. A link to another site, or `window.open`, asks the viewer before opening it in a new tab; links within the page stay in it. Scripts, styles, fonts and images load only from these hosts, besides inline code and `data:` or `blob:` images:
 
 - `fonts.googleapis.com` and `fonts.gstatic.com`
 - `cdn.jsdelivr.net`, `cdnjs.cloudflare.com` and `unpkg.com`
-- `res.cloudinary.com`
+- any the operator adds with [`DAIMON_WEB__ARTIFACT_ASSET_HOSTS`](configuration.md#daimon_web__artifact_asset_hosts)
 
 The frame cannot read the web session or another page, so a page's code cannot act as its viewer. Everything it does goes through `window.daimon`, which the server checks on every call.
+
+### Video and storage on a content host
+
+By default a page has no origin of its own: `localStorage` fails and no other site can be framed. Set [`DAIMON_WEB__ARTIFACT_CONTENT_URL`](configuration.md#daimon_web__artifact_content_url) to serve pages from another domain, such as `https://{id}.pages.example.net`. Each page then gets its own origin and storage, and can embed YouTube and Google Drive players.
+
+For that template, point a wildcard DNS record, `*.pages.example.net`, at the web service and give it a wildcard TLS certificate. The domain must not share the app's registrable domain, or Daimon refuses to start. A single host such as `https://pages.example.net` needs no wildcard, but its pages share storage.
+
+### What a page can still reach
+
+No browser setting closes every channel. The allowed hosts see the address of each file a page loads, and browsers may look up the hosts of links in DNS. On a content host, a frame the page creates can still use WebRTC in browsers that ignore the `webrtc` policy, Chrome among them. Keep a page free of data its viewers should not pass on.
 
 ### The page API
 
@@ -76,7 +86,7 @@ Page code reaches Daimon through `window.daimon`. Every method returns a promise
 | Call | Does |
 | --- | --- |
 | `daimon.use('db')` | Returns the shared data, or `null` when it is off. |
-| `daimon.me()` | Returns `{name, kind}` of the viewer, or `null` for an anonymous one. |
+| `daimon.me()` | Returns `{name, email, kind}` of the viewer, or `null` for an anonymous one. |
 | `daimon.notify(event, data)` | Sends an event and returns its id. |
 | `daimon.ask(text, {onText})` | Asks the agent as the viewer and streams the answer. |
 | `daimon.thread()` | Returns the viewer's conversation, the last 50 messages. |
@@ -100,6 +110,8 @@ Collection names are 1 to 64 letters, digits, `_` or `-`. Names starting with `_
 ### Asking the agent
 
 With `ask=true`, each click in the page can send one question. The agent answers as that viewer, in a conversation of their own that only the page writes in, and reads the question as page text. Tools that need a person's own message refuse it. A viewer may ask 10 times a minute. `daimon.thread()` returns that conversation, and an empty list before the first question. If the page moves to another agent, its next question starts a new conversation.
+
+The first question on each version opens a sheet that the page cannot reach: the viewer allows it to ask as them, or not. The server refuses questions without that consent. Each later question shows its text for a moment. A viewer takes consent back in the page's Details or in the ask conversation.
 
 ## Limits
 
