@@ -279,7 +279,15 @@ async def test_ask_runs_as_the_viewer_in_one_thread_per_page_with_the_page_in_it
         origins.append(kwargs["origin"])
         return await admit(*args, **kwargs)
 
+    requests: list[object] = []
+    run = web_turns.run_prepared_turn
+
+    async def ran(*args: Any, **kwargs: Any) -> Any:
+        requests.append(kwargs["request_text"])
+        return await run(*args, **kwargs)
+
     monkeypatch.setattr(web_turns, "admit", recorded)
+    monkeypatch.setattr(web_turns, "run_prepared_turn", ran)
 
     with one_session():
         async with page_client(db_session_factory, t.member, turns=turns) as client:
@@ -304,6 +312,7 @@ async def test_ask_runs_as_the_viewer_in_one_thread_per_page_with_the_page_in_it
     assert sse_frames(first.text)[-1][1]["type"] == "done", first.text
     # The page's text is no person's own message, and the person cannot type in its thread.
     assert origins and set(origins) == {"page"}, origins
+    assert requests and set(requests) == {None}, requests
     assert "<page_text" in str(sent) and 'source="artifact_page"' in str(sent)
     assert typed.status_code == 409, typed.text
     assert second.status_code == 200, second.text

@@ -494,7 +494,8 @@ class WebTurns:
                 thread_id=key,
                 external_user_id=principal.external_id,
                 user_message=f"{controls}\n\n{prefix}{said(message)}",
-                request_text=message.content,
+                # Page text never briefs the agent's MCP servers or counts as the person's question.
+                request_text=None if message.blocks.from_page else message.content,
                 request_ref=str(message.id),
                 lifecycle=lifecycle,
                 cancel=cancel,
