@@ -92,7 +92,7 @@ function OverviewBody({ data, period }: { data: OpsOverview; period: OpsPeriod }
 }
 
 const Swatch = ({ cls, label }: { cls: string; label: string }) => <span className="inline-flex items-center gap-1.5"><span className={cn("size-2 rounded-[2px]", cls)} />{label}</span>
-const Legend = () => <span className="flex gap-3"><Swatch cls="bg-destructive" label="Failed" /><Swatch cls="bg-faint" label="Answered" /></span>
+const Legend = () => <span className="flex gap-3"><Swatch cls="bg-destructive" label="Failed" /><Swatch cls="bg-answered" label="Answered" /></span>
 
 // The answered segment drops 2px at its base, so a surface gap separates it from the failed one below.
 const AnsweredShape = (p: BarShapeProps) => {
@@ -122,7 +122,7 @@ function AnswersChart({ data, period }: { data: OpsOverview["series"]; period: O
             }}
           />
           <Bar dataKey="failed" stackId="a" fill="var(--destructive)" maxBarSize={24} isAnimationActive={false} />
-          <Bar dataKey="answered" stackId="a" fill="var(--faint)" maxBarSize={24} isAnimationActive={false} shape={AnsweredShape} />
+          <Bar dataKey="answered" stackId="a" fill="var(--answered)" maxBarSize={24} isAnimationActive={false} shape={AnsweredShape} />
         </BarChart>
       </ResponsiveContainer>
       <table className="sr-only">
