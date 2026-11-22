@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.fernet import Fernet
-from daimon.core._models import Artifact, ArtifactDocument, TaskContinuation, Watch
+from daimon.core._models import Artifact, ArtifactDocument, TaskContinuation, Watch, WatchFiring
 from daimon.core.artifact_pages import events
 from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.documents import DocumentWrite, ListQuery
@@ -494,3 +494,9 @@ async def test_a_turn_woken_by_an_outside_pages_event_is_known(
         .values(status="claimed")
     )
     assert await woken(), "the running turn came from a public page's event"
+    firing = await db_session.scalar(select(WatchFiring.wake_key))
+    assert firing is not None
+    await watches.record_delivery_thread(db_session, firing, "9999")
+    assert await store.woken_by_outside_page(
+        db_session, tenant_id=binding.tenant_id, platform="discord", thread_id="9999"
+    ), "a report in a new thread is the same turn"

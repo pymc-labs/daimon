@@ -144,7 +144,7 @@ Every event a page sends is saved to its `_events` collection, which the page ca
 
 ### Wake an agent on events
 
-From any chat or the web app, an owner can ask an agent to wake on a page's events with `create_watch(source="page_event", page=<slug>)`. The page needs `events` on, and a watch gets events only while its maker may still use the page with tools. Each event then starts a read-and-report turn, within the [watch](watches.md) limits. An event over 4 KiB reaches the watch as its id and a preview; the agent reads the rest from `_events` with `doc_id`. A page holds at most 5 watches. Daimon derives each watch's signing key from the deployment's encryption keys, so no key is shown or sent.
+From any chat or the web app, an owner can ask an agent to wake on a page's events with `create_watch(source="page_event", page=<slug>)`. The page needs `events` on, and a watch gets events only while its maker may still use the page with tools. Each event starts a read-and-report turn, within the [watch](watches.md) limits. An event over 4 KiB reaches the watch as its id and a preview; the agent reads the rest from `_events`. A page holds at most 5 watches. Daimon derives each watch's signing key from the deployment's encryption keys, so no key is shown or sent.
 
 A page watch can report in a new thread per event, keep one part of each event with `select`, and be permanent. Someone who does not manage the page holds at most one watch on it; see [Page watches](watches.md#page-watches).
 

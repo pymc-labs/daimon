@@ -551,11 +551,15 @@ async def _authorize_web_poll(
 async def read_page_data(runtime: McpRuntime, watch: WatchRow) -> JsonValue:
     """`artifact_db_query` as the watch owner: refused once they can no longer use the page."""
     arguments = cast(dict[str, JsonValue], watch.source_state["arguments"])
+    limits = runtime.settings.artifact_pages
+    order_by = cast(str | None, arguments.get("order_by"))
     query = build_list_query(
         str(arguments["collection"]),
-        order_by=cast(str | None, arguments.get("order_by")),
+        order_by=order_by,
         descending=arguments.get("descending") is True,
-        limit=int(str(arguments.get("limit", 20))),
+        limit=min(int(str(arguments.get("limit", 20))), limits.list_documents),
+        by_creation=order_by is None,
+        limits=limits,
     )
     async with runtime.session_factory() as db:
         page = await artifact_pages.get_by_slug(
@@ -566,7 +570,7 @@ async def read_page_data(runtime: McpRuntime, watch: WatchRow) -> JsonValue:
             == "none"
         ):
             raise PollAccessRevoked("Watch owner can no longer use the page")
-        rows = await artifact_pages.list_docs(db, page.id, query)
+        rows = await artifact_pages.list_docs(db, page.id, query, limits=limits)
     return {"rows": [{"id": row.doc_id, "data": row.data} for row in rows]}
 
 

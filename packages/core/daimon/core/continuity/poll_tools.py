@@ -204,6 +204,7 @@ def validate_poll(
 def _validate_page_query(arguments: Mapping[str, JsonValue]) -> None:
     from daimon.core.artifact_pages.documents import build_list_query
     from daimon.core.artifact_pages.model import ArtifactError
+    from daimon.core.config import ArtifactPagesSettings
 
     slug, collection = arguments.get("slug"), arguments.get("collection")
     order_by, descending = arguments.get("order_by"), arguments.get("descending", False)
@@ -218,7 +219,13 @@ def _validate_page_query(arguments: Mapping[str, JsonValue]) -> None:
     ):
         raise ValueError("A page poll names a page and collection and reads 1 to 100 documents")
     try:
-        build_list_query(collection, order_by=order_by, descending=descending, limit=limit)
+        build_list_query(
+            collection,
+            order_by=order_by,
+            descending=descending,
+            limit=limit,
+            limits=ArtifactPagesSettings(),
+        )
     except ArtifactError as exc:
         raise ValueError(str(exc)) from exc
 

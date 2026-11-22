@@ -59,6 +59,7 @@ from sqlalchemy import (
     func,
     literal,
     null,
+    or_,
     select,
     text,
     update,
@@ -915,7 +916,11 @@ async def woken_by_outside_page(
         .where(
             TaskContinuation.tenant_id == tenant_id,
             TaskContinuation.platform == platform,
-            TaskContinuation.thread_id == thread_id,
+            # A report in a new thread runs there; its wake is the one that made the thread.
+            or_(
+                TaskContinuation.thread_id == thread_id,
+                WatchFiring.delivery_thread_id == thread_id,
+            ),
             TaskContinuation.status == "claimed",
             Watch.source == "page_event",
         )
