@@ -374,7 +374,8 @@ def _refused(
 ) -> Response:
     """A refusal that used to be silent, with a fixed reason. The tenant is named only once
     the credential resolved it, and no server name is logged for one the relay does not have."""
-    log.warning(
+    # Scanner noise (an unknown path, a missing bearer) is info; the rest is a warning.
+    (log.info if reason in {"unknown_server", "no_bearer"} else log.warning)(
         "mcp_identity.relay_refused",
         status=status,
         reason=reason,
@@ -626,17 +627,26 @@ def build_identity_relay_route(
             )
             return Response(status_code=502)
         # An upstream 5xx is a failed relay for alerting; the call still reaches the caller.
-        (log.warning if response.status_code >= 500 else log.info)(
-            "mcp_identity.relay_failed"
-            if response.status_code >= 500
-            else "mcp_identity.request_relayed",
-            server=server.name,
-            tenant_id=str(tenant_id),
-            tool=_tool_name(request, message, body),
-            status=response.status_code,
-            person=origin is not None,
-            auth=server.auth,
-        )
+        # The tool name is read for failure lines only, never on the success path.
+        if response.status_code >= 500:
+            log.warning(
+                "mcp_identity.relay_failed",
+                server=server.name,
+                tenant_id=str(tenant_id),
+                tool=_tool_name(request, message, body),
+                status=response.status_code,
+                person=origin is not None,
+                auth=server.auth,
+            )
+        else:
+            log.info(
+                "mcp_identity.request_relayed",
+                server=server.name,
+                tenant_id=str(tenant_id),
+                status=response.status_code,
+                person=origin is not None,
+                auth=server.auth,
+            )
         return StreamingResponse(
             response.aiter_bytes(),
             status_code=response.status_code,

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 
 import pytest
-from daimon.core.scheduler import RoutineDispatcher, run_one_tick
+from daimon.core.scheduler import RoutineDispatcher, _record_fire_error, run_one_tick
 from daimon.core.stores.domain import CatchUpPolicy, RoutineRow, TenantRow
 from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -461,3 +461,16 @@ async def test_fire_failure_logs_fixed_fields_and_never_the_exception_message(
     assert "secret-detail" not in repr(failed), "the exception message must not be logged"
     (finished,) = [e for e in logs if e["event"] == "routine.finished"]
     assert finished["outcome"] == "failed", "the run history records the failure"
+
+
+async def test_benign_fire_skip_logs_fire_skipped_at_info(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fire that did not run on purpose is `routine.fire_skipped`, never `fire_failed`."""
+    routine = await seed(db_session, due=NOW)
+    with capture_logs() as logs:
+        await _record_fire_error(db_session_factory, routine, "scheduler_shutdown", None)
+    assert [
+        (e["event"], e["log_level"]) for e in logs if e["event"].startswith("routine.fire")
+    ] == [("routine.fire_skipped", "info")]

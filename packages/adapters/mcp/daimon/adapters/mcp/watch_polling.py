@@ -805,15 +805,15 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             if floor:
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
         _log_poll_failed(
-            log.warning,
+            log.info if capped else log.warning,
             watch_id,
             watch,
-            kind="other",
+            kind="daily_cap" if capped else "other",
             error_class=type(exc).__name__,
             consecutive_errors=failure.consecutive_errors if failure else None,
         )
         if failure is not None and failure.paused_reason == "failed":
-            log.error(
+            log.warning(
                 "watch.paused_failing",
                 tenant_id=str(failure.tenant_id),
                 watch_id=str(watch_id),

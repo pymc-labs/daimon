@@ -87,7 +87,7 @@ class RoutineDispatcher:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-# Fires that did not run on purpose: logged at info so they never trip the failure alert.
+# Fires that did not run on purpose: logged as `routine.fire_skipped` (info), never as a failure.
 _BENIGN_FIRE_REASONS = frozenset(
     {"routines_turned_off", "lead_intake_turned_off", "scheduler_shutdown"}
 )
@@ -106,9 +106,13 @@ async def _record_fire_error(
     The log line carries only a fixed reason and the exception class, never `msg`,
     which may hold exception text."""
     fixed = reason.value if reason is not None else msg
-    log_fire = log.info if fixed in _BENIGN_FIRE_REASONS else log.warning
+    log_fire, event = (
+        (log.info, "routine.fire_skipped")
+        if fixed in _BENIGN_FIRE_REASONS
+        else (log.warning, "routine.fire_failed")
+    )
     log_fire(
-        "routine.fire_failed",
+        event,
         tenant_id=str(row.tenant_id),
         routine_id=str(row.id),
         agent_id=row.agent_id,

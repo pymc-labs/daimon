@@ -928,6 +928,16 @@ async def tenant_dm_still_open(
         )
 
 
+#: Skip notes that mean a post was attempted and failed; every other skip is deliberate.
+_POST_FAILURE_NOTES = frozenset(
+    {
+        "post_failed",
+        "Delivery was interrupted; it will not be retried.",
+        "The DM could not be delivered; it will not be retried.",
+    }
+)
+
+
 @dataclass(frozen=True)
 class DeliveryOutcome:
     status: Literal["delivered", "skipped"]
@@ -1002,8 +1012,10 @@ async def poll_deliveries_once(
             settled=settled,
         )
         if outcome.status == "skipped" and outcome.note != "no_result" and not raised:
-            log.warning(
-                "routine.delivery_failed",
+            # Real post failures page; deliberate skips (policy, archive, ...) only log.
+            failed = outcome.note in _POST_FAILURE_NOTES
+            (log.warning if failed else log.info)(
+                "routine.delivery_failed" if failed else "routine.delivery_skipped",
                 tenant_id=str(row.tenant_id),
                 routine_id=str(row.id),
                 status="skipped",

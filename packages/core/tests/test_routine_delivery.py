@@ -866,6 +866,35 @@ async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_sess
     assert failures[0]["error_type"] == "RuntimeError"
 
 
+@pytest.mark.parametrize(
+    ("note", "event"),
+    [
+        ("tenant_archived", "routine.delivery_skipped"),
+        ("post_failed", "routine.delivery_failed"),
+    ],
+)
+async def test_deliberate_skip_is_not_a_delivery_failure(
+    db_session, db_session_factory, note, event
+):
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="Report", error=None, delivery="pending")
+    await db_session.commit()
+
+    async def post(claimed):
+        return DeliveryOutcome(status="skipped", note=note)
+
+    with capture_logs() as logs:
+        await poll_deliveries_once(db_session_factory, platform="discord", post=post, now=_NOW)
+    seen = {
+        e["event"]
+        for e in logs
+        if e["event"] in {"routine.delivery_failed", "routine.delivery_skipped"}
+    }
+    assert seen == {event}
+
+
 def test_lapsed_role_card_names_the_routine_and_how_to_resume() -> None:
     from types import SimpleNamespace
 

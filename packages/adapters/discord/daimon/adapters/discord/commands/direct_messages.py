@@ -82,6 +82,7 @@ from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.handoff_context import TranscriptTurn
+from daimon.core.logging_setup import is_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
@@ -1321,7 +1322,7 @@ class DirectMessageCog(commands.Cog):
         log.warning(
             "discord.dm.dropped",
             tenant_id=str(tenant_id) if tenant_id is not None else None,
-            reason=reason,
+            reason="process_stopping" if is_shutting_down() else reason,
         )
         with contextlib.suppress(discord.HTTPException):
             await channel.send(
