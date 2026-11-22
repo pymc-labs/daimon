@@ -26,7 +26,14 @@ import structlog
 from daimon.adapters.web.chat import chattable_agents, open_thread, post_message
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.viewer import PageVisitor, page_on, person_viewer, resolve_viewer
-from daimon.core.artifact_pages.access import Role, admit, can_edit, is_link, sender_of
+from daimon.core.artifact_pages.access import (
+    Role,
+    admit,
+    can_edit,
+    is_link,
+    sender_of,
+    shown_as,
+)
 from daimon.core.artifact_pages.content import SANDBOX, content_policy, inject_runtime, shell_policy
 from daimon.core.artifact_pages.documents import (
     DocumentWrite,
@@ -449,7 +456,8 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
     ) -> str:
         """Save the event, then hand it to each of the page's watches, signed with the
         key this process derives for it. A watch that refuses it is counted, not shown."""
-        viewer, now = visitor.viewer, runtime.now()
+        now = runtime.now()
+        viewer = shown_as(artifact, visitor.viewer, admit(artifact, visitor.viewer, now))
         event = build_event(
             slug=artifact.slug,
             name=name,
@@ -466,6 +474,10 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         for watch in await watches_store.page_watches(
             db, tenant_id=artifact.tenant_id, page_id=artifact.id
         ):
+            # The rule creating a watch applies: its owner must still be able to use the page.
+            owner = watch.owner_account_id
+            if await artifact_store.tool_role(db, artifact, owner, chat_admin=False) == "none":
+                continue
             try:
                 async with db.begin_nested():
                     key_id = await watches_store.live_key_id(db, watch.id, now=now)

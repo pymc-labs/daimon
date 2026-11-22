@@ -14,6 +14,7 @@ import pytest
 from daimon.adapters.web import turns as web_turns
 from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.security import content_security_policy
+from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.content import content_policy
 from daimon.core.artifact_pages.model import page_url
 from daimon.core.continuity.continuation import ContinuationRequest
@@ -242,12 +243,21 @@ async def test_notify_saves_the_event_and_wakes_the_pages_watch(
     async with page_client(db_session_factory, t.member) as client:
         api = f"/a/{page.public_id}/_api/notify"
         sent = await client.post(api, json={"event": "vote", "data": {"id": "a"}}, headers=OWN)
+        async with db_session_factory.begin() as db:
+            # Shared with the member only: the watch's maker can no longer use the page.
+            change = PageChange(access="people", people=(t.member.account_id,))
+            await artifact_store.update_settings(
+                db, page, change, role="owner", now=datetime.now(UTC)
+            )
+        unseen = await client.post(api, json={"event": "vote", "data": {}}, headers=OWN)
 
     assert sent.status_code == 200, sent.text
     async with db_session_factory() as db:
         event = await artifact_store.get_doc(db, page.id, "_events", sent.json()["id"])
+        skipped = await artifact_store.get_doc(db, page.id, "_events", unseen.json()["id"])
         key_id = await watches.live_key_id(db, watch_id, now=datetime.now(UTC))
     assert event is not None and event.data["delivered"] == 1, event
+    assert skipped is not None and skipped.data["delivered"] == 0, skipped
     assert event.data["by"] == "Bea" and event.data["sender"] == "member"
     assert key_id is not None, "the web process enrolled a key it derives"
 

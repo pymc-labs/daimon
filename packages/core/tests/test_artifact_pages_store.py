@@ -15,9 +15,9 @@ from daimon.core.artifact_pages.keys import page_event_key
 from daimon.core.artifact_pages.model import ArtifactError, Limits
 from daimon.core.continuity.page_events import sign_page_event
 from daimon.core.stores import artifact_pages as store
-from daimon.core.stores import watches
+from daimon.core.stores import watches, web_people
 from daimon.core.stores.domain import AccountRow, ArtifactRow, TenantRow
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_web_person
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -139,14 +139,15 @@ async def test_transfer_goes_to_an_editor_and_restore_copies_an_older_version(
     db_session: AsyncSession, tenant: TenantRow
 ) -> None:
     owner, editor, member = [await make_account(db_session, tenant=tenant) for _ in range(3)]
-    page = await _publish(db_session, tenant.id, owner.id, change=PageChange(editors=(editor.id,)))
+    change = PageChange(editors=(editor.id,), people=(editor.id,))
+    page = await _publish(db_session, tenant.id, owner.id, change=change)
     page = await _publish(db_session, tenant.id, editor.id, html="<p>2</p>")
     with pytest.raises(ArtifactError, match="editor first"):
         await store.transfer(db_session, page, to_account_id=member.id, role="owner", now=NOW)
     with pytest.raises(ArtifactError):
         await store.transfer(db_session, page, to_account_id=editor.id, role="editor", now=NOW)
     moved = await store.transfer(db_session, page, to_account_id=editor.id, role="owner", now=NOW)
-    assert (moved.owner_account_id, moved.editors) == (editor.id, (owner.id,)), moved
+    assert (moved.owner_account_id, moved.editors, moved.people) == (editor.id, (owner.id,), ())
     with pytest.raises(ArtifactError, match="current version"):
         await store.restore(db_session, moved, 2, role="owner", account_id=editor.id, now=NOW)
     restored = await store.restore(
@@ -154,6 +155,22 @@ async def test_transfer_goes_to_an_editor_and_restore_copies_an_older_version(
     )
     version = await store.get_version(db_session, page.id, restored.current_version)
     assert version is not None and (version.version, version.html) == (3, "<p>v</p>"), version
+
+
+async def test_a_visitor_can_open_a_page_but_never_edit_it(
+    db_session: AsyncSession, tenant: TenantRow
+) -> None:
+    owner, guest = [await make_account(db_session, tenant=tenant) for _ in range(2)]
+    person = await make_web_person(db_session, tenant=tenant, account=guest)
+    await web_people.update_person(db_session, person_id=person.id, kind="visitor")
+    with pytest.raises(ArtifactError, match="Only members"):
+        await _publish(db_session, tenant.id, owner.id, change=PageChange(editors=(guest.id,)))
+    page = await _publish(db_session, tenant.id, owner.id, change=PageChange(people=(guest.id,)))
+    with pytest.raises(ArtifactError, match="Only members"):
+        await store.update_settings(
+            db_session, page, PageChange(editors=(guest.id,)), role="owner", now=NOW
+        )
+    assert await store.visible_outside_workspace(db_session, page)
 
 
 async def test_data_writes_stay_under_the_caps_and_move_the_revision(

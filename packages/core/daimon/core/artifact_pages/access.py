@@ -203,13 +203,23 @@ def can_use_with_tools(artifact: ArtifactRow, role: Role) -> bool:
     return artifact.access == "workspace" or role in _MANAGERS
 
 
+def shown_as(artifact: ArtifactRow, viewer: Viewer, role: Role) -> Viewer:
+    """Who the page's events name: a public page's viewers stay anonymous, signed in or not."""
+    return viewer if artifact.access != "public" or can_edit(role) else Viewer()
+
+
 def sender_of(viewer: Viewer) -> Sender:
     if viewer.account_id is None:
         return "anonymous"
     return "visitor" if viewer.kind == "visitor" else "member"
 
 
+def readers(artifact: ArtifactRow) -> tuple[uuid.UUID, ...]:
+    """Everyone named on the page: its owner, editors and people."""
+    return (artifact.owner_account_id, *artifact.editors, *artifact.people)
+
+
 def visible_outside_workspace(artifact: ArtifactRow, visitor_ids: Collection[uuid.UUID]) -> bool:
     """Whether people outside the workspace can read the page: an agent writing to it
-    writes for them. `visitor_ids` are the page's people who are visitors."""
-    return artifact.access == "public" or any(i in visitor_ids for i in artifact.people)
+    writes for them. `visitor_ids` are the visitors among its `readers`."""
+    return artifact.access == "public" or any(i in visitor_ids for i in readers(artifact))

@@ -8,6 +8,7 @@ moves `data_revision`, which a page's `onSnapshot` polls.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
@@ -44,6 +45,7 @@ from daimon.core.stores.domain import (
     ArtifactVersionRow,
     WebArtifactRef,
 )
+from daimon.core.web_roles_rules import is_admin, role_of_account
 from pydantic import JsonValue
 from sqlalchemy import (
     ColumnElement,
@@ -120,6 +122,43 @@ async def _locked(session: AsyncSession, artifact_id: uuid.UUID) -> Artifact:
     if orm is None:
         raise ArtifactError("not_found", "No such artifact.")
     return orm
+
+
+async def _require_members(
+    session: AsyncSession, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
+) -> None:
+    """Editors, and so owners (a page transfers only to an editor), are members: a visitor
+    managing a page would read it while `visible_outside_workspace` stayed false."""
+    if not account_ids:
+        return
+    visitor = await session.scalar(
+        select(WebPerson.account_id)
+        .where(
+            WebPerson.tenant_id == tenant_id,
+            WebPerson.kind == "visitor",
+            WebPerson.account_id.in_(list(account_ids)),
+        )
+        .limit(1)
+    )
+    if visitor is not None:
+        raise ArtifactError("invalid", "Only members can edit a page. Visitors can open it.")
+
+
+async def tool_role(
+    session: AsyncSession, artifact: ArtifactRow, account_id: uuid.UUID, *, chat_admin: bool
+) -> Role:
+    """The account's role when tools may use the page now, else `none`: a suspended person
+    or a visitor never may (`access.can_use_with_tools` for the rest), and a workspace page's
+    members are its viewers. Page watches are made and fed under this one rule."""
+    standing = await role_of_account(
+        session, tenant_id=artifact.tenant_id, account_id=account_id, chat_admin=chat_admin
+    )
+    if standing is None or standing == "visitor":
+        return "none"
+    role = access.role_of(artifact, account_id, is_admin=is_admin(standing))
+    if not access.can_use_with_tools(artifact, role):
+        return "none"
+    return "viewer" if role == "none" else role
 
 
 def _set_settings(
@@ -209,6 +248,7 @@ async def publish(
     if orm is None:
         settings = access.apply_change(PageSettings(), change, owner_account_id=account_id)
         access.check_change(PageSettings(), settings, role="owner", now=now)
+        await _require_members(session, tenant_id, settings.editors)
         orm = Artifact(
             tenant_id=tenant_id,
             public_id=new_public_id(),
@@ -228,6 +268,7 @@ async def publish(
             access.settings_of(current), change, owner_account_id=orm.owner_account_id
         )
         access.check_change(access.settings_of(current), settings, role=role, now=now)
+        await _require_members(session, tenant_id, set(settings.editors) - set(current.editors))
         if new_link and not access.can_share(current, role):
             raise ArtifactError("forbidden", access.ASK_OWNER)
         _set_settings(session, orm, settings, rotate=new_link)
@@ -282,7 +323,7 @@ async def visible_outside_workspace(session: AsyncSession, artifact: ArtifactRow
             select(WebPerson.account_id).where(
                 WebPerson.tenant_id == artifact.tenant_id,
                 WebPerson.kind == "visitor",
-                WebPerson.account_id.in_(artifact.people),
+                WebPerson.account_id.in_(access.readers(artifact)),
             )
         )
     )
@@ -299,6 +340,7 @@ async def update_settings(
         access.settings_of(current), change, owner_account_id=orm.owner_account_id
     )
     access.check_change(access.settings_of(current), settings, role=role, now=now)
+    await _require_members(session, orm.tenant_id, set(settings.editors) - set(current.editors))
     _set_settings(session, orm, settings, rotate=False)
     if change.title is not None:
         orm.title = check_title(change.title)
@@ -337,9 +379,12 @@ async def transfer(
         raise ArtifactError("forbidden", access.ASK_OWNER)
     if to_account_id not in orm.editors:
         raise ArtifactError("invalid", "Make them an editor first.")
+    await _require_members(session, orm.tenant_id, [to_account_id])
     previous = orm.owner_account_id
     orm.owner_account_id = to_account_id
+    # The owner is more than an editor or one of the people, as `apply_change` keeps it.
     orm.editors = sorted({*orm.editors, previous} - {to_account_id}, key=str)
+    orm.people = sorted(set(orm.people) - {to_account_id}, key=str)
     orm.updated_at = now
     await session.flush()
     return _row(session, orm)

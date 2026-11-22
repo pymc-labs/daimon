@@ -77,6 +77,7 @@ class Page(BaseModel):
     data_scale: int
     expires_at: datetime | None
     updated_at: datetime
+    visible_outside_workspace: bool
 
 
 class Pages(BaseModel):
@@ -132,7 +133,7 @@ async def _admit(runtime: McpRuntime, auth: AuthIdentity) -> Caller:
             db, tenant_id=auth.tenant_id, account_id=auth.account_id, chat_admin=auth.is_admin
         )
     if role is None or role == "visitor":
-        raise ToolError("Only people in the workspace can use pages.")
+        raise ToolError("Only members can use pages. Ask an admin.")
     return Caller(
         public_url=str(web.public_url).rstrip("/"),
         crypto_keys=tuple(k.get_secret_value() for k in runtime.settings.crypto.keys),
@@ -154,17 +155,20 @@ async def _person_origin(
 
 
 async def _usable(
-    db: AsyncSession, auth: AuthIdentity, caller: Caller, slug: str
+    db: AsyncSession, auth: AuthIdentity, slug: str, *, watch: bool = False
 ) -> tuple[ArtifactRow, access.Role]:
     """The page at `slug` and the caller's role, when tools may touch it. A page the caller
-    cannot use reads as missing, so a name never confirms a page they may not see."""
+    cannot use reads as missing, so a name never confirms a page they may not see. A watch
+    is fed without the chat's admin standing (`store.tool_role`), so it is made without it."""
     artifact = await store.get_by_slug(db, tenant_id=auth.tenant_id, slug=slug)
-    role = (
+    role: access.Role = (
         "none"
         if artifact is None
-        else access.role_of(artifact, auth.account_id, is_admin=caller.is_admin)
+        else await store.tool_role(
+            db, artifact, auth.account_id, chat_admin=auth.is_admin and not watch
+        )
     )
-    if artifact is None or not access.can_use_with_tools(artifact, role):
+    if artifact is None or role == "none":
         raise ToolError(NO_PAGE.format(slug=slug))
     return artifact, role
 
@@ -181,7 +185,7 @@ async def _account_of(db: AsyncSession, auth: AuthIdentity, ref: str) -> uuid.UU
         person = await web_people.get_person_for_platform_user(
             db, tenant_id=auth.tenant_id, platform=auth.platform, platform_user_id=ref
         )
-    if person is None:
+    if person is None or person.status != "active":
         raise ToolError(NOT_A_PERSON)
     return person.account_id
 
@@ -199,6 +203,7 @@ async def _pages(
     for artifact in artifacts:
         ids.update(artifact.people, artifact.editors)
     named = await web_people.get_people_for_accounts(db, tenant_id=auth.tenant_id, account_ids=ids)
+    visitors = {i for i, p in named.items() if p.kind == "visitor"}
 
     def person(account_id: uuid.UUID) -> Person | None:
         found = named.get(account_id)
@@ -229,6 +234,7 @@ async def _pages(
             data_scale=a.data_scale,
             expires_at=a.expires_at,
             updated_at=a.updated_at,
+            visible_outside_workspace=access.visible_outside_workspace(a, visitors),
         )
         for a in artifacts
     ]
@@ -401,8 +407,10 @@ async def source_impl(
     await _person_origin(runtime, auth, origin_context_id)
     caller = await _admit(runtime, auth)
     async with runtime.session_factory() as db:
-        artifact, _ = await _usable(db, auth, caller, slug)
+        artifact, role = await _usable(db, auth, slug)
         number = artifact.current_version if version is None else version
+        if number != artifact.current_version and not access.can_edit(role):
+            raise ToolError("Only the page's owner, editors and admins can read older versions.")
         if await store.get_version(db, artifact.id, number) is None:
             raise ToolError(f"Page {slug!r} has no version {number}.")
     token = tickets.seal(
@@ -427,7 +435,7 @@ async def query_impl(
     descending: bool,
     limit: int | None,
 ) -> str:
-    caller = await _admit(runtime, auth)
+    await _admit(runtime, auth)
     with refusals():
         query = documents.build_list_query(
             collection,
@@ -436,7 +444,7 @@ async def query_impl(
             limit=DEFAULT_QUERY_LIMIT if limit is None else limit,
         )
         async with runtime.session_factory() as db:
-            artifact, _ = await _usable(db, auth, caller, slug)
+            artifact, _ = await _usable(db, auth, slug)
             rows = await store.list_docs(db, artifact.id, query)
     body = json.dumps(
         [{"id": r.doc_id, "data": r.data, "updated_at": r.updated_at.isoformat()} for r in rows],
@@ -463,10 +471,10 @@ async def write_impl(
     data: dict[str, JsonValue] | None,
     mode: WriteMode,
 ) -> Written:
-    caller = await _admit(runtime, auth)
+    await _admit(runtime, auth)
     with refusals():
         async with runtime.session_factory.begin() as db:
-            artifact, _ = await _usable(db, auth, caller, slug)
+            artifact, _ = await _usable(db, auth, slug)
             if data is None:
                 revision = await store.delete_doc(db, artifact, collection, doc_id)
                 return Written(revision=revision, deleted=True)
@@ -487,10 +495,10 @@ async def delete_impl(
     runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str | None, slug: str
 ) -> str:
     await _person_origin(runtime, auth, origin_context_id)
-    caller = await _admit(runtime, auth)
+    await _admit(runtime, auth)
     with refusals():
         async with runtime.session_factory.begin() as db:
-            artifact, role = await _usable(db, auth, caller, slug)
+            artifact, role = await _usable(db, auth, slug)
             await store.delete_artifact(db, artifact, role=role, now=datetime.now(UTC))
     return f"Deleted page {slug!r} with its versions, data and watches."
 
@@ -507,7 +515,7 @@ async def transfer_impl(
     caller = await _admit(runtime, auth)
     with refusals():
         async with runtime.session_factory.begin() as db:
-            artifact, role = await _usable(db, auth, caller, slug)
+            artifact, role = await _usable(db, auth, slug)
             saved = await store.transfer(
                 db,
                 artifact,
@@ -554,7 +562,7 @@ async def create_page_watch(
     caller = await _admit(runtime, auth)
     with refusals():
         async with runtime.session_factory.begin() as db:
-            artifact, _ = await _usable(db, auth, caller, slug)
+            artifact, _ = await _usable(db, auth, slug, watch=True)
             if not artifact.events:
                 raise ToolError(f"Page {slug!r} does not send events. Turn events on first.")
             live = [

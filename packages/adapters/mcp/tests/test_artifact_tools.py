@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools.artifacts import (
     list_impl,
     publish_impl,
     query_impl,
+    source_impl,
     upload_url_impl,
     write_impl,
 )
@@ -230,12 +231,42 @@ async def test_a_routine_may_query_and_write_but_not_publish(world: World) -> No
 
 
 async def test_a_caller_the_workspace_does_not_admit_is_refused(world: World) -> None:
-    """A suspended person can use no page tool, and a member cannot use a page that is
-    only for other people: it reads as missing."""
+    """A suspended person can use no page tool nor be named on a page, a member cannot use
+    a page that is only for other people (it reads as missing), and only those who manage
+    a page read its older versions."""
     await put_page(world, access="people")
     async with world.factory.begin() as db:
         stranger = await make_account(db, tenant=world.tenant)
-        await make_web_person(db, tenant=world.tenant, account=stranger, email="b@example.com")
+        theirs = await make_web_person(
+            db, tenant=world.tenant, account=stranger, email="b@example.com"
+        )
+        for html in (HTML, "<p>2</p>"):
+            await store.publish(
+                db,
+                tenant_id=world.tenant.id,
+                agent_id="agent-bound",
+                account_id=stranger.id,
+                is_admin=False,
+                slug="notes",
+                title="Notes",
+                html=html,
+                change=PageChange(),
+                origin=None,
+                new_link=False,
+                now=datetime.now(UTC),
+            )
+    async with turn(world) as origin_id:
+        current = await source_impl(
+            world.runtime, world.auth, origin_context_id=origin_id, slug="notes", version=None
+        )
+        with pytest.raises(ToolError, match="older versions"):
+            await source_impl(
+                world.runtime, world.auth, origin_context_id=origin_id, slug="notes", version=1
+            )
+    assert current.version == 2
+    assert not any(
+        p.visible_outside_workspace for p in (await list_impl(world.runtime, world.auth)).pages
+    )
     other = auth_identity(stranger.id, world.tenant.id, role=Role.USER, platform="discord")
     with pytest.raises(ToolError, match="No page named 'votes'"):
         await query_impl(
@@ -248,9 +279,21 @@ async def test_a_caller_the_workspace_does_not_admit_is_refused(world: World) ->
             limit=None,
         )
 
+    async with turn(world) as origin_id:
+        async with world.factory.begin() as db:
+            await web_people.update_person(db, person_id=theirs.id, status="suspended")
+        with pytest.raises(ToolError, match="Not a person in the app"):
+            await publish_impl(
+                world.runtime,
+                world.auth,
+                origin_context_id=origin_id,
+                slug="votes",
+                people=[str(theirs.id)],
+            )
+
     async with world.factory.begin() as db:
         await web_people.update_person(db, person_id=world.person_id, status="suspended")
-    with pytest.raises(ToolError, match="Only people in the workspace"):
+    with pytest.raises(ToolError, match="Only members can use pages"):
         await list_impl(world.runtime, world.auth)
 
 
