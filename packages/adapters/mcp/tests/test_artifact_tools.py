@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -15,9 +16,12 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import _session_gate
+from daimon.adapters.mcp.tools import artifacts as artifact_tools
 from daimon.adapters.mcp.tools import watches as watch_tools
 from daimon.adapters.mcp.tools.artifacts import (
+    hub_call,
     list_impl,
+    person_call,
     publish_impl,
     query_impl,
     source_impl,
@@ -26,6 +30,7 @@ from daimon.adapters.mcp.tools.artifacts import (
 )
 from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.keys import page_event_key
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.page_events import sign_page_event
 from daimon.core.membership import Membership
 from daimon.core.stores import artifact_pages as store
@@ -52,6 +57,7 @@ pytestmark = pytest.mark.fresh_schema
 
 PUBLIC_URL = "https://daimon.example.com"
 CRYPTO_KEY = Fernet.generate_key().decode()
+LIMITS = ArtifactPagesSettings()
 HTML = "<!doctype html><html><head></head><body>Votes</body></html>"
 
 
@@ -102,6 +108,7 @@ async def world(db_session_factory: async_sessionmaker[AsyncSession], monkeypatc
                 app_root_url="https://os.example", public_url="https://os.example/mcp"
             ),
             direct_message_policies={},
+            artifact_pages=LIMITS,
         ),
     )
     auth = auth_identity(
@@ -153,6 +160,7 @@ async def put_page(world: World, slug: str = "votes", **change) -> None:
             origin=None,
             new_link=False,
             now=datetime.now(UTC),
+            limits=LIMITS,
         )
 
 
@@ -171,7 +179,7 @@ async def test_publish_from_an_upload_makes_a_version_at_the_page_address(world:
         page = await publish_impl(
             world.runtime,
             world.auth,
-            origin_context_id=origin_id,
+            by=await person_call(world.runtime, world.auth, origin_id),
             slug="votes",
             upload=slot.upload,
             title="Votes",
@@ -199,13 +207,7 @@ async def test_a_routine_may_query_and_write_but_not_publish(world: World) -> No
     await put_page(world)
     async with turn(world, human=False) as origin_id:
         with pytest.raises(ToolError, match="Only a person in this conversation"):
-            await publish_impl(
-                world.runtime,
-                world.auth,
-                origin_context_id=origin_id,
-                slug="votes",
-                title="Renamed",
-            )
+            await person_call(world.runtime, world.auth, origin_id)
 
     written = await write_impl(
         world.runtime,
@@ -254,15 +256,13 @@ async def test_a_caller_the_workspace_does_not_admit_is_refused(world: World) ->
                 origin=None,
                 new_link=False,
                 now=datetime.now(UTC),
+                limits=LIMITS,
             )
     async with turn(world) as origin_id:
-        current = await source_impl(
-            world.runtime, world.auth, origin_context_id=origin_id, slug="notes", version=None
-        )
+        by = await person_call(world.runtime, world.auth, origin_id)
+        current = await source_impl(world.runtime, world.auth, by=by, slug="notes", version=None)
         with pytest.raises(ToolError, match="older versions"):
-            await source_impl(
-                world.runtime, world.auth, origin_context_id=origin_id, slug="notes", version=1
-            )
+            await source_impl(world.runtime, world.auth, by=by, slug="notes", version=1)
     assert current.version == 2
     assert not any(
         p.visible_outside_workspace for p in (await list_impl(world.runtime, world.auth)).pages
@@ -286,7 +286,7 @@ async def test_a_caller_the_workspace_does_not_admit_is_refused(world: World) ->
             await publish_impl(
                 world.runtime,
                 world.auth,
-                origin_context_id=origin_id,
+                by=await person_call(world.runtime, world.auth, origin_id),
                 slug="votes",
                 people=[str(theirs.id)],
             )
@@ -366,3 +366,101 @@ async def test_create_watch_on_a_page_enrolls_a_key_the_page_host_derives(
             now=now,
         )
         assert await watches.accept_page_event(db, event, key=key) is not None
+
+
+async def test_query_reads_one_document_with_who_changed_it_and_its_revision(world: World) -> None:
+    """Each document carries `updated_by` and `revision`; `doc_id` reads just that one."""
+    await put_page(world)
+    for doc_id in ("a", "b"):
+        await write_impl(
+            world.runtime,
+            world.auth,
+            slug="votes",
+            collection="votes",
+            doc_id=doc_id,
+            data={"choice": doc_id},
+            mode="set",
+        )
+    seen = await query_impl(
+        world.runtime,
+        world.auth,
+        slug="votes",
+        collection="votes",
+        order_by=None,
+        descending=False,
+        limit=None,
+        doc_id="b",
+    )
+    body = json.loads(html.unescape(seen).splitlines()[-2])
+    assert [(d["id"], d["updated_by"], d["revision"]) for d in body] == [("b", "agent", 2)], body
+
+
+async def test_a_turn_an_outside_pages_event_woke_cannot_write_to_an_outside_page(
+    world: World, monkeypatch
+) -> None:
+    """Only a turn no person started is checked; it may still write to a workspace page."""
+    await put_page(world, slug="board")
+    await put_page(world, access="public")
+    monkeypatch.setattr(store, "woken_by_outside_page", AsyncMock(return_value=True))
+
+    async def write(slug: str) -> object:
+        return await write_impl(
+            world.runtime,
+            world.auth,
+            slug=slug,
+            collection="votes",
+            doc_id="a",
+            data={"n": 1},
+            mode="set",
+        )
+
+    async with turn(world, human=False):
+        with pytest.raises(ToolError, match="cannot write to such a page"):
+            await write("votes")
+        assert await write("board"), "a workspace page takes the write"
+    async with turn(world):
+        assert await write("votes"), "a person's own turn is not checked"
+
+
+async def test_a_chat_member_who_never_opened_the_app_may_be_an_editor(world: World) -> None:
+    """A member known only by their chat id is accepted; a stranger's id is not."""
+    await put_page(world)
+    async with world.factory.begin() as db:
+        chatter = await make_account(db, tenant=world.tenant)
+        await make_platform_principal(
+            db, platform="discord", external_id="456", tenant=world.tenant, account=chatter
+        )
+    async with turn(world) as origin_id:
+        by = await person_call(world.runtime, world.auth, origin_id)
+        page = await publish_impl(
+            world.runtime, world.auth, by=by, slug="votes", editors=["<@456>"]
+        )
+        with pytest.raises(ToolError, match="Not a person in the app"):
+            await publish_impl(world.runtime, world.auth, by=by, slug="votes", editors=["789"])
+    assert [e.id for e in page.editors] == [chatter.id], page.editors
+
+
+async def test_a_hub_client_publishes_as_its_person_where_pages_are_on(
+    world: World, monkeypatch
+) -> None:
+    """A hub call needs no chat turn: it publishes as the signed-in person, under the agent
+    it names, and is refused where that agent has pages off."""
+    on = SimpleNamespace(on=True)
+    monkeypatch.setattr(artifact_tools, "feature_in", AsyncMock(return_value=on))
+    slot = await upload_url_impl(world.runtime, world.auth, "votes.html")
+    async with world.factory.begin() as db:
+        await store_upload_content(
+            db,
+            upload_token=slot.upload_url.rsplit("/", 1)[1],
+            data=HTML.encode(),
+            now=datetime.now(UTC),
+        )
+    by = await hub_call(world.runtime, world.auth, "agent-bound")
+    page = await publish_impl(
+        world.runtime, world.auth, by=by, slug="votes", upload=slot.upload, title="Votes"
+    )
+    assert page.owner is not None and page.owner.id == world.person_id, page.owner
+
+    on.on = False
+    with pytest.raises(ToolError, match="Pages are off"):
+        await hub_call(world.runtime, world.auth, "agent-bound")

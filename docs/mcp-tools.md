@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 243 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 243 tools Daimon's MCP server registers, plus the 16 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -791,6 +791,27 @@ post_wizard: the agent-facing tool that posts a multi-step form.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `post_wizard` | Discord callers, Teams callers | Post a multi-step form in the channel instead of asking in prose. |
+
+## Hub login mounts: `artifacts`
+
+Artifact page tools: publish an HTML page, share it, read and write its data.
+
+A second surface, separate from the tools above: one app per platform, mounted at
+`/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
+when the matching `DAIMON_HUB__*` client credentials are set. These tools carry no
+visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id` from
+`list_daimons`, because one person reaches several workspaces here.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `artifact_db_query` | all callers | Read documents from one collection of a page's data. |
+| `artifact_db_write` | all callers | Write or delete one document in a page's data; the page shows it within seconds. |
+| `artifact_delete` | all callers | Delete a page with its versions, data and watches. |
+| `artifact_list` | all callers | List the pages you can use: slug, title, URL, version, sharing and capabilities. |
+| `artifact_publish` | all callers | Publish an HTML page at `slug`, or republish it, or change only its settings. |
+| `artifact_source` | all callers | Get a 15-minute URL to download a page's HTML (the current version, or `version`). |
+| `artifact_transfer` | all callers | Give a page to one of its editors (named by their id in the app, a chat user id or an @mention); the old owner stays an editor. |
+| `artifact_upload_url` | all callers | Publish an HTML page, step 1 of 2: get a one-time URL to PUT the file to. |
 
 ## Hub login mounts: `hub`
 
