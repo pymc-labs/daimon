@@ -22,6 +22,7 @@ from daimon.core.stores.turn_origins import get_active_origin, update_origin_tar
 from daimon.core.turn_origin import (
     MAX_REQUESTED_WORK_CHARS,
     HandoffNotice,
+    PageOrigin,
     ResponderAccount,
     SessionState,
     render_turn_origin,
@@ -730,3 +731,16 @@ def test_web_awareness_off_drops_the_web_links() -> None:
     )
     assert "web" not in _controls(rendered), "no web block with web_awareness Off"
     assert "Web links:" not in rendered, "no web sentence either"
+
+
+def test_an_ask_from_a_page_names_the_page_and_who_sees_it() -> None:
+    page = PageOrigin(
+        slug="runsheet",
+        title="Runsheet",
+        url="https://d/a/x/runsheet",
+        visible_outside_workspace=True,
+    )
+    rendered = render_turn_origin(_origin(), effective_is_admin=False, page=page)
+    assert _controls(rendered)["page"] == page.model_dump(), "server-supplied page facts"
+    assert "outside the workspace" in rendered, "the agent is told outsiders see it"
+    assert "page" not in _controls(render_turn_origin(_origin(), effective_is_admin=False))

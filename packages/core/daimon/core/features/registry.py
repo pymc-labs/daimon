@@ -42,6 +42,7 @@ Requirement = Literal[
     "teams_public_url",
     "support_channel",
     "support_credits",
+    "web_public_url",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
 ``support_channel``: the platform has a request channel, the deployment's or the workspace's own.
@@ -1153,6 +1154,13 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "The agent can publish a report as a web page and delete it later. Off removes "
         "the report tools here.",
         requires=("report_host",),
+    ),
+    _capability(
+        "artifacts",
+        "Artifacts",
+        "The agent can publish web pages that people open, use and share, with data they "
+        "save on the page. Off removes the artifact tools here and the Artifacts page.",
+        requires=("web_public_url",),
     ),
     _capability(
         "media",

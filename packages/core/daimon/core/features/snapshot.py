@@ -118,13 +118,22 @@ _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
     "microsoft_accounts": lambda s: s.microsoft_accounts_enabled and bool(s.crypto.keys),
     "repo_memory_setup": lambda s: get_repo_memory_settings(s).enabled,
     "teams_public_url": lambda s: s.teams is not None and s.teams.public_url is not None,
+    # Pages are served by the web app; their links and page-event keys need the crypto keys.
+    "web_public_url": lambda s: s.web is not None and bool(s.crypto.keys),
 }
 """One integration's setup, exactly the condition its tools need to run. Unmet, the session is not
 offered them, so a check here must never be stricter than the tools. Watches and GitHub have none:
 their tools work (and list or remove what exists) without the operator gate or the App."""
 
 SERVER_SETUP: Final[frozenset[Requirement]] = frozenset(
-    {"compute_setup", "notebook_host", "report_host", "gemini_key", "microsoft_accounts"}
+    {
+        "compute_setup",
+        "notebook_host",
+        "report_host",
+        "gemini_key",
+        "microsoft_accounts",
+        "web_public_url",
+    }
 )
 """Setup only the MCP server's tools use. A worker may not carry it, so a session's toolset leaves
 it to the MCP server, whose capability gate judges it with its own settings."""

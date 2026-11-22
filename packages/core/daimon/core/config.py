@@ -1068,12 +1068,15 @@ def origin_of(url: str) -> str:
 
 
 WebProvider = Literal["discord", "slack", "microsoft"]
-WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
+WebModuleKey = Literal[
+    "chat", "agents", "channels", "routines", "artifacts", "credits", "integrations", "admin"
+]
 _WEB_MODULES: tuple[WebModuleKey, ...] = (
     "chat",
     "agents",
     "channels",
     "routines",
+    "artifacts",
     "credits",
     "integrations",
     "admin",
@@ -1171,7 +1174,7 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, channels, routines, credits, integrations, admin."
+            "chat, agents, channels, routines, artifacts, credits, integrations, admin."
         ),
     )
     nodes: WebNodesSettings = Field(
