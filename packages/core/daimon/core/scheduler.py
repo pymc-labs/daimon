@@ -28,6 +28,31 @@ log = structlog.get_logger(__name__)
 
 
 FireFn = Callable[[RoutineRow], Awaitable[None]]
+#: Tells a routine's owner that a run failed: the routine, why, and whether its channel was told.
+OwnerNotifier = Callable[[RoutineRow, TerminationReason, bool], Awaitable[None]]
+
+
+async def tell_owner(
+    notify: OwnerNotifier | None,
+    row: RoutineRow,
+    reason: TerminationReason | None,
+    *,
+    channel_told: bool,
+) -> None:
+    """Tell the owner of a failed run, once per failing streak, as the channel notice is.
+
+    `row` is the routine as claimed, so a clear `last_error` means this failure starts the
+    streak. `reason` None (a deploy cutting the run short) tells nobody. Never raises.
+    """
+    if notify is None or reason is None or row.last_error is not None:
+        return
+    try:
+        await notify(row, reason, channel_told)
+    except Exception as exc:
+        # Boundary: the failure is already recorded; telling the owner must not undo that.
+        log.warning(
+            "routine.owner_notice_unhandled", routine_id=str(row.id), error_class=type(exc).__name__
+        )
 
 
 class RoutineDispatcher:
@@ -100,8 +125,9 @@ async def _record_fire_error(
     reason: TerminationReason | None,
     *,
     error_class: str | None = None,
+    notify_owner: OwnerNotifier | None = None,
 ) -> None:
-    """Record a failure on a FRESH session (never reuse fire's session).
+    """Record a failure on a FRESH session (never reuse fire's session), then tell the owner.
 
     The log line carries only a fixed reason and the exception class, never `msg`,
     which may hold exception text."""
@@ -121,9 +147,11 @@ async def _record_fire_error(
     )
     try:
         async with asyncio.timeout(1), sm() as s, s.begin():
-            await record_routine_failure(s, row, error=msg, reason=reason)
+            told = await record_routine_failure(s, row, error=msg, reason=reason)
     except Exception:
         log.exception("record_result(error) failed", routine_id=str(row.id))
+        return
+    await tell_owner(notify_owner, row, reason, channel_told=told)
 
 
 async def _release_slot(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:
@@ -145,6 +173,7 @@ async def run_one_tick(
     dispatch_timeout_s: float,
     dispatcher: RoutineDispatcher | None = None,
     wait_for_completion: bool = False,
+    notify_owner: OwnerNotifier | None = None,
 ) -> RoutineDispatcher:
     """Claim and dispatch a tick without awaiting routine completion.
 
@@ -152,6 +181,7 @@ async def run_one_tick(
     Set wait_for_completion=True for a one-shot batch. Active routines are
     excluded and their intervening slots are recorded as skipped.
     Retain a bounded claimed batch, including work waiting for the semaphore.
+    `notify_owner` tells the owner of a run that failed (`tell_owner`).
     """
     one_shot = wait_for_completion
     loop = asyncio.get_running_loop()
@@ -250,7 +280,9 @@ async def run_one_tick(
                     # sibling tasks continue and record_result still runs.
                     capture_exception_with_scope(err)
                     timeout = f"timeout: exceeded {dispatch_timeout_s}s"
-                    await _record_fire_error(sm, row, timeout, TerminationReason.CEILING)
+                    await _record_fire_error(
+                        sm, row, timeout, TerminationReason.CEILING, notify_owner=notify_owner
+                    )
                 except Exception as err:
                     outcome = "failed"
                     reason = termination_reason(err)
@@ -264,6 +296,7 @@ async def run_one_tick(
                         else f"{type(err).__name__}: {err}"[:500],
                         reason,
                         error_class=type(err).__name__,
+                        notify_owner=notify_owner,
                     )
         except asyncio.CancelledError as err:
             outcome = "failed"
