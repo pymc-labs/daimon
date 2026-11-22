@@ -3234,7 +3234,6 @@ class DaimonBot(commands.Bot):
             bot_mentioned = await self._plain_text_mentions_on(message)
         if (
             bot_mentioned
-            and not startup_replay
             and not resume_admitted
             and not isinstance(message, ButtonMessage)
             and await workflow_cards.claim_mention(self.runtime, message, self._channel_by_id)

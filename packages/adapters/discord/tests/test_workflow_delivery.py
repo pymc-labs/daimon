@@ -99,10 +99,16 @@ async def test_a_failed_run_sends_the_owner_a_notice_card(
 async def test_a_titled_post_finds_its_thread_active_or_archived(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def thread(id_: int, name: str, parent: int = 1) -> SimpleNamespace:
-        return SimpleNamespace(id=id_, name=name, parent_id=parent)
+    def thread(id_: int, name: str, parent: int = 1, private: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(id=id_, name=name, parent_id=parent, is_private=lambda: private)
 
-    active = [thread(5, "Week", parent=2), thread(6, "Week 7"), thread(7, "Week")]
+    active = [
+        thread(5, "Week", parent=2),
+        thread(6, "Week 7"),
+        thread(4, "Week", private=True),
+        thread(10, "Secret", private=True),
+        thread(7, "Week"),
+    ]
     archived = [thread(8, "Old"), thread(9, "Week 8")]
 
     async def active_threads() -> list[SimpleNamespace]:
@@ -122,3 +128,4 @@ async def test_a_titled_post_finds_its_thread_active_or_archived(
     assert await find(as_channel, "Week") == "7", "an active thread under this channel only"
     assert await find(as_channel, "Week 8") == "9", "then the archived ones"
     assert await find(as_channel, "week 8") is None, "the name must match exactly"
+    assert await find(as_channel, "Secret") is None, "a private thread is never adopted"

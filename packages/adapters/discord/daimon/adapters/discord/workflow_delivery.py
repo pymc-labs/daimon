@@ -61,12 +61,13 @@ def _skipped(note: str) -> DeliveryOutcome:
 
 
 async def find_thread(channel: discord.TextChannel, title: str) -> str | None:
-    """The channel's thread named exactly `title`, active or archived, else None."""
+    """The channel's public thread named exactly `title`, active or archived, else None. A
+    private thread is never adopted: the channel's approvers could not see the posts."""
     for thread in await channel.guild.active_threads():
-        if thread.parent_id == channel.id and thread.name == title:
+        if thread.parent_id == channel.id and thread.name == title and not thread.is_private():
             return str(thread.id)
     async for thread in channel.archived_threads(limit=None):
-        if thread.name == title:
+        if thread.name == title and not thread.is_private():
             return str(thread.id)
     return None
 
