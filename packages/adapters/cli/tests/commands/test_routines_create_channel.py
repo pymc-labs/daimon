@@ -64,7 +64,16 @@ def _resolver(placement=None, refusal=None):
 
 
 async def _create(
-    rt, tenant, kind, destination_id, resolver, *, dry_run=False, paused=False, member=_member
+    rt,
+    tenant,
+    kind,
+    destination_id,
+    resolver,
+    *,
+    dry_run=False,
+    paused=False,
+    member=_member,
+    **extra,
 ):
     output = StringIO()
     await run_create_channel_routine(
@@ -82,6 +91,7 @@ async def _create(
         destination_resolver=resolver,
         dry_run=dry_run,
         paused=paused,
+        **extra,
     )
     return output.getvalue()
 
@@ -273,5 +283,35 @@ def test_command_rejects_inconsistent_destination_options(monkeypatch, extra):
     result, mocks = _invoke(monkeypatch, *extra)
 
     assert result.exit_code != 0, "inconsistent options must fail"
+    mocks["run_create_channel_routine"].assert_not_awaited()
+    mocks["run_create_dm_routine"].assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("kind", "destination_id", "message"),
+    [
+        ("thread", "777", "not a thread"),
+        ("channel", "general", "Discord ID"),
+        ("channel", "555", "bot_access_wait"),
+    ],
+    ids=["thread", "bad_id", "feature_off"],
+)
+async def test_defer_bot_access_refuses_what_it_cannot_defer(
+    db_session_factory, kind, destination_id, message
+):
+    """Only a numeric channel id, with the feature on, may be saved unchecked."""
+    tenant, rt = await _setup(db_session_factory)
+    resolver = _resolver(Placement(channel_id="555"))
+
+    with pytest.raises(UserFacingError, match=message):
+        await _create(rt, tenant, kind, destination_id, resolver, defer_bot_access=True)
+
+    assert resolver.calls == [] and await _rows(db_session_factory, tenant) == [], "nothing saved"
+
+
+def test_defer_bot_access_is_refused_for_a_dm(monkeypatch):
+    result, mocks = _invoke(monkeypatch, "--destination", "dm", "--defer-bot-access")
+
+    assert result.exit_code != 0, "dm has no channel to wait for"
     mocks["run_create_channel_routine"].assert_not_awaited()
     mocks["run_create_dm_routine"].assert_not_awaited()

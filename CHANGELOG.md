@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
+  With the new Wait for bot access setting on (off by default, set per
+  workspace by a server admin), a routine, timer or watch whose channel Daimon
+  cannot see or post in is held back, not failed: a routine's fire is refused
+  before any turn runs, so it costs nothing, and shows `bot_access_unavailable`
+  as its last error; a channel timer and a watch's wake are offered again
+  later; a poll watch backs off without an error. Nothing is paused or
+  reported to the owner, and all of it runs again once Daimon is given access.
+  A channel that is gone or in another server, and a person losing their own
+  permission, are handled as before. `daimon routines create
+  --defer-bot-access` saves a channel routine whose channel Daimon has no
+  access to yet.
+
 - **Moving people in is easier for repository memory and rotated links.**
   `scripts/import_repo_memory.py` takes `--tenant`: a creator with no account on
   this deployment gets a Discord identity there, so the accounts map is only for

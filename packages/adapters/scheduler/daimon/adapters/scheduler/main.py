@@ -51,6 +51,7 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.billing import BillingConfig, load_billing_config
+from daimon.core.bot_access import BOT_ACCESS_UNAVAILABLE, bot_access_blocked, bot_access_wait_on
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import (
     agent_native_provider,
@@ -590,12 +591,32 @@ async def _build_fire(
             ),
         )
 
+    async def _bot_locked_out(row: RoutineRow) -> bool:
+        """Whether the workspace waits for the bot's access and Discord says it has none here.
+
+        Read before the firing transaction, so the REST call holds no connection.
+        """
+        target = delivery_target(row, platform="discord")
+        if target is None or not target.channel_id.isdigit():
+            return False
+        async with sm() as s:
+            tenant = await get_tenant(s, row.tenant_id)
+        if tenant is None or tenant.platform != "discord":
+            return False
+        if not await bot_access_wait_on(sm, tenant_id=row.tenant_id, platform="discord"):
+            return False
+        async with httpx.AsyncClient(timeout=10) as http:
+            return await bot_access_blocked(
+                http, settings, guild_id=tenant.external_id, destination_id=target.channel_id
+            )
+
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
             async with sm() as s, s.begin():
                 await _refuse(s, row, "This routine has no owner. Create it again.")
             return
         granted = row.destination_kind != "dm" or await _owner_granted(row, row.created_by_user_id)
+        bot_locked_out = await _bot_locked_out(row)
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
@@ -784,6 +805,10 @@ async def _build_fire(
                             and lapsed_role(policy, (row.agent_name,), subject)
                             else initial.reason
                         )
+                # The bot's own access comes after every owner check, so a revoked owner
+                # still stops the routine. Waiting costs no turn and tells nobody.
+                if policy_error is None and bot_locked_out:
+                    policy_error = BOT_ACCESS_UNAVAILABLE
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",

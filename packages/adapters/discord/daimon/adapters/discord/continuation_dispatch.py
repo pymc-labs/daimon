@@ -17,6 +17,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.bot_access import BotAccessUnavailable
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.continuity.dispatch import ContinuationContextUnavailable
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
@@ -111,7 +112,7 @@ async def dispatch_pending_continuations(
             authorization = OutputAuthorization(check_watch_notice)
             try:
                 await authorization.check()
-            except AdmissionDenied:
+            except (AdmissionDenied, BotAccessUnavailable):
                 log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
                 return
             allowed = True

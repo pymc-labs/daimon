@@ -198,6 +198,7 @@ source_modules = [
     "daimon.core.authz",
     "daimon.core.billing",
     "daimon.core.billing_panel",
+    "daimon.core.bot_access",
     "daimon.core.broker",
     "daimon.core.bundle_handle",
     "daimon.core.capability_tools",

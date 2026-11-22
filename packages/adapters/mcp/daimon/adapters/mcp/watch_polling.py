@@ -41,6 +41,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -292,9 +293,16 @@ async def poll_read_place(
         raise PollAccessRevoked("Missing owner identity")
     async with rest_client(_require_bot_token(runtime)) as client:
         _, member = await _resolve_member(client, auth.external_id, auth.platform_user_id)
-        channel = _require_guild_channel(
-            await _resolve_channel(client, resource_id), auth.external_id
-        )
+        try:
+            resolved = await _resolve_channel(client, resource_id)
+        except discord.Forbidden as err:
+            # The bot's own read of the channel. A missing channel keeps its old handling.
+            if is_missing_access(err.status, err.code) and await bot_access_wait_on(
+                runtime.session_factory, tenant_id=auth.tenant_id, platform="discord"
+            ):
+                raise BotAccessUnavailable from None
+            raise
+        channel = _require_guild_channel(resolved, auth.external_id)
         if isinstance(channel, discord.Thread):
             await _check_thread_view(client, channel, member, auth.platform_user_id)
             parent = await _ensure_thread_parent_cached(channel)
@@ -687,8 +695,9 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 )
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
-    except SourceBusy:
-        # This server's own budget is spent. Step back in the claim queue, or due
+    except (SourceBusy, BotAccessUnavailable):
+        # This server's own budget is spent, or the bot cannot read the source yet (not an
+        # error, not a revocation). Step back in the claim queue, or due
         # watches on one busy server would fill every claim and starve the rest.
         until = datetime.now(UTC) + timedelta(seconds=BUSY_DEFER_S + random.uniform(0, 30))
         async with runtime.session_factory.begin() as db:
