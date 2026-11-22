@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all, and agents already stored keep reading as before. The web inspector, chat and
   MCP skill tools, channel skills and platform skills use the new limit; an
   over-limit list the provider still refuses is reported as before.
+- **Saving the GitHub connect page picks a working repo only for an agent's first repos.**
+  An agent that has repos keeps its working repo, or none, unless the person chooses one.
 
 - **Admins can see what is failing in a workspace.** Failed answers, direct messages,
   routines, deliveries, watches, follow-ups and bridged-tool calls are recorded once per
