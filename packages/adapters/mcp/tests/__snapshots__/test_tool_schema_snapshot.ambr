@@ -197,7 +197,8 @@
           lets viewers ask you from the page. `data_scale` (1-10) multiplies the data caps.
           `rules` sets what viewers may do per collection, replacing the page's rules:
           {"votes": {"read": "all"|"own", "write": "all"|"own"|"none"}}, where "own" is the
-          documents that viewer created. Owners and editors are not bound by them, and nor are you when you act for one; you follow them for anyone else.
+          documents that viewer created. Owners and editors are not bound by them, and nor are
+          you when you act for one; you follow them for anyone else.
           `new_link` replaces a public page's link.
         ''',
         'parameters': dict({
@@ -1379,7 +1380,8 @@
         lets viewers ask you from the page. `data_scale` (1-10) multiplies the data caps.
         `rules` sets what viewers may do per collection, replacing the page's rules:
         {"votes": {"read": "all"|"own", "write": "all"|"own"|"none"}}, where "own" is the
-        documents that viewer created. Owners and editors are not bound by them, and nor are you when you act for one; you follow them for anyone else.
+        documents that viewer created. Owners and editors are not bound by them, and nor are
+        you when you act for one; you follow them for anyone else.
         `new_link` replaces a public page's link. Only a person's own message can publish.
       ''',
       'parameters': dict({
