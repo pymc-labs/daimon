@@ -133,7 +133,7 @@ async def _dm_fallback(
             error_type=type(err).__name__,
         )
         # A person gone or a DM Slack never allows repeats on every run: a skip, not a page.
-        closed = err.response.get("error") in _UNREACHABLE
+        closed = str(err.response.get("error", "")) in _UNREACHABLE  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
         return DeliveryOutcome(
             status="skipped", note=reason, failed=None if closed else type(err).__name__
         )
