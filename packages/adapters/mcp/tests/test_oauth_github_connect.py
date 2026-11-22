@@ -27,6 +27,7 @@ from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
     Settings,
+    WebSettings,
 )
 from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_connect_views import (
@@ -99,6 +100,34 @@ def test_routes_not_mounted_when_unconfigured(
     paths = [route.path for route in app.routes if isinstance(route, Route)]
     assert "/oauth/github/connect/{token}" not in paths
     assert "/oauth/github/confirm" not in paths
+
+
+async def test_connect_and_setup_redirect_to_the_web_app_when_it_runs() -> None:
+    """Old links and a setup URL on this host land on the same page in the web app."""
+    key = Fernet.generate_key().decode()
+    web = WebSettings(public_url=HttpUrl("https://web.example.com"))
+    connect, _callback, setup, _confirm = build_oauth_github_routes(
+        settings=_settings(key).model_copy(update={"web": web}),
+        sessionmaker=async_sessionmaker(class_=AsyncSession),
+        fernet=build_multifernet((key,)),
+    )
+    app = Starlette(
+        routes=[
+            Route("/oauth/github/connect/{token}", connect),
+            Route("/oauth/github/setup", setup),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+    ) as client:
+        opened = await client.get("/oauth/github/connect/tok_1")
+        installed = await client.get("/oauth/github/setup?installation_id=7&state=s1")
+    assert opened.headers["location"] == "https://web.example.com/oauth/github/connect/tok_1", (
+        "an old link should open in the web app"
+    )
+    assert installed.headers["location"] == (
+        "https://web.example.com/oauth/github/setup?installation_id=7&state=s1"
+    ), "setup should keep its query"
 
 
 def test_picker_names_owner_type_for_screen_readers() -> None:

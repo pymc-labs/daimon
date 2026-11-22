@@ -12,13 +12,12 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-import httpx
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
-from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.web_icons import icon, platform_mark
-from daimon.core.config import Settings, TeamsSettings
+from daimon.core.config import Settings
+from daimon.core.github_connect_admin import teams_admin_owner_ids
 from daimon.core.github_connect_cards import (
     NEEDED,
     NEEDS_WRITE,
@@ -47,12 +46,13 @@ from daimon.core.github_connect_views import (
     PendingView,
     SavedAgentView,
     WorkspacePickerView,
+    read_capped,
     selection_from_form,
     selection_too_large,
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access
-from daimon.core.teams_graph import GraphClient
+from daimon.core.web_links import WebLinks
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -116,26 +116,6 @@ def _error(
         status=status,
         error=True,
     )
-
-
-async def _read_capped_body(request: Request, limit: int) -> bytes | None:
-    """Read the request body, or return None as soon as it exceeds `limit` bytes.
-
-    The declared Content-Length is checked first so an honest oversize request
-    costs nothing. The streamed total is checked too, because a chunked body has
-    no Content-Length and a declared length can be wrong.
-    """
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isascii() and declared.isdigit() and int(declared) > limit:
-        return None
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > limit:
-            return None
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def _back_to_chat(platform: str, workspace_id: str) -> str:
@@ -1605,19 +1585,6 @@ def _respond(outcome: ConnectOutcome) -> Response:
     return response
 
 
-async def teams_admin_owner_ids(
-    client: httpx.AsyncClient, teams: TeamsSettings, team_id: str
-) -> frozenset[str]:
-    """The owners of a Teams team, read from Graph with the bot's app token."""
-    bot = TeamsBotClient(
-        client,
-        client_id=teams.client_id,
-        client_secret=teams.client_secret.get_secret_value(),
-        tenant_id=teams.tenant_id,
-    )
-    return await GraphClient(client, bot.graph_token).list_team_owner_ids(team_id)
-
-
 def build_oauth_github_routes(
     *,
     settings: Settings,
@@ -1627,8 +1594,14 @@ def build_oauth_github_routes(
     deployment_default: DeploymentDefault | None = None,
     anthropic: AsyncAnthropic | None = None,
 ) -> tuple[RouteHandler, RouteHandler, RouteHandler, RouteHandler]:
-    """Build connect, callback, setup and confirmation handlers."""
+    """Build connect, callback, setup and confirmation handlers.
+
+    With the web app on, connect and setup send the browser to the same page there
+    (old links, and a GitHub App whose setup URL still names this host). Callback and
+    confirm stay for flows started here and for personal account links.
+    """
     root = settings.mcp.app_root_url
+    web = WebLinks.from_settings(settings.web)
     if root is None:
         raise ValueError("GitHub connection is not configured")
     flow = GitHubConnectFlow(
@@ -1642,6 +1615,10 @@ def build_oauth_github_routes(
     )
 
     async def connect(request: Request) -> Response:
+        if web is not None:
+            return RedirectResponse(
+                f"{web.base}/oauth/github/connect/{request.path_params['token']}"
+            )
         return _respond(await flow.start(root, request.path_params["token"]))
 
     async def callback(request: Request) -> Response:
@@ -1655,6 +1632,9 @@ def build_oauth_github_routes(
         )
 
     async def setup(request: Request) -> Response:
+        if web is not None:
+            query = f"?{request.url.query}" if request.url.query else ""
+            return RedirectResponse(f"{web.base}/oauth/github/setup{query}")
         return _respond(
             await flow.setup(
                 root,
@@ -1667,7 +1647,9 @@ def build_oauth_github_routes(
     async def confirm(request: Request) -> Response:
         cookie = request.cookies.get(FLOW_COOKIE, "")
         if request.method == "POST":
-            raw_body = await _read_capped_body(request, MAX_CONFIRM_BODY_BYTES)
+            raw_body = await read_capped(
+                request.stream(), request.headers.get("content-length"), MAX_CONFIRM_BODY_BYTES
+            )
             if raw_body is None:
                 return _render(selection_too_large())
             selection = selection_from_form(raw_body)
