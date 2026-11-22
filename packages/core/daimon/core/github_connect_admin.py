@@ -14,14 +14,27 @@ from daimon.core.github_credentials import decrypt_token
 from daimon.core.native_admins import AdminAttestationUnavailable, attest_discord_membership
 from daimon.core.stores.domain import AccountIdentityRow
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
-from daimon.core.teams_graph import GraphUnavailable
+from daimon.core.teams_graph import GraphClient, GraphUnavailable, app_token
 from mux.drivers import isolated_ssl_context
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-# The owner ids of a Teams team: (client, teams settings, team id). The Teams
-# client lives in an adapter, so the adapter that serves the flow passes it in.
+# The owner ids of a Teams team: (client, teams settings, team id). Injected so
+# tests can stand in for Graph; the pages pass `teams_admin_owner_ids`.
 TeamsOwnerLookup = Callable[[httpx.AsyncClient, TeamsSettings, str], Awaitable[frozenset[str]]]
+
+
+async def teams_admin_owner_ids(
+    client: httpx.AsyncClient, teams: TeamsSettings, team_id: str
+) -> frozenset[str]:
+    """The owners of a Teams team, read from Graph with the bot's app token."""
+    token = app_token(
+        client,
+        tenant_id=teams.tenant_id,
+        client_id=teams.client_id,
+        client_secret=teams.client_secret.get_secret_value(),
+    )
+    return await GraphClient(client, token).list_team_owner_ids(team_id)
 
 
 async def attest_native_admin(

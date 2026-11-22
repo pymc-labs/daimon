@@ -42,6 +42,7 @@ from daimon.core.github_connect_views import (
     SAVED_COOKIE_MAX_AGE,
     STATE_COOKIE,
     AlreadyConnectedView,
+    BackLink,
     CancelledView,
     ChatReturn,
     ConnectCookie,
@@ -85,6 +86,7 @@ from daimon.core.stores.github_request_actions import (
     lock_confirmed_request_repos,
 )
 from daimon.core.stores.security_audit import append_event
+from daimon.core.web_links import WebLinks
 from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import text as sql_text
 from sqlalchemy.exc import DBAPIError
@@ -312,6 +314,32 @@ class GitHubConnectFlow:
         self._app_id = config.app_id
         self._private_key = config.private_key.get_secret_value()
 
+    def _back(
+        self, invitation: github_connect.Invitation | None, requester: AccountIdentityRow | None
+    ) -> BackLink | None:
+        """The agent's GitHub tab for a link minted in the web app, else the chat it came from."""
+        if invitation is not None and invitation.origin_platform == "web":
+            links = WebLinks.from_settings(self._settings.web)
+            # Every person may open an agent's page, so the role does not matter here.
+            url = (
+                links.for_tenant(invitation.tenant_id, admin=False).agent(
+                    invitation.agent_ma_id, "github"
+                )
+                if links is not None and invitation.agent_ma_id
+                else None
+            )
+            return None if url is None else BackLink(url=url, platform="web")
+        if requester is None:
+            return None
+        match requester.platform:
+            case "discord":
+                url = f"https://discord.com/channels/{requester.external_id}"
+                return BackLink(url=url, platform="discord")
+            case "slack" | "teams" as platform:
+                return BackLink(url="", platform=platform)
+            case _:
+                return None
+
     async def _attest(
         self, requester: AccountIdentityRow, db_session: AsyncSession | None = None
     ) -> bool:
@@ -453,11 +481,13 @@ class GitHubConnectFlow:
                 visible_repo_ids=sorted(visible_ids or ()),
                 back_to_chat=_chat_return(requester),
                 installations=list(installations),
+                back=self._back(invitation, requester),
             )
         return AlreadyConnectedView(
             count=invitation.connected_repo_count,
             back_to_chat=_chat_return(requester),
             agent_name=invitation.agent_name,
+            back=self._back(invitation, requester),
         )
 
     async def start(self, root: str, token: str) -> ConnectOutcome:
@@ -482,6 +512,7 @@ class GitHubConnectFlow:
                             count=invitation.connected_repo_count,
                             back_to_chat=_chat_return(requester),
                             agent_name=invitation.agent_name,
+                            back=self._back(invitation, requester),
                         )
                     )
                 if status == "requester_left":
@@ -560,7 +591,12 @@ class GitHubConnectFlow:
                     if refused_invitation is not None
                     else None
                 )
-            return _page(CancelledView(back_to_chat=_chat_return(refused_requester)))
+            return _page(
+                CancelledView(
+                    back_to_chat=_chat_return(refused_requester),
+                    back=self._back(refused_invitation, refused_requester),
+                )
+            )
         async with self._sessionmaker() as session:
             flow = await github_connect.get_flow(
                 session, state=state, cookie=flow_cookie, settings=self._settings
@@ -653,7 +689,11 @@ class GitHubConnectFlow:
                     await github_connect.finish_cancel_revocation(
                         session, state=state, cookie=flow_cookie
                     )
-        return _page(CancelledView(back_to_chat=_chat_return(requester)))
+        return _page(
+            CancelledView(
+                back_to_chat=_chat_return(requester), back=self._back(invitation, requester)
+            )
+        )
 
     async def load(self, root: str, *, state: str, flow_cookie: str) -> ConnectOutcome:
         """The confirm page: the agent editor or the workspace picker, or why not."""
@@ -961,6 +1001,7 @@ class GitHubConnectFlow:
                     requester_label=invitation.requester_label,
                     same_person=requester_github_id == github_user_id,
                     agent_name=invitation.agent_name,
+                    back=self._back(invitation, requester),
                 ),
                 _flow_cookie(root, cookie, SAVED_COOKIE_MAX_AGE),
             )

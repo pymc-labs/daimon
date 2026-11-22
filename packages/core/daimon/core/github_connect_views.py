@@ -10,13 +10,13 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import Mapping, Sequence
-from typing import Annotated, Literal
+from collections.abc import AsyncIterable, Mapping, Sequence
+from typing import Annotated, Literal, cast
 from urllib.parse import parse_qs, urlencode
 
 from daimon.core.stores.github_access import MAX_AGENT_INSTALLATIONS, AgentRepo
 from daimon.core.stores.github_connect import GitHubPermission, RepoConfirmation
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 FLOW_COOKIE = "daimon_gh_connect"
@@ -176,6 +176,18 @@ class ChatReturn(BaseModel):
     workspace_id: str
 
 
+class BackLink(BaseModel):
+    """Where a finished page sends the person: the agent in the web app, or the chat.
+
+    `url` is empty where the chat has no link to open (Slack: run `/github`;
+    Teams: close the tab).
+    """
+
+    model_config = ConfigDict(frozen=True)
+    url: str
+    platform: Literal["web", "discord", "slack", "teams"]
+
+
 class _View(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -207,6 +219,7 @@ class ConnectTransientErrorView(_View):
 class CancelledView(_View):
     kind: Literal["cancelled"] = "cancelled"
     back_to_chat: ChatReturn | None = None
+    back: BackLink | None = None
 
 
 class ExpiredView(_View):
@@ -219,6 +232,7 @@ class AlreadyConnectedView(_View):
     count: int | None
     back_to_chat: ChatReturn | None = None
     agent_name: str | None = None
+    back: BackLink | None = None
 
 
 class InstallView(_View):
@@ -321,6 +335,7 @@ class SavedAgentView(_View):
     visible_repo_ids: list[int]
     back_to_chat: ChatReturn | None
     installations: list[ConnectInstallation]
+    back: BackLink | None = None
 
 
 class DoneView(_View):
@@ -331,6 +346,7 @@ class DoneView(_View):
     # The GitHub account that saved is the requester's own linked account.
     same_person: bool
     agent_name: str | None
+    back: BackLink | None = None
 
 
 ConnectView = Annotated[
@@ -400,6 +416,57 @@ def selection_from_form(body: bytes) -> ConnectSelection | ConnectErrorView:
     except ValueError:  # parse_qs: more than MAX_CONFIRM_FIELDS fields
         return selection_too_large()
     return selection_from_fields(fields)
+
+
+def selection_from_json(body: bytes) -> ConnectSelection | ConnectErrorView:
+    """Parse a JSON body already capped at `MAX_CONFIRM_BODY_BYTES`, as the form path does.
+
+    Keys outside `ConnectSelection` go to `unknown_fields`; more than
+    `MAX_CONFIRM_FIELDS` values in all is too large.
+    """
+    try:
+        data: object = json.loads(body)
+    except ValueError:
+        return unverified()
+    if not isinstance(data, dict):
+        return unverified()
+    fields = cast(dict[str, object], data)
+    access = fields.get("repo_access")
+    nested = cast(dict[str, object], access).values() if isinstance(access, dict) else ()
+    values = [*fields.values(), *nested]
+    if sum(len(cast(list[object], v)) if isinstance(v, list) else 1 for v in values) > (
+        MAX_CONFIRM_FIELDS
+    ):
+        return selection_too_large()
+    known = ConnectSelection.model_fields.keys() - {"unknown_fields"}
+    try:
+        return ConnectSelection.model_validate(
+            {name: value for name, value in fields.items() if name in known}
+            | {"unknown_fields": [name for name in fields if name not in known]}
+        )
+    except ValidationError:
+        return unverified()
+
+
+async def read_capped(
+    chunks: AsyncIterable[bytes], declared: str | None, limit: int
+) -> bytes | None:
+    """Read a request body, or return None as soon as it exceeds `limit` bytes.
+
+    The declared Content-Length is checked first so an honest oversize request
+    costs nothing. The streamed total is checked too, because a chunked body has
+    no Content-Length and a declared length can be wrong.
+    """
+    if declared is not None and declared.isascii() and declared.isdigit() and int(declared) > limit:
+        return None
+    parts: list[bytes] = []
+    total = 0
+    async for chunk in chunks:
+        total += len(chunk)
+        if total > limit:
+            return None
+        parts.append(chunk)
+    return b"".join(parts)
 
 
 def receipt_signature(state: str, invitation_hash: str, secret: str) -> str:
