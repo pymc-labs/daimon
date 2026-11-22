@@ -100,7 +100,7 @@ const stop = db.collection('runs').orderBy('createdAt', 'desc').limit(200)
 
 ## Connect it to Daimon
 
-- **Events** (a submit, "request review"): every event is saved to the page's `_events` collection (read it with `artifact_db_query`; the page cannot) and wakes the page's watches. Where `create_watch` is offered, make one with `source="page_event"` and `page` set to the slug: up to 5 per page, each reporting in the thread that made it, and only while its maker may still use the page. Elsewhere, read `_events`. `_events` keeps the newest 1,000 events (4 MiB). Delete handled ones with `artifact_db_write(data=null)`; you cannot write there.
+- **Events** (a submit, "request review"): every event is saved to the page's `_events` collection (read it with `artifact_db_query`; the page cannot) and wakes the page's watches. Where `create_watch` is offered, make one with `source="page_event"` and `page` set to the slug: up to 5 per page, and one per person who does not manage it, each working only while its maker may still use the page. It reports in the thread that made it, or with `delivery="new_thread"` in a new thread per event; `select` keeps one part of each event. Elsewhere, read `_events`. `_events` keeps the newest 1,000 events (4 MiB). Delete handled ones with `artifact_db_write(data=null)`; you cannot write there.
 - **Daimon writes back**: `artifact_db_write(slug, collection, doc_id, data)`; viewers see it within seconds.
 - **Work that needs a model**: use `ask=true`, or `data="write", events=true`: the page writes a request document and calls `notify`; the watch's turn does the work and writes the result with `artifact_db_write`; `onSnapshot` shows it. Show the pending state meanwhile.
 
