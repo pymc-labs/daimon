@@ -41,10 +41,12 @@ from daimon.core.artifact_pages.documents import (
     check_doc_id,
     check_list_size,
     check_page_collection,
+    may_read,
+    rule_of,
 )
 from daimon.core.artifact_pages.events import build_event
 from daimon.core.artifact_pages.keys import new_key_id, page_event_key
-from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, Limits, page_url
+from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, page_url
 from daimon.core.artifact_pages.tickets import Ticket, link_digest, open_ticket, seal
 from daimon.core.config import origin_of
 from daimon.core.continuity.page_events import sign_page_event
@@ -81,6 +83,7 @@ _STATUS: Final[dict[ErrorCode, int]] = {
     "forbidden": 403,
     "too_large": 413,
     "rate_limited": 429,
+    "not_allowed": 403,
     "unavailable": 503,
 }
 _CODE_OF: Final[dict[int, ErrorCode]] = {
@@ -217,6 +220,7 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter()
     origin = origin_of(str(runtime.web.public_url))
     limiter = RateLimiter()
+    limits = runtime.settings.artifact_pages
 
     async def open_page(
         db: AsyncSession, request: Request, public_id: str, link: str | None
@@ -250,8 +254,8 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         client = request.client.host if request.client else ""
         key = str(account) if account else f"{artifact.public_id}:{client}"
         now = time.monotonic()
-        allowed = limiter.allow(key, limit=Limits.API_PER_MINUTE, now=now) and (
-            not ask or limiter.allow(f"ask:{key}", limit=Limits.ASK_PER_MINUTE, now=now)
+        allowed = limiter.allow(key, limit=limits.requests_per_minute, now=now) and (
+            not ask or limiter.allow(f"ask:{key}", limit=limits.asks_per_minute, now=now)
         )
         if not allowed:
             raise ArtifactError("rate_limited", "Too many calls; slow down.")
@@ -391,12 +395,19 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             raise ArtifactError("not_found", f"No method {method}.")
         _check_capability(artifact, method)
         viewer, now = visitor.viewer, runtime.now()
+        role = admit(artifact, viewer, now)
+        # Collection rules bind viewers, not managers; a public page's viewers are anonymous.
+        bound = not can_edit(role)
+        me = shown_as(artifact, viewer, role).account_id
         # Reads report the revision read with the page, before their data.
         revision = artifact.data_revision
         match method:
             case "db.get":
                 collection, doc_id = _page_doc(_Doc.model_validate_json(body).path)
                 doc = await artifact_store.get_doc(db, artifact.id, collection, doc_id)
+                rule = rule_of(artifact.collection_rules, collection)
+                if doc is not None and bound and not may_read(rule, doc.created_by_account_id, me):
+                    doc = None
                 return {
                     "id": doc_id,
                     "data": None if doc is None else doc.data,
@@ -409,9 +420,15 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
                     order_by=p.orderBy,
                     descending=p.direction == "desc",
                     limit=p.limit,
+                    limits=limits,
                 )
-                docs = await artifact_store.list_docs(db, artifact.id, query)
-                check_list_size(sum(d.size_bytes for d in docs))
+                own = bound and rule_of(artifact.collection_rules, p.collection).read == "own"
+                if own and me is None:
+                    return {"docs": [], "revision": revision}
+                if own:
+                    query = query.model_copy(update={"created_by": me})
+                docs = await artifact_store.list_docs(db, artifact.id, query, limits=limits)
+                check_list_size(sum(d.size_bytes for d in docs), limits)
                 return {
                     "docs": [{"id": d.doc_id, "data": d.data} for d in docs],
                     "revision": revision,
@@ -435,13 +452,18 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
                     write,
                     by=viewer.name,
                     account_id=viewer.account_id,
+                    rule=rule_of(artifact.collection_rules, collection) if bound else None,
                     now=now,
+                    limits=limits,
                 )
                 return {"id": doc_id, "revision": revision}
             case "db.delete":
                 collection, doc_id = _page_doc(_Doc.model_validate_json(body).path)
+                rule = rule_of(artifact.collection_rules, collection) if bound else None
                 return {
-                    "revision": await artifact_store.delete_doc(db, artifact, collection, doc_id)
+                    "revision": await artifact_store.delete_doc(
+                        db, artifact, collection, doc_id, rule=rule, account_id=me
+                    )
                 }
             case "db.revision":
                 return {"revision": revision}
@@ -467,8 +489,11 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             visible_outside_workspace=await artifact_store.visible_outside_workspace(db, artifact),
             event_id=uuid.uuid4(),
             now=now,
+            max_bytes=limits.event_bytes,
         )
-        await artifact_store.add_event(db, artifact, event, account_id=viewer.account_id, now=now)
+        await artifact_store.add_event(
+            db, artifact, event, account_id=viewer.account_id, now=now, limits=limits
+        )
         keys = tuple(k.get_secret_value() for k in runtime.settings.crypto.keys)
         delivered = 0
         for watch in await watches_store.page_watches(

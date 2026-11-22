@@ -13,7 +13,7 @@ import json
 import re
 from typing import Final
 
-from daimon.core.artifact_pages.model import ArtifactError, Limits
+from daimon.core.artifact_pages.model import ArtifactError
 from pydantic import JsonValue
 
 ASSET_HOSTS: Final = (
@@ -33,11 +33,11 @@ _HEAD: Final = re.compile(r"<head(?:\s[^>]*)?>", re.IGNORECASE)
 _DOCTYPE: Final = re.compile(r"\s*<!doctype[^>]*>", re.IGNORECASE)
 
 
-def decode_html(raw: bytes) -> str:
-    if len(raw) > Limits.HTML_BYTES:
+def decode_html(raw: bytes, max_bytes: int) -> str:
+    if len(raw) > max_bytes:
         raise ArtifactError(
             "too_large",
-            f"The page is {len(raw):,} bytes; the limit is {Limits.HTML_BYTES:,}. Move large "
+            f"The page is {len(raw):,} bytes; the limit is {max_bytes:,}. Move large "
             "data into the page's data or images to a CDN.",
         )
     try:

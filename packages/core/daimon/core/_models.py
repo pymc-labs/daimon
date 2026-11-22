@@ -5752,7 +5752,7 @@ class Artifact(Base):
         ),
         CheckConstraint(
             "access <> 'public' OR (data <> 'write' AND NOT (data = 'read' AND events)"
-            " AND NOT ask AND expires_at IS NOT NULL)",
+            " AND NOT ask)",
             name="ck_artifacts_public",
         ),
         CheckConstraint(
@@ -5784,6 +5784,8 @@ class Artifact(Base):
     size_bytes: Mapped[int] = mapped_column(server_default="0")
     # Bumped on every page data write: pages poll this one number for changes.
     data_revision: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    # {collection: {"read": "all"|"own", "write": "all"|"own"|"none"}}, for the page API.
+    collection_rules: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'"))
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
 
@@ -5824,6 +5826,7 @@ class ArtifactDocument(Base):
     __tablename__ = "artifact_documents"
     __table_args__ = (
         Index("ix_artifact_documents_account", "updated_by_account_id"),
+        Index("ix_artifact_documents_creator", "created_by_account_id"),
         CheckConstraint(
             "collection ~ '^[A-Za-z0-9_-]{1,64}$'", name="ck_artifact_documents_collection"
         ),
@@ -5840,6 +5843,10 @@ class ArtifactDocument(Base):
     size_bytes: Mapped[int]
     updated_by: Mapped[str | None]
     updated_by_account_id: Mapped[AccountSetNull]
+    # Who created it, for "own" collection rules; never changes.
+    created_by_account_id: Mapped[AccountSetNull]
+    # The page's `data_revision` its last write made.
+    revision: Mapped[int] = mapped_column(BigInteger, server_default="0")
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
 

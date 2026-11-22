@@ -2,7 +2,9 @@
 
 Roles follow Google Drive: the owner and workspace admins do everything; editors
 republish and change settings, and change sharing unless `editors_can_share` is off;
-only the owner and admins delete, transfer or turn editor sharing off. A public page's
+only the owner and admins delete, transfer or turn editor sharing off. An editor may
+always leave. While editors may not share, a page seen outside the workspace keeps its
+data, events and data scale too: those decide what outsiders may do. A public page's
 viewers are anonymous, so it cannot take their data writes, cannot both read data and
 send events (an event could talk an agent into writing what the sender reads back), and
 cannot ask (no person to run the turn as).
@@ -17,9 +19,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, Literal
 
+from daimon.core.artifact_pages.documents import check_rules
 from daimon.core.artifact_pages.model import ArtifactError, Limits
-from daimon.core.stores.domain import ArtifactAccess, ArtifactRow, DataAccess, WebPersonKind
-from pydantic import BaseModel, ConfigDict
+from daimon.core.stores.domain import (
+    ArtifactAccess,
+    ArtifactRow,
+    CollectionRule,
+    DataAccess,
+    WebPersonKind,
+)
+from pydantic import BaseModel, ConfigDict, Field
 
 Role = Literal["owner", "admin", "editor", "viewer", "none"]
 Sender = Literal["member", "visitor", "anonymous"]
@@ -56,6 +65,7 @@ class PageSettings(BaseModel):
     ask: bool = False
     data_scale: int = 1
     expires_at: datetime | None = None
+    collection_rules: dict[str, CollectionRule] = Field(default_factory=dict[str, CollectionRule])
 
 
 class PageChange(BaseModel):
@@ -74,6 +84,7 @@ class PageChange(BaseModel):
     ask: bool | None = None
     data_scale: int | None = None
     expires_at: datetime | None = None
+    collection_rules: dict[str, CollectionRule] | None = None
 
 
 def settings_of(artifact: ArtifactRow) -> PageSettings:
@@ -95,6 +106,7 @@ def apply_change(
 
 
 def check_settings(settings: PageSettings) -> None:
+    check_rules(settings.collection_rules)
     if not 1 <= settings.data_scale <= Limits.MAX_DATA_SCALE:
         raise ArtifactError("invalid", f"Data space is 1-{Limits.MAX_DATA_SCALE} times.")
     if len(settings.people) > Limits.PEOPLE:
@@ -109,18 +121,29 @@ def check_settings(settings: PageSettings) -> None:
         raise ArtifactError("invalid", "A public page can read its data or send events, not both.")
     if settings.ask:
         raise ArtifactError("invalid", "A public page cannot ask the agent.")
-    if settings.expires_at is None:
-        raise ArtifactError("invalid", "A public page needs an expiry.")
 
 
-def check_change(current: PageSettings, new: PageSettings, *, role: Role, now: datetime) -> None:
-    """Whether `role` may move a page from `current` to `new`; then its hard rules."""
+def check_change(
+    current: PageSettings,
+    new: PageSettings,
+    *,
+    role: Role,
+    now: datetime,
+    actor: uuid.UUID | None = None,
+    outside: bool = False,
+) -> None:
+    """Whether `role` (the account `actor`) may move a page from `current` to `new`; then
+    its hard rules. `outside`: people outside the workspace can read the page now."""
     if not can_edit(role):
         raise ArtifactError("forbidden", ASK_OWNER)
-    sharing = ("access", "people", "editors", "expires_at")
-    if any(getattr(current, k) != getattr(new, k) for k in sharing) and not can_share(
-        current, role
-    ):
+    sharing = ["access", "people", "editors", "expires_at"]
+    if outside:
+        sharing += ["data", "events", "data_scale"]
+    leaving = tuple(e for e in current.editors if e != actor)
+    changed = [k for k in sharing if getattr(current, k) != getattr(new, k)]
+    if changed == ["editors"] and new.editors == leaving:
+        changed = []
+    if changed and not can_share(current, role):
         raise ArtifactError("forbidden", ASK_OWNER)
     if current.editors_can_share != new.editors_can_share and not can_delete(role):
         raise ArtifactError("forbidden", ASK_OWNER)

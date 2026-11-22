@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.artifact_pages.access import PageChange
-from daimon.core.config import Settings
+from daimon.core.config import ArtifactPagesSettings, Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import web_people
@@ -96,6 +96,7 @@ async def publish(
             origin=None,
             new_link=False,
             now=datetime.now(UTC),
+            limits=ArtifactPagesSettings(),
         )
 
 

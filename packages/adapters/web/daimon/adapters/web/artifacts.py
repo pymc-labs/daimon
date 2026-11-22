@@ -33,8 +33,6 @@ from daimon.core.artifact_pages.documents import (
     DocumentWrite,
     build_list_query,
     check_page_collection,
-    max_bytes,
-    max_documents,
 )
 from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, page_url
 from daimon.core.permissions import WEB_PLACE_PREFIX
@@ -55,6 +53,7 @@ _STATUS: dict[ErrorCode, int] = {
     "not_found": 404,
     "forbidden": 403,
     "rate_limited": 429,
+    "not_allowed": 403,
     "unavailable": 503,
 }
 _NOT_FOUND = "This page doesn't exist or isn't shared with you."
@@ -97,6 +96,8 @@ def _doc_json(doc: ArtifactDocumentRow) -> dict[str, Any]:
 
 def artifacts_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/artifacts")
+    limits = runtime.settings.artifact_pages
+    docs_page, events_shown = (min(n, limits.list_documents) for n in (_DOCS_PAGE, _EVENTS_SHOWN))
 
     async def agents_of(tenant_id: uuid.UUID) -> dict[str, dict[str, Any]]:
         listed = await listed_agents(runtime, tenant_id)
@@ -185,12 +186,13 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
             "editors": [_person(i, people) for i in artifact.editors],
             "editors_can_share": artifact.editors_can_share,
             "data_scale": artifact.data_scale,
+            "collection_rules": {k: v.model_dump() for k, v in artifact.collection_rules.items()},
             "link": link,
             "usage": {
                 "documents": usage.documents,
-                "max_documents": max_documents(artifact.data_scale),
+                "max_documents": limits.documents * artifact.data_scale,
                 "bytes": usage.bytes,
-                "max_bytes": max_bytes(artifact.data_scale),
+                "max_bytes": limits.data_bytes * artifact.data_scale,
             },
             "watches": [
                 {
@@ -280,7 +282,12 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                 raise HTTPException(status_code=422, detail="Pick people from the list.")
             try:
                 artifact = await artifact_store.update_settings(
-                    db, artifact, wanted, role=role, now=runtime.now()
+                    db,
+                    artifact,
+                    wanted,
+                    role=role,
+                    account_id=caller.person.account_id,
+                    now=runtime.now(),
                 )
             except ArtifactError as exc:
                 raise _refused(exc) from exc
@@ -368,6 +375,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                     role=role,
                     account_id=caller.person.account_id,
                     now=runtime.now(),
+                    limits=limits,
                 )
             except ArtifactError as exc:
                 raise _refused(exc) from exc
@@ -394,12 +402,12 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
             require(can_edit(role))
             try:
                 query = build_list_query(
-                    check_page_collection(collection), limit=_DOCS_PAGE, after=after
+                    check_page_collection(collection), limit=docs_page, after=after, limits=limits
                 )
             except ArtifactError as exc:
                 raise _refused(exc) from exc
-            found = await artifact_store.list_docs(db, artifact.id, query)
-        headers = {"X-Next-Cursor": found[-1].doc_id} if len(found) == _DOCS_PAGE else {}
+            found = await artifact_store.list_docs(db, artifact.id, query, limits=limits)
+        headers = {"X-Next-Cursor": found[-1].doc_id} if len(found) == docs_page else {}
         return JSONResponse([_doc_json(d) for d in found], headers=headers)
 
     @router.put("/{artifact_id}/data/{collection}/{doc_id}")
@@ -422,7 +430,9 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                     DocumentWrite(data=data),
                     by=caller.person.display_name,
                     account_id=caller.person.account_id,
+                    rule=None,
                     now=runtime.now(),
+                    limits=limits,
                 )
             except ArtifactError as exc:
                 raise _refused(exc) from exc
@@ -437,7 +447,12 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
             require(can_edit(role))
             try:
                 await artifact_store.delete_doc(
-                    db, artifact, check_page_collection(collection), doc_id
+                    db,
+                    artifact,
+                    check_page_collection(collection),
+                    doc_id,
+                    rule=None,
+                    account_id=None,
                 )
             except ArtifactError as exc:
                 raise _refused(exc) from exc
@@ -449,9 +464,9 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
             artifact, role = await load(db, caller, artifact_id)
             require(can_edit(role))
             query = build_list_query(
-                EVENTS_COLLECTION, order_by="at", descending=True, limit=_EVENTS_SHOWN
+                EVENTS_COLLECTION, order_by="at", descending=True, limit=events_shown, limits=limits
             )
-            found = await artifact_store.list_docs(db, artifact.id, query)
+            found = await artifact_store.list_docs(db, artifact.id, query, limits=limits)
         return [
             {
                 "id": d.doc_id,

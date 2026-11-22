@@ -62,6 +62,7 @@ typo is silent — check the spelling here.
 - [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
+- [Artifact Pages](#artifact-pages)
 - [Scheduler](#scheduler)
 - [Sidecar](#sidecar)
 - [Notebook host (standalone service)](#notebook-host-standalone-service)
@@ -2192,6 +2193,91 @@ S3 signing region supplied by the bucket provider.
 `int` · optional · default `600`
 
 Lifetime of each presigned artifact GET URL; defaults to ten minutes.
+
+## Artifact Pages
+
+Read from `daimon.core.config.ArtifactPagesSettings`. Prefix `DAIMON_ARTIFACT_PAGES__`.
+
+Caps for artifact pages (web app pages agents publish). Data caps are per page, times
+its data scale (1-10).
+
+### `DAIMON_ARTIFACT_PAGES__HTML_BYTES`
+
+`int` · optional · default `2097152`
+
+Largest page HTML.
+
+### `DAIMON_ARTIFACT_PAGES__VERSIONS_KEPT`
+
+`int` · optional · default `20`
+
+Versions kept per page.
+
+### `DAIMON_ARTIFACT_PAGES__DOCUMENT_BYTES`
+
+`int` · optional · default `65536`
+
+Largest data document.
+
+### `DAIMON_ARTIFACT_PAGES__DOCUMENTS`
+
+`int` · optional · default `5000`
+
+Documents per page at 1x data space.
+
+### `DAIMON_ARTIFACT_PAGES__DATA_BYTES`
+
+`int` · optional · default `20971520`
+
+Data bytes per page at 1x data space.
+
+### `DAIMON_ARTIFACT_PAGES__LIST_DOCUMENTS`
+
+`int` · optional · default `1000`
+
+Documents per list call.
+
+### `DAIMON_ARTIFACT_PAGES__LIST_BYTES`
+
+`int` · optional · default `4194304`
+
+Bytes per list call.
+
+### `DAIMON_ARTIFACT_PAGES__EVENTS`
+
+`int` · optional · default `1000`
+
+Events kept per page at 1x data space.
+
+### `DAIMON_ARTIFACT_PAGES__EVENTS_BYTES`
+
+`int` · optional · default `4194304`
+
+Event bytes kept per page at 1x data space.
+
+### `DAIMON_ARTIFACT_PAGES__EVENT_BYTES`
+
+`int` · optional · default `65536`
+
+Largest single event.
+
+### `DAIMON_ARTIFACT_PAGES__REQUESTS_PER_MINUTE`
+
+`int` · optional · default `600`
+
+Page API calls per page and viewer each minute.
+
+### `DAIMON_ARTIFACT_PAGES__ASKS_PER_MINUTE`
+
+`int` · optional · default `10`
+
+Page asks per page and viewer each minute.
+
+### `DAIMON_ARTIFACT_PAGES__SHARES_PER_DAY`
+
+`int` · optional · default `20`
+
+New visitors each person may invite by sharing a page.
 
 ## Scheduler
 

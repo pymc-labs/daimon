@@ -2297,6 +2297,37 @@ class ArtifactsSettings(BaseModel):
         return self
 
 
+class ArtifactPagesSettings(BaseModel):
+    """Caps for artifact pages (web app pages agents publish). Data caps are per page,
+    times its data scale (1-10)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    html_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, description="Largest page HTML.")
+    versions_kept: int = Field(default=20, ge=1, description="Versions kept per page.")
+    document_bytes: int = Field(default=64 * 1024, ge=1024, description="Largest data document.")
+    documents: int = Field(default=5000, ge=1, description="Documents per page at 1x data space.")
+    data_bytes: int = Field(
+        default=20 * 1024 * 1024, ge=1024, description="Data bytes per page at 1x data space."
+    )
+    list_documents: int = Field(default=1000, ge=1, description="Documents per list call.")
+    list_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, description="Bytes per list call.")
+    events: int = Field(default=1000, ge=1, description="Events kept per page at 1x data space.")
+    events_bytes: int = Field(
+        default=4 * 1024 * 1024, ge=1024, description="Event bytes kept per page at 1x data space."
+    )
+    event_bytes: int = Field(default=64 * 1024, ge=1024, description="Largest single event.")
+    requests_per_minute: int = Field(
+        default=600, ge=1, description="Page API calls per page and viewer each minute."
+    )
+    asks_per_minute: int = Field(
+        default=10, ge=1, description="Page asks per page and viewer each minute."
+    )
+    shares_per_day: int = Field(
+        default=20, ge=1, description="New visitors each person may invite by sharing a page."
+    )
+
+
 class DirectMessagePolicy(BaseModel):
     """Tenant recipient restrictions; platform membership is always required."""
 
@@ -3198,6 +3229,7 @@ class Settings(BaseSettings):
             "Bounded image embeds still run when this is unset."
         ),
     )
+    artifact_pages: ArtifactPagesSettings = Field(default_factory=ArtifactPagesSettings)
     defaults_root: Path = Field(
         default_factory=lambda: Path("defaults"),
         description=(

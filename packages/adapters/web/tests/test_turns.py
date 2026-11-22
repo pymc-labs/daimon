@@ -29,6 +29,7 @@ from daimon.adapters.web.stream import Event
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.artifact_pages.access import PageChange
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.errors import TurnError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import accounts, spend_allowances, tenants, turn_outcomes, usage_events
@@ -149,6 +150,7 @@ async def test_a_reply_carries_the_pages_its_turn_published(
             origin=artifact_store.PublishOrigin("web", thread_key(thread.id), str(message.id)),
             new_link=False,
             now=NOW,
+            limits=ArtifactPagesSettings(),
         )
         principal = await principal_of(session, ws.person, "member")
 

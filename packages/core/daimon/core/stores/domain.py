@@ -1866,6 +1866,16 @@ DataAccess = Literal["off", "read", "write"]
 """What a page's own code may do with its shared data; tools may always read and write."""
 
 
+class CollectionRule(BaseModel):
+    """What a page's viewers may do in one collection: `own` is the documents they created.
+    Managers and tools are not bound by it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    read: Literal["all", "own"] = "all"
+    write: Literal["all", "own", "none"] = "all"
+
+
 class ArtifactRow(BaseModel):
     """An artifact page. `link_secret` is the decrypted secret of a public page's link."""
 
@@ -1891,6 +1901,7 @@ class ArtifactRow(BaseModel):
     current_version: int
     size_bytes: int
     data_revision: int
+    collection_rules: dict[str, CollectionRule] = Field(default_factory=dict[str, CollectionRule])
     created_at: datetime
     updated_at: datetime
 
@@ -1922,6 +1933,8 @@ class ArtifactDocumentRow(BaseModel):
     size_bytes: int
     updated_by: str | None
     updated_by_account_id: uuid.UUID | None
+    created_by_account_id: uuid.UUID | None
+    revision: int
     created_at: datetime
     updated_at: datetime
 
