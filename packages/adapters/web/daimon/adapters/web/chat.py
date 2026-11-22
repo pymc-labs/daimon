@@ -197,9 +197,10 @@ async def post_message(
     message_id: uuid.UUID,
     content: str,
     attachments: tuple[WebAttachment, ...] = (),
+    from_page: bool = False,
 ) -> StreamingResponse:
     """Save the person's message and stream the turn that answers it, metered and gated
-    as every web chat turn is."""
+    as every web chat turn is. `from_page`: a page's code wrote it (`daimon.ask`)."""
     live = turns_of(runtime)
     if live.draining:
         raise HTTPException(status_code=503, detail="Restarting. Try again in a moment.")
@@ -213,7 +214,7 @@ async def post_message(
                 thread_id=thread.id,
                 message_id=message_id,
                 content=content,
-                blocks=WebMessageBlocks(attachments=attachments),
+                blocks=WebMessageBlocks(attachments=attachments, from_page=from_page),
             )
         except LookupError:
             raise HTTPException(status_code=409, detail="This message was already sent.") from None
@@ -462,6 +463,9 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(status_code=422, detail="Write a message first.")
         async with runtime.sessionmaker() as db:
             thread = await thread_of(db, caller, session_id)
+        if thread.artifact_id is not None:
+            # Only the page writes here, so its turns never carry the person's own words.
+            raise HTTPException(status_code=409, detail="Ask from the page.")
         current = live.streams.get(thread.id)
         if current is not None and current.message_id == body.id:
             return sse_response(current)  # a retried post re-attaches

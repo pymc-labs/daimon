@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import anthropic
 import structlog
@@ -85,6 +85,7 @@ from daimon.core.turn.slots import holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_origin import PageOrigin, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
+from daimon.core.untrusted import render_untrusted
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key, with_spend_person
 from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -92,6 +93,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
+
+
+PAGE_ASK_ORIGIN: Final = "page"
+"""An ask thread's turns (`daimon.ask`): attended, but no person's own message."""
+
+
+def said(message: WebMessageRow) -> str:
+    """The message as the agent reads it: a page's text arrives as untrusted page text."""
+    if not message.blocks.from_page:
+        return message.content
+    return render_untrusted(message.content, source="artifact_page", tag="page_text")
 
 
 class WebTurns:
@@ -321,7 +333,8 @@ class WebTurns:
                 surface=Surface.WEB,
                 principal_platform=principal.platform,
                 spend_person=principal.spend_person,
-                origin="chat",
+                # A page's ask is no person's own message: person-only tools refuse it.
+                origin="chat" if thread.artifact_id is None else PAGE_ASK_ORIGIN,
             )
         except (
             MissingTurnConfigError,
@@ -444,7 +457,8 @@ class WebTurns:
             is_setup=config.thread_binding_kind == "setup",
             sender_foreign=admission.hold is not None and admission.hold.client,
             shared_channel=admission.shared_channel,
-            message_text=message.content,
+            # Page text never settles the person's pending previews or grants.
+            message_text=None if message.blocks.from_page else message.content,
             platform_channel_id=key,
             platform_message_id=str(message.id),
         ) as origin:
@@ -462,7 +476,7 @@ class WebTurns:
                 async with self.sessionmaker() as session:
                     earlier = await chat_store.list_messages(session, thread_id=thread.id)
                 previous = [
-                    TranscriptTurn(role="user" if m.role == "user" else "agent", text=m.content)
+                    TranscriptTurn(role="user" if m.role == "user" else "agent", text=said(m))
                     for m in earlier
                     if m.seq < message.seq and m.content
                 ]
@@ -470,7 +484,7 @@ class WebTurns:
                     bounded_turns(previous, admission.dm_history),
                     from_agent_name=admission.agent.name,
                 )
-                return f"{controls}\n{history}\n\n{prefix}{message.content}"
+                return f"{controls}\n{history}\n\n{prefix}{said(message)}"
 
             outcome = await run_prepared_turn(
                 deps,
@@ -479,7 +493,7 @@ class WebTurns:
                 platform="web",
                 thread_id=key,
                 external_user_id=principal.external_id,
-                user_message=f"{controls}\n\n{prefix}{message.content}",
+                user_message=f"{controls}\n\n{prefix}{said(message)}",
                 request_text=message.content,
                 request_ref=str(message.id),
                 lifecycle=lifecycle,

@@ -2014,6 +2014,8 @@ class WebMessageBlocks(BaseModel):
     card: WebCard | None = None
     # Artifacts this reply's turn published (`artifact_pages.published_in`).
     artifacts: tuple[WebArtifactRef, ...] = ()
+    # A page's code wrote this message (`daimon.ask`), not the person: untrusted text.
+    from_page: bool = False
 
 
 WebMessageStatus = Literal["running", "done", "stopped", "interrupted"]

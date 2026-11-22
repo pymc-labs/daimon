@@ -72,6 +72,7 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
       }
     }
   }
+  let askSpent = false;
   window.addEventListener("message", async (event) => {
     const msg = event.data;
     if (event.source !== frame.contentWindow || !msg || typeof msg !== "object" || Array.isArray(msg) || msg.daimon !== 1) return;
@@ -94,11 +95,19 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
     if (!Number.isSafeInteger(msg.id) || !METHODS.has(msg.method)) return;
     try {
       if (msg.method === "ask") {
-        // A turn runs only on a click or key press, never on page load or a timer.
-        if (!navigator.userActivation?.isActive) {
+        // One turn per click or key press in the page, never on load, a timer or a tab in
+        // the background: the activation is fresh, in this frame, and no earlier ask's.
+        const active = () => navigator.userActivation?.isActive === true;
+        if (askSpent || !active() || !document.hasFocus() || document.activeElement !== frame) {
           reply({ error: { code: "forbidden", message: "Ask the agent from a click." } });
           return;
         }
+        askSpent = true;
+        const rearm = setInterval(() => {
+          if (active()) return;
+          askSpent = false;
+          clearInterval(rearm);
+        }, 250);
         reply({ result: await ask(msg.params, (text) => reply({ progress: text })) });
         return;
       }

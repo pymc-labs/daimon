@@ -81,6 +81,13 @@ async def get_ask_thread(
     return None if orm is None else WebThreadRow.model_validate(orm)
 
 
+async def unlink_ask_thread(session: AsyncSession, *, thread_id: uuid.UUID) -> None:
+    """The thread stops being its page's ask thread and stays an ordinary chat."""
+    await session.execute(
+        update(WebThread).where(WebThread.id == thread_id).values(artifact_id=None)
+    )
+
+
 async def list_threads(
     session: AsyncSession,
     *,

@@ -258,7 +258,7 @@ export function ChatView() {
             )}
             {out && card}
             {!out && notice && <MonitoringNotice notice={notice} onDismiss={closeNotice} />}
-            {agent && (
+            {agent && !session?.artifact && (
               <Composer
                 key={id} onSend={(t, f) => { stick.current = true; send(qc, id!, t, f) }} onStop={() => stop(id!)} busy={busy} disabled={out} canAttach={can("files.attach")} autoFocus
                 placeholder={out ? "Out of credit" : `Message ${agent.name}`}

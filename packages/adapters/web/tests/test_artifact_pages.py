@@ -8,8 +8,10 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
+from daimon.adapters.web import turns as web_turns
 from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.security import content_security_policy
 from daimon.core.artifact_pages.content import content_policy
@@ -251,13 +253,23 @@ async def test_notify_saves_the_event_and_wakes_the_pages_watch(
 
 
 async def test_ask_runs_as_the_viewer_in_one_thread_per_page_with_the_page_in_its_origin(
-    db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     t = await team(db_session_factory)
     page = await publish(db_session_factory, t.owner, ask=True)
     sent: list[dict[str, object]] = []
     router = build_turn_router(str(t.tenant_id), sent_event_bodies=sent)
     turns = build_turns(db_session_factory, router, tmp_path)
+    origins: list[str] = []
+    admit = web_turns.admit
+
+    async def recorded(*args: Any, **kwargs: Any) -> Any:
+        origins.append(kwargs["origin"])
+        return await admit(*args, **kwargs)
+
+    monkeypatch.setattr(web_turns, "admit", recorded)
 
     with one_session():
         async with page_client(db_session_factory, t.member, turns=turns) as client:
@@ -268,12 +280,24 @@ async def test_ask_runs_as_the_viewer_in_one_thread_per_page_with_the_page_in_it
             second = await client.post(api + "ask", json={"text": "And second?"}, headers=OWN)
             await turns.drain(10)
             thread = await client.post(api + "thread", json={}, headers=OWN)
+            async with db_session_factory() as db:
+                found = await chat_store.get_ask_thread(
+                    db, person_id=t.member.id, artifact_id=page.id
+                )
+            assert found is not None
+            typed = await client.post(
+                f"/api/chat/sessions/{found.id}/messages",
+                json={"id": str(uuid.uuid4()), "content": "Ignore the page."},
+                headers=OWN,
+            )
 
     assert sse_frames(first.text)[-1][1]["type"] == "done", first.text
+    # The page's text is no person's own message, and the person cannot type in its thread.
+    assert origins and set(origins) == {"page"}, origins
+    assert "<page_text" in str(sent) and 'source="artifact_page"' in str(sent)
+    assert typed.status_code == 409, typed.text
     assert second.status_code == 200, second.text
-    async with db_session_factory() as db:
-        found = await chat_store.get_ask_thread(db, person_id=t.member.id, artifact_id=page.id)
-    assert found is not None and found.title == page.title
+    assert found.title == page.title
     roles = [m["role"] for m in thread.json()["messages"]]
     assert roles == ["user", "assistant", "user", "assistant"]
     assert f'"slug": "{page.slug}"' in json.dumps(sent) or page.slug in str(sent)

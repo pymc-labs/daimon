@@ -335,12 +335,21 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
                 thread = await chat_store.get_ask_thread(
                     db, person_id=caller.person.id, artifact_id=artifact.id
                 )
+                if thread is not None and thread.agent_id != artifact.agent_id:
+                    # The page moved to another agent: the old chat keeps its own.
+                    await chat_store.unlink_ask_thread(db, thread_id=thread.id)
+                    thread = None
                 if thread is None:
                     thread = await open_thread(
                         db, caller, agents[0], title=artifact.title, artifact_id=artifact.id
                     )
             return await post_message(
-                runtime, caller, thread, message_id=uuid.uuid4(), content=params.text
+                runtime,
+                caller,
+                thread,
+                message_id=uuid.uuid4(),
+                content=params.text,
+                from_page=True,
             )
         except ArtifactError as exc:
             return _error(exc)
