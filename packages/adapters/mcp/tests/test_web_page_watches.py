@@ -16,7 +16,7 @@ from daimon.adapters.mcp.tools import artifacts as page_tools
 from daimon.adapters.mcp.tools import watches as tools
 from daimon.adapters.mcp.watch_polling import PollAccessRevoked, read_page_data
 from daimon.core.artifact_pages.access import PageChange
-from daimon.core.artifact_pages.documents import DocumentWrite
+from daimon.core.artifact_pages.documents import CollectionRule, DocumentWrite
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.membership import Membership
@@ -229,6 +229,68 @@ async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
         await read_page_data(runtime, watch(other))
 
 
+async def test_a_page_data_poll_by_a_viewer_reads_only_their_documents_under_an_own_rule(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A watch owner who only views the page is bound by its rule, as in `artifact_db_query`."""
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        owner, viewer = await make_account(db, tenant=tenant), await make_account(db, tenant=tenant)
+        await make_web_person(db, tenant=tenant, account=viewer, email="viewer@example.com")
+        page = await store.publish(
+            db,
+            tenant_id=tenant.id,
+            agent_id="agent-web",
+            account_id=owner.id,
+            is_admin=False,
+            slug="votes",
+            title="Votes",
+            html="<p>Votes</p>",
+            change=PageChange(collection_rules={"ballots": CollectionRule(read="own")}),
+            origin=None,
+            new_link=False,
+            now=datetime.now(UTC),
+            limits=ArtifactPagesSettings(),
+        )
+        for doc_id, account in (("b1", owner), ("b2", viewer)):
+            await store.write_doc(
+                db,
+                page,
+                "ballots",
+                doc_id,
+                DocumentWrite(data={"by": doc_id}),
+                by="agent",
+                account_id=account.id,
+                rule=None,
+                now=datetime.now(UTC),
+                limits=ArtifactPagesSettings(),
+            )
+    runtime = cast(
+        Any,
+        SimpleNamespace(
+            session_factory=db_session_factory,
+            settings=SimpleNamespace(artifact_pages=ArtifactPagesSettings()),
+        ),
+    )
+    state = {"tool": "artifact_db_query", "arguments": {"slug": "votes", "collection": "ballots"}}
+
+    def rows(account: Any) -> Any:
+        return read_page_data(
+            runtime,
+            cast(
+                Any,
+                SimpleNamespace(
+                    tenant_id=tenant.id, owner_account_id=account.id, source_state=state
+                ),
+            ),
+        )
+
+    assert await rows(viewer) == {"rows": [{"id": "b2", "data": {"by": "b2"}}]}, "own only"
+    assert await rows(owner) == {
+        "rows": [{"id": "b1", "data": {"by": "b1"}}, {"id": "b2", "data": {"by": "b2"}}]
+    }, "the owner reads all"
+
+
 @pytest.mark.parametrize("platform", ["web", "slack", "teams"])
 async def test_an_admin_is_proven_only_in_a_turn_a_person_attends(
     platform: str, monkeypatch: pytest.MonkeyPatch
@@ -243,7 +305,8 @@ async def test_an_admin_is_proven_only_in_a_turn_a_person_attends(
     admin = auth_identity(account, tenant, platform=platform, chat_session_id=chat)
     member = auth_identity(account, tenant, Role.USER, platform=platform, chat_session_id=chat)
     unattended = SimpleNamespace(attended=False)
-    attended = SimpleNamespace(attended=True)
+    attended = SimpleNamespace(attended=True, human_invocation=True)
+    page_ask = SimpleNamespace(attended=True, human_invocation=False)
     lookup = AsyncMock(return_value=attended)
     monkeypatch.setattr(tools.turn_origins, "get_session_origin", lookup)
     for auth, ok in ((admin, True), (member, False)):
@@ -255,8 +318,9 @@ async def test_an_admin_is_proven_only_in_a_turn_a_person_attends(
         else:
             with pytest.raises(ToolError, match="Only an admin"):
                 await raised
-    lookup.return_value = unattended
-    with pytest.raises(ToolError, match="Only an admin"):
-        await tools.admin_approval(
-            runtime, admin, permanent=False, max_turns_per_day=48, check_ceiling=False
-        )
+    for refused in (unattended, page_ask):
+        lookup.return_value = refused
+        with pytest.raises(ToolError, match="Only an admin"):
+            await tools.admin_approval(
+                runtime, admin, permanent=False, max_turns_per_day=48, check_ceiling=False
+            )

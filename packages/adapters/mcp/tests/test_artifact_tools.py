@@ -19,6 +19,7 @@ from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools import artifacts as artifact_tools
 from daimon.adapters.mcp.tools import watches as watch_tools
 from daimon.adapters.mcp.tools.artifacts import (
+    Written,
     hub_call,
     list_impl,
     person_call,
@@ -467,6 +468,72 @@ async def test_a_members_agent_follows_the_collection_rules_a_manager_is_free_of
         )
 
 
+async def test_a_members_agent_deletes_only_what_the_collection_rule_lets_it(
+    world: World,
+) -> None:
+    """A delete is a write: under `write: own` a member's agent removes only that member's
+    document, under `write: none` none, while the page's owner removes any."""
+    await put_page(
+        world,
+        collection_rules={
+            "own": CollectionRule(write="own"),
+            "frozen": CollectionRule(write="none"),
+        },
+    )
+    async with world.factory.begin() as db:
+        member = await make_account(db, tenant=world.tenant)
+        await make_platform_principal(
+            db, platform="discord", external_id="456", tenant=world.tenant, account=member
+        )
+        page = await store.get_by_slug(db, tenant_id=world.tenant.id, slug="votes")
+        assert page is not None
+        for collection, doc_id, account in (
+            ("own", "ada", world.account),
+            ("own", "mine", member),
+            ("frozen", "mine", member),
+        ):
+            await store.write_doc(
+                db,
+                page,
+                collection,
+                doc_id,
+                DocumentWrite(data={"by": doc_id}),
+                by="member",
+                account_id=account.id,
+                rule=None,
+                now=datetime.now(UTC),
+                limits=LIMITS,
+            )
+    theirs = auth_identity(
+        member.id,
+        world.tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="456",
+        external_id=world.tenant.external_id,
+        chat_session_id="grant",
+    )
+
+    async def delete(auth: AuthIdentity, collection: str, doc_id: str) -> Written:
+        return await write_impl(
+            world.runtime,
+            auth,
+            slug="votes",
+            collection=collection,
+            doc_id=doc_id,
+            data=None,
+            mode="set",
+        )
+
+    with pytest.raises(ToolError, match="only their own"):
+        await delete(theirs, "own", "ada")
+    with pytest.raises(ToolError, match="read-only"):
+        await delete(theirs, "frozen", "mine")
+    assert (await delete(theirs, "own", "mine")).deleted, "a member removes their own"
+    assert (await delete(world.auth, "own", "ada")).deleted, "the owner removes any"
+    assert (await delete(world.auth, "frozen", "mine")).deleted, "and under a read-only rule"
+
+
 async def test_a_turn_an_outside_pages_event_woke_cannot_write_to_an_outside_page(
     world: World, monkeypatch
 ) -> None:
@@ -492,6 +559,41 @@ async def test_a_turn_an_outside_pages_event_woke_cannot_write_to_an_outside_pag
         assert await write("board"), "a workspace page takes the write"
     async with turn(world):
         assert await write("votes"), "a person's own turn is not checked"
+
+
+async def test_an_agent_shares_a_visitor_only_the_person_who_invited_them_may_add(
+    world: World,
+) -> None:
+    """A page's settings change through the agent holds the rule the app holds: a visitor
+    another member invited is added by that member or an admin, not by anyone else."""
+    await put_page(world, access="people")
+    async with world.factory.begin() as db:
+        stranger = await make_account(db, tenant=world.tenant)
+        theirs, mine = [
+            await web_people.create_invited(
+                db,
+                person_id=uuid.uuid4(),
+                tenant_id=world.tenant.id,
+                account_id=(await make_account(db, tenant=world.tenant)).id,
+                kind="visitor",
+                display_name=name,
+                workspace_name="Acme",
+                email=f"{name}@example.com",
+                invite_id=uuid.uuid4(),
+                invited_by_account_id=inviter.id,
+            )
+            for name, inviter in (("theirs", stranger), ("mine", world.account))
+        ]
+    async with turn(world) as origin_id:
+        by = await person_call(world.runtime, world.auth, origin_id)
+        with pytest.raises(ToolError, match="An admin needs to share with theirs@example.com"):
+            await publish_impl(
+                world.runtime, world.auth, by=by, slug="votes", people=[str(theirs.id)]
+            )
+        page = await publish_impl(
+            world.runtime, world.auth, by=by, slug="votes", people=[str(mine.id)]
+        )
+    assert [p.id for p in page.people] == [mine.id], "only the member's own visitor is added"
 
 
 async def test_a_chat_member_who_never_opened_the_app_may_be_an_editor(world: World) -> None:
