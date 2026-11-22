@@ -87,7 +87,7 @@ def register_routine_run_tool(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def report_routine_problem(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, category: RoutineProblem, note: str
     ) -> RoutineProblemReported:
-        """Tell the workspace admins this routine run could not do its task, and why.
+        """Tell the admins this routine run could not do its task, and why.
 
         Only inside a routine run, once, when something kept you from the task. `note` is
         one short line on what blocked you (at most 300 characters), with no private

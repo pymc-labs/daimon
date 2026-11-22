@@ -132,7 +132,7 @@ def register_ops_issues_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 agent_names=names,
             )
             if detail is None:
-                raise ToolError("This workspace has no such issue.")
+                raise ToolError("No such issue here.")
             rows = await ops.load_issue_events(
                 session,
                 tenant_id=auth.tenant_id,

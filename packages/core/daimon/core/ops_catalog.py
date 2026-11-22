@@ -133,7 +133,7 @@ _REASON_WORDS: Final[Mapping[str, str]] = {
     "ceiling": "Ran too long",
     "timeout": "Timed out",
     "connection_lost": "Connection lost",
-    "session_terminated": "Session ended",
+    "session_terminated": "Ended early",
     "mcp_degraded_empty": "Tools were down",
     "retrying_unsettled": "Still retrying",
     "rate_limited": "Rate limited",

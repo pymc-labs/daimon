@@ -532,7 +532,7 @@ task.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `report_routine_problem` | all callers | Tell the workspace admins this routine run could not do its task, and why. |
+| `report_routine_problem` | all callers | Tell the admins this routine run could not do its task, and why. |
 | `run_routine` | all callers | Run a routine now, ahead of its schedule; its own schedule continues after. |
 
 ## `routines`
@@ -584,7 +584,7 @@ updates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `add_server_skill` | all callers | Only for the connected data server: list what it serves, or take one of its offers by name or URI into the library, kept current with that server. |
+| `add_server_skill` | all callers | Only for the connected data server: list the skills it offers, or take one by name or URI into the library, kept current with that server. |
 | `apply_server_skill_update` | all callers | Give an agent the server skill update its model provider check held back. |
 | `approve_server_skill_update` | admin only | Approve the update waiting on a server skill, given as its ``pending_digest``. |
 | `check_server_skill` | admin only | Check a server skill for an update now. |

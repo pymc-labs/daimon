@@ -287,7 +287,7 @@
     }),
     'add_server_skill': dict({
       'description': '''
-        Only for the connected data server: list what it serves, or take one of its offers
+        Only for the connected data server: list the skills it offers, or take one
         by name or URI into the library, kept current with that server. A person confirms on
         a card, and you pass your ``origin_context_id``. Not for any other source, nor for giving
         an agent what the library already holds.
@@ -7984,7 +7984,7 @@
     }),
     'report_routine_problem': dict({
       'description': '''
-        Tell the workspace admins this routine run could not do its task, and why.
+        Tell the admins this routine run could not do its task, and why.
         <blank line>
         Only inside a routine run, once, when something kept you from the task. `note` is
         one short line on what blocked you (at most 300 characters), with no private
