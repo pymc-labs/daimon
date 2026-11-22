@@ -61,6 +61,7 @@ def _set_up() -> Settings:
             "compute": ComputeSettings(
                 enabled=True, deployment_id="d", api_token=SecretStr("c" * 32), org_slug="o"
             ),
+            "web": WebSettings(public_url=HttpUrl("https://app.example.com/")),
         }
     )
 

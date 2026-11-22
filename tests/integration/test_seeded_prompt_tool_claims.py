@@ -33,14 +33,17 @@ from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
+    CryptoSettings,
     DatabaseSettings,
     DiscordSettings,
     McpSettings,
     NotebookSettings,
     Settings,
+    WebSettings,
 )
 from daimon.core.defaults.loader import (
     load_agent_specs,
@@ -184,6 +187,9 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
             notebook=NotebookSettings(
                 host_url=HttpUrl("http://notebook.test:8001"), admin_secret=SecretStr("test")
             ),
+            # The artifact tools are offered only where pages have an address and a key.
+            web=WebSettings(public_url=HttpUrl("https://app.test/")),
+            crypto=CryptoSettings(keys=(SecretStr(Fernet.generate_key().decode()),)),
         ),
         sessionmaker=sessionmaker,
         anthropic=build_fake_anthropic(MARouter().dispatch),
