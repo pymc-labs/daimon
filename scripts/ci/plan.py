@@ -27,6 +27,8 @@ from typing import Any
 FILES: dict[str, str] = {
     ".env.example": "generated",
     "docs/configuration.md": "generated",
+    # Its claims test checks the page against the limits and roles in code.
+    "docs/artifacts.md": "parity",
     "docs/mcp-tools.md": "mcp-catalogue",
     "docs/slack-app-manifest.yaml": "slack-manifest",
     "docs/teams-app-manifest.yaml": "teams-manifest",
