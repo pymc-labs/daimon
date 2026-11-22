@@ -1159,7 +1159,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "artifacts",
         "Artifacts",
         "The agent can publish web pages that people open, use and share, with data they "
-        "save on the page. Off removes the artifact tools here and the Artifacts page.",
+        "save on the page. Off removes the artifact tools here and takes its pages offline.",
         requires=("web_public_url",),
     ),
     _capability(

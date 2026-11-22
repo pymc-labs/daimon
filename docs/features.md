@@ -986,7 +986,7 @@ The agent can publish a report as a web page and delete it later. Off removes th
 
 ## Artifacts
 
-The agent can publish web pages that people open, use and share, with data they save on the page. Off removes the artifact tools here and the Artifacts page.
+The agent can publish web pages that people open, use and share, with data they save on the page. Off removes the artifact tools here and takes its pages offline.
 
 | | |
 | --- | --- |
