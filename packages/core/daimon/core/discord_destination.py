@@ -72,7 +72,12 @@ def _timed_out(member: _Json) -> bool:
 
 
 class DiscordRestDestinationResolver:
-    """A `DestinationResolver` for one guild and one owner, over the bot's REST credential."""
+    """A `DestinationResolver` for one guild and one owner, over the bot's REST credential.
+
+    With `defer_bot_access`, a channel the bot cannot see yet is accepted unchecked (its
+    guild and the owner's rights are re-read when it first runs). A thread still has to be
+    seen, so its parent is known; only a parent the bot cannot see is accepted.
+    """
 
     def __init__(
         self,
@@ -81,7 +86,9 @@ class DiscordRestDestinationResolver:
         guild_id: str,
         owner_id: str,
         transport: httpx.AsyncBaseTransport | None = None,
+        defer_bot_access: bool = False,
     ):
+        self._defer = defer_bot_access
         self._bot_token = bot_token
         self._guild_id = guild_id
         self._owner_id = owner_id
@@ -109,6 +116,8 @@ class DiscordRestDestinationResolver:
     ) -> Placement:
         guild = self._guild_id
         channel = await self._get(client, f"channels/{destination_id}")
+        if channel is None and self._defer and kind == "channel":
+            return Placement(channel_id=destination_id)
         if channel is None or channel.get("id") != destination_id:
             raise _unverifiable(destination_id)
         if channel.get("guild_id") != guild:
@@ -125,6 +134,8 @@ class DiscordRestDestinationResolver:
         if is_thread:
             parent_id = _snowflake(channel.get("parent_id"))
             parent_channel = await self._get(client, f"channels/{parent_id}") if parent_id else None
+            if parent_channel is None and parent_id and self._defer:
+                return Placement(channel_id=destination_id, parent_channel_id=parent_id)
             if (
                 parent_channel is None
                 or parent_channel.get("id") != parent_id

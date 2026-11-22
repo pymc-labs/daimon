@@ -41,6 +41,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -104,6 +105,7 @@ from daimon.core.tool_safety import (
 )
 from daimon.core.turn.approvals import agent_rule_lookup
 from daimon.core.turn_hold import TurnHold
+from fastmcp.exceptions import ToolError
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
@@ -292,9 +294,18 @@ async def poll_read_place(
         raise PollAccessRevoked("Missing owner identity")
     async with rest_client(_require_bot_token(runtime)) as client:
         _, member = await _resolve_member(client, auth.external_id, auth.platform_user_id)
-        channel = _require_guild_channel(
-            await _resolve_channel(client, resource_id), auth.external_id
-        )
+        try:
+            resolved = await _resolve_channel(client, resource_id)
+        except (discord.Forbidden, ToolError) as err:
+            # The bot's own read of the channel. A missing channel is `ToolError`.
+            if (
+                isinstance(err, discord.Forbidden) or str(err) == "channel not found"
+            ) and await bot_access_wait_on(
+                runtime.session_factory, tenant_id=auth.tenant_id, platform="discord"
+            ):
+                raise BotAccessUnavailable from None
+            raise
+        channel = _require_guild_channel(resolved, auth.external_id)
         if isinstance(channel, discord.Thread):
             await _check_thread_view(client, channel, member, auth.platform_user_id)
             parent = await _ensure_thread_parent_cached(channel)
@@ -687,8 +698,9 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 )
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
-    except SourceBusy:
-        # This server's own budget is spent. Step back in the claim queue, or due
+    except (SourceBusy, BotAccessUnavailable):
+        # This server's own budget is spent, or the bot cannot read the source yet (not an
+        # error, not a revocation). Step back in the claim queue, or due
         # watches on one busy server would fill every claim and starve the rest.
         until = datetime.now(UTC) + timedelta(seconds=BUSY_DEFER_S + random.uniform(0, 30))
         async with runtime.session_factory.begin() as db:
@@ -718,8 +730,6 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
         # Never log remote content, arguments, credentials, lease capabilities or
         # exception text. A remote isError or transport failure (McpCallError) is
         # transient: it backs off and stops the watch only after a day of errors.
-        from fastmcp.exceptions import ToolError
-
         capped = isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "54000"
         async with runtime.session_factory.begin() as db:
             await poll_failed(

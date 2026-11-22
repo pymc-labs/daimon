@@ -41,6 +41,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
+from daimon.core.bot_access import BOT_ACCESS_UNAVAILABLE, bot_access_wait_on
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.dm_access import roles_by_membership, sender_admits
@@ -492,6 +493,13 @@ def make_discord_routine_poster(
             )
 
         async def fallback(reason: str) -> DeliveryOutcome:
+            if reason == BOT_ACCESS_UNAVAILABLE:
+                # A channel the bot cannot see waits quietly: no DM, and the next run retries.
+                if await bot_access_wait_on(
+                    sessionmaker, tenant_id=row.tenant_id, platform="discord"
+                ):
+                    return DeliveryOutcome(status="skipped", note=reason)
+                reason = "destination_unavailable"
             if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(row, reason, tenant.external_id, fallback_guard)
@@ -537,6 +545,8 @@ def make_discord_routine_poster(
             return await fallback("destination_unavailable")
         try:
             channel = await fetch_channel(int(target.channel_id))
+        except (discord.Forbidden, discord.NotFound):
+            return await fallback(BOT_ACCESS_UNAVAILABLE)
         except discord.HTTPException:
             return await fallback("destination_unavailable")
         placement = await _placement(channel, fetch_channel)

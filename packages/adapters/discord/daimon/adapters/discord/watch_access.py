@@ -8,7 +8,9 @@ objects are parsed into a new, empty ConnectionState; no gateway guild, role,
 member, channel or thread object (or cache-derived attribute) supplies authority.
 Tenant and destination IDs come from the persisted binding. A missing, invalid
 or failed REST proof refuses output without parent fallback. Only proved loss of
-access pauses the watch; transient transport failures refuse that output alone.
+access pauses the watch; transient transport failures refuse that output alone. With
+`bot_access_wait` on, a channel the bot itself cannot fetch raises `BotAccessUnavailable`
+instead: the wake waits and nothing is paused.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from daimon.core.audience_gate import PostAudience
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on
 from daimon.core.continuity.continuation import WATCH_REASONS
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
@@ -36,6 +39,21 @@ class WatchThreadAccess:
 
 def _discard_event(*args: object, **kwargs: object) -> None:
     pass
+
+
+async def _bot_fetch(
+    sessions: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    guild: discord.Guild,
+    channel_id: int,
+) -> discord.abc.GuildChannel | discord.Thread:
+    """The bot's own read of a channel; with the wait on, a refusal means wait, not revoked."""
+    try:
+        return await guild.fetch_channel(channel_id)
+    except (discord.Forbidden, discord.NotFound):
+        if await bot_access_wait_on(sessions, tenant_id=row.tenant_id, platform="discord"):
+            raise BotAccessUnavailable from None
+        raise
 
 
 async def require_watch_thread_access(
@@ -69,7 +87,7 @@ async def require_watch_thread_access(
         guild._roles = {role.id: role for role in roles}  # pyright: ignore[reportPrivateUsage]
         if not any(role.id == guild_id for role in roles):
             raise ValueError("Watch guild roles are incomplete")
-        current = await guild.fetch_channel(int(row.thread_id))
+        current = await _bot_fetch(sessions, row, guild, int(row.thread_id))
         if (
             not isinstance(current, discord.Thread)
             or str(current.id) != row.thread_id
@@ -80,7 +98,7 @@ async def require_watch_thread_access(
         member = await guild.fetch_member(int(row.requester_external_user_id))
         if str(member.id) != row.requester_external_user_id:
             raise ValueError("Watch member binding changed")
-        parent = await guild.fetch_channel(thread.parent_id)
+        parent = await _bot_fetch(sessions, row, guild, thread.parent_id)
         if (
             not isinstance(parent, (discord.TextChannel, discord.ForumChannel))
             or str(parent.id) != row.parent_channel_id
@@ -167,7 +185,7 @@ async def require_watch_parent_access(
         member = await guild.fetch_member(int(row.requester_external_user_id))
         if str(member.id) != row.requester_external_user_id:
             raise ValueError("Watch member binding changed")
-        parent = await guild.fetch_channel(int(row.parent_channel_id))
+        parent = await _bot_fetch(sessions, row, guild, int(row.parent_channel_id))
         if not isinstance(parent, discord.TextChannel) or str(parent.id) != row.parent_channel_id:
             reason = "Watch paused: the channel it starts threads in is unavailable."
         else:

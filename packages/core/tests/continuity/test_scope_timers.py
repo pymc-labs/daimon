@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core.anthropic_guard import AnthropicDisabled
+from daimon.core.bot_access import BotAccessUnavailable
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.scope_timers import dispatch_scope_timer
 from daimon.core.continuity.wakes import enqueue_wake
@@ -193,3 +194,19 @@ async def test_only_timers_run_in_a_dm_scope(
 
     with pytest.raises(ValueError, match="timers"):
         await dispatch_scope_timer(db_session_factory, row, run_timer=run)
+
+
+async def test_a_timer_for_a_channel_the_bot_cannot_reach_waits_without_costing_an_attempt(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _seed(db_session_factory)
+
+    async def run(_row: TaskContinuationRow, _seed: str) -> None:
+        raise BotAccessUnavailable
+
+    await dispatch_scope_timer(db_session_factory, row, run_timer=run)
+
+    again = await _read(db_session_factory, row.idempotency_key)
+    assert again.status == "pending" and again.attempts == row.attempts
+    assert again.available_at is not None
+    assert again.available_at > datetime.now(UTC) + timedelta(minutes=10)

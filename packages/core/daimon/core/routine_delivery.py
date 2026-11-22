@@ -148,6 +148,7 @@ SkipReason = Literal[
     "invoker_not_allowed",
     "access_policy_unreadable",
     "destination_unavailable",
+    "bot_access_unavailable",
     "post_failed",
     "no_result",
     "own_agents_only",

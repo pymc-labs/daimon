@@ -1119,6 +1119,21 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         platforms=_DISCORD,
         authority=_SERVER_ADMIN,
     ),
+    FeatureSpec(
+        key="bot_access_wait",
+        name="Wait for bot access",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace",),
+        binds="turn",
+        doc=(
+            "Work for a channel Daimon cannot reach waits, without failing, and runs once it can."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SERVER_ADMIN,
+    ),
     _capability(
         "compute",
         "Cloud computers",

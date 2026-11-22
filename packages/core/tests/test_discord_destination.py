@@ -29,7 +29,7 @@ def _deny_everyone(bits):
     return {"id": GUILD, "type": 0, "allow": "0", "deny": str(bits)}
 
 
-def _resolver(channels, *, everyone=SPEAK, thread_members=(), owner_id="999"):
+def _resolver(channels, *, everyone=SPEAK, thread_members=(), owner_id="999", defer=False):
     """A resolver over canned REST answers: guild, roles, member and the given channels."""
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -49,7 +49,11 @@ def _resolver(channels, *, everyone=SPEAK, thread_members=(), owner_id="999"):
         return httpx.Response(404, json={})
 
     return DiscordRestDestinationResolver(
-        "token", guild_id=GUILD, owner_id=OWNER, transport=httpx.MockTransport(handle)
+        "token",
+        guild_id=GUILD,
+        owner_id=OWNER,
+        transport=httpx.MockTransport(handle),
+        defer_bot_access=defer,
     )
 
 
@@ -134,3 +138,13 @@ async def test_private_thread_needs_membership(member, allowed):
     else:
         with pytest.raises(RoutineRefused, match="can't post in 20"):
             await resolver("thread", "20")
+
+
+async def test_a_deferred_channel_the_bot_cannot_see_still_resolves():
+    """With the bot-access deferral, an unseen channel or thread parent waits instead of failing."""
+    assert await _resolver({}, defer=True)("channel", "10") == Placement(channel_id="10")
+    with pytest.raises(RoutineRefused):
+        await _resolver({})("channel", "10")
+    thread = {"20": _channel("20", kind=11, parent="10")}
+    placement = await _resolver(thread, defer=True)("thread", "20")
+    assert placement.parent_channel_id == "10"

@@ -51,6 +51,7 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.billing import BillingConfig, load_billing_config
+from daimon.core.bot_access import BOT_ACCESS_UNAVAILABLE, bot_access_blocked, bot_access_wait_on
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import (
     agent_native_provider,
@@ -784,6 +785,21 @@ async def _build_fire(
                             and lapsed_role(policy, (row.agent_name,), subject)
                             else initial.reason
                         )
+                # The bot's own access comes after every owner check, so a revoked owner
+                # still stops the routine. Waiting costs no turn and tells nobody.
+                if (
+                    policy_error is None
+                    and target is not None
+                    and await bot_access_wait_on(sm, tenant_id=row.tenant_id, platform=platform)
+                    and await bot_access_blocked(
+                        settings,
+                        sm,
+                        platform=platform,
+                        workspace_id=tenant.external_id,
+                        channel_id=routine_destination_channel(row) or target.channel_id,
+                    )
+                ):
+                    policy_error = BOT_ACCESS_UNAVAILABLE
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",

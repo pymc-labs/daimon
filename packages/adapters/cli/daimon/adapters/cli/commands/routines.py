@@ -24,6 +24,7 @@ from anthropic import APIStatusError
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import agent_invoker_roles
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.bot_access import bot_access_wait_on
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import env_admits, load_settings
 from daimon.core.cron import validated_next_slot
@@ -109,12 +110,23 @@ def create_command(
         bool, typer.Option("--paused", help="Create paused, with no next fire time scheduled.")
     ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    defer_bot_access: Annotated[
+        bool,
+        typer.Option(
+            "--defer-bot-access",
+            help="Save a channel the bot cannot see yet; it waits until the bot has access. "
+            "Needs the bot_access_wait feature on.",
+        ),
+    ] = False,
 ) -> None:
     """Create a Discord routine for --owner, who is its owner and, for dm, sole recipient.
 
     A channel or thread destination must be one the owner could post in, the same
-    checks as creating the routine in chat.
+    checks as creating the routine in chat. --defer-bot-access skips them for a channel
+    the bot cannot see yet; a thread still needs its parent channel to resolve.
     """
+    if defer_bot_access and destination == "dm":
+        raise UserFacingError("--defer-bot-access is for a channel or thread destination.")
     if (destination == "dm") != (destination_id is None):
         raise UserFacingError(
             "Give --destination-id with channel or thread, and not with dm."
@@ -146,6 +158,7 @@ def create_command(
                     paused=paused,
                     dry_run=dry_run,
                     resolver=DiscordRestMembershipResolver(bot_token),
+                    defer_bot_access=defer_bot_access,
                 )
                 return
             await run_create_dm_routine(
@@ -280,6 +293,7 @@ async def run_create_channel_routine(
     dry_run: bool = False,
     paused: bool = False,
     destination_resolver: DestinationResolver | None = None,
+    defer_bot_access: bool = False,
 ) -> None:
     """Create a routine that posts to a channel or thread, as the owner would in chat.
 
@@ -308,6 +322,10 @@ async def run_create_channel_routine(
     )
     if agent is None:
         raise UserFacingError(f"No agent named {agent_name!r} found for this tenant.")
+    if defer_bot_access and not await bot_access_wait_on(
+        rt.sessionmaker, tenant_id=tenant_id, platform="discord"
+    ):
+        raise UserFacingError("Turn on the bot_access_wait feature for this workspace first.")
     if destination_resolver is None:
         if rt.settings.discord is None:
             raise UserFacingError("Discord bot credentials are required to verify the destination.")
@@ -315,6 +333,7 @@ async def run_create_channel_routine(
             rt.settings.discord.bot_token.get_secret_value(),
             guild_id=tenant.external_id,
             owner_id=owner,
+            defer_bot_access=defer_bot_access,
         )
 
     async def stop_if_dry(_session: AsyncSession, _happened: Happened, _row: RoutineRow) -> None:
