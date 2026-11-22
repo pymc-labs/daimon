@@ -51,13 +51,13 @@ from daimon.core.dm_access import (
     lookup_dm_groups,
 )
 from daimon.core.dm_debounce import PICK_EXPIRED, PICK_SECONDS, DmBurst, debounce_seconds
+from daimon.core.dm_failures import report_dm_issue
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.monitoring import MonitoringNotice
-from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import DirectMessageRow, dm_enabled, get_conversation
 from daimon.core.stores.domain import Role
@@ -343,15 +343,27 @@ async def _explain_no_private_chat(
         log.warning(
             "slack.dm.cold_notice_failed", tenant_id=str(tenant_id), error_type=type(exc).__name__
         )
-        _report_dm_failed(sessions, tenant_id, "not_sent")
+        await _report_dm_failed(
+            sessions, tenant_id, team_id=team_id, channel_id=channel_id, user_id=user_id
+        )
 
 
-def _report_dm_failed(
-    sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, reason: str
+async def _report_dm_failed(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *,
+    team_id: str,
+    channel_id: str,
+    user_id: str,
 ) -> None:
-    """Record a DM failure as an issue; the caller logs its own line."""
-    report_ops_event(
-        sessions, OpsEvent("dm.failed", tenant_id, reason=reason, platform="slack"), logged=False
+    """Record a DM not sent as an issue, with its person and agent; the caller logs."""
+    await report_dm_issue(
+        sessions,
+        tenant_id,
+        "not_sent",
+        platform="slack",
+        route_key=f"{team_id}:{channel_id}",
+        user_id=user_id,
     )
 
 
@@ -410,7 +422,13 @@ async def handle_direct_message(
                 messages=len(left),
                 client=client is not None,
             )
-            _report_dm_failed(runtime.sessionmaker, tenant_id, "not_sent")
+            await _report_dm_failed(
+                runtime.sessionmaker,
+                tenant_id,
+                team_id=team_id,
+                channel_id=channel_id,
+                user_id=user_id,
+            )
             if client is not None:
                 with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]

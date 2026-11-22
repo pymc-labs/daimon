@@ -77,6 +77,7 @@ from daimon.core.dm_access import (
     list_routable_dm_agents,
 )
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
+from daimon.core.dm_failures import DmStage, report_dm_issue
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
@@ -86,8 +87,6 @@ from daimon.core.logging_setup import is_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.ops_catalog import OpsCode
-from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.setup_conversations import BoundAgentUnavailable
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -418,7 +417,7 @@ class DirectMessageCog(commands.Cog):
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )
-            self._report(tenant.id, "dm.failed", "discovery")
+            await self._report(tenant.id, "discovery", message)
             await message.channel.send(
                 _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
             )
@@ -430,7 +429,9 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         *,
         expected_scope_id: str | None = None,
+        tried: list[uuid.UUID] | None = None,
     ) -> DirectMessageRow | None:
+        """`tried` collects each server looked at, so a failure can name the last one."""
         if self._unloaded or not self._claim_discovery(message.author.id):
             return None
         tenants = await list_tenants_by_platform(self.bot.runtime.sessionmaker, platform="discord")
@@ -438,6 +439,8 @@ class DirectMessageCog(commands.Cog):
         denied: set[uuid.UUID] = set()
         unknown = False
         for tenant in tenants:
+            if tried is not None:
+                tried.append(tenant.id)
             found = await self._eligible(tenant, message, denied=denied)
             if found.failed:
                 return None
@@ -460,6 +463,8 @@ class DirectMessageCog(commands.Cog):
         if len(candidates) == 1 and expected_scope_id is None:
             only = candidates[0]
             if only.admission is not None:
+                if tried is not None:
+                    tried.append(only.tenant.id)
                 return await self._start(
                     message, only.tenant, only.admission, expected_scope_id=None
                 )
@@ -1245,23 +1250,27 @@ class DirectMessageCog(commands.Cog):
                 # An error no turn handled, or a cancellation: nothing left goes unheard.
                 if await self._bursts.end(key, burst):
                     await self._tell_dropped(
-                        message.channel,
+                        message,
                         reason="burst_interrupted",
                         tenant_id=found.tenant_id if found is not None else None,
                     )
 
     async def _open(self, message: discord.Message) -> DirectMessageRow | None:
         """The conversation a first message starts; None once it offered a pick or said why not."""
+        tried: list[uuid.UUID] = []
         try:
-            return await self._discover(message)
+            return await self._discover(message, tried=tried)
         except _DM_FAILURES as exc:
+            tenant_id = tried[-1] if tried else None
             log.warning(
                 "discord.dm.discovery_failed",
+                tenant_id=str(tenant_id) if tenant_id is not None else None,
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
                 user_id=str(message.author.id),
                 reason="discovery_unavailable",
             )
+            await self._report(tenant_id, "discovery", message)
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
@@ -1312,34 +1321,50 @@ class DirectMessageCog(commands.Cog):
                 error_type=type(exc).__name__,
                 user_id=str(first.author.id),
             )
-            self._report(tenant_id, "dm.failed", "reply")
+            await self._report(tenant_id, "reply", first)
             with contextlib.suppress(discord.HTTPException):
                 await first.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
             return scope_id
 
-    def _report(self, tenant_id: uuid.UUID | None, code: OpsCode, reason: str) -> None:
-        """Record a DM failure as an issue; the caller logs its own line."""
-        report_ops_event(
+    async def _report(
+        self,
+        tenant_id: uuid.UUID | None,
+        reason: DmStage | Literal["queue_full"],
+        message: discord.Message | _DmRequest,
+    ) -> None:
+        """Record a DM failure as an issue, with its person and agent; the caller logs."""
+        await report_dm_issue(
             self.bot.runtime.sessionmaker,
-            OpsEvent(code, tenant_id, reason=reason, platform="discord"),
-            logged=False,
+            tenant_id,
+            reason,
+            platform="discord",
+            route_key=str(message.channel.id),
+            user_id=str(message.author.id),
         )
 
     async def _tell_dropped(
-        self, channel: discord.abc.Messageable, *, reason: str, tenant_id: uuid.UUID | None
+        self,
+        message: discord.Message | _DmRequest,
+        *,
+        reason: str,
+        tenant_id: uuid.UUID | None,
     ) -> None:
-        """Tell the person messages taken in for a turn that will not run were not sent."""
-        reason = "process_stopping" if is_shutting_down() else reason
-        log.warning(
-            "discord.dm.dropped",
+        """Tell the person messages taken in for a turn that will not run were not sent.
+
+        A deploy stopping the process is not an issue, and an interrupted burst only
+        warns: the error that interrupted it is reported where it happened."""
+        stopping = is_shutting_down()
+        (log.info if stopping else log.warning)(
+            "discord.dm.dropped_on_stop" if stopping else "discord.dm.dropped",
             tenant_id=str(tenant_id) if tenant_id is not None else None,
-            reason=reason,
+            reason="process_stopping" if stopping else reason,
         )
-        self._report(tenant_id, "dm.failed", reason)
+        if not stopping and reason != "burst_interrupted":
+            await self._report(tenant_id, "dropped", message)
         with contextlib.suppress(discord.HTTPException):
-            await channel.send(
+            await message.channel.send(
                 embed=build_notice_embed(_DROPPED_NOTICE),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -1524,7 +1549,7 @@ class DirectMessageCog(commands.Cog):
             # Messages sent before /dm-me moved the conversation.
             self._suppress(message, "conversation_moved")
             await self._tell_dropped(
-                message.channel,
+                message,
                 reason="conversation_moved",
                 tenant_id=conversation.tenant_id if conversation is not None else None,
             )
@@ -1589,7 +1614,7 @@ class DirectMessageCog(commands.Cog):
                     path="dm",
                     reason="queue_full",
                 )
-                self._report(conversation.tenant_id, "turn.shed", "queue_full")
+                await self._report(conversation.tenant_id, "queue_full", message)
                 await message.channel.send(
                     embed=build_notice_embed(GLOBAL_CAP_NOTICE),
                     allowed_mentions=discord.AllowedMentions.none(),
@@ -1739,6 +1764,7 @@ class DirectMessageCog(commands.Cog):
                 return
             if cards and cards[-1].ended:
                 return  # the card already shows how the turn ended
+            await self._report(conversation.tenant_id, "reply", message)
             error = _error_text(
                 exc,
                 "Couldn't verify or complete this private conversation. Please retry.",

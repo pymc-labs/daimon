@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -1801,3 +1802,28 @@ async def test_a_grant_that_lists_others_hides_the_agent(db_session_factory, mon
     await cog.on_message(msg)
     assert_generic_guidance(msg, tenants)
     assert await conversation(db_session_factory) is None, "an unlisted person gets no DM"
+
+
+@pytest.mark.parametrize(
+    ("reason", "stopping", "reported"),
+    [
+        ("conversation_moved", False, ["dropped"]),
+        ("burst_interrupted", False, []),
+        ("conversation_moved", True, []),
+    ],
+)
+async def test_a_dropped_dm_is_an_issue_unless_a_deploy_or_an_interruption_dropped_it(
+    db_session_factory, monkeypatch, reason, stopping, reported
+):
+    """Deploys make no DM issues; an interrupted burst's own error is reported where it was."""
+    cog, *_ = await setup(db_session_factory, monkeypatch)
+    issues = AsyncMock()
+    monkeypatch.setattr(module, "report_dm_issue", issues)
+    monkeypatch.setattr(module, "is_shutting_down", lambda: stopping)
+    msg = dm_message(101, "one")
+    await cog._tell_dropped(msg, reason=reason, tenant_id=uuid.uuid4())
+    assert [call.args[2] for call in issues.await_args_list] == reported
+    if reported:
+        assert issues.await_args.kwargs["user_id"] == str(msg.author.id), "with its person"
+    assert sent_text(msg.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    await cog.cog_unload()

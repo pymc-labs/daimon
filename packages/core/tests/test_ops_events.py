@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core import ops_events
+from daimon.core.dm_failures import report_dm_issue
 from daimon.core.ops_catalog import clean_note, clean_reason, fingerprint_of
 from daimon.core.ops_events import OpsEvent, drain_ops_events, record_of, report_ops_event
 from daimon.core.ops_events_sweep import sweep_ops_events
@@ -25,12 +26,13 @@ from daimon.core.ops_overview import (
 )
 from daimon.core.stores import ops_events as store
 from daimon.core.stores.domain import OpsIssueGroupRow, OpsIssueStateRow
+from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.turn_outcomes import answer_stats
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
@@ -319,3 +321,44 @@ async def test_a_persons_events_go_with_their_account(db_session: AsyncSession) 
     assert await store.count_for_account(db_session, account_id=gone.id) == 1
     assert await store.delete_for_account(db_session, account_id=gone.id) == 1
     assert await store.count_for_account(db_session, account_id=kept.id) == 1, "only theirs"
+
+
+async def test_an_unanswered_dm_names_its_person_and_bound_agent(
+    db_session: AsyncSession, db_engine: AsyncEngine
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    conversation = await make_dm_conversation(db_session, tenant=tenant, account_id=account.id)
+    await create_binding(
+        db_session,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        parent_channel_id=conversation.channel_id,
+        thread_id=conversation.scope_id,
+        responder_ma_agent_id="agent_dm",
+        responder_name="helper",
+        kind="owner",
+    )
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    await report_dm_issue(
+        sm,
+        tenant.id,
+        "reply",
+        platform=tenant.platform,
+        route_key=conversation.route_key,
+        user_id=conversation.external_user_id,
+    )
+    await report_dm_issue(sm, tenant.id, "queue_full", platform=tenant.platform, user_id="nobody")
+    await drain_ops_events()
+    async with sm() as session:
+        groups = await store.list_issue_groups(
+            session, tenant_id=tenant.id, since=datetime.now(UTC) - timedelta(hours=1)
+        )
+
+    assert sorted(
+        (g.latest.code, g.latest.reason, g.latest.agent_id, g.latest.account_id) for g in groups
+    ) == [
+        ("dm.failed", "reply", "agent_dm", account.id),
+        ("turn.shed", "queue_full", None, None),
+    ], "the conversation's person and agent; an unknown person is left out"
