@@ -40,8 +40,14 @@ POLL_TOOLS = MappingProxyType(
     {
         "read_thread": PollTool("read", False, frozenset({"thread_id", "limit"})),
         "read_channel": PollTool("read", False, frozenset({"channel_id", "limit"})),
+        # A page's data, read as the watch owner; Daimon writes none of it.
+        "artifact_db_query": PollTool(
+            "read", False, frozenset({"slug", "collection", "order_by", "descending", "limit"})
+        ),
     }
 )
+#: The reader with no chat source: it never reports into what it reads.
+PAGE_DATA_TOOL = "artifact_db_query"
 
 
 def require_poll_tool(name: str) -> PollTool:
@@ -182,14 +188,39 @@ def validate_poll(
     if set(arguments) - tool.arguments or rule not in {"change", "added", "updated"}:
         raise ValueError("Unsupported poll arguments or rule")
     validate_rule(rule, key=key, evidence=evidence)
+    if not 60 <= interval <= 86400:
+        raise ValueError("Poll interval must be 60 to 86400 seconds")
+    if name == PAGE_DATA_TOOL:
+        _validate_page_query(arguments)
+        return
     identity = "thread_id" if name == "read_thread" else "channel_id"
     value = arguments.get(identity)
     canonical_source_id(value)
     limit = arguments.get("limit", 10)
     if type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("Poll read limit must be 1 to 20")
-    if not 60 <= interval <= 86400:
-        raise ValueError("Poll interval must be 60 to 86400 seconds")
+
+
+def _validate_page_query(arguments: Mapping[str, JsonValue]) -> None:
+    from daimon.core.artifact_pages.documents import build_list_query
+    from daimon.core.artifact_pages.model import ArtifactError
+
+    slug, collection = arguments.get("slug"), arguments.get("collection")
+    order_by, descending = arguments.get("order_by"), arguments.get("descending", False)
+    limit = arguments.get("limit", 20)
+    if (
+        not isinstance(slug, str)
+        or not isinstance(collection, str)
+        or not isinstance(order_by, str | None)
+        or type(descending) is not bool
+        or type(limit) is not int
+        or not 1 <= limit <= 100
+    ):
+        raise ValueError("A page poll names a page and collection and reads 1 to 100 documents")
+    try:
+        build_list_query(collection, order_by=order_by, descending=descending, limit=limit)
+    except ArtifactError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def canonical_source_id(value: object) -> str:
@@ -201,6 +232,8 @@ def canonical_source_id(value: object) -> str:
 
 def require_distinct_source(arguments: Mapping[str, object], destination: str) -> None:
     """Reporting into the source would turn each report into another firing."""
+    if "slug" in arguments:
+        return  # a page's data: no chat to report into
     source = canonical_source_id(arguments.get("thread_id", arguments.get("channel_id")))
     # A DM's scope id is no resource id, so a watch made in a DM never reports into its source.
     if destination.startswith(DM_SCOPE_PREFIX):

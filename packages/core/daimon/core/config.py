@@ -2705,6 +2705,15 @@ def _default_pollable_tools() -> list[PollableTool]:
             label=label,
         )
         for tool, label in (("read_thread", "Discord thread"), ("read_channel", "Discord channel"))
+    ] + [
+        PollableTool(
+            server="daimon-mcp",
+            tool="artifact_db_query",
+            credential="none",
+            returns_chat=False,
+            max_interval_floor_s=60,
+            label="Page data",
+        )
     ]
 
 
@@ -2746,7 +2755,8 @@ class WatchesSettings(BaseModel):
             "for MCP servers), returns_chat (required: true only for native readers, which "
             "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
             "least 60, default 300) and label (shown on the approval card). Native "
-            "entries must be read_thread or read_channel. Daimon's chat readers and chat_tools "
+            "entries must be read_thread, read_channel or artifact_db_query (a page's data, "
+            "read as the watch owner). Daimon's chat readers and chat_tools "
             "are refused on MCP servers. Credential owner polls with each watch owner's "
             "own read-only key, which they send once through a private form: for example "
             "a read-scoped API key the person creates on that server. Credential relay "
@@ -2757,7 +2767,8 @@ class WatchesSettings(BaseModel):
             "list does, and a server can still write when it says it only reads. A "
             "watch below a raised floor polls at the "
             "floor. Default (also used when the value is empty): read_thread and "
-            "read_channel on daimon-mcp, credential none, returns_chat true, floor 60. "
+            "read_channel on daimon-mcp, credential none, returns_chat true, floor 60, "
+            "and artifact_db_query with returns_chat false. "
             "Set [] to allow no polls."
         ),
     )

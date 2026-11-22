@@ -27,6 +27,7 @@ from daimon.core._models import (
 from daimon.core.config import Settings, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
+from daimon.core.continuity.poll_tools import PAGE_DATA_TOOL
 from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT
 from daimon.core.continuity.watch_projection import projection_path
 from daimon.core.errors import WatchFeatureUnreadable
@@ -77,7 +78,7 @@ PAGE_WATCH_PLATFORMS = ("discord", "slack", "teams", "web")
 #: Where a watch can report into a new thread per firing.
 NEW_THREAD_PLATFORMS = ("discord", "web")
 #: The one tool a web poll watch may check: a page's own data, read as its owner.
-WEB_POLL_TOOL = "artifact_db_query"
+WEB_POLL_TOOL = PAGE_DATA_TOOL
 #: Daily firing limits with no ceiling stored, and the hard limits no ceiling passes.
 #: The firing SQL (0164) holds the same numbers.
 DEFAULT_WATCH_CAP = 24

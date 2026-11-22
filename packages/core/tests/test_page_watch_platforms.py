@@ -13,6 +13,7 @@ from daimon.core._models import TaskContinuation
 from daimon.core.artifact_pages.keys import new_key_id, page_event_key
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import sign_page_event
+from daimon.core.continuity.poll_tools import validate_poll
 from daimon.core.stores import watches
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.identity import create_platform_principal, get_or_create_platform_principal
@@ -118,3 +119,36 @@ async def test_a_permanent_web_page_watch_reports_in_a_new_thread_as_its_linked_
         "watch_report",
         "d-owner",
     )
+
+
+async def test_a_web_watch_polls_a_pages_data(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binding = await _web_owner(db_session, monkeypatch)
+    query = {"slug": "votes", "collection": "_events", "order_by": "at", "limit": 50}
+    watch = await watches.register_poll_watch(
+        db_session,
+        binding,
+        instructions="Say when someone votes.",
+        tool=watches.WEB_POLL_TOOL,
+        arguments=query,
+        projection=".rows",
+        rule="added",
+        key=".rows[].id",
+        interval=300,
+        expires_at=datetime.now(UTC) + timedelta(days=1),
+        now=datetime.now(UTC),
+    )
+    assert (watch.platform, watch.source, watch.source_state["tool"]) == (
+        "web",
+        "poll",
+        "artifact_db_query",
+    )
+    with pytest.raises(ValueError, match="1 to 100"):
+        validate_poll(
+            watches.WEB_POLL_TOOL,
+            {**query, "limit": 500},
+            projection=".rows",
+            rule="change",
+            interval=300,
+        )
