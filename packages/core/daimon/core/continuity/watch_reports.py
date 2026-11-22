@@ -106,7 +106,9 @@ async def dispatch_watch_report(
             return
         skip_reason: str | None = None
         try:
-            async with keep_wake(sessionmaker, claim, now=now):
+            async with keep_wake(
+                sessionmaker, claim, now=now, tenant_id=row.tenant_id, kind=row.reason
+            ):
                 await run_report(row, seed)
         except AnthropicDisabled:
             log.warning("watch_report.provider_guard_denied", row_id=str(row.id))
@@ -139,6 +141,8 @@ async def dispatch_watch_report(
             log.warning(
                 "watch_report.dispatch_failed",
                 row_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                kind=row.reason,
                 error_type=type(exc).__name__,
                 causes=backend_refusal_causes(exc),
             )

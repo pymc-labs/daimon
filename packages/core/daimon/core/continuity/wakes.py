@@ -252,8 +252,12 @@ async def keep_wake(
     claim: WakeClaim,
     *,
     now: Callable[[], datetime],
+    tenant_id: uuid.UUID | None = None,
+    kind: str | None = None,
 ) -> AsyncIterator[None]:
-    """Renew a started wake's lease while its turn runs, and stop when it ends."""
+    """Renew a started wake's lease while its turn runs, and stop when it ends.
+
+    `tenant_id` and `kind` only label the log line when the lease is lost."""
 
     async def renew() -> None:
         while True:
@@ -275,7 +279,12 @@ async def keep_wake(
                 continue
             if not held:
                 # Cancelled or settled elsewhere: this turn's settle write is refused too.
-                log.warning("wake.lease_lost", idempotency_key=str(claim.idempotency_key))
+                log.warning(
+                    "wake.lease_lost",
+                    idempotency_key=str(claim.idempotency_key),
+                    tenant_id=str(tenant_id) if tenant_id is not None else None,
+                    kind=kind,
+                )
                 return
 
     renewer = asyncio.create_task(renew())
@@ -444,8 +453,10 @@ async def abandon_interrupted_wakes(
         log.warning(
             "wake.abandoned",
             idempotency_key=str(row.idempotency_key),
+            tenant_id=str(row.tenant_id),
+            kind=row.reason,
             thread_id=row.thread_id,
-            reason=row.skip_reason,
+            skip_reason=row.skip_reason,
         )
     return rows
 

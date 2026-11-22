@@ -87,13 +87,34 @@ class RoutineDispatcher:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+# Fires that did not run on purpose: logged at info so they never trip the failure alert.
+_BENIGN_FIRE_REASONS = frozenset(
+    {"routines_turned_off", "lead_intake_turned_off", "scheduler_shutdown"}
+)
+
+
 async def _record_fire_error(
     sm: async_sessionmaker[AsyncSession],
     row: RoutineRow,
     msg: str,
     reason: TerminationReason | None,
+    *,
+    error_class: str | None = None,
 ) -> None:
-    """Record a failure on a FRESH session (never reuse fire's session)."""
+    """Record a failure on a FRESH session (never reuse fire's session).
+
+    The log line carries only a fixed reason and the exception class, never `msg`,
+    which may hold exception text."""
+    fixed = reason.value if reason is not None else msg
+    log_fire = log.info if fixed in _BENIGN_FIRE_REASONS else log.warning
+    log_fire(
+        "routine.fire_failed",
+        tenant_id=str(row.tenant_id),
+        routine_id=str(row.id),
+        agent_id=row.agent_id,
+        reason=fixed,
+        error_class=error_class,
+    )
     try:
         async with asyncio.timeout(1), sm() as s, s.begin():
             await record_routine_failure(s, row, error=msg, reason=reason)
@@ -183,6 +204,9 @@ async def run_one_tick(
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid, tenant_id=str(row.tenant_id))
         unreadable = False
+        started = loop.time()
+        outcome = "ok"
+        skip_reason: str | None = None
         try:
             async with sem:
                 try:
@@ -194,6 +218,7 @@ async def run_one_tick(
                         # back below so the next tick tries again, as a watch's poll does.
                         unreadable = routines is None
                         reason = "feature_read_failed" if unreadable else "routines_turned_off"
+                        outcome, skip_reason = "skipped", reason
                         await _record_fire_error(sm, row, reason, None)
                         return
                     if (row.tenant_id, row.id) in intake_bindings:
@@ -203,6 +228,7 @@ async def run_one_tick(
                             reason = (
                                 "feature_read_failed" if unreadable else "lead_intake_turned_off"
                             )
+                            outcome, skip_reason = "skipped", reason
                             await _record_fire_error(sm, row, reason, None)
                             return
                     with observation.activate():
@@ -215,6 +241,7 @@ async def run_one_tick(
                         ):
                             await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
+                    outcome = "failed"
                     observation.finish(error=err, reason=TerminationReason.CEILING)
                     # Capture to Sentry, then keep the existing swallow —
                     # sibling tasks continue and record_result still runs.
@@ -222,6 +249,7 @@ async def run_one_tick(
                     timeout = f"timeout: exceeded {dispatch_timeout_s}s"
                     await _record_fire_error(sm, row, timeout, TerminationReason.CEILING)
                 except Exception as err:
+                    outcome = "failed"
                     reason = termination_reason(err)
                     observation.finish(error=err, reason=reason)
                     capture_exception_with_scope(err)
@@ -232,14 +260,25 @@ async def run_one_tick(
                         if row.destination_kind == "dm"
                         else f"{type(err).__name__}: {err}"[:500],
                         reason,
+                        error_class=type(err).__name__,
                     )
         except asyncio.CancelledError as err:
+            outcome = "failed"
             observation.finish(error=err)
             # Includes cancellation while waiting for a dispatch slot.
             await _record_fire_error(sm, row, "scheduler_shutdown", None)
             raise
         finally:
             observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
+            log.info(
+                "routine.finished",
+                tenant_id=str(row.tenant_id),
+                routine_id=str(row.id),
+                agent_id=row.agent_id,
+                outcome=outcome,
+                skip_reason=skip_reason,
+                duration_ms=int((loop.time() - started) * 1000),
+            )
             try:
                 async with asyncio.timeout(1), sm() as session, session.begin():
                     await skip_slots_during_fire(

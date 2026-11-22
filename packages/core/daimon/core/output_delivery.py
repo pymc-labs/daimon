@@ -289,8 +289,12 @@ async def sweep_outputs(
     discard_skipped_up_to: int = 0,
     order: Callable[[Sequence[str]], Sequence[int]] | None = None,
     quiet_s: float | None = None,
+    tenant_id: str | None = None,
+    platform: str | None = None,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
+
+    ``tenant_id`` and ``platform`` only label the abort log line.
 
     ``order`` takes the listed filenames and returns the indexes to handle
     them in; without it they go in listing order.
@@ -385,7 +389,13 @@ async def sweep_outputs(
             _log.info("output_delivery.deferred", session_id=session_id, file_id=meta.id)
             continue
         except OutputPostingUnavailable:
-            _log.warning("output_delivery.aborted", session_id=session_id, file_id=meta.id)
+            _log.warning(
+                "output_delivery.aborted",
+                session_id=session_id,
+                file_id=meta.id,
+                tenant_id=tenant_id,
+                platform=platform,
+            )
             raise
         except Exception as exc:  # named boundary: per-file failures must not kill the sweep
             _log.warning(

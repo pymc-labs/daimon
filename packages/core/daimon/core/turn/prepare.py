@@ -801,6 +801,7 @@ async def bind_session(
     observation.thread_id = thread_id
     observation.account_id = admission.account_id
     observation.agent_id = admission.agent.id
+    observation.is_dm = admission.private_dm_id is not None
     try:
         with observation.activate():
             # Any admitted profile may share a thread: a provider preparation
