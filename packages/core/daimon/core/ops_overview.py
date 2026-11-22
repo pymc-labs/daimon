@@ -17,6 +17,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Final, Literal, TypedDict, get_args
+from urllib.parse import quote, urlencode
 
 from daimon.core import credit_views
 from daimon.core.cursor import Cursor
@@ -374,11 +375,43 @@ def status_of(*, answers: int, failed: int, hour: Sequence[OpsIssueGroupRow]) ->
     return "degraded" if errors else "healthy"
 
 
-def thread_url(tenant: TenantRow | None, event: OpsEventRow) -> str | None:
-    """A link to the conversation, for the platform whose links need only the ids stored."""
-    target = event.thread_id or event.channel_id
-    if tenant is None or tenant.platform != "discord" or event.platform != "discord":
+_SLACK_ID = re.compile(r"[A-Z][A-Z0-9]{2,}")
+_SLACK_TS = re.compile(r"\d+\.\d+")
+_TEAMS_ROOT = ";messageid="
+
+
+def _slack_url(team: str, event: OpsEventRow) -> str | None:
+    channel = event.channel_id
+    if not channel or not _SLACK_ID.fullmatch(channel) or not _SLACK_ID.fullmatch(team):
         return None
+    url = f"https://app.slack.com/client/{team}/{channel}"
+    ts = event.thread_id
+    return f"{url}/thread/{channel}-{ts}" if ts and _SLACK_TS.fullmatch(ts) else url
+
+
+def _teams_url(entra_tenant: str, event: OpsEventRow) -> str | None:
+    """A channel thread; chats and direct conversations have no link others can open."""
+    channel = (event.channel_id or "").split(";", 1)[0]
+    if "@thread.tacv2" not in channel:
+        return None
+    root = (event.thread_id or "").partition(_TEAMS_ROOT)[2]
+    if not root.isdigit():
+        return None
+    query = urlencode({"tenantId": entra_tenant, "parentMessageId": root})
+    return f"https://teams.microsoft.com/l/message/{quote(channel, safe=':@')}/{root}?{query}"
+
+
+def thread_url(tenant: TenantRow | None, event: OpsEventRow) -> str | None:
+    """A link to the conversation, built from the ids stored on the event."""
+    if tenant is None or tenant.platform != event.platform:
+        return None
+    if tenant.platform == "slack":
+        return _slack_url(tenant.external_id, event)
+    if tenant.platform == "teams":
+        return _teams_url(tenant.external_id, event)
+    if tenant.platform != "discord":
+        return None
+    target = event.thread_id or event.channel_id
     if not target or not target.isdigit() or not tenant.external_id.isdigit():
         return None
     return f"https://discord.com/channels/{tenant.external_id}/{target}"
