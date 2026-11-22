@@ -971,6 +971,21 @@ class DaimonBot(commands.Bot):
                 thread_id=thread.id,
                 error=str(exc)[:300],
             )
+            guild = thread.guild
+            report_ops_event(
+                self.runtime.sessionmaker,
+                OpsEvent(
+                    "delivery.output_failed",
+                    derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+                    if guild is not None
+                    else None,
+                    reason=type(exc).__name__,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    session_id=session_id,
+                ),
+                logged=False,
+            )
 
     def _confirmed_call_prefix(
         self, tenant_id: uuid.UUID, row: TaskContinuationRow

@@ -298,7 +298,7 @@ async def sweep_outputs(
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
 
-    ``tenant_id`` and ``platform`` label an abort, which ``sessions`` also records.
+    ``tenant_id`` and ``platform`` label an abort or a failed file, which ``sessions`` records.
 
     ``order`` takes the listed filenames and returns the indexes to handle
     them in; without it they go in listing order.
@@ -420,6 +420,18 @@ async def sweep_outputs(
                 file_id=meta.id,
                 error=str(exc)[:300],
             )
+            if sessions is not None:
+                report_ops_event(
+                    sessions,
+                    OpsEvent(
+                        "delivery.output_failed",
+                        tenant_id,
+                        reason="file_failed",
+                        platform=platform,
+                        session_id=session_id,
+                    ),
+                    logged=False,
+                )
             continue
 
         await runtime.delete_output(meta.id)
