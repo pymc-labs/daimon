@@ -1525,7 +1525,12 @@ class DiscordTurnLifecycle(OutputGate):
             except discord.HTTPException as exc:
                 if not table_files:
                     raise
-                log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+                log.warning(
+                    "turn.table_delivery_failed",
+                    tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
+                    platform="discord",
+                    error_type=type(exc).__name__,
+                )
                 chunks = (
                     _split_with_name_prefix(original_response_text, self._agent_name)
                     if use_name_prefix

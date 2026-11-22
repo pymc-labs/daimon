@@ -411,6 +411,7 @@ class DirectMessageCog(commands.Cog):
             # disclose which candidate failed, or include exception/resource text.
             log.warning(
                 "discord.dm.discovery_failed",
+                tenant_id=str(tenant.id),
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )
@@ -1199,6 +1200,7 @@ class DirectMessageCog(commands.Cog):
         # reply -- is in progress for the shutdown drain, not only the turn.
         with self.bot.runtime.turn_deps.running_turns.track():
             burst = self._bursts.open(key, message)
+            found: DirectMessageRow | None = None
             try:
                 async with self._lock(key):
                     found = await self._conversation(message)
@@ -1218,6 +1220,7 @@ class DirectMessageCog(commands.Cog):
                     # The refusal, the failed pick or the expired selector speaks for the burst.
                     await self._bursts.end(key, burst)
                     return
+                tenant_id = found.tenant_id
                 async with self._lock(key):
                     seconds = 0.0
                     if not fresh:
@@ -1231,13 +1234,17 @@ class DirectMessageCog(commands.Cog):
 
                     async def answer(group: list[discord.Message]) -> None:
                         nonlocal scope_id
-                        scope_id = await self._answer(group, scope_id)
+                        scope_id = await self._answer(group, scope_id, tenant_id)
 
                     await burst.answer(seconds, self._react, answer)
             finally:
                 # An error no turn handled, or a cancellation: nothing left goes unheard.
                 if await self._bursts.end(key, burst):
-                    await self._tell_dropped(message.channel)
+                    await self._tell_dropped(
+                        message.channel,
+                        reason="burst_interrupted",
+                        tenant_id=found.tenant_id if found is not None else None,
+                    )
 
     async def _open(self, message: discord.Message) -> DirectMessageRow | None:
         """The conversation a first message starts; None once it offered a pick or said why not."""
@@ -1286,7 +1293,9 @@ class DirectMessageCog(commands.Cog):
             elif self.bot.user is not None:
                 await message.remove_reaction(_SEEN_REACTION, self.bot.user)
 
-    async def _answer(self, group: list[discord.Message], scope_id: str | None) -> str | None:
+    async def _answer(
+        self, group: list[discord.Message], scope_id: str | None, tenant_id: uuid.UUID
+    ) -> str | None:
         """One turn for `group`, sent into `scope_id`; the conversation the next one goes to."""
         first = group[0]
         try:
@@ -1294,6 +1303,7 @@ class DirectMessageCog(commands.Cog):
         except _DM_FAILURES as exc:
             log.warning(
                 "discord.dm.reply_failed",
+                tenant_id=str(tenant_id),
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
                 user_id=str(first.author.id),
@@ -1304,9 +1314,15 @@ class DirectMessageCog(commands.Cog):
                 )
             return scope_id
 
-    async def _tell_dropped(self, channel: discord.abc.Messageable) -> None:
+    async def _tell_dropped(
+        self, channel: discord.abc.Messageable, *, reason: str, tenant_id: uuid.UUID | None
+    ) -> None:
         """Tell the person messages taken in for a turn that will not run were not sent."""
-        log.info("discord.dm.dropped")
+        log.warning(
+            "discord.dm.dropped",
+            tenant_id=str(tenant_id) if tenant_id is not None else None,
+            reason=reason,
+        )
         with contextlib.suppress(discord.HTTPException):
             await channel.send(
                 embed=build_notice_embed(_DROPPED_NOTICE),
@@ -1492,7 +1508,11 @@ class DirectMessageCog(commands.Cog):
         if conversation is None or conversation.scope_id != expected_scope_id:
             # Messages sent before /dm-me moved the conversation.
             self._suppress(message, "conversation_moved")
-            await self._tell_dropped(message.channel)
+            await self._tell_dropped(
+                message.channel,
+                reason="conversation_moved",
+                tenant_id=conversation.tenant_id if conversation is not None else None,
+            )
             return None if conversation is None else conversation.scope_id
         await self._turn(message, conversation, batch)
         return conversation.scope_id
@@ -1548,8 +1568,8 @@ class DirectMessageCog(commands.Cog):
                 channel_id=str(message.channel.id),
             )
             if ticket is None:
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(conversation.tenant_id),
                     path="dm",
                     reason="queue_full",
@@ -1691,6 +1711,7 @@ class DirectMessageCog(commands.Cog):
             )
             log.warning(
                 "discord.dm.turn_failed",
+                tenant_id=str(conversation.tenant_id),
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )

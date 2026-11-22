@@ -903,7 +903,12 @@ class SlackTurnLifecycle(OutputGate):
                 except SlackApiError as exc:
                     if block.get("type") != "table":
                         raise
-                    log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+                    log.warning(
+                        "turn.table_delivery_failed",
+                        tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
+                        platform="slack",
+                        error_type=type(exc).__name__,
+                    )
                     # The renderer retains escaped original Markdown alongside
                     # the native table. Avoid double-escaping it on retry, but
                     # seal each part: a split can move code into prose.
