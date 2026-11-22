@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
+  an earlier Managed Agents limit; the provider now accepts far more. 50 fits every
+  backend, including OpenAI agents whose skills are pinned by content digest: a list
+  too long for one metadata value is now stored in a compact form that holds them
+  all, and agents already stored keep reading as before. The web inspector, chat and
+  MCP skill tools, channel skills and platform skills use the new limit; an
+  over-limit list the provider still refuses is reported as before.
+- **Saving the GitHub connect page picks a working repo only for an agent's first repos.**
+  An agent that has repos keeps its working repo, or none, unless the person chooses one.
+
 - **Admins can see what is failing in a workspace.** Failed answers, direct messages,
   routines, deliveries, watches, follow-ups and bridged-tool calls are recorded once per
   issue, without message content, and read on the Overview and Issues pages. An issue can

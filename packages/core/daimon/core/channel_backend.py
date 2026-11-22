@@ -732,6 +732,7 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "session_resource",
         "session_restore",
         "session_skill_source",
+        "session_metadata_size",
         "session_skills",
         "session_update_plan",
         "single_bound_mcp_server",

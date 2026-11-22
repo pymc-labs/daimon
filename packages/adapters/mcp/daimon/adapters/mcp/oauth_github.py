@@ -2591,7 +2591,6 @@ def build_oauth_github_routes(
             allowed_fields = _RETRY_FIELD_NAMES | {f"access_{repo_id}" for repo_id in repairable}
             if fields.keys() - allowed_fields:
                 return _error("Selection could not be verified.", 400, retry_confirm_url)
-            working_before = next((repo.repo_id for repo in grants if repo.is_working_repo), None)
             working_choice = working_values[0]
             if working_choice not in ("keep", "clear"):
                 try:
@@ -2828,7 +2827,9 @@ def build_oauth_github_routes(
                                 account_id=invitation.requester_account_id,
                                 agent_name=invitation.agent_name,
                             )
-                        elif repos and (working_before is None or working_before in removed_ids):
+                        elif repos and not old:
+                            # Only an agent's first repos pick a working repo; later saves
+                            # keep its choice, none included, so none is ever picked by chance.
                             await github_access.set_working_repo(
                                 session,
                                 tenant_id=invitation.tenant_id,
