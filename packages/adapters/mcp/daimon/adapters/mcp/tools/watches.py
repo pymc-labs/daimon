@@ -250,8 +250,9 @@ async def private_key_delivery(
 
 
 async def _in_attended_turn(runtime: McpRuntime, auth: AuthIdentity) -> bool:
-    """Whether a person is in the calling turn: a watch, routine or ask turn has no one
-    there, however admin its token's owner. A web turn's origin is under `web`."""
+    """Whether a person started and is in the calling turn: a watch, routine or ask turn has
+    no one there, however admin its token's owner, and a page's ask turn is attended but not
+    started by a person. A web turn's origin is under `web`."""
     if auth.chat_session_id is None:
         return False
     async with runtime.session_factory() as db:
@@ -265,7 +266,7 @@ async def _in_attended_turn(runtime: McpRuntime, auth: AuthIdentity) -> bool:
                 now=datetime.now(UTC),
             )
             if origin is not None:
-                return origin.attended
+                return origin.attended and origin.human_invocation is True
     return False
 
 
