@@ -740,14 +740,14 @@ Owner-bound watch management.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_watch` | Discord callers | Watch a listed read tool from this conversation, wake on posts to a secret link, or wake on a page's events. |
-| `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
-| `list_watches` | Discord callers | List your watches in this workspace; admins may list every owner's with scope "all". |
-| `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
+| `create_watch` | Discord callers, Slack callers, Teams callers, web app callers | Watch a listed read tool from this conversation, wake on posts to a secret link, or wake on a page's events. |
+| `delete_watch` | Discord callers, Slack callers, Teams callers, web app callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
+| `list_watches` | Discord callers, Slack callers, Teams callers, web app callers | List your watches in this workspace; admins may list every owner's with scope "all". |
+| `pause_watch` | Discord callers, Slack callers, Teams callers, web app callers | Pause your watch and cancel its queued wakes. |
 | `preview_watch_edit` | Discord callers | Show what an edit to your watch would change, old and new, without changing it. |
-| `resume_watch` | Discord callers | Resume your paused watch from an attended owner turn after fresh access checks. |
+| `resume_watch` | Discord callers, Slack callers, Teams callers, web app callers | Resume your paused watch from an attended owner turn after fresh access checks. |
 | `rotate_watch_key` | Discord callers | Rotate a watch's signing key, revoke the old key and cancel queued wakes. |
-| `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
+| `show_watch` | Discord callers, Slack callers, Teams callers, web app callers | Show your watch's immutable destination, source, status and expiry. |
 | `update_watch` | Discord callers | Change your watch in place, after `preview_watch_edit`, with the same changes. |
 
 ## `web_invites`

@@ -38,6 +38,7 @@ from daimon.core.stores.domain import (
     ArtifactRow,
     DataAccess,
     TurnOriginRow,
+    WatchDelivery,
     WatchRow,
 )
 from daimon.core.stores.file_uploads import create_upload, get_upload
@@ -553,16 +554,19 @@ async def create_page_watch(
     *,
     slug: str,
     instructions: str,
-    expires_at: datetime,
+    expires_at: datetime | None,
     max_turns_per_day: int,
     now: datetime,
+    delivery: WatchDelivery = "thread",
+    select_path: str | None = None,
 ) -> tuple[WatchRow, str]:
     """A watch on the page's events, with its key; the page must send events and be one
-    tools may use, and holds at most `MAX_WATCHES_PER_PAGE` live watches."""
+    tools may use, and holds at most `MAX_WATCHES_PER_PAGE` live watches. Someone who
+    does not manage it holds at most one of them."""
     caller = await _admit(runtime, auth)
     with refusals():
         async with runtime.session_factory.begin() as db:
-            artifact, _ = await _usable(db, auth, slug, watch=True)
+            artifact, role = await _usable(db, auth, slug, watch=True)
             if not artifact.events:
                 raise ToolError(f"Page {slug!r} does not send events. Turn events on first.")
             live = [
@@ -576,6 +580,10 @@ async def create_page_watch(
                 raise ToolError(
                     f"Page {slug!r} already has {MAX_WATCHES_PER_PAGE} watches. Delete one first."
                 )
+            if not access.can_edit(role) and any(
+                w.owner_account_id == auth.account_id for w in live
+            ):
+                raise ToolError(f"You already watch page {slug!r}. Delete that watch first.")
             watch = await watches.register_page_watch(
                 db,
                 binding,
@@ -584,6 +592,8 @@ async def create_page_watch(
                 expires_at=expires_at,
                 now=now,
                 max_turns_per_day=max_turns_per_day,
+                delivery=delivery,
+                select_path=select_path,
             )
             return watch, await enroll_page_key(db, watch, caller.crypto_keys, now=now)
 
