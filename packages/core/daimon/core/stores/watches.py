@@ -2568,3 +2568,29 @@ async def list_notice_receipts(
         )
         for row in rows
     ]
+
+
+async def page_watches(
+    session: AsyncSession, *, tenant_id: uuid.UUID, page_id: uuid.UUID
+) -> list[WatchRow]:
+    """The page-event watches bound to one page (an artifact's id), in one tenant."""
+    rows = await session.scalars(
+        select(Watch)
+        .where(Watch.tenant_id == tenant_id, Watch.page_id == page_id, Watch.source == "page_event")
+        .order_by(Watch.created_at, Watch.id)
+    )
+    return [WatchRow.model_validate(row) for row in rows]
+
+
+async def live_key_id(session: AsyncSession, watch_id: uuid.UUID, *, now: datetime) -> str | None:
+    """The id of the watch's live page-event signing key; None when it has none."""
+    return await session.scalar(
+        select(WatchCapability.key_id)
+        .where(
+            WatchCapability.watch_id == watch_id,
+            WatchCapability.operation == "page_event",
+            _key_live_at(now),
+        )
+        .order_by(WatchCapability.generation.desc())
+        .limit(1)
+    )
