@@ -314,6 +314,12 @@ EXEMPT: dict[str, str] = {
     "POST /api/artifacts/{artifact_id}/link": _PAGE,
     "POST /api/artifacts/{artifact_id}/transfer": _PAGE,
     "POST /api/artifacts/{artifact_id}/versions/{version}/restore": _PAGE,
+    "POST /api/artifacts/{artifact_id}/people": _PAGE,
+    "POST /api/artifacts/{artifact_id}/watches/{watch_id}": _PAGE,
+    "DELETE /api/artifacts/{artifact_id}/watches/{watch_id}": _PAGE,
+    "PUT /api/artifacts/{artifact_id}/versions/{version}/thumbnail": _PAGE,
+    "DELETE /api/artifacts/{artifact_id}/consent": _PAGE,
+    "POST /a/{public_id}/_api/consent": _PAGE,
     "POST /a/{public_id}/_api/ask": _PAGE,
     "POST /a/{public_id}/_api/{method}": _PAGE,
 }

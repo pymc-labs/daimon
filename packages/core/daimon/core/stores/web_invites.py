@@ -14,7 +14,7 @@ from decimal import Decimal
 from daimon.core._models import WebInvite, WebInviteAgent
 from daimon.core.cursor import Cursor
 from daimon.core.stores.domain import WebInviteKind, WebInviteRole, WebInviteRow
-from sqlalchemy import func, literal, select, tuple_, update
+from sqlalchemy import func, literal, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -166,6 +166,17 @@ async def list_invites(
     if limit is not None:
         query = query.limit(limit)
     return await _with_agents(session, (await session.scalars(query)).all())
+
+
+async def lock_visitor_invites_by(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> None:
+    """Serialise one person's visitor invites until the transaction ends, so the daily
+    count and the invite that follows it cannot race past the limit."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": f"visitor-invites:{tenant_id}:{account_id}"},
+    )
 
 
 async def count_visitor_invites_by(

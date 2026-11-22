@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from urllib.parse import unquote
 
+import httpx
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.stores import web_invites, web_people
+from daimon.core.stores.domain import ArtifactRow, WebPersonRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .agent_support import OWN
-from .artifact_support import COOKIE, page_client, page_settings, publish, team
+from .agent_support import OWN, make_admin
+from .artifact_support import COOKIE, member_of, page_client, page_settings, publish, team
 
 
 async def test_a_public_page_is_listed_only_to_those_who_manage_it(
@@ -149,3 +151,30 @@ async def test_sharing_by_email_makes_a_visitor_who_reaches_only_the_page(
         assert (await client.get(f"/a/{page.public_id}/poll")).status_code == 200
         assert (await client.get(f"/a/{board.public_id}/board")).status_code == 404
         assert (await client.get("/api/artifacts")).status_code == 403
+
+
+async def test_only_the_inviter_or_an_admin_shares_more_with_an_emailed_visitor(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Whoever made the visitor holds their sign-in link, so another member cannot hand
+    them pages; the inviter and an admin can."""
+    t = await team(db_session_factory)
+    await make_admin(db_session_factory, t.owner)
+    cy = await member_of(db_session_factory, t.tenant_id, "Cy")
+    first = await publish(db_session_factory, t.member, slug="first", access="people")
+    second = await publish(db_session_factory, t.member, slug="second", access="people")
+    theirs = await publish(db_session_factory, cy, slug="theirs", access="people")
+    admins = await publish(db_session_factory, t.owner, slug="admins", access="people")
+    body = {"email": "guest@example.com"}
+
+    async def share(person: WebPersonRow, page: ArtifactRow) -> httpx.Response:
+        async with page_client(db_session_factory, person) as client:
+            return await client.post(f"/api/artifacts/{page.id}/people", json=body, headers=OWN)
+
+    assert (await share(t.member, first)).status_code == 200, "the inviter makes the visitor"
+    refused = await share(cy, theirs)
+    assert refused.status_code == 403, refused.text
+    assert refused.json() == {"detail": "An admin needs to share with guest@example.com."}
+    assert (await share(t.member, second)).status_code == 200, "the inviter shares more"
+    res = await share(t.owner, admins)
+    assert res.status_code == 200, res.text
