@@ -36,6 +36,8 @@ REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
         ("agent_posted_messages", "agent_id"),
         ("agent_skill_follows", "agent_id"),
         ("agent_tool_rules", "agent_id"),
+        ("artifact_versions", "agent_id"),
+        ("artifacts", "agent_id"),
         ("coding_key_claims", "agent_id"),
         ("coding_key_claims", "ma_agent_id"),
         ("compute_sessions", "agent_id"),
