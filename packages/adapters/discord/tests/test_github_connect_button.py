@@ -14,6 +14,9 @@ from daimon.testing.shared_helpers import Sessions as _Sessions
 from pydantic import SecretStr
 
 _AGENT_NAME = "ResearchBot"
+_APP = SimpleNamespace(
+    app_id="1", app_slug="app", private_key="key", client_id="client", client_secret="secret"
+)
 _MA_AGENT = "ma-agent"
 
 
@@ -63,6 +66,8 @@ def _press(
         settings=SimpleNamespace(
             crypto=SimpleNamespace(keys=[key]),
             mcp=SimpleNamespace(app_root_url="https://mcp.test"),
+            web=None,
+            github_app=_APP,
         ),
         sessionmaker=_Sessions(),
         anthropic=object(),
@@ -164,6 +169,8 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
         settings=SimpleNamespace(
             crypto=SimpleNamespace(keys=[key]),
             mcp=SimpleNamespace(app_root_url="https://mcp.test"),
+            web=None,
+            github_app=_APP,
         ),
         sessionmaker=_Sessions(),
     )

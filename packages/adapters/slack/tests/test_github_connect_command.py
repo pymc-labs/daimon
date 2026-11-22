@@ -24,6 +24,7 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     runtime = SimpleNamespace(
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://mcp.test"),
+            web=None,
             github_app=SimpleNamespace(
                 app_id="1",
                 app_slug="app",
