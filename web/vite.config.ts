@@ -42,7 +42,8 @@ export default defineConfig(({ mode }) => ({
     // dev: the local web adapter. dev:mock: MSW in the browser, no proxy.
     proxy: mode === 'mock'
       ? {}
-      : Object.fromEntries(['/api', '/auth'].map((p) => [p, { target: process.env.DAIMON_WEB_API ?? 'http://localhost:8780' }])),
+      // '^/a/' is a pattern: a bare '/a' prefix would also take /agents and /admin.
+      : Object.fromEntries(['/api', '/auth', '^/a/'].map((p) => [p, { target: process.env.DAIMON_WEB_API ?? 'http://localhost:8780' }])),
   },
   test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], include: ['src/**/*.test.{ts,tsx}'], restoreMocks: true },
   build: {

@@ -3,6 +3,7 @@ import { useEffect, useMemo } from "react"
 import { useNavigate } from "react-router"
 
 import { api } from "./api"
+import { isServerPage } from "./safe-next"
 import type { AgentRef, Capability, ChatSession, Group, Me, Person, Provider } from "./types"
 
 export const useMe = () => useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/me"), staleTime: 60_000, refetchOnWindowFocus: true })
@@ -12,7 +13,7 @@ export function useSwitchWorkspace(next: string, { replace = false, onError }: {
   const navigate = useNavigate()
   return useMutation({
     mutationFn: (id: string) => api.post("/api/workspaces/switch", { id }),
-    onSuccess: () => { qc.clear(); navigate(next, { replace }) },
+    onSuccess: () => { qc.clear(); if (isServerPage(next)) window.location.assign(next); else navigate(next, { replace }) },
     onError,
   })
 }
