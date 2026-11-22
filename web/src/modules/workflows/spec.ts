@@ -1,5 +1,5 @@
 // Pure spec logic shared by the canvas and the mock server: edges, references, validation, diffs and edits.
-import type { AnswerShape, Change, Field, Grant, Kind, Node, Problem, RuleClass, Spec, Validation } from "./types"
+import type { AnswerShape, ArgRule, Change, Field, Grant, Kind, Node, Problem, RuleClass, Spec, Validation, WriteScope } from "./types"
 
 export type EdgeKind = "next" | "route" | "case" | "else" | "error" | "max" | "otherwise"
 /** One edge of the graph. `slot` says where `from` points at `to`, so edits can rewire it. */
@@ -230,9 +230,16 @@ export function validate(spec: Spec): Validation {
   return { errors, warnings, grants, classes }
 }
 
-/** Every cycle through `loop` passes an approval: a person answers before each lap. */
+/** An approval whose timeout route stays in the loop is no gate: a lap can run with no answer. */
+const personGate = (n: Node | undefined, loop: Set<string>) => {
+  if (n?.kind !== "approval") return false
+  const to = typeof n.timeout === "object" ? n.routes?.[n.timeout.route] : undefined
+  return !to || !loop.has(routeTo(to))
+}
+
+/** Every cycle through `loop` passes a person gate: a person answers before each lap. */
 function gated(spec: Spec, loop: Set<string>) {
-  const rest = new Set([...loop].filter((x) => spec.nodes[x] && spec.nodes[x].kind !== "approval"))
+  const rest = new Set([...loop].filter((x) => spec.nodes[x] && !personGate(spec.nodes[x], loop)))
   const state = new Map<string, 1 | 2>()
   const cycles = (id: string): boolean => {
     state.set(id, 1)
@@ -249,6 +256,18 @@ const boundBy = (spec: Spec, id: string) =>
 /** A write beyond the step's `writes_to` scopes. */
 export const writes = (n: Node) =>
   (n.kind === "action" && toolWrites(n.tool) && !(n.writes_to ?? []).some((s) => s.tool === n.tool)) || (n.kind === "agent" && (n.writes === "allow" || n.writes === "routine"))
+const ruleText = (r: ArgRule) =>
+  [
+    ...(r.in ?? []).map((x) => `is ${x}`),
+    ...(r.prefix ?? []).map((x) => `starts with ${x}`),
+    ...(r.domains ?? []).map((x) => `is an address at ${x}`),
+    ...(r.created_by ? [`was made by this run with ${r.created_by.tool}`] : []),
+  ].join(" or ")
+
+/** What a reviewer approves for a scoped write, in plain words: the tool, each limited argument and the free ones. */
+export const scopeText = (s: WriteScope) =>
+  `${s.tool}: ${Object.entries(s.where ?? {}).map(([path, r]) => `${path} ${ruleText(r)}`).join("; ")}.${s.free?.length ? ` Any text in ${s.free.join(", ")}.` : ""}`
+
 const scopesOf = (n: Node) => (n.kind === "for_each" && n.do ? n.do : n).writes_to ?? []
 
 /** Rule of Two classes per step and the grants the spec needs. */

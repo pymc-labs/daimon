@@ -118,9 +118,12 @@ export function ReviewBody({ wf, draft, note, setNote }: { wf: Workflow; draft: 
           <Heading n={grants.length}>Grants needing an admin</Heading>
           <ul>
             {grants.map((g, i) => (
-              <li key={i} className="flex h-8 items-center gap-2 text-sm">
-                <KeyRound className="size-3.5 shrink-0 text-warning" /><span className="font-medium">{GRANT[g.kind]}</span>
-                <span className="ml-auto truncate text-xs text-muted-foreground">{g.node ? titleOf(g.node, draft.spec.nodes[g.node]) : g.detail}</span>
+              <li key={i}>
+                <div className="flex h-8 items-center gap-2 text-sm">
+                  <KeyRound className="size-3.5 shrink-0 text-warning" /><span className="font-medium">{GRANT[g.kind]}</span>
+                  <span className="ml-auto truncate text-xs text-muted-foreground">{g.node ? titleOf(g.node, draft.spec.nodes[g.node]) : g.detail}</span>
+                </div>
+                {g.kind === "scoped_write" && <p className="pb-1.5 pl-5.5 text-xs text-muted-foreground">{g.detail}</p>}
               </li>
             ))}
           </ul>

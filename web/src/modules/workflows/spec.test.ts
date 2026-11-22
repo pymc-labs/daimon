@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { SPECS } from "@/mock/workflows-specs"
 import type { Spec } from "./types"
-import { insertNode, removeNode, safety, setAnswer, validate } from "./spec"
+import { insertNode, removeNode, safety, scopeText, setAnswer, validate } from "./spec"
 
 const codes = (s: Parameters<typeof validate>[0]) => validate(s).errors.map((p) => `${p.code}:${p.node ?? ""}`)
 
@@ -57,5 +57,28 @@ describe("validate", () => {
     expect(safety(s).classes.send).not.toContain("U")
     review.approvers = ["person:p_1"]
     expect(safety(s).classes.send).toContain("U")
+  })
+})
+
+describe("loops and scoped grants", () => {
+  const loop = (timeout?: { after: string; route: string }): Spec => ({
+    schema: "daimon.workflow/v1", name: "loop", start: "work",
+    nodes: {
+      work: { kind: "agent", agent: "a", instructions: "Go", next: "ask" },
+      ask: { kind: "approval", answer: "choice", routes: { again: "work", stop: "done" }, ...(timeout ? { timeout } : {}) },
+      done: { kind: "finish" },
+    },
+  })
+
+  it("counts an approval as a person gate unless its timeout route stays in the loop", () => {
+    expect(codes(loop())).not.toContain("loop_limit:work")
+    expect(codes(loop({ after: "1d", route: "stop" }))).not.toContain("loop_limit:work")
+    expect(codes(loop({ after: "1d", route: "again" }))).toContain("loop_limit:work")
+  })
+
+  it("shows a scoped write's limits and free arguments in words", () => {
+    expect(scopeText({ tool: "mail/send_reply", where: { to: { in: ["a@x.org"], domains: ["example.com"] } }, free: ["subject", "body"] })).toBe(
+      "mail/send_reply: to is a@x.org or is an address at example.com. Any text in subject, body.",
+    )
   })
 })
