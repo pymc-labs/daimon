@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them from the command line, and operator tokens with the new `issues:read` scope read
   them over MCP. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
 
+- **A routine's owner hears about a failed run, and runs can say what blocked them.**
+  On Discord, the first failure of a routine after a success reaches its owner by
+  direct message, written by the routine's own agent from fixed facts (the routine,
+  why it stopped, when, the next run and how to pause it), never the raw error. When
+  the agent cannot run, the owner gets a plain error card. The channel notice is
+  unchanged. A run that could not do its task calls `report_routine_problem` with a
+  category and one short line, which admins see on the Issues page, and failed calls
+  to an attached MCP server are recorded there per server.
+
 - **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
   With the new Wait for bot access setting on (off by default, set per
   workspace by a server admin), a routine, timer or watch whose channel Daimon

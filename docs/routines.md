@@ -258,7 +258,7 @@ writes `last_error` and clears `last_result_tail`, and a success does the
 reverse. The panels show a failure whenever `last_error` is set.
 
 A channel or thread routine announces the first failure after a success, or a
-first run that fails. An owner-DM routine only records it. The notice goes through the same checks as a result, with
+first run that fails. On Discord, owners also get a DM. The notice goes through the same checks as a result, with
 the DM fallback. It says what failed in plain words, never the raw error, and
 that the routine will try again. It never replaces an undelivered result. A
 routine that keeps failing posts once and stays quiet until a run succeeds.
