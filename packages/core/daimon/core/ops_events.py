@@ -74,6 +74,9 @@ class _Window:
     event: OpsEvent
     record: OpsEventRecord
     count: int = 1
+    last_at: datetime | None = None
+    """The newest repeat's time, which the row is stamped with, so a repeat after an
+    admin resolved the issue regresses it."""
     loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.get_running_loop)
     flush_now: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -137,7 +140,9 @@ def _log(event: OpsEvent, record: OpsEventRecord) -> None:
 async def _write(
     sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, window: _Window
 ) -> None:
-    row = replace(window.record, count=window.count)
+    row = replace(
+        window.record, count=window.count, occurred_at=window.last_at or window.record.occurred_at
+    )
     try:
         # Always own a connection, even for a caller bound to a checked-out one.
         bind = sm.kw.get("bind")
@@ -181,6 +186,7 @@ def report_ops_event(
         # A window from another event loop (a finished test) has no writer left.
         if window is not None and window.loop is asyncio.get_running_loop():
             window.count += 1
+            window.last_at = record.occurred_at
             return
         if len(_PENDING) >= _MAX_PENDING:
             log.warning("ops.event_queue_full", code=event.code)

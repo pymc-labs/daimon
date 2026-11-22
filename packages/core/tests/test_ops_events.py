@@ -147,8 +147,11 @@ async def test_repeats_within_the_window_make_one_row_and_a_bad_reason_is_other(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
-    for _ in range(5):
+    for _ in range(4):
         report_ops_event(sm, _event(tenant.id))
+    await asyncio.sleep(0.01)
+    last_repeat = datetime.now(UTC)
+    report_ops_event(sm, _event(tenant.id))
     report_ops_event(sm, _event(tenant.id, reason="boom: secret text here"))
     report_ops_event(sm, _event(None))
     await drain_ops_events()
@@ -158,6 +161,8 @@ async def test_repeats_within_the_window_make_one_row_and_a_bad_reason_is_other(
         )
 
     assert sorted(g.events for g in groups) == [1, 5], "five repeats share one row's count"
+    repeated = next(g for g in groups if g.events == 5)
+    assert repeated.last_seen >= last_repeat, "the row is stamped with its newest repeat"
     assert {g.latest.reason for g in groups} == {"timeout", "other"}, "free text is not stored"
 
 
