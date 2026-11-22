@@ -67,7 +67,7 @@ export function Activity({ a }: { a: ArtifactDetail }) {
         <PanelSection title="Asks" className={a.events || a.watches.length ? "" : "border-t-0"}>
           <div className="flex gap-6 text-sm">
             <div><div className="font-medium tabular">{exact(a.asks.threads)}</div><div className="text-xs text-muted-foreground">Threads</div></div>
-            <div><div className="font-medium tabular">{exact(a.asks.turns_7d)}</div><div className="text-xs text-muted-foreground">Turns in 7 days</div></div>
+            <div><div className="font-medium tabular">{exact(a.asks.turns_7d)}</div><div className="text-xs text-muted-foreground">Questions in 7 days</div></div>
           </div>
         </PanelSection>
       )}
