@@ -18,8 +18,6 @@ _EFFORTS: Final[dict[str, str]] = {
     "xhigh": "🌔",
     "max": "🌕",
 }
-MODEL_MARKS: Final[frozenset[str]] = frozenset([*(mark for _, mark in _MODELS), *_EFFORTS.values()])
-"""Every emoji `model_marks` can return."""
 
 
 MODEL_MARKS: Final[frozenset[str]] = frozenset(
