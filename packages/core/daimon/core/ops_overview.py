@@ -682,9 +682,13 @@ async def change_issue_state(
     action: IssueAction,
     by_account_id: uuid.UUID | None,
     now: datetime,
+    agent_names: Mapping[str, str] | None = None,
+    via: str | None = None,
 ) -> Issue | None:
     """Resolve, mute or reopen an issue and record it in the audit trail; the issue as it now
-    stands, or None if the workspace has no such issue. The caller commits."""
+    stands, or None if the workspace has no such issue. `via` names a path with no signed-in
+    person (the CLI), added to the audit detail. The caller commits."""
+    names = agent_names or {}
     if (
         await load_issue_summary(session, tenant_id=tenant_id, fingerprint=fingerprint, now=now)
         is None
@@ -702,16 +706,17 @@ async def change_issue_state(
             at=now,
         )
     current = await load_issue_summary(
-        session, tenant_id=tenant_id, fingerprint=fingerprint, now=now
+        session, tenant_id=tenant_id, fingerprint=fingerprint, now=now, agent_names=names
     )
     assert current is not None, "the issue was just found"
+    detail = ", ".join(part for part in (current.subject and current.subject.name, via) if part)
     await audit(
         session,
         tenant_id=tenant_id,
         actor_account_id=by_account_id,
         action=_AUDIT_ACTIONS[action],
         target=current.title,
-        detail=current.subject.name if current.subject else None,
+        detail=detail or None,
         at=now,
     )
     return current

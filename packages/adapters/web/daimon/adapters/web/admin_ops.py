@@ -148,6 +148,7 @@ def ops_router(runtime: WebRuntime) -> APIRouter:
     async def change_state(  # pyright: ignore[reportUnusedFunction]
         caller: WorkspaceAdmin, fingerprint: str, body: StateChange
     ) -> Issue:
+        names = await agent_names(caller.person.tenant_id)
         async with runtime.sessionmaker.begin() as db:
             current = await ops.change_issue_state(
                 db,
@@ -156,6 +157,7 @@ def ops_router(runtime: WebRuntime) -> APIRouter:
                 action=body.action,
                 by_account_id=caller.person.account_id,
                 now=runtime.now(),
+                agent_names=names,
             )
         if current is None:
             raise HTTPException(status_code=404, detail=_NO_ISSUE)
