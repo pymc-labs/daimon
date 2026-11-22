@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Admins can see what is failing in a workspace.** Failed answers, direct messages,
+  routines, deliveries, watches, follow-ups and bridged-tool calls are recorded once per
+  issue, without message content, and read on the Overview and Issues pages. An issue can
+  be resolved (it returns if it happens again) or muted. `daimon issues` reads and changes
+  them from the command line, and operator tokens with the new `issues:read` scope read
+  them over MCP. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
+
 - **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
   With the new Wait for bot access setting on (off by default, set per
   workspace by a server admin), a routine, timer or watch whose channel Daimon

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 235 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 238 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -21,6 +21,7 @@ tool is hidden by default and restored only for a matching caller.
 - **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
+- **operator tokens with issues:read** — carries the `scope:issues:read` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
 - **operator tokens with promo:redeem** — carries the `scope:promo:redeem` tag.
 - **operator tokens with tenant:read** — carries the `scope:tenant:read` tag.
@@ -447,6 +448,16 @@ Notebook MCP tools.
 | `create_notebook_upload_url` | all callers | Mint a one-time upload URL for a marimo notebook. |
 | `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
+
+## `ops_issues`
+
+The workspace's failures and warnings, read from chat or by an operator token.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_issue` | admin only, operator tokens with issues:read | Read one issue by its ``fingerprint`` (from list_issues): what it is about, when it started, who it reached and its latest events. |
+| `get_ops_overview` | admin only, operator tokens with issues:read | Read how the workspace is doing: answers and the share that failed, direct message and routine failures, status (healthy, degraded or failing, from the last hour), failures per area, an answers chart and the issues that need attention. |
+| `list_issues` | admin only, operator tokens with issues:read | List the workspace's failures and warnings, grouped into issues, newest first. |
 
 ## `progress_plans`
 

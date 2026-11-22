@@ -4338,6 +4338,31 @@
         'type': 'object',
       }),
     }),
+    'get_issue': dict({
+      'description': '''
+        Read one issue by its ``fingerprint`` (from list_issues): what it is about, when it
+        started, who it reached and its latest events. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'events_limit': dict({
+            'default': 20,
+            'maximum': 100,
+            'minimum': 0,
+            'type': 'integer',
+          }),
+          'fingerprint': dict({
+            'maxLength': 64,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'fingerprint',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'get_long_job': dict({
       'description': '''
         Read an owner/admin job; return source-restricted metadata when content is private.
@@ -4495,6 +4520,30 @@
         'required': list([
           'handle',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'get_ops_overview': dict({
+      'description': '''
+        Read how the workspace is doing: answers and the share that failed, direct message and
+        routine failures, status (healthy, degraded or failing, from the last hour), failures per
+        area, an answers chart and the issues that need attention. ``period`` is 1h, 24h, 7d or
+        30d. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'period': dict({
+            'default': '24h',
+            'enum': list([
+              '1h',
+              '24h',
+              '7d',
+              '30d',
+            ]),
+            'type': 'string',
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -5816,6 +5865,70 @@
         'required': list([
           'origin_context_id',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'list_issues': dict({
+      'description': '''
+        List the workspace's failures and warnings, grouped into issues, newest first. ``since``
+        is how far back to look, like 15m, 24h or 7d. ``active_only`` keeps open issues seen in
+        the last day; resolved and muted ones are otherwise included. Each issue has a
+        ``fingerprint`` for get_issue. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'active_only': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'area': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'turn',
+                  'dm',
+                  'routine',
+                  'delivery',
+                  'watch',
+                  'wake',
+                  'bridge',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit': dict({
+            'default': 50,
+            'maximum': 200,
+            'minimum': 1,
+            'type': 'integer',
+          }),
+          'severity': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'error',
+                  'warning',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'since': dict({
+            'default': '24h',
+            'maxLength': 8,
+            'type': 'string',
+          }),
+        }),
         'type': 'object',
       }),
     }),

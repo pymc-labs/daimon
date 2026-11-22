@@ -252,6 +252,24 @@ An uncaught exception is logged as `process.uncaught_exception` at critical.
 `release` is the commit the image was built from, set by the `DAIMON_RELEASE`
 build argument. An image built without it reports the package version.
 
+## Read failures and warnings
+
+Daimon records each failed answer, routine, delivery, watch, follow-up and bridged-tool call
+once per issue, with no message content, and keeps it for
+`DAIMON_OPS_EVENTS__RETENTION_DAYS` days. Admins read the issues on the Overview and Issues
+pages of the web app, and can resolve or mute them there. From the command line:
+
+```bash
+daimon issues summary <tenant-uuid> [--period 1h|24h|7d|30d] [--json]
+daimon issues list <tenant-uuid> [--since 24h] [--area routine] [--severity error] [--active] [--json]
+daimon issues show <tenant-uuid> <fingerprint> [--events 50] [--json]
+daimon issues resolve|mute|reopen <tenant-uuid> <fingerprint>
+```
+
+A resolved issue returns as open when it happens again. A muted one stays hidden until
+reopened. An operator token with the `issues:read` scope reads the same data through the
+`get_ops_overview`, `list_issues` and `get_issue` tools.
+
 ## Audit security events
 
 Each authenticated MCP `tools/call` and `tools/list` request writes one
@@ -303,6 +321,7 @@ token.
 | `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
 | `agents:archive` | `archive_channel_copy` |
 | `promo:redeem` | `redeem_promo_code` |
+| `issues:read` | `get_ops_overview`, `list_issues`, `get_issue` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
 On each request the token must be unrevoked and unexpired, and its account must
