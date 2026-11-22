@@ -89,6 +89,7 @@ Where each feature can be set, and its default.
 | Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Artifacts | `artifacts` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Ask a person | `support_escalation` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  | Needs setup by whoever runs Daimon |
@@ -978,6 +979,18 @@ The agent can publish a report as a web page and delete it later. Off removes th
 | | |
 | --- | --- |
 | Key | `report_publish` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+
+## Artifacts
+
+The agent can publish web pages that people open, use and share, with data they save on the page. Off removes the artifact tools here and the Artifacts page.
+
+| | |
+| --- | --- |
+| Key | `artifacts` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |

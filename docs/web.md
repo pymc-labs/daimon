@@ -103,6 +103,10 @@ It also lists your coding keys, which you can revoke.
 `/privacy`. Type your name to confirm. An admin can pause deletion with
 `DAIMON_PRIVACY__DELETE_ENABLED=false`.
 
+## Pages
+
+Agents can publish HTML pages that people open from the web app, such as dashboards and forms. See [Artifacts](artifacts.md).
+
 ## Connect agents to a data server
 
 A connection node lets agent editors link an agent to a server that keeps its

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 235 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 243 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -149,6 +149,21 @@ invite.
 | `delete_allowance` | admin only | Remove an allowance or cap. |
 | `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
 | `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
+
+## `artifacts`
+
+Artifact page tools: publish an HTML page, share it, read and write its data.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `artifact_db_query` | all callers | Read documents from one collection of a page's data. |
+| `artifact_db_write` | all callers | Write or delete one document in a page's data; the page shows it within seconds. |
+| `artifact_delete` | all callers | Delete a page with its versions, data and watches. |
+| `artifact_list` | all callers | List the pages you can use: slug, title, URL, version, sharing and capabilities. |
+| `artifact_publish` | all callers | Publish an HTML page at `slug`, or republish it, or change only its settings. |
+| `artifact_source` | all callers | Get a 15-minute URL to download a page's HTML (the current version, or `version`). |
+| `artifact_transfer` | all callers | Give a page to one of its editors (named by their id in the app, a chat user id or an @mention); the old owner stays an editor. |
+| `artifact_upload_url` | all callers | Publish an HTML page, step 1 of 2: get a one-time URL to PUT the file to. |
 
 ## `audit_log`
 
@@ -725,13 +740,13 @@ Owner-bound watch management.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_watch` | Discord callers | Watch a listed read tool from this conversation, or wake on posts to a secret link. |
+| `create_watch` | Discord callers | Watch a listed read tool from this conversation, wake on posts to a secret link, or wake on a page's events. |
 | `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
 | `list_watches` | Discord callers | List your watches in this workspace; admins may list every owner's with scope "all". |
 | `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
 | `preview_watch_edit` | Discord callers | Show what an edit to your watch would change, old and new, without changing it. |
 | `resume_watch` | Discord callers | Resume your paused watch from an attended owner turn after fresh access checks. |
-| `rotate_watch_key` | Discord callers | Rotate a page signing key, revoke the old key and cancel queued wakes. |
+| `rotate_watch_key` | Discord callers | Rotate a watch's signing key, revoke the old key and cancel queued wakes. |
 | `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
 | `update_watch` | Discord callers | Change your watch in place, after `preview_watch_edit`, with the same changes. |
 

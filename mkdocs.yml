@@ -34,6 +34,7 @@ nav:
       - Move routines in: routine-migration.md
       - Move people in: people-migration.md
       - Watches: watches.md
+      - Artifacts: artifacts.md
       - Direct messages: direct-messages.md
       - Repository memory: repo-memory.md
       - Context providers: context-providers.md

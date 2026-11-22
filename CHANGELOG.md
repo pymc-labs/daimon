@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daimon features set routine_result_header off --routine <id>`; its value
   beats its agent's.
 
+- **Agents can publish interactive pages, and watch them on Discord.** An agent
+  hosts one HTML file at `/a/<id>/<slug>` in the web app, shared with the
+  workspace, named people or anyone with a link, with an optional expiry. A page
+  can keep shared data, send events and let viewers ask the agent, each off until
+  turned on. Eight `artifact_*` tools publish, list, read and write a page's
+  data, fetch its source, delete and transfer it; routines may only list, query
+  and write. `create_watch(source="page_event", page=...)` wakes an agent on a
+  page's events from Discord, and `rotate_watch_key` no longer sends a key for
+  such a watch. The new Artifacts feature is on wherever the web app is, and the
+  seeded agent gets an `artifacts` skill. See the Artifacts page.
+
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎
   feedback, voice messages and the card's model footer. Pings are joined with a

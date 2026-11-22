@@ -5,11 +5,11 @@ changes. Polling itself spends no AI turn. Read this to turn watches on, choose
 what they may read and manage them for a deployment.
 
 Watches are off by default. Polling works for Discord `read_thread` and
-`read_channel`, and for read tools on MCP servers an operator lists. Signed
-page-event callbacks are accepted but not yet produced by any host, so
-`create_watch(source="page_event")` is refused. A callback watch wakes on
-posts to a private link instead of polling; see
-[Callback watches](#callback-watches).
+`read_channel`, and for read tools on MCP servers an operator lists. A callback
+watch wakes on posts to a private link instead of polling; see
+[Callback watches](#callback-watches). A page-event watch wakes on the events
+an [artifact](artifacts.md#wake-an-agent-on-events) page sends. It needs no key
+from you, and only Discord can create one.
 
 ## How a watch works
 
