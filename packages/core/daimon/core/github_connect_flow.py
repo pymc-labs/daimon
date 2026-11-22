@@ -66,6 +66,7 @@ from daimon.core.github_connect_views import (
     confirm_url,
     install_url,
     receipt_signature,
+    redact_hidden_grants,
     repo_confirmation,
     snapshot_signature,
     unverified,
@@ -477,7 +478,7 @@ class GitHubConnectFlow:
         if invitation.agent_id is not None:
             return SavedAgentView(
                 agent_name=invitation.agent_name or "Agent",
-                grants=agent_grants,
+                grants=redact_hidden_grants(agent_grants, visible_ids or ()),
                 visible_repo_ids=sorted(visible_ids or ()),
                 back_to_chat=_chat_return(requester),
                 installations=list(installations),

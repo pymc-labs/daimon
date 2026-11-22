@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import json
 import re
-from collections.abc import AsyncIterable, Mapping, Sequence
+from collections.abc import AsyncIterable, Collection, Mapping, Sequence
 from typing import Annotated, Literal, cast
 from urllib.parse import parse_qs, urlencode
 
@@ -530,6 +530,27 @@ def _usable(installations: Sequence[ConnectInstallation]) -> dict[int, ConnectRe
     return {repo.id: repo for item in installations for repo in item.repos if repo.usable}
 
 
+def redact_hidden_grants(
+    grants: Sequence[AgentRepo], visible_ids: Collection[int]
+) -> list[AgentRepo]:
+    """Grants outside `visible_ids` keep their owner and status, never the name or account ids.
+
+    The old pages masked them as hidden repos, so a client must not learn them.
+    """
+    return [
+        grant
+        if grant.repo_id in visible_ids
+        else grant.model_copy(
+            update={
+                "full_name": f"{grant.full_name.partition('/')[0]}/",
+                "added_by_account_id": None,
+                "granted_by_account_id": None,
+            }
+        )
+        for grant in grants
+    ]
+
+
 def agent_editor_view(
     *,
     root: str,
@@ -612,7 +633,7 @@ def agent_editor_view(
         visibility=visibility,
         visibility_sig=snapshot_signature(state, invitation_hash, visibility, secret),
         installations=installations,
-        grants=grants,
+        grants=redact_hidden_grants(grants, usable),
         visible_repos=list(usable.values()),
         available=available,
         repairable_repo_ids=[
