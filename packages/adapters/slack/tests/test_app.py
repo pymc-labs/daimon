@@ -1511,6 +1511,7 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
     admission.agent.name = "test-agent"
+    admission.display_name = lambda fallback: fallback
     admission.agent.model.id = "claude-sonnet-4-6"
     admission.config.thread_binding_kind = "standard"
     admission.config.agent_name = "test-agent"

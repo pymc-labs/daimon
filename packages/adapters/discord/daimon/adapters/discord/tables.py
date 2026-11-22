@@ -4,15 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
 from functools import cache
 from typing import cast
 
 from daimon.core.fonts import FONT_DIR as _FONTS
-from daimon.core.tables import MarkdownTable, render_tables
+from daimon.core.tables import Alignment, MarkdownTable, render_tables
 from fontTools.ttLib import TTFont  # pyright: ignore[reportMissingTypeStubs]
 from PIL import Image, ImageDraw, ImageFont
 
 import discord
+
+_NUMBER = re.compile(r"[-+−]?[$€£¥]?\d[\d,. ]*(?:%|[kKMBx])?")
+_PAD = 12
+_FENCE = re.compile(r"(```.*?```)", re.DOTALL)
+
+
+def _aligned(alignment: Alignment, cell: str, *, header: bool) -> Alignment:
+    """A body cell holding only a number sits right, like a column of figures, unless its
+    column is centred or right-aligned already."""
+    if alignment == "left" and not header and _NUMBER.fullmatch(cell.strip()):
+        return "right"
+    return alignment
 
 
 @cache
@@ -49,14 +62,33 @@ def table_png(table: MarkdownTable) -> bytes:
             raise ValueError("table contains glyphs unavailable in the bundled font")
     regular = ImageFont.truetype(str(_FONTS / "Inter-Regular.ttf"), 18)
     bold = ImageFont.truetype(str(_FONTS / "Inter-Bold.ttf"), 18)
-    width = min(300, 2400 // len(table.headers))
     cells = (table.headers, *table.rows)
+    # Each column is as wide as its longest cell, up to its share of the image.
+    limit = min(600, 2400 // len(table.headers))
+    widths = [
+        min(
+            limit,
+            int(
+                max(
+                    (bold if index == 0 else regular).getlength(row[column])
+                    for index, row in enumerate(cells)
+                )
+            )
+            + 2 * _PAD
+            + 1,
+        )
+        for column in range(len(table.headers))
+    ]
+    lefts = [sum(widths[:column]) for column in range(len(widths))]
     wrapped = [
-        [_wrap(cell, bold if index == 0 else regular, width - 24) for cell in row]
+        [
+            _wrap(cell, bold if index == 0 else regular, widths[column] - 2 * _PAD)
+            for column, cell in enumerate(row)
+        ]
         for index, row in enumerate(cells)
     ]
     heights = [max(map(len, row)) * 25 + 24 for row in wrapped]
-    total_width, total_height = width * len(table.headers), sum(heights)
+    total_width, total_height = sum(widths), sum(heights)
     if total_width * total_height > 12_000_000:
         raise ValueError("table image exceeds pixel budget")
     image = Image.new("RGB", (total_width, total_height), "white")
@@ -69,12 +101,14 @@ def table_png(table: MarkdownTable) -> bytes:
         )
         font = bold if index == 0 else regular
         for column, lines in enumerate(row):
+            left, width = lefts[column], widths[column]
+            alignment = _aligned(table.alignments[column], cells[index][column], header=index == 0)
             for offset, line in enumerate(lines):
-                x = column * width + 12
-                if table.alignments[column] == "right":
-                    x = (column + 1) * width - 12 - font.getlength(line)
-                elif table.alignments[column] == "center":
-                    x = column * width + (width - font.getlength(line)) / 2
+                x = left + _PAD
+                if alignment == "right":
+                    x = left + width - _PAD - font.getlength(line)
+                elif alignment == "center":
+                    x = left + (width - font.getlength(line)) / 2
                 draw.text(
                     (x, y + 12 + offset * 25),
                     line,
@@ -103,6 +137,13 @@ async def render_discord_tables(
         else:
             png, raw = part  # Discord caps attachment descriptions (alt text) at 1024 chars
             name = f"table-{len(files) + 1}.png"
+            # The image follows the message; no placeholder stands in the text.
             files.append(discord.File(io.BytesIO(png), filename=name, description=raw[:1024]))
-            rendered.append(f"[Table attached: {name}]\n")
-    return "".join(rendered), files
+    text = "".join(rendered)
+    if files:  # close the gap each table left, outside code blocks
+        parts = _FENCE.split(text)
+        text = "".join(
+            part if index % 2 else re.sub(r"\n{3,}", "\n\n", part)
+            for index, part in enumerate(parts)
+        ).strip("\n")
+    return text, files

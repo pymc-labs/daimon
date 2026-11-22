@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord import audience_sync
 from daimon.adapters.discord.audience_sync import AudienceSync
 from daimon.adapters.discord.member_sync import MemberSync, tenant_of
 from daimon.core.access_policy import TenantAccessPolicy
@@ -21,6 +22,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from . import audience_fakes as fake
 
@@ -771,3 +773,164 @@ async def test_renewal_keeps_ticking_after_a_tick_fails() -> None:
         await audience.run(lambda: [])
 
     assert ticks == [0, 1, 2], "the tick after a failure still runs; cancel still ends it"
+
+
+async def test_the_policy_fence_is_held_from_the_roles_read_to_the_facts_written(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy write takes the same fence exclusively, so it cannot commit between the role
+    lists the publisher read and the facts it writes from them. (The test connection is
+    shared, so the order of the steps is checked, not the lock itself.)"""
+    from daimon.adapters.discord import audience_sync
+
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    steps: list[str] = []
+    real_lock, real_load, real_publish = (
+        audience_sync.lock_policy_writes_shared,
+        audience_sync.load_access_policy,
+        store.publish_facts,
+    )
+
+    async def lock(*args: Any, **kwargs: Any) -> None:
+        steps.append("fence")
+        await real_lock(*args, **kwargs)
+
+    async def load(*args: Any, **kwargs: Any) -> TenantAccessPolicy:
+        steps.append("roles")
+        return await real_load(*args, **kwargs)
+
+    async def publish(*args: Any, **kwargs: Any) -> int:
+        steps.append("facts")
+        return await real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(audience_sync, "lock_policy_writes_shared", lock)
+    monkeypatch.setattr(audience_sync, "load_access_policy", load)
+    monkeypatch.setattr(store, "publish_facts", publish)
+    await audience.tick([_server()])  # type: ignore[list-item]
+    assert steps[-3:] == ["fence", "roles", "facts"]
+
+
+async def test_a_busy_fence_retires_the_facts_and_a_dirty_server_is_never_renewed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.discord import audience_sync
+    from daimon.core.session_fence_retry import FenceUnavailable
+
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    await audience.tick([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False), "published"
+
+    real = audience_sync.lock_policy_writes_shared
+    busy = [True]
+
+    async def lock(*args: Any, **kwargs: Any) -> None:
+        if busy[0]:
+            raise FenceUnavailable(0.0, "advisory")
+        await real(*args, **kwargs)
+
+    monkeypatch.setattr(audience_sync, "lock_policy_writes_shared", lock)
+    assert await audience.reconcile(server) is False  # type: ignore[arg-type]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "retired at once"
+
+    # Even a server wrongly thought live is not renewed while dirty.
+    audience._live.add(TENANT)  # pyright: ignore[reportPrivateUsage]
+    clock.now += timedelta(seconds=60)
+    await audience._renew({TENANT: server}, set())  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "no renewal"
+
+    busy[0] = False
+    await audience.tick([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False), "recomputed"
+    assert TENANT not in audience._dirty  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_role_lists_that_changed_before_the_publish_retire_the_facts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy write lands after the roles were read and before the publish takes the
+    fence: the facts computed from the old lists are never published."""
+    from daimon.adapters.discord import audience_sync
+
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    real = audience_sync.lock_policy_writes_shared
+    wrote = [False]
+
+    async def lock(*args: Any, **kwargs: Any) -> None:
+        if not wrote[0]:
+            wrote[0] = True
+            await set_access_policy(
+                db_session,
+                tenant_id=TENANT,
+                policy=TenantAccessPolicy(internal_role_ids=(str(fake.CORE),)),
+            )
+            await db_session.commit()
+        await real(*args, **kwargs)
+
+    monkeypatch.setattr(audience_sync, "lock_policy_writes_shared", lock)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert wrote[0]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "old lists never publish"
+    clock.now += timedelta(seconds=60)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert (await _fact(db_session_factory, clock, "1")).contained, "the new lists decide"
+
+
+async def test_a_channel_type_discord_py_does_not_know_does_not_stop_the_facts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fetch_channels` raises `InvalidData` for one unknown type. The reconcile reads the raw
+    list, skips that channel, publishes the known rooms and does not raise."""
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    known: dict[str, Any] = {"1": server.channels[0], "2": server.channels[1]}  # type: ignore[attr-defined]
+    server.fetch_channels = AsyncMock(  # type: ignore[attr-defined]
+        side_effect=discord.InvalidData("Unknown channel type 20 for channel ID 9")
+    )
+    server._state.http.get_all_guild_channels = AsyncMock(  # type: ignore[attr-defined]
+        return_value=[
+            {"type": 0, "id": "1"},
+            {"type": 20, "id": "9", "name": "never logged"},
+            {"type": 0, "id": "2"},
+        ]
+    )
+
+    def factory(channel_type: int) -> tuple[Any, Any]:
+        if channel_type != 0:
+            return None, None
+
+        def build(*, guild: object, state: object, data: dict[str, Any]) -> Any:
+            return known[data["id"]]
+
+        return build, channel_type
+
+    monkeypatch.setattr(audience_sync, "_guild_channel_factory", factory)
+
+    with capture_logs() as logs:
+        assert await audience.reconcile(server)  # type: ignore[arg-type]
+
+    assert await _fact(db_session_factory, clock, "1") == RoomFacts(False, False)
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False)
+    assert await _fact(db_session_factory, clock, "9") == UNKNOWN_FACTS, (
+        "the skipped room is unknown"
+    )
+    [skipped] = [log for log in logs if log["event"] == "discord.audience.channel_type_skipped"]
+    assert skipped["count"] == 1 and skipped["types"] == [20]
+    assert "never logged" not in str(logs)

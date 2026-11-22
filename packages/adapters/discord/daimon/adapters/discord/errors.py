@@ -10,6 +10,7 @@ from __future__ import annotations
 import anthropic
 import structlog
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.audience_refusal import AUDIENCE_CONTAINED
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget import ChannelBudgetError
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
@@ -22,7 +23,7 @@ from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
-from daimon.core.turn.errors import SessionAgentMismatch
+from daimon.core.turn.errors import AdmissionDenied, SessionAgentMismatch
 from daimon.core.turn.notices import provider_quota_copy, short_ref
 from mux.errors import ProviderError
 from ulid import ULID
@@ -70,6 +71,15 @@ _OUR_SIDE = (
     "Something went wrong on our side.",
     "Try again. If it keeps happening, tell an admin.",
 )
+#: A turn whose room became contained while it ran: the gate stopped its post, and nothing
+#: is wrong on our side. Short, with no Ref: there is nothing for support to find.
+AUDIENCE_STOPPED = "Answer stopped: people outside the team can see this room now."
+
+
+def _audience_stopped(exc: BaseException) -> bool:
+    if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
+        return _audience_stopped(exc.cause)
+    return isinstance(exc, AdmissionDenied) and exc.detail == AUDIENCE_CONTAINED
 
 
 def _guidance(exc: BaseException) -> str | None:
@@ -183,6 +193,9 @@ def render_error(
             offer_button=offer_button,
         )
     lines = list(error_lines(exc))
+    if _audience_stopped(exc):
+        log.info("error.audience_stopped", rid=request_id)
+        return AUDIENCE_STOPPED
     if request_id:
         log.warning(
             "error.rendered",

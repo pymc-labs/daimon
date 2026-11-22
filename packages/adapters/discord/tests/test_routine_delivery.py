@@ -18,7 +18,8 @@ from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import list_posts_in
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import FeatureTarget, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.routines import record_result
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.builders import new_routine
@@ -204,6 +205,55 @@ async def test_posts_the_tail_with_mentions_disabled(
     assert kwargs["content"].endswith("All green @\u200beveryone.\n-# requested by <@1>")
     mentions = kwargs["allowed_mentions"]
     assert not mentions.everyone and not mentions.users and not mentions.roles
+
+
+async def _header_off(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:
+    async with sm.begin() as session:
+        await set_feature_value(
+            session, tenant_id=row.tenant_id, target=FeatureTarget("workspace"),
+            key="routine_result_header", value="off", set_by=None, surface="cli",
+        )  # fmt: skip
+
+
+async def test_with_the_header_off_the_result_posts_without_it_on_every_path(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bot's channel post, the agent-identity post and the owner's DM all drop the line."""
+    monkeypatch.setattr(poster_mod, "DiscordPostTransport", _Transport)
+    _Transport.made, _Transport.sent = [], []
+    row = await _routine(db_session)
+    await _header_off(db_session_factory, row)
+    channel = _text_channel()
+    await _poster(db_session_factory, channel)(row)
+    assert channel.send.await_args.kwargs["content"] == (
+        "All green @\u200beveryone.\n-# requested by <@1>"
+    )
+    identity = AgentIdentity(name="research", avatar_url="https://app/a.png", builtin=False)
+    await _poster(db_session_factory, _text_channel(), identity=identity)(row)
+    assert _Transport.sent[-1]["content"] == "All green @\u200beveryone.\n-# requested by <@1>"
+
+
+async def test_with_the_header_off_a_dm_routine_posts_the_result_alone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.routines import update_routine
+
+    row = await _routine(db_session)
+    await _header_off(db_session_factory, row)
+    async with db_session_factory.begin() as session:
+        updated = await update_routine(
+            session, row.id, edited_by="1", tenant_id=row.tenant_id, destination_kind="dm"
+        )
+        await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=True)
+    assert updated is not None
+    row = updated.model_copy(update={"delivery_payload": "A private notification."})
+    dms = _Dms()
+    assert (await _poster(db_session_factory, {}, dms=dms)(row)).status == "delivered"
+    [(_, _, text)] = dms.sent
+    assert "Result from" not in text and text.endswith("A private notification."), text
 
 
 async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
@@ -1455,12 +1505,28 @@ async def test_a_legacy_result_keeps_todays_logic(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    audience.mode = "off"  # `on` counts a legacy result as unheld
     audience.contained = {"555"}
     row = await _stored(db_session, None)
     channel = _text_channel()
     outcome = await _poster(db_session_factory, channel)(row)
     assert outcome.status == "delivered"
     channel.send.assert_awaited_once()
+
+
+async def test_a_legacy_result_counts_as_unheld_in_mode_on(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, None)
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []
 
 
 async def test_shadow_delivers_and_logs_the_refusal(
@@ -1533,3 +1599,73 @@ async def test_every_chunk_is_sent_while_the_audience_stays_the_same(
     channel.send = AsyncMock(return_value=SimpleNamespace(id=1))
     outcome = await _poster(db_session_factory, channel)(row)
     assert outcome.status == "delivered" and channel.send.await_count >= 2
+
+
+@pytest.mark.parametrize(
+    ("mode", "roles", "delivered"),
+    [
+        ("on", ("4001",), True),
+        ("on", ("4002",), False),
+        ("on", None, False),
+        ("shadow", ("4002",), True),
+        ("off", ("4002",), True),
+    ],
+)
+async def test_a_channel_routines_dm_fallback_rechecks_the_owners_standing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    roles: tuple[str, ...] | None,
+    delivered: bool,
+) -> None:
+    """The fallback DM (and its files) goes only to an owner who still holds an internal
+    role in `on`; a failed lookup is an unknown standing, which `on` refuses."""
+    from daimon.core.config import DirectMessagePolicy
+
+    async def read(*_args: object, **_kwargs: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", read)
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(internal_role_ids=("4001",)),
+        )
+        # An open room: a room with no fact is narrow in `on`, and a narrow room keeps its
+        # results inside (no DM fallback).
+        from datetime import UTC, datetime, timedelta
+
+        from daimon.core.audience_facts import RoomFacts
+        from daimon.core.stores.audience_facts import StoredRoom, publish_facts
+
+        now = datetime.now(UTC)
+        await publish_facts(
+            session,
+            tenant_id=row.tenant_id,
+            rooms={"555": StoredRoom(RoomFacts(contained=False, narrow=False))},
+            now=now,
+            fresh_until=now + timedelta(minutes=10),
+        )
+
+    calls = 0
+
+    async def member(*_args: object) -> Membership:
+        nonlocal calls
+        calls += 1
+        if roles is None and calls > 1:
+            raise RuntimeError("lookup failed")
+        return Membership(is_member=True, role_ids=roles or ("4001",))
+
+    dms = _Dms()
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone")),
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),  # type: ignore[arg-type]
+    )
+    result = await poster(row)
+    assert bool(dms.sent) is delivered, result

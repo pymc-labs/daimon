@@ -30,7 +30,7 @@ from daimon.core.stores import identity, web_people
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
-    lock_policy_writes_exclusive,
+    lock_policy_writes_exclusive_retrying,
     set_access_policy,
 )
 from daimon.core.stores.domain import ChangeSurface, WebPersonRow
@@ -137,7 +137,7 @@ async def _change_policy(
     build: Callable[[TenantAccessPolicy], dict[str, object]],
 ) -> TenantAccessPolicy:
     """Merge what `build` returns for the stored policy, under the policy lock, as an admin."""
-    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+    await lock_policy_writes_exclusive_retrying(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     current = await load_access_policy(session, tenant_id=tenant_id)
     _require_admin(current, subject)

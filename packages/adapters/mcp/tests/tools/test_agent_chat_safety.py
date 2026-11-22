@@ -1232,7 +1232,7 @@ def test_annotation_credentials_use_the_sessions_agent(
         factory, fernet=runtime.fernet, tenant_id=_TENANT_ID, agent_id=_AGENT_UUID
     )
     lookup_builder.assert_called_once_with(
-        server_urls={"linear": _LINEAR_URL}, token_for=token_builder.return_value
+        server_urls={"linear": _LINEAR_URL}, token_for=token_builder.return_value, relays={}
     )
 
 

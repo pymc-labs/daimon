@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import discord
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.outbound.mentions import ping_users
+from discord.channel import _guild_channel_factory  # pyright: ignore[reportPrivateUsage]
 from fastmcp.exceptions import ToolError
+
+log = structlog.get_logger(__name__)
 
 _application_ids: dict[int, int] = {}
 
@@ -112,6 +117,9 @@ async def _resolve_channel(  # pyright: ignore[reportUnusedFunction]  # used by 
         channel = await c.fetch_channel(int(channel_id))
     except discord.NotFound as e:
         raise ToolError("channel not found") from e
+    except discord.InvalidData as e:
+        # A channel type this discord.py does not know: it cannot be read or searched here.
+        raise ToolError("channel not found") from e
     if isinstance(channel, (discord.abc.GuildChannel, discord.Thread, discord.DMChannel)):
         return channel
     # GroupChannel and other partial types are not supported.
@@ -128,3 +136,40 @@ def _require_guild_channel(  # pyright: ignore[reportUnusedFunction]  # used by 
     if str(channel.guild.id) != expected_guild_id:
         raise ToolError("channel not in this guild")
     return channel
+
+
+async def _fetch_known_channels(  # pyright: ignore[reportUnusedFunction]  # used by _read/_search
+    guild: discord.Guild,
+) -> list[discord.abc.GuildChannel]:
+    """The server's channels by REST, leaving out any type discord.py does not know.
+
+    `Guild.fetch_channels` raises `InvalidData` for one unknown type, which would fail the
+    whole call. On that error the raw list is read again and built with the library's own
+    factory, skipping the unknown. A skipped channel is never listed and has no cached
+    permission, so a read or search of it is resolved one by one and refused as not found
+    (`_resolve_channel`). Only the count and the types are logged, never a name.
+
+    A copy of `daimon.adapters.discord.audience_sync._fetch_known_channels`: the adapters
+    may not import each other and `daimon-core` does not depend on discord.py. Keep the
+    two in step.
+    """
+    try:
+        return list(await guild.fetch_channels())
+    except discord.InvalidData:
+        pass
+    raw: list[Any] = await guild._state.http.get_all_guild_channels(guild.id)  # pyright: ignore[reportPrivateUsage]
+    channels: list[discord.abc.GuildChannel] = []
+    skipped: list[int] = []
+    for data in raw:
+        factory, _ = _guild_channel_factory(data["type"])
+        if factory is None:
+            skipped.append(data["type"])
+            continue
+        channels.append(factory(guild=guild, state=guild._state, data=data))  # pyright: ignore[reportPrivateUsage]
+    log.warning(
+        "discord.channel_type_skipped",
+        guild_id=str(guild.id),
+        count=len(skipped),
+        types=sorted(set(skipped)),
+    )
+    return channels

@@ -168,6 +168,20 @@ channel, or nowhere. A sender from another organisation, a replaced session and
 two turns at once carry none of the three fields, so a server must not treat a
 call with no `requester_kind` as a routine.
 
+### Wake the conversation when a server's job ends
+
+A `requester_meta` server that starts long work can list the tools that start it
+in `"wake_tools"`. A call to one in a person's turn also carries
+`params._meta.wake_url`, a private [callback watch](watches.md#callback-watches)
+link; one the caller supplied is removed. Each `POST` of the outcome wakes the
+conversation once, in a turn that reads and reports. Keep the link out of logs.
+
+Each call gets its own link to one watch per conversation and server. The watch
+follows the conversation to its newest session and lasts a day after the latest call.
+It needs the `watches` feature and `DAIMON_WATCHES__CALLBACK_BASE_URL`. In a Discord
+DM each post runs as a fresh private turn in that DM. A Slack DM, a helper or an owner
+at the watch limit gets none.
+
 A request body that is not JSON, repeats a key, cannot be re-encoded, or holds
 a tool call without object `params` is refused with a 400. GET and DELETE
 requests are forwarded without a body. Rotating

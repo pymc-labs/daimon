@@ -24,6 +24,9 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 COLD_DM_ORIGIN = "Private conversation"
+#: A Private answer from a contained room (`audience_hold`): a cold conversation whose
+#: "no source" is a recorded fact, so the agent's budget channel never stands in for one.
+PRIVATE_ANSWER_ORIGIN = "Private answer"
 
 DM_SCOPE_PREFIX = "dm:"
 """Thread id prefix of a private conversation's scope."""
@@ -100,7 +103,15 @@ class DirectMessageRow(BaseModel):
     @property
     def is_cold(self) -> bool:
         """Source-free provenance, distinct from legacy moves with missing source fields."""
-        return self.source_url == COLD_DM_ORIGIN and self.source_channel_id is None
+        return (
+            self.source_url in (COLD_DM_ORIGIN, PRIVATE_ANSWER_ORIGIN)
+            and self.source_channel_id is None
+        )
+
+    @property
+    def private_answer(self) -> bool:
+        """A Private answer's conversation: it has no source by design, on every turn."""
+        return self.source_url == PRIVATE_ANSWER_ORIGIN and self.source_channel_id is None
 
 
 class DmOrigin(BaseModel):
@@ -136,6 +147,19 @@ async def get_conversation(
     session: AsyncSession, *, platform: str, route_key: str, external_user_id: str
 ) -> DirectMessageRow | None:
     row = await session.get(DirectMessageConversation, (platform, route_key, external_user_id))
+    return None if row is None else DirectMessageRow.model_validate(row)
+
+
+async def get_conversation_in_scope(
+    session: AsyncSession, *, tenant_id: uuid.UUID, scope_id: str
+) -> DirectMessageRow | None:
+    """The conversation holding `scope_id` in this tenant, whoever owns it."""
+    row = await session.scalar(
+        select(DirectMessageConversation).where(
+            DirectMessageConversation.tenant_id == tenant_id,
+            DirectMessageConversation.scope_id == scope_id,
+        )
+    )
     return None if row is None else DirectMessageRow.model_validate(row)
 
 

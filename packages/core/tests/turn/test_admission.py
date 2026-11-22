@@ -2600,6 +2600,84 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         ).allow
 
 
+@pytest.mark.parametrize("follows", [False, True], ids=["off", "on"])
+async def test_a_dm_follows_approvals_only_with_dm_approvals_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    follows: bool,
+) -> None:
+    """`dm_approvals` on: a DM reads the workspace's Allow writes, as a channel does, so a
+    third-party write runs without a card. Off (the default): every DM write asks."""
+    from daimon.core.access_policy import AgentApprovals, ChannelRule, TenantAccessPolicy
+    from daimon.core.approval_gate import ApprovalGate
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.admission import refresh_approval_gate
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    # A rule keyed by the DM's own id is ignored: a DM has no channel setting.
+    policy = TenantAccessPolicy(
+        approvals="off",
+        approvals_set_by="server-admin",
+        channel_rules={"dm-1": ChannelRule(approvals="on", approvals_set_by="someone")},
+    )
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    if follows:
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key="dm_approvals",
+            value="on",
+            account_id=None,
+            surface="cli",
+        )
+        await db_session.commit()
+    deps = replace(
+        _deps(
+            native_member_admin=False,
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    admission = await admit_chat(
+        deps, tenant, channel_id="dm-1", is_dm=True, verified_membership=True, now=_NOW
+    )
+
+    gate = await refresh_approval_gate(deps, admission)
+    assert gate == (
+        ApprovalGate("off", "server", "server-admin", tenant.id) if follows else None
+    ), "a DM reads the workspace value only with dm_approvals on"
+    posture = chat_tool_confirmation(
+        deps.tool_safety,
+        requester_platform_user_id="user-1",
+        confirm=None,
+        approval_gate_for=lambda: refresh_approval_gate(deps, admission),
+        server_urls={"third": "https://third.example/mcp"},
+    )
+    assert isinstance(posture, PolicyApproval)
+    decided = await posture.decide(
+        ToolCall(tool_use_id="dm-write", server_name="third", tool_name="create_issue")
+    )
+    assert decided.allow is follows, "Allow writes reaches a DM only with dm_approvals on"
+    if follows:
+        agent_id = admission.agent.id
+        own = {agent_id: AgentApprovals(approvals="on", approvals_set_by="agent-admin")}
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=policy.model_copy(update={"agent_approvals": own}),
+        )
+        await db_session.commit()
+        assert await refresh_approval_gate(deps, admission) == ApprovalGate(
+            "on", f"agent:{agent_id}", "agent-admin", tenant.id
+        ), "a DM follows its agent's own value over the workspace's"
+
+
 @pytest.mark.parametrize("scope", ["server", "channel", "thread"])
 @pytest.mark.parametrize("revoked", ["on", "inherit"])
 @pytest.mark.parametrize("between_calls", [False, True])

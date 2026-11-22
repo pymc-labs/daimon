@@ -173,14 +173,14 @@ async def test_an_update_that_is_not_a_content_edit_is_ignored(
     assert same.await_count == 0, "no turn when the text did not change"
 
 
-async def test_a_message_that_already_has_a_thread_is_ignored(
+async def test_a_message_that_already_has_a_thread_is_answered_there(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A thread on the message means it was answered, or another bot took it."""
+    """A person threaded the message, then added the mention: the turn runs, in that thread."""
     on_message = await _run_edit(
         _bot(db_session_factory), _edit(mentions=[_BOT_ID]), thread=MagicMock(spec=discord.Thread)
     )
-    assert on_message.await_count == 0, "no second answer where a thread exists"
+    assert on_message.await_count == 1, "the edit that added the mention runs one turn"
 
 
 def _http_error(status: HTTPStatus) -> discord.HTTPException:

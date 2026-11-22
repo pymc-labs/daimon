@@ -957,9 +957,9 @@
         ``default`` to clear the level's own value. ``tier`` is the ``workspace``,
         ``agent``, ``channel`` or ``thread`` level of this conversation; other places cannot be
         named. ``locked`` (an admin's, not at the thread tier) makes the value final
-        below. Approvals need a live admin of the chat platform; a thread's participation
-        or progress plans are anyone's; the rest an admin's. Read the returned ``note``
-        back.
+        below. Approvals, and approvals in direct messages, need a live admin of the chat
+        platform; a thread's participation or progress plans are anyone's; the rest an
+        admin's. Read the returned ``note`` back.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -12812,6 +12812,50 @@
         }),
         'required': list([
           'repo_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'share_secret_with': dict({
+      'description': '''
+        Send one of this agent's saved keys to a person's Discord DMs, where they can
+        reveal it once within a day. Use it when someone asks for a key's value; never
+        paste a value in chat. Only an admin, the agent's owner or whoever saved the key
+        can get it, and only while they are in the conversation. It goes to them; when an
+        admin names someone else, it goes once they click Send. The result never holds
+        the value.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'key_name': dict({
+            'description': "The agent's key, e.g. TOGGL_API_TOKEN.",
+            'type': 'string',
+          }),
+          'label': dict({
+            'description': 'What the person sees, up to 100 characters.',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'recipient_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': 'Their user ID; omit to send it to the person who asked.',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'key_name',
+          'label',
         ]),
         'type': 'object',
       }),

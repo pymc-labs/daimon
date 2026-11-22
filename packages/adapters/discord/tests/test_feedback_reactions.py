@@ -27,7 +27,7 @@ from daimon.core.message_feedback import CUSTOM_ID_PATTERN
 from daimon.core.stores.domain import RecordVoteResult
 from daimon.core.stores.identity import find_platform_principal
 from daimon.testing.builders import new_thread_session
-from daimon.testing.factories import make_platform_principal, make_tenant
+from daimon.testing.factories import make_dm_conversation, make_platform_principal, make_tenant
 from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -547,7 +547,39 @@ async def test_reaction_with_no_guild_id_writes_nothing(
 
     await cog.on_raw_reaction_add(payload)  # must not raise, no tenant to check against
 
-    assert calls == [], "a reaction with no guild resolves no tenant and must not be recorded"
+    assert calls == [], "a reaction outside any known DM conversation must not be recorded"
+
+
+async def test_dm_vote_is_recorded_for_the_reactors_conversation(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id=str(_GUILD_ID))
+    principal = await make_platform_principal(
+        db_session, tenant=tenant, platform="discord", external_id=str(_REACTOR_ID)
+    )
+    await make_dm_conversation(
+        db_session,
+        tenant=tenant,
+        account_id=principal.account_id,
+        route_key="2009",
+        external_user_id=str(_REACTOR_ID),
+    )
+    await db_session.commit()
+    calls = _spy_on_record_vote(monkeypatch)
+    cog = FeedbackReactionCog(_fake_bot(sessionmaker=db_session_factory))
+    payload = _payload(
+        message_id=1030,
+        channel_id=2009,
+        guild_id=None,
+        emoji_name="\N{THUMBS UP SIGN}",
+        message_author_id=_BOT_USER_ID,
+    )
+
+    await cog.on_raw_reaction_add(payload)
+
+    assert [(c.row.tenant_id, c.row.vote) for c in calls] == [(tenant.id, "up")]
 
 
 async def test_non_vote_emoji_writes_nothing(

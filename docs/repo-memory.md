@@ -39,7 +39,8 @@ access.
 
 1. Apply the database migration.
 2. Freeze writes to the old memory, then run the offline importer,
-   `scripts/import_repo_memory.py`. Its docstring holds the input formats.
+   `scripts/import_repo_memory.py`, in a worker container
+   ([how](people-migration.md#repository-memory)). Its docstring holds the input formats.
    Compare the dry-run and applied manifests. Keep exports outside the
    repository.
 3. Set

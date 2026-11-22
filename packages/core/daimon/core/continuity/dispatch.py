@@ -22,6 +22,7 @@ from daimon.core.anthropic_guard import (
     guard_selfhosted_channel,
     independent_wake_provider_context,
 )
+from daimon.core.bot_access import BOT_ACCESS_RETRY_DELAY, BotAccessUnavailable
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
@@ -276,6 +277,11 @@ async def dispatch_pending_continuations(
             except AnthropicDisabled:
                 log.warning("continuation.provider_guard_denied", row_id=str(row.id))
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+            except BotAccessUnavailable:
+                # The bot cannot reach the thread's channel yet; nothing ran, nothing is paused.
+                log.info("continuation.bot_access_unavailable", row_id=str(row.id))
+                retry_at = busy_retry_at(row, now=now(), delay=BOT_ACCESS_RETRY_DELAY)
+                await release_wake(sessionmaker, claim, retry_at=retry_at)
             except SessionPreparationFailed:
                 await _settle(sessionmaker, claim, "blocked_preparation_failed", now)
             except ResponderChanged as exc:
