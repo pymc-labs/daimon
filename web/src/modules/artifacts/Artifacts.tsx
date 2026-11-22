@@ -16,6 +16,7 @@ import { plural } from "@/lib/format"
 import { Pill } from "../agents/bits"
 import { AccessLabel, ACCESS, expiry, fullUrl, KEY, UseTags } from "./bits"
 import type { ArtifactSummary } from "./types"
+import { Thumb } from "./Viewing"
 
 const ownerOf = (a: ArtifactSummary) => (a.mine ? "You" : a.owner.name)
 
@@ -71,10 +72,13 @@ function ArtifactTable({ rows: all }: { rows: ArtifactSummary[] }) {
                 const left = expiry(a.expires_at)
                 return (
                   <TableRow key={a.id} className="group/row" {...rowProps(() => navigate(`/artifacts/${a.id}`))}>
-                    <TableCell className="max-w-72">
-                      <span className="block min-w-0">
-                        <span className="flex items-center gap-2"><span className="truncate font-medium">{a.title}</span>{left && <Pill>{left === "Expired" ? left : `Expires in ${left.replace(" left", "")}`}</Pill>}</span>
-                        <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground"><AgentAvatar src={a.agent.avatar} name={a.agent.name} className="size-4 text-[8px]" /><span className="truncate">{a.agent.name}</span></span>
+                    <TableCell className="max-w-80">
+                      <span className="flex min-w-0 items-center gap-3">
+                        <Thumb id={a.id} version={a.version} className="w-12 max-sm:hidden" />
+                        <span className="block min-w-0">
+                          <span className="flex items-center gap-2"><span className="truncate font-medium">{a.title}</span>{left && <Pill>{left === "Expired" ? left : `Expires in ${left.replace(" left", "")}`}</Pill>}</span>
+                          <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground"><AgentAvatar src={a.agent.avatar} name={a.agent.name} className="size-4 text-[8px]" /><span className="truncate">{a.agent.name}</span></span>
+                        </span>
                       </span>
                     </TableCell>
                     <TableCell className="max-sm:hidden"><AccessLabel access={a.access} count={a.people_count} /></TableCell>

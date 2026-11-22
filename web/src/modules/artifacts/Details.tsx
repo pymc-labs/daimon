@@ -1,6 +1,7 @@
 import { CopyButton, Mono } from "@/components/common"
 import { AgentLink } from "@/components/links"
 import { Facts, PanelSection, SettingRow } from "@/components/panel"
+import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -9,6 +10,7 @@ import { absolute, plural } from "@/lib/format"
 import { useChange } from "./bits"
 import { refused } from "./rules"
 import type { ArtifactDetail, DataAccess } from "./types"
+import { useAskConsent } from "./Viewing"
 
 /** A control that explains, on hover, why it is off. */
 function Why({ reason, children }: { reason: string | null; children: React.ReactNode }) {
@@ -25,6 +27,7 @@ export function Details({ a }: { a: ArtifactDetail }) {
   const change = useChange(a.id)
   const no = refused(a.access, a)
   const edit = a.can.edit && !change.isPending
+  const consent = useAskConsent(a.id, a.ask)
   return (
     <>
       <PanelSection>
@@ -65,6 +68,11 @@ export function Details({ a }: { a: ArtifactDetail }) {
               </Why>
             </div>
           </SettingRow>
+          {a.ask && consent.allowed && (
+            <SettingRow label="You allowed asks">
+              <Button variant="outline" size="sm" disabled={consent.revoke.isPending} onClick={() => consent.revoke.mutate()}>Revoke</Button>
+            </SettingRow>
+          )}
           {a.data !== "off" && (
             <SettingRow label="Data space">
               <Select value={String(a.data_scale)} disabled={!edit} onValueChange={(v) => change.mutate({ data_scale: Number(v) })}>
