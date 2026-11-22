@@ -51,12 +51,20 @@ async def test_report_problem_when_not_a_routine_run_then_refused():
         await tool._report_routine_problem_impl(fake_runtime(), make_auth(), "other", "stuck")
 
 
+@pytest.mark.parametrize(
+    ("channel_id", "note"),
+    [("C1", "The report folder is not shared."), (None, None)],
+    ids=["channel_output", "private_output_drops_the_note"],
+)
 async def test_report_problem_in_a_live_fire_then_recorded_against_the_signed_routine(
-    db_session, committing_sessionmaker
+    db_session, committing_sessionmaker, channel_id, note
 ):
-    """The event names the routine from the credential, and only while its fire runs."""
+    """The event names the routine from the credential, and only while its fire runs. A
+    routine with private output keeps its note from the admins; its category still counts."""
     tenant = await make_tenant(db_session)
-    routine = await make_routine(db_session, tenant=tenant, created_by_user_id="7")
+    routine = await make_routine(
+        db_session, tenant=tenant, created_by_user_id="7", channel_id=channel_id
+    )
     await db_session.commit()
     runtime = cast(McpRuntime, SimpleNamespace(session_factory=committing_sessionmaker))
     async with routine_execution(committing_sessionmaker, tenant.id, routine.id, lifetime_s=60):
@@ -74,8 +82,8 @@ async def test_report_problem_in_a_live_fire_then_recorded_against_the_signed_ro
     assert out.routine_id == str(routine.id), "the tool names the signed routine"
     assert [
         (g.latest.code, g.latest.routine_id, g.latest.reason, g.latest.note) for g in groups
-    ] == [
-        ("routine.goal_unmet", routine.id, "blocked_access", "The report folder is not shared.")
-    ], "one event for the routine, its category and the agent's one-line note"
+    ] == [("routine.goal_unmet", routine.id, "blocked_access", note)], (
+        "one event for the routine, its category and the agent's one-line note"
+    )
     with pytest.raises(ToolError):
         await tool._report_routine_problem_impl(runtime, auth, "other", "late")

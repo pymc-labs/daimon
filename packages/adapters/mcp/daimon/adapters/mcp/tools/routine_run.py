@@ -17,6 +17,7 @@ from daimon.adapters.mcp.tools.routines import (
 )
 from daimon.core import routine_service
 from daimon.core.ops_events import OpsEvent, report_ops_event
+from daimon.core.routines import has_private_output
 from daimon.core.stores.lead_intake import execution_is_active
 from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
@@ -68,7 +69,8 @@ async def _report_routine_problem_impl(
             reason=category,
             routine_id=row.id,
             agent_id=row.agent_id,
-            note=note,
+            # Admins read the note; a routine whose output is private keeps it to itself.
+            note=None if has_private_output(row) else note,
         ),
     )
     return RoutineProblemReported(routine_id=str(row.id))
