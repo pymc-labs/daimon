@@ -51,3 +51,21 @@ async def test_save_refuses_an_oversized_body_as_a_page(web_client: WebClientFac
     assert response.status_code == 200, response.text
     view = response.json()["view"]
     assert (view["kind"], view["status"]) == ("error", 413), view
+
+
+async def test_unconfigured_app_answers_every_step_with_an_error_page(
+    web_client: WebClientFactory,
+) -> None:
+    """A web app without the GitHub App settings still answers, so a link shows the reason."""
+    async with web_client() as client:
+        view = await client.get("/api/github/connect/view", params={"state": "s"})
+        start = await client.post(
+            "/api/github/connect/start",
+            json={"token": "t"},
+            headers={CSRF_HEADER: "1", "origin": PUBLIC_URL},
+        )
+    for response in (view, start):
+        assert response.status_code == 200, response.text
+        page = response.json()["view"]
+        assert (page["kind"], page["status"]) == ("error", 503), page
+        assert "unavailable" in page["message"], page

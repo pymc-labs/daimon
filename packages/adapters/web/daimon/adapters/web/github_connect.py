@@ -56,10 +56,18 @@ def respond(outcome: ConnectOutcome) -> Response:
 
 
 def github_connect_router(runtime: WebRuntime) -> APIRouter:
-    """The connect steps; no routes unless the GitHub App flow is configured."""
+    """The connect steps; unconfigured, each answers that GitHub setup is unavailable."""
     router = APIRouter(prefix="/api/github/connect")
     root = connect_root(runtime.settings)
     if root is None:
+        unavailable = ConnectErrorView(
+            message="GitHub setup is unavailable here.", status=503, action="Ask an admin."
+        )
+
+        @router.api_route("/{step}", methods=["GET", "POST"])
+        async def not_configured(step: str) -> Response:  # pyright: ignore[reportUnusedFunction]
+            return respond(ConnectPage(view=unavailable))
+
         return router
     flow = GitHubConnectFlow(
         settings=runtime.settings,
