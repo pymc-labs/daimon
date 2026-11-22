@@ -24,7 +24,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools.artifacts import create_page_watch, enroll_page_key
+from daimon.adapters.mcp.tools.artifacts import create_page_watch
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
@@ -884,7 +884,7 @@ async def rotate_page_key(runtime: McpRuntime, auth: AuthIdentity, watch: WatchR
         )
         require_unchanged_enrollment(watch, current)
         keys = tuple(k.get_secret_value() for k in runtime.settings.crypto.keys)
-        key_id = await enroll_page_key(db, watch, keys, now=datetime.now(UTC))
+        key_id, _ = await watches.enroll_page_key(db, watch, keys, now=datetime.now(UTC))
     return summary(watch, key_id=key_id)
 
 

@@ -29,7 +29,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     refuse_helper,
     require_turn_origin,
 )
-from daimon.core.artifact_pages import access, content, documents, keys, tickets
+from daimon.core.artifact_pages import access, content, documents, tickets
 from daimon.core.artifact_pages.events import MAX_WATCHES_PER_PAGE
 from daimon.core.artifact_pages.model import ArtifactError, page_url
 from daimon.core.continuity.continuation import ContinuationRequest
@@ -634,26 +634,6 @@ async def transfer_impl(
             return Handed(slug=slug, owner=(await _page(db, auth, caller, saved)).owner)
 
 
-async def enroll_page_key(
-    db: AsyncSession, watch: WatchRow, crypto_keys: tuple[str, ...], *, now: datetime
-) -> str:
-    """Give the watch a fresh signing key the page host derives itself, so none is ever
-    stored or shown; returns its id. Replaces the previous key and cancels queued wakes."""
-    key_id = keys.new_key_id(crypto_keys)
-    key = keys.page_event_key(crypto_keys, watch.id, key_id)
-    if key is None:
-        raise ArtifactError("unavailable", "This Daimon has no encryption key set up.")
-    await watches.rotate_signing_key(
-        db,
-        watch.id,
-        key_id=key_id,
-        key=key,
-        expires_at=watch.expires_at or now + watches.MAX_LIFETIME,
-        now=now,
-    )
-    return key_id
-
-
 async def create_page_watch(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -702,7 +682,8 @@ async def create_page_watch(
                 delivery=delivery,
                 select_path=select_path,
             )
-            return watch, await enroll_page_key(db, watch, caller.crypto_keys, now=now)
+            key_id, _ = await watches.enroll_page_key(db, watch, caller.crypto_keys, now=now)
+            return watch, key_id
 
 
 _TURN: Final = "Pass this active turn's origin_context_id."

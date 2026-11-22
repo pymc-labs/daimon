@@ -2628,15 +2628,37 @@ async def live_key_id(session: AsyncSession, watch_id: uuid.UUID, *, now: dateti
     )
 
 
+async def enroll_page_key(
+    session: AsyncSession, watch: WatchRow, crypto_keys: tuple[str, ...], *, now: datetime
+) -> tuple[str, str]:
+    """Give the watch a fresh signing key the page host derives itself, so none is stored
+    or shown; replaces the previous key and cancels queued wakes."""
+    key_id = new_key_id(crypto_keys)
+    key = page_event_key(crypto_keys, watch.id, key_id)
+    if key is None:
+        raise ValueError("This Daimon has no encryption key set up.")
+    end = now + MAX_LIFETIME
+    await rotate_signing_key(
+        session,
+        watch.id,
+        key_id=key_id,
+        key=key,
+        expires_at=end if watch.expires_at is None else min(end, watch.expires_at),
+        now=now,
+    )
+    return key_id, key
+
+
 async def ensure_page_key(
     session: AsyncSession, watch: WatchRow, crypto_keys: tuple[str, ...], *, now: datetime
 ) -> tuple[str, str]:
     """The page watch's live signing key, enrolled anew when it expired or was derived from
-    a crypto key no longer listed; the page host derives it, so none is stored or shown."""
+    a crypto key no longer listed."""
     key_id = await live_key_id(session, watch.id, now=now)
     key = None if key_id is None else page_event_key(crypto_keys, watch.id, key_id)
     if key_id is not None and key is not None:
         return key_id, key
+    return await enroll_page_key(session, watch, crypto_keys, now=now)
     key_id = new_key_id(crypto_keys)
     key = page_event_key(crypto_keys, watch.id, key_id)
     if key is None:
