@@ -1058,6 +1058,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "dm_carry_overs": "dm_carry_overs",
         "held_timers": "held_timers",
         "credential_requests": "credential_requests",
+        "secret_shares": "secret_shares",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",

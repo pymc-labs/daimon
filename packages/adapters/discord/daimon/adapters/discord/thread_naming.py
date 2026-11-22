@@ -20,6 +20,7 @@ from anthropic import APIError, AsyncAnthropic
 from daimon.core.auxiliary_calls import AuxiliaryUnavailable
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.thread_naming import (
+    TitleStyle,
     is_generic_thread_name,
     suggest_thread_name,
 )
@@ -46,6 +47,7 @@ async def generate_thread_name(
     channel_id: str | None = None,
     provider: Provider | None = None,
     agent_id: str | None = None,
+    style: TitleStyle = "sentence",
 ) -> str:
     """Title from ``message_text``; ``fallback`` on failure, timeout, or a blank or generic answer.
 
@@ -67,6 +69,7 @@ async def generate_thread_name(
                 message_text=message_text,
                 max_input_chars=max_input_chars,
                 provider=provider,
+                style=style,
             )
     except TimeoutError:
         log.warning(

@@ -22,8 +22,7 @@ For a one-off "remind me in two hours", use a timer (`create_timer`,
 [mcp-tools.md](mcp-tools.md#timers)). It fires once, runs in the conversation it
 was set in and needs no cleanup.
 
-An admin can move a routine to a [workflow](workflows.md#routines-and-workflows)
-and back.
+Admins can [move routines to workflows](workflows.md#routines-and-workflows).
 
 ## Create a routine
 
@@ -176,7 +175,9 @@ For a routine with a destination, a successful run queues its full result. If
 the agent already called `send_message` to that exact destination, the result is
 skipped as `agent_posted`. Otherwise the chat adapter for the tenant's platform
 posts it, in chunks that keep code fences intact. The post reads `Result from
-<agent>'s daily routine at 09:00 UTC:` followed by the result.
+<agent>'s daily routine at 09:00 UTC:` followed by the result. The Routine
+result header feature turns that line off for a workspace, agent, channel or
+one routine.
 
 Delivery is at most once and checks first:
 

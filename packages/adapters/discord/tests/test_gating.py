@@ -7,6 +7,7 @@ from functools import partial
 import pytest
 from daimon.adapters.discord.gating import (
     HintCooldown,
+    bot_message_answerable,
     is_participation_candidate,
     is_plain_text_mention_candidate,
     should_process_message,
@@ -239,3 +240,35 @@ def test_plain_text_candidate_admits_a_person_naming_the_bot_in_a_guild() -> Non
 def test_plain_text_candidate_rejects(overrides: dict[str, object], why: str) -> None:
     """Only a person's unmentioned guild message that names the bot qualifies."""
     assert not _plain_text_candidate(**overrides), f"{why} must not be a candidate"  # type: ignore[arg-type]
+
+
+def test_answer_bots_lets_another_bots_mention_through_but_never_its_reply_or_our_own() -> None:
+    """`answer_bots` decides later; a reply could be another agent answering, so it never counts."""
+    other = partial(_should_process_message, author_is_bot=True, answer_bots=True)
+    assert other(author_id=OTHER_BOT_ID, bot_mentioned=True), "a mention reaches the agent check"
+    assert not other(author_id=OTHER_BOT_ID, bot_mentioned=False, reply_to_recorded_post=True), (
+        "a bot's reply to an answer is never answered"
+    )
+    assert not other(author_id=DAIMON_ID, bot_mentioned=True), "never itself"
+    assert not other(author_id=OTHER_BOT_ID, bot_mentioned=True, author_is_webhook=True), (
+        "never an agent posting through a webhook"
+    )
+
+
+@pytest.mark.parametrize(
+    ("typed", "is_reply", "to_other", "answered"),
+    [
+        (True, False, False, True),
+        (False, False, False, False),  # a reply-ping lists us in `mentions` but types nothing
+        (True, True, False, False),  # a reply to our own post, or one we cannot read
+        (True, True, True, True),
+        (False, True, True, False),
+    ],
+)
+def test_a_bot_is_answered_only_for_a_typed_mention_never_a_reply_to_our_post(
+    typed: bool, is_reply: bool, to_other: bool, answered: bool
+) -> None:
+    assert (
+        bot_message_answerable(typed_mention=typed, is_reply=is_reply, reply_to_other=to_other)
+        is answered
+    )

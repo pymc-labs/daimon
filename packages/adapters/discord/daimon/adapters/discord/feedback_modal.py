@@ -56,6 +56,15 @@ _SUBMIT_FAILED = "That didn't work. Try again."
 _THANKS = "Thanks for the feedback."
 
 
+async def _in_private_channel(bot: commands.Bot, channel_id: str) -> bool:
+    """Whether the answer voted on is in a DM; one that cannot be told counts as private."""
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+    except (discord.HTTPException, ValueError):
+        return True
+    return isinstance(channel, discord.DMChannel | discord.GroupChannel)
+
+
 class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
     """Single-field free-text form, written through the ownership-predicated store call."""
 
@@ -96,8 +105,16 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
 
         _log.info("feedback_modal.submit", feedback_id=str(self._feedback_id))
         bot = cast(commands.Bot, interaction.client)
-        channel_id = await support_channel_for(
-            self._runtime, bot, tenant_id=updated_row.tenant_id, channel_id=updated_row.channel_id
+        # Feedback on a private answer stays private.
+        channel_id = (
+            None
+            if await _in_private_channel(bot, updated_row.channel_id)
+            else await support_channel_for(
+                self._runtime,
+                bot,
+                tenant_id=updated_row.tenant_id,
+                channel_id=updated_row.channel_id,
+            )
         )
         if channel_id is not None:
             # Best-effort: the text is already recorded, whatever the post does.

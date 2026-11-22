@@ -51,6 +51,7 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     map_slack_api_error,
 )
 from daimon.core.agent_identity import (
+    agent_display_name,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
@@ -254,6 +255,12 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
                 session,
                 tenant_id=auth.tenant_id,
                 agent_name=agent.name,
+                display_name=await agent_display_name(
+                    runtime.session_factory,
+                    tenant_id=auth.tenant_id,
+                    agent_id=agent.id,
+                    fallback=agent.name,
+                ),
                 is_builtin=is_builtin_agent(
                     name=agent.name,
                     metadata=agent.metadata,

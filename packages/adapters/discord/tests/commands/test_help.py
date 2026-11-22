@@ -21,6 +21,7 @@ from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.commands.privacy import PrivacyCog
 from daimon.adapters.discord.commands.routines import RoutinesCog
 from daimon.adapters.discord.commands.settings import SettingsCog
+from daimon.adapters.discord.commands.share_secret import ShareSecretCog
 from daimon.adapters.discord.commands.workflows import WorkflowsCog
 from daimon.core.platform_words import DESCRIPTIONS, WORDS
 
@@ -100,7 +101,7 @@ class TestBuildHelpView:
             for text in _collect_text_display_content(build_help_view())
             if text.startswith("/here")
         )
-        assert len(commands.splitlines()) == 15
+        assert len(commands.splitlines()) == 16
         assert all(line.startswith("/") for line in commands.splitlines())
         assert "/dm-me" in content
         assert "/model" in content
@@ -168,6 +169,7 @@ class TestSharedDescriptions:
             RoutinesCog,
             SettingsCog,
             WorkflowsCog,
+            ShareSecretCog,
         ]
         registered = {
             f"/{command.qualified_name}": command.description

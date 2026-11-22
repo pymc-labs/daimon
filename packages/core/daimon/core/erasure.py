@@ -32,6 +32,7 @@ from daimon.core.stores import (
     mcp_tokens,
     monitoring,
     routines,
+    secret_shares,
     slack_turn_contexts,
     slack_user_tokens,
     support,
@@ -391,6 +392,11 @@ ERASABLE: tuple[Erasable, ...] = (
         "credential_requests",
         credential_requests.count_credential_requests_for_platform_user,
         credential_requests.delete_credential_requests_for_platform_user,
+    ),
+    by_user(
+        "secret_shares",
+        _tpu(secret_shares.delete_shares_for_platform_user),
+        count=_tpu(secret_shares.count_shares_for_platform_user),
     ),
     by_requester(
         "wizard_sessions",

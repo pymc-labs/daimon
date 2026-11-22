@@ -83,6 +83,12 @@ _NARROWED: dict[str, str] = {
     "participation": _PRE_AGENT,
     "thread_naming": "read when a thread opens, before an agent or thread exists",
     "plain_text_mentions": _PRE_AGENT,
+    "display_name": "a name belongs to one agent, so only the agent tier sets it",
+    "thread_title_style": "read when a thread opens for its agent, before the thread exists",
+    "thread_auto_archive": "read when a thread opens for its agent, before the thread exists",
+    "status_reactions": "read per message and agent, before a thread setting could apply",
+    "protected_notice_reaction": "read when a mention is refused, before a thread is chosen",
+    "answer_bots": "read per message and agent, before a thread setting could apply",
     "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
     "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
     "support_escalation": "set where credits apply: the workspace, an agent or a channel",
@@ -103,6 +109,7 @@ _NARROWED: dict[str, str] = {
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
+    "secret_sharing": "a workspace or agent choice: a share has no channel or thread",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
@@ -111,6 +118,7 @@ _NARROWED: dict[str, str] = {
     "monitor_direct_messages": "kept per agent: a DM or web chat has no channel to set",
     "monitor_mcp": "kept per agent: an MCP call has no channel or thread",
     "routine_sandbox_tools": "an admin's opt-in for routine runs, so a workspace, agent or routine",
+    "routine_result_header": "read when a routine posts, which has no thread; the routine sets its own",
     "model_reactions": "a workspace or agent display choice, read when the turn starts",
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
@@ -524,6 +532,7 @@ def test_every_feature_key_read_is_registered_and_every_registered_key_is_read()
         | set(CAPABILITY_KEYS)
         | {f"web.{module}" for module in WEB_MODULES}
         | {"daily_model_cap"}  # request.admission.resolved("daily_model_cap")
+        | {"display_name"}  # Admission.display_name resolves it
     )
     for path in _PRODUCT:
         constants: set[str] = set()

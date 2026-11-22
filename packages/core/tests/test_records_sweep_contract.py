@@ -41,6 +41,8 @@ WRAPPER_ALLOWED = {
     "core/daimon/core/long_jobs_ma.py": "long jobs run as Anthropic sessions; Daimon ids refused",
     "core/daimon/core/workflows/code_worker.py": "a code step's worker is a long-job Anthropic session",
     "core/daimon/core/agent_fork.py": "forking an Anthropic agent; Daimon-owned forks use records",
+    "core/daimon/core/agent_rename.py": "renames Anthropic agents through the provider-only "
+    "defaults rename helpers; a Daimon-owned agent is not renamed",
     "core/daimon/core/agent_convert.py": "converting back creates the Anthropic agent by tag",
     "core/daimon/core/ma_resolver.py": "resolves Anthropic agents by name; dm_ ids use records",
     "adapters/web/": "web adapter sweep is separate",

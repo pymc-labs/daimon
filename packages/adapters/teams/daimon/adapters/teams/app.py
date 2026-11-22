@@ -1757,7 +1757,7 @@ class TeamsApp:
                 vote_buttons=admission.shown("message_feedback", "teams"),
                 direct_chat=inbound.kind == "dm",
                 foreign=inbound.is_foreign,
-                agent_name=admission.agent.name,
+                agent_name=admission.display_name(admission.agent.name),
                 model_id=admission.agent.model.id,
                 markup=self.runtime.turn_deps.markup,
                 sessionmaker=self.runtime.sessionmaker,

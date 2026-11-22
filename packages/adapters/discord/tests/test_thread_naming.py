@@ -524,9 +524,13 @@ async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
         patch("daimon.adapters.discord.bot.admit", AsyncMock(return_value=admission)),
         patch("daimon.adapters.discord.bot.bind_session", AsyncMock(side_effect=refused)) as bind,
         patch.object(bot, "_wait_for_orphan_recovery", AsyncMock()),
+        patch.object(bot, "_place_value", wraps=bot._place_value) as read,  # pyright: ignore[reportPrivateUsage]
     ):
         await bot._orchestrate_observed(message, "12345", tenant.id)  # pyright: ignore[reportPrivateUsage]
     message.create_thread.assert_awaited_once_with(
         name="Keep this private", auto_archive_duration=10080
     )
+    places = {c.args[1]: c.args[0] for c in read.await_args_list}
+    for key in ("thread_title_style", "thread_auto_archive"):
+        assert places[key].agent_id == "sh_agent_test", "read for the agent opening the thread"
     bind.assert_awaited_once()

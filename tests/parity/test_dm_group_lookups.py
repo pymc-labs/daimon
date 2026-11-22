@@ -36,6 +36,10 @@ NO_GRANT_CHECK: dict[str, str] = {
     "adapters/discord/daimon/adapters/discord/workflow_delivery.py": WORKFLOW_DM,
     "adapters/slack/daimon/adapters/slack/workflow_delivery.py": WORKFLOW_DM,
     "adapters/teams/daimon/adapters/teams/workflow_delivery.py": WORKFLOW_DM,
+    "adapters/mcp/daimon/adapters/mcp/tools/secret_shares.py": (
+        "a share card, not a conversation: it goes to the asker or to whom an admin names, "
+        "behind the Secret sharing feature"
+    ),
     "adapters/discord/daimon/adapters/discord/bot.py": (
         "`open_member_dm` opens the chat that routine, watch and timer delivery asked for after their grant check"
     ),

@@ -4,17 +4,22 @@ A grant's groups are each platform's own: Discord roles come with the member,
 Slack user groups need the `usergroups:read` scope (an existing install must be
 reinstalled), and Teams groups are teams the app is installed in, read with the
 team roster permission; Entra groups would need tenant-wide consent. A Teams
-personal chat routes by the same grants and follows the same DM settings.
+personal chat routes by the same grants and follows the same DM settings. Only Discord
+runs a watch's fire in a DM, so a callback watch made in a Slack DM is refused.
 No database -- this is a scope check.
 """
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
+import pytest
 import yaml
+from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.features.registry import FEATURES
 from daimon.core.slack_oauth import SLACK_BOT_SCOPES
+from daimon.core.stores.watches import require_delivery
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -37,3 +42,20 @@ def test_teams_personal_chats_when_routed_then_follow_the_dm_settings() -> None:
     assert FEATURES["direct_messages"].on_platform("teams"), "Teams DMs follow the grants"
     for key in ("dm_debounce_seconds", "dm_history_depth", "dm_memory_read_only"):
         assert FEATURES[key].on_platform("teams"), f"{key} applies to a personal chat"
+
+
+def test_watches_when_made_in_a_dm_then_report_there_on_discord_only() -> None:
+    """A Discord DM watch's fires run as fresh private turns there (`_run_watch_report`);
+    Slack has no such path, so it refuses rather than never report."""
+
+    def made_in_dm(platform: str) -> ContinuationRequest:
+        return ContinuationRequest(
+            tenant_id=uuid.uuid4(), platform=platform, parent_channel_id="D1",
+            thread_id="dm:scope", requester_account_id=uuid.uuid4(),
+            requester_external_user_id="U1", target_ma_agent_id="agent", target_name="agent",
+            requested_work=None, reason="watch_fired", idempotency_key=uuid.uuid4(),
+        )  # fmt: skip
+
+    assert require_delivery(made_in_dm("discord"), "thread") == "dm", "Discord DMs the owner"
+    with pytest.raises(ValueError, match="made in a DM here"):
+        require_delivery(made_in_dm("slack"), "thread")

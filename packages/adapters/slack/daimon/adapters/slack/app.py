@@ -2612,7 +2612,7 @@ class SlackApp:
         is_admin = admission.is_admin
 
         agent = admission.agent
-        _lc_agent_name: str = agent.name
+        _lc_agent_name: str = admission.display_name(agent.name)
         _lc_model_id: str = agent.model.id
         turn_identity: AgentIdentity | None = None
         try:
@@ -2621,6 +2621,7 @@ class SlackApp:
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
+                    display_name=_lc_agent_name,
                     is_builtin=is_builtin_agent(
                         name=agent.name,
                         metadata=agent.metadata,
@@ -3564,6 +3565,7 @@ class SlackApp:
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=follow_admission.agent.name,
+                    display_name=follow_admission.display_name(follow_admission.agent.name),
                     is_builtin=is_builtin_agent(
                         name=follow_admission.agent.name,
                         metadata=follow_admission.agent.metadata,
@@ -3600,7 +3602,7 @@ class SlackApp:
             requester_is_admin=follow_admission.is_admin,
             requester_foreign=standing.foreign,
             notify_on_completion=follow_admission.shown("completion_pings", "slack"),
-            agent_name=follow_admission.agent.name,
+            agent_name=follow_admission.display_name(follow_admission.agent.name),
             model_id=follow_admission.agent.model.id,
             markup=self.runtime.turn_deps.markup,
             register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
@@ -3703,7 +3705,7 @@ class SlackApp:
                 requester_is_admin=follow_admission.is_admin,
                 requester_foreign=standing.foreign,
                 notify_on_completion=follow_admission.shown("completion_pings", "slack"),
-                agent_name=follow_admission.agent.name,
+                agent_name=follow_admission.display_name(follow_admission.agent.name),
                 model_id=follow_admission.agent.model.id,
                 markup=self.runtime.turn_deps.markup,
                 register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),

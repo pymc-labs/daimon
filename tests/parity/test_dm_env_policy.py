@@ -15,7 +15,14 @@ from .test_dm_group_lookups import GRANT_CHECKS, OPENERS, SOURCES
 DECISIONS = frozenset({"decide_dm", "permits_dm", "explain_dm"})
 """Core decisions that apply the env policy themselves, given the settings."""
 ENV_CHECKS = frozenset(
-    {"env_admits", "env_dm_policy", "allowed_recipients", "require_dm_grant", *DECISIONS}
+    {
+        "env_admits",
+        "env_dm_policy",
+        "allowed_recipients",
+        "require_dm_grant",
+        "sharing_refusal",  # every secret-share card's check (`core/secret_share_flow.py`)
+        *DECISIONS,
+    }
 )
 
 # Modules that open a DM or check a grant without the env policy, and why.

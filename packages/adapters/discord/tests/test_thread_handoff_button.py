@@ -392,7 +392,10 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
             async with asyncio.timeout(20):
                 while not bot._pending.get(thread.id):
                     await asyncio.sleep(0.01)
-            interaction.message.add_reaction.assert_any_await("⌛")
+                # The queue mark follows a feature read, after the message is queued.
+                marks = interaction.message.add_reaction.await_args_list
+                while not any(c.args == ("⌛",) for c in marks):
+                    await asyncio.sleep(0.01)
             ran.assert_not_awaited()
         elif later:
             await asyncio.wait_for(started.wait(), 20)

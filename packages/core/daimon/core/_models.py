@@ -1984,6 +1984,39 @@ class CredentialRequest(Base):
     used_at: Mapped[datetime | None]
 
 
+class SecretShare(Base):
+    """One secret a person shared with another (`daimon.core.secret_shares`).
+
+    `content` is Fernet ciphertext, cleared on reveal or expiry; the row stays as the audit
+    record. Person-scoped like `credential_requests`: erased by platform user, no account FK.
+    `agent_id` is the provider id of the agent whose key it is, `key_name` the key;
+    `awaiting_sender` holds a share until its sender confirms it.
+    """
+
+    __tablename__ = "secret_shares"
+    __table_args__ = (
+        Index("secret_shares_sender_idx", "tenant_id", "platform", "sender_platform_user_id"),
+        Index("secret_shares_recipient_idx", "tenant_id", "platform", "recipient_platform_user_id"),
+        Index("secret_shares_live_idx", "expires_at", postgresql_where=text("content IS NOT NULL")),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    sender_platform_user_id: Mapped[str]
+    recipient_platform_user_id: Mapped[str]
+    label: Mapped[str]
+    content: Mapped[bytes | None]
+    agent_id: Mapped[str | None]
+    key_name: Mapped[str | None]
+    awaiting_sender: Mapped[bool] = mapped_column(server_default=text("false"), default=False)
+    channel_id: Mapped[str | None]
+    message_id: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    revealed_at: Mapped[datetime | None]
+
+
 class McpOAuthFlow(Base):
     """One in-flight MCP OAuth authorization, keyed by its `state`.
 

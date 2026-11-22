@@ -39,6 +39,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.agent_identity import (
     AgentIdentity,
+    agent_display_name,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
@@ -123,6 +124,7 @@ __all__ = [
     "poll_deliveries_once",
     "render_fallback_post",
     "render_routine_controls",
+    "routine_agent_name",
     "run_delivery_poller",
 ]
 
@@ -400,12 +402,15 @@ def lapsed_role(
     )
 
 
-def lapsed_role_card(row: RoutineRow) -> tuple[str, str]:
-    """The error card DMed to a routine's owner when it was paused for a lapsed role."""
+def lapsed_role_card(row: RoutineRow, agent_name: str | None = None) -> tuple[str, str]:
+    """The error card DMed to a routine's owner when it was paused for a lapsed role.
+
+    `agent_name` is the agent as people see it (`routine_agent_name`).
+    """
     label = row.name or routine_phrase(row.cron_expr, row.timezone)
     return (
-        f'Your routine "{label}" ({row.agent_name}) is paused: you no longer have a role'
-        " its agent needs.",
+        f'Your routine "{label}" ({agent_name or row.agent_name}) is paused: '
+        "you no longer have a role its agent needs.",
         "Ask an admin for the role, then resume it from /routines.",
     )
 
@@ -489,8 +494,13 @@ def render_fallback_post(
     as_agent: bool = False,
     platform: str | None = None,
     requester_name: str | None = None,
+    agent_name: str | None = None,
+    header: bool = True,
 ) -> str:
     """The message posted for a routine whose agent did not post itself.
+
+    `agent_name` is the agent as people see it (`routine_agent_name`). `header` False
+    (`routine_header_shown`) posts a result without its "Result from" line.
 
     `as_agent` is for a post that carries the agent's own name and face, which
     already say who it is from; the schedule is kept either way, in words
@@ -499,11 +509,13 @@ def render_fallback_post(
     """
     payload = decode_payload(payload_for(row)).text.strip()
     phrase = routine_phrase(row.cron_expr, row.timezone)
+    name = agent_name or row.agent_name
     if row.delivery_note == FAILURE_NOTICE:
-        owner = "The" if as_agent else f"{row.agent_name}'s"
+        owner = "The" if as_agent else f"{name}'s"
         return f"{owner} {phrase} failed, so there's no result this time.\n\n{payload}"
-    owner = "the" if as_agent else f"{row.agent_name}'s"
-    return _attributed(f"Result from {owner} {phrase}:\n\n{payload}", row, platform, requester_name)
+    owner = "the" if as_agent else f"{name}'s"
+    text = f"Result from {owner} {phrase}:\n\n{payload}" if header else payload
+    return _attributed(text, row, platform, requester_name, name)
 
 
 async def routine_requester_name(
@@ -519,7 +531,11 @@ async def routine_requester_name(
 
 
 def _attributed(
-    text: str, row: RoutineRow, platform: str | None, requester_name: str | None = None
+    text: str,
+    row: RoutineRow,
+    platform: str | None,
+    requester_name: str | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """A routine's post says who asked for it, like every post Daimon makes unasked."""
     if platform not in ("discord", "slack", "teams"):
@@ -529,9 +545,20 @@ def _attributed(
         # Discord's routine posts never ping, so the creator's tag only names them.
         requester_id=row.created_by_user_id if platform == "discord" else None,
         requester_name=requester_name if platform != "discord" else None,
-        routine_name=row.name or row.agent_name,
+        routine_name=row.name or agent_name or row.agent_name,
     )
     return render_post(text, platform, do_not_tag=frozenset(), attribution=line).text
+
+
+async def routine_agent_name(
+    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineRow
+) -> str:
+    """The routine's agent as people see it: its display name, else its name."""
+    if sessionmaker is None:
+        return row.agent_name
+    return await agent_display_name(
+        sessionmaker, tenant_id=row.tenant_id, agent_id=row.agent_id, fallback=row.agent_name
+    )
 
 
 async def resolve_routine_identity(
@@ -563,6 +590,7 @@ async def resolve_routine_identity(
                 session,
                 tenant_id=row.tenant_id,
                 agent_name=row.agent_name,
+                display_name=await routine_agent_name(sessionmaker, row),
                 is_builtin=is_builtin_agent(
                     name=row.agent_name,
                     metadata=agent.metadata if agent is not None else None,
@@ -599,10 +627,11 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(row: RoutineRow, reason: str) -> str:
+def render_fallback_dm(row: RoutineRow, reason: str, agent_name: str | None = None) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
-    The agent and schedule first, then why the result is here, then the result.
+    The agent (as people see it, `routine_agent_name`) and schedule first, then why the
+    result is here, then the result.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
     payload = decode_payload(payload_for(row)).text.strip()
@@ -610,7 +639,7 @@ def render_fallback_dm(row: RoutineRow, reason: str) -> str:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:
         why = _DM_REASONS.get(reason, _DM_REASONS["destination_unavailable"])
-    return "\n\n".join((f"{row.agent_name}, {schedule}", *why, payload))
+    return "\n\n".join((f"{agent_name or row.agent_name}, {schedule}", *why, payload))
 
 
 def delivery_refusal(
