@@ -21,7 +21,10 @@ Then check these:
   Confirm the setup with `docker compose run --rm init "daimon crypto verify"`.
 - **Database connections.** Each process opens up to
   [`DAIMON_DATABASE__POOL_SIZE`](configuration.md#daimon_database__pool_size)
-  plus `DAIMON_DATABASE__MAX_OVERFLOW` connections. Count every worker and MCP
+  plus `DAIMON_DATABASE__MAX_OVERFLOW` connections.
+  The web process adds
+  [`DAIMON_WEB__ARTIFACT_DB_POOL_SIZE`](configuration.md#daimon_web__artifact_db_pool_size)
+  for artifact pages. Count every worker and MCP
   instance against the Postgres limit.
 - **Operator alerts.** Set
   [`DAIMON_OPS__ALERT_WEBHOOK_URL`](configuration.md#daimon_ops__alert_webhook_url)
@@ -30,6 +33,10 @@ Then check these:
 - **Agent names and avatars.** Off by default. See
   [agent identity](agent-identity.md) before enabling
   [`DAIMON_AGENT_IDENTITY__ENABLED`](configuration.md#daimon_agent_identity__enabled).
+- **Reverse proxy.** The web process trusts `X-Forwarded-For` only from
+  [`DAIMON_WEB__FORWARDED_ALLOW_IPS`](configuration.md#daimon_web__forwarded_allow_ips),
+  loopback by default. Set it to your proxy's address, so rate limits count
+  each viewer, not the proxy.
 
 Postgres backups and upgrades are in [operations](operations.md).
 

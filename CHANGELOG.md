@@ -73,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such a watch. The new Artifacts feature is on wherever the web app is, and the
   seeded agent gets an `artifacts` skill. See the Artifacts page.
 
+- **Artifact pages can run on their own domain, and ask before acting as the
+  viewer.** `DAIMON_WEB__ARTIFACT_CONTENT_URL` serves each page from its own
+  origin, where it keeps storage and embeds YouTube and Google Drive players.
+  Pages open no tabs themselves: Daimon asks the viewer before following a link
+  to another site. A page's first question to the agent on each version needs
+  the viewer's yes, which they can take back. Refused pages say why, keep the
+  `#section` through sign-in, and `daimon.me()` includes the viewer's email.
+  The list and chat cards show version thumbnails.
+  `DAIMON_WEB__ARTIFACT_ASSET_HOSTS`, `DAIMON_WEB__FORWARDED_ALLOW_IPS` and
+  `DAIMON_WEB__ARTIFACT_DB_POOL_SIZE` are new; `res.cloudinary.com` is no
+  longer an allowed asset host.
+
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎
   feedback, voice messages and the card's model footer. Pings are joined with a
