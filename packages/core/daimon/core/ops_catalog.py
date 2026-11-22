@@ -23,7 +23,6 @@ OpsCode = Literal[
     "routine.goal_unmet",
     "routine.delivery_failed",
     "routine.owner_notice_failed",
-    "routine.owner_notified",
     "delivery.output_failed",
     "watch.poll_failed",
     "watch.paused_failing",
@@ -74,9 +73,6 @@ CATALOG: Final[Mapping[OpsCode, CodeSpec]] = {
     ),
     "routine.owner_notice_failed": CodeSpec(
         "routine", "warning", "Owner not told of a failed run", "routine"
-    ),
-    "routine.owner_notified": CodeSpec(
-        "routine", "warning", "Owner told of a failed run", "routine"
     ),
     "delivery.output_failed": CodeSpec(
         "delivery", "warning", "File or table not delivered", "platform"

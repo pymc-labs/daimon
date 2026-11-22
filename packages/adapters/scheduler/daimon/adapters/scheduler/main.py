@@ -2255,6 +2255,9 @@ async def run(
         discord_dm=discord_owner_dm(settings.discord.bot_token.get_secret_value())
         if settings.discord is not None
         else None,
+        membership=DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+        if settings.discord is not None
+        else None,
     )
     fire = await _build_fire(
         client=client,

@@ -3,6 +3,7 @@ with no tools, or the plain card; and why not, where DMs are closed."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from daimon.core.ops_catalog import CATALOG
 from daimon.core.ops_events import OpsEvent
 from daimon.core.owner_notices import OwnerNotice, build_owner_notifier, poll_owner_notices_once
 from daimon.core.stores.direct_messages import set_dm_enabled
+from daimon.core.stores.dm_access import set_grant
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine
 from daimon.core.turn.termination import TerminationReason
@@ -148,8 +150,9 @@ async def test_the_owner_gets_the_agents_words_or_the_plain_card(
     if written is None:
         assert codes == [("routine.owner_notice_failed", "ConnectError")]
     else:
-        assert codes == [("routine.owner_notified", written)], "telling the owner is recorded"
-    assert CATALOG["routine.owner_notified"].area == "routine"
+        assert codes == [], "a told owner is a log line, not an issue"
+    assert "routine.owner_notified" not in CATALOG, "no catalog code for a sent notice"
+    assert "routine.owner_notice_failed" in CATALOG, "a notice that failed stays an issue"
 
 
 async def test_a_slack_owners_notice_waits_for_the_slack_adapter_and_goes_once(
@@ -168,7 +171,7 @@ async def test_a_slack_owners_notice_waits_for_the_slack_adapter_and_goes_once(
 
     assert (sent, again) == (1, 0), "taken once"
     assert [n.text for n in world.sent] == ["Your weekly readout failed."]
-    assert [e.code for e in world.events] == ["routine.owner_notified"]
+    assert world.events == [], "a sent notice records no issue"
 
 
 @pytest.mark.parametrize(
@@ -211,3 +214,75 @@ async def test_where_dms_are_closed_the_owner_is_not_told_and_the_reason_is_logg
     assert [log["reason"] for log in logs if log["event"] == "routine.owner_notice_skipped"] == [
         skipped
     ]
+
+
+async def test_an_owner_the_agent_no_longer_admits_gets_the_card_and_no_paid_call(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The access gate runs before the model call, so nothing is billed or written for them."""
+    row = await _routine(db_session, "discord")
+    await set_grant(
+        db_session,
+        tenant_id=row.tenant_id,
+        agent_name="analyst",
+        who="listed",
+        user_ids=["999"],
+        group_ids=[],
+        set_by=None,
+        now=datetime.now(UTC),
+    )
+    await db_session.commit()
+    world = _World(monkeypatch)
+
+    await world.notifier(db_session_factory, row)(row, TerminationReason.UPSTREAM, True)
+
+    assert (world.calls, world.metered) == ([], []), "no model call for a closed owner"
+    assert [n.text for n in world.sent] == [None], "the plain card goes, never agent text"
+
+
+async def test_a_notice_that_hangs_is_skipped_once_and_the_next_still_goes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung chat API stalls the poll loop for the timeout only, and is never retried."""
+    first = await _routine(db_session, "slack")
+    world = _World(monkeypatch)
+    second = await create_routine(
+        db_session,
+        tenant_id=first.tenant_id,
+        created_by_user_id="123",
+        agent_id="ag_1",
+        agent_name="analyst",
+        name="Daily digest",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="digest",
+        next_fire_at=datetime.now(UTC),
+        destination_kind="channel",
+        destination_id="456",
+    )
+    await db_session.commit()
+    notify = world.notifier(db_session_factory, first)
+    await notify(first, TerminationReason.UPSTREAM, False)
+    await notify(second, TerminationReason.UPSTREAM, False)
+    monkeypatch.setattr(owner_notices, "_SEND_TIMEOUT_S", 0.05)
+    hung = [True, False]
+
+    async def send(row: RoutineRow, notice: OwnerNotice) -> str | None:
+        if hung.pop(0):
+            await asyncio.sleep(5)
+        return await world.dm(row, notice)
+
+    with structlog.testing.capture_logs() as logs:
+        taken = await poll_owner_notices_once(db_session_factory, platform="slack", send=send)
+        again = await poll_owner_notices_once(db_session_factory, platform="slack", send=send)
+
+    assert (taken, again) == (2, 0), "both notices were taken once and none is resent"
+    assert len(world.sent) == 1, "the second notice still went after the first hung"
+    assert [log["reason"] for log in logs if log["event"] == "routine.owner_notice_skipped"] == [
+        "timeout"
+    ], "the timed-out notice counts as sent and logs why"
+    assert world.events == [], "a timeout is no issue"

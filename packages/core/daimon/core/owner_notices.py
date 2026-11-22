@@ -3,7 +3,8 @@
 Once per failing streak (`scheduler.tell_owner`), where routines may DM the owner. The
 routine's agent writes it from fixed facts (`routine_owner_notice`) in one call with no
 tools, on its own instructions, metered to the owner after the balance and cap gates. A
-refusal, or a call that cannot run or says nothing, sends the plain card. Discord sends from
+refusal, an owner the agent no longer admits (`_owner_admitted`, asked before the call), or a
+call that cannot run or says nothing, sends the plain card. Discord sends from
 the scheduler. A Slack or Teams notice waits on the routine (`queue_owner_notice`) for that
 adapter, the only one that can reach the person, which applies its own DM rules
 (`poll_owner_notices_once`).
@@ -22,6 +23,8 @@ from anthropic import AsyncAnthropic
 from daimon.core.auxiliary_calls import auxiliary_complete
 from daimon.core.config import Settings, env_admits
 from daimon.core.discord_membership import send_discord_dm, send_discord_error_dm
+from daimon.core.dm_access import groups_by_members, roles_by_membership, sender_admits
+from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.ops_events import OpsEvent, report_ops_event
@@ -55,6 +58,8 @@ _NO_WRITE: Final = frozenset(
 )
 _WRITTEN: Final = frozenset(TerminationReason) - _NO_WRITE
 _WRITE_TIMEOUT_S: Final = 120.0
+#: One Slack or Teams notice in the poll loop: a hung chat API must not stall routine delivery.
+_SEND_TIMEOUT_S: Final = 10.0
 _MAX_TOKENS: Final = 1024
 
 
@@ -90,13 +95,17 @@ def build_owner_notifier(
     settings: Settings,
     anthropic: AsyncAnthropic,
     discord_dm: OwnerDm | None,
+    membership: MembershipResolver | None = None,
 ) -> OwnerNotifier:
-    """The scheduler's `notify_owner`, for routines on every chat platform."""
+    """The scheduler's `notify_owner`, for routines on every chat platform.
+
+    `membership` reads a Discord owner's roles for the agent's DM grant."""
 
     async def notify(row: RoutineRow, reason: str, channel_told: bool) -> None:
         owner = row.created_by_user_id
         async with sm() as s:
             tenant = await get_tenant(s, row.tenant_id)
+            guild_id = tenant.external_id if tenant is not None else ""
             platform = tenant.platform if tenant is not None else None
             if owner is None:
                 closed: str | None = "no_owner"
@@ -113,8 +122,12 @@ def build_owner_notifier(
         if closed is not None:
             return _skipped(row, closed)
         chat = cast(ChatPlatform, platform)
+        assert owner is not None
+        write = reason in _WRITTEN and await _owner_admitted(
+            sm, row, owner, membership=membership if chat == "discord" else None, guild_id=guild_id
+        )
         try:
-            notice = await _compose(sm, settings, anthropic, row, reason, channel_told, chat)
+            notice = await _compose(sm, settings, anthropic, row, reason, channel_told, chat, write)
         except Exception as exc:  # boundary: no facts, nothing was sent
             return _failed(sm, row, chat, exc)
         if chat == "discord" and discord_dm is not None:
@@ -125,6 +138,28 @@ def build_owner_notifier(
     return notify
 
 
+async def _owner_admitted(
+    sm: async_sessionmaker[AsyncSession],
+    row: RoutineRow,
+    owner: str,
+    *,
+    membership: MembershipResolver | None,
+    guild_id: str,
+) -> bool:
+    """Whether the routine agent's DM grant still admits the owner: asked before the paid call,
+    on every platform, so an owner who lost access gets the card, never agent text. Only
+    Discord roles can be read here; a Slack or Teams group grant stays unknown, which is
+    not admitted, and that adapter's own check still gates the send."""
+    groups = (
+        roles_by_membership(membership, tenant_id=row.tenant_id, guild_id=guild_id)
+        if guild_id and membership is not None
+        else groups_by_members(None)
+    )
+    return await sender_admits(
+        sm, tenant_id=row.tenant_id, agent_name=row.agent_name, user_id=owner, groups=groups
+    )
+
+
 async def _compose(
     sm: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -133,6 +168,7 @@ async def _compose(
     reason: str,
     channel_told: bool,
     platform: ChatPlatform,
+    write: bool,
 ) -> OwnerNotice:
     links = await routine_links(sm, settings, row, platform)
     facts = owner_notice_facts(
@@ -146,7 +182,7 @@ async def _compose(
     )
     title, body = owner_notice_card(facts)
     text: str | None = None
-    if reason in _WRITTEN:
+    if write:
         try:
             async with asyncio.timeout(_WRITE_TIMEOUT_S):
                 text = await _agent_text(sm, settings, anthropic, row, facts, platform)
@@ -222,19 +258,8 @@ async def send_owner_notice(
     if closed is not None:
         return _skipped(row, closed)
     written_by = "agent" if notice.text is not None else "plain"
+    # A told owner is no issue: a log line only.
     log.info("routine.owner_notified", routine_id=str(row.id), written_by=written_by)
-    report_ops_event(
-        sm,
-        OpsEvent(
-            "routine.owner_notified",
-            row.tenant_id,
-            reason=written_by,
-            routine_id=row.id,
-            agent_id=row.agent_id,
-            platform=platform,
-        ),
-        logged=False,
-    )
 
 
 async def poll_owner_notices_once(
@@ -245,7 +270,12 @@ async def poll_owner_notices_once(
         taken = await take_owner_notices(s, platform=platform)
     for row, held in taken:
         notice = OwnerNotice(str(held["title"]), str(held["body"]), held.get("text"))
-        await send_owner_notice(sm, row, notice, platform=platform, send=send)
+        try:
+            async with asyncio.timeout(_SEND_TIMEOUT_S):
+                await send_owner_notice(sm, row, notice, platform=platform, send=send)
+        except TimeoutError:
+            # Already taken, so it is never sent again; the owner may or may not have it.
+            _skipped(row, "timeout")
     return len(taken)
 
 
