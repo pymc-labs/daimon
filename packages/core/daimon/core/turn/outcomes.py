@@ -343,10 +343,12 @@ class TurnObservation:
                     agent_id=self.agent_id,
                 )
                 # The line above is what the log-based metric counts: do not log the event twice.
+                # A turn shed for concurrency is only `turn.shed`, not also a failed answer.
+                shed = resolved is TerminationReason.ADMISSION_CONCURRENCY_SHED
                 report_ops_event(
                     self.sessionmaker,
                     OpsEvent(
-                        "turn.failed",
+                        "turn.shed" if shed else "turn.failed",
                         self.tenant_id,
                         reason=resolved.value,
                         area="dm" if self.is_dm else None,

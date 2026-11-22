@@ -61,6 +61,7 @@ from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.mentions import attribution_line, render_post
 from daimon.core.outbound.opt_out import opt_out_names
 from daimon.core.permissions import any_writers_none, limiting_ids_at
@@ -950,6 +951,8 @@ class DeliveryOutcome:
     #: A `SkipReason`, or `dm_fallback:<reason>` for a result delivered to the
     #: creator by direct message instead of the destination.
     note: str | None = None
+    #: The error class of a post that was tried and failed, such as a fallback DM.
+    failed: str | None = None
 
 
 #: The adapter hook: post `row`'s result (or refuse) and say what happened.
@@ -993,6 +996,7 @@ async def poll_deliveries_once(
                     status="post_failed",
                     error_type=type(err).__name__,
                 )
+                _report_delivery_failed(sessionmaker, row, platform, type(err).__name__)
                 outcome = DeliveryOutcome(
                     status="skipped",
                     note=(
@@ -1019,7 +1023,7 @@ async def poll_deliveries_once(
         )
         if outcome.status == "skipped" and outcome.note != "no_result" and not raised:
             # Real post failures page; deliberate skips (policy, archive, ...) only log.
-            failed = outcome.note in _POST_FAILURE_NOTES
+            failed = outcome.failed is not None or outcome.note in _POST_FAILURE_NOTES
             (log.warning if failed else log.info)(
                 "routine.delivery_failed" if failed else "routine.delivery_skipped",
                 tenant_id=str(row.tenant_id),
@@ -1027,7 +1031,28 @@ async def poll_deliveries_once(
                 status="skipped",
                 note=outcome.note,
             )
+            if failed:
+                _report_delivery_failed(
+                    sessionmaker, row, platform, outcome.failed or "post_failed"
+                )
     return len(claimed)
+
+
+def _report_delivery_failed(
+    sm: async_sessionmaker[AsyncSession], row: RoutineRow, platform: str, reason: str
+) -> None:
+    report_ops_event(
+        sm,
+        OpsEvent(
+            "routine.delivery_failed",
+            row.tenant_id,
+            reason=reason,
+            routine_id=row.id,
+            agent_id=row.agent_id,
+            platform=platform,
+        ),
+        logged=False,
+    )
 
 
 async def run_delivery_poller(

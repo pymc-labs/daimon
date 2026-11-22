@@ -11,6 +11,7 @@ import structlog
 from daimon.core.features.snapshot import FeaturePlace, place_feature_or_none
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.routine_delivery import record_routine_failure
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.lead_intake import configured_routines, routine_execution
@@ -145,6 +146,18 @@ async def _record_fire_error(
         reason=fixed,
         error_class=error_class,
     )
+    if event == "routine.fire_failed":
+        report_ops_event(
+            sm,
+            OpsEvent(
+                event,
+                row.tenant_id,
+                reason=error_class or fixed,
+                routine_id=row.id,
+                agent_id=row.agent_id,
+            ),
+            logged=False,
+        )
     try:
         async with asyncio.timeout(1), sm() as s, s.begin():
             told = await record_routine_failure(s, row, error=msg, reason=reason)

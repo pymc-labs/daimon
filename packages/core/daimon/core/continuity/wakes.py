@@ -38,6 +38,7 @@ from typing import Final, Literal
 
 import structlog
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
@@ -246,6 +247,22 @@ async def start_wake(
         )
 
 
+def report_wake_failed(
+    sm: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID | None,
+    kind: str | None,
+    reason: str,
+    *,
+    thread_id: str | None = None,
+) -> None:
+    """Record a wake that will not run; the caller logs its own line."""
+    report_ops_event(
+        sm,
+        OpsEvent("wake.failed", tenant_id, reason=reason, thread_id=thread_id, subject_key=kind),
+        logged=False,
+    )
+
+
 @asynccontextmanager
 async def keep_wake(
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -285,6 +302,7 @@ async def keep_wake(
                     tenant_id=str(tenant_id) if tenant_id is not None else None,
                     kind=kind,
                 )
+                report_wake_failed(sessionmaker, tenant_id, kind, "lease_lost")
                 return
 
     renewer = asyncio.create_task(renew())
@@ -457,6 +475,9 @@ async def abandon_interrupted_wakes(
             kind=row.reason,
             thread_id=row.thread_id,
             skip_reason=row.skip_reason,
+        )
+        report_wake_failed(
+            sessionmaker, row.tenant_id, row.reason, "abandoned", thread_id=row.thread_id
         )
     return rows
 

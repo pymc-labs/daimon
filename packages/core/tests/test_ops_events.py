@@ -161,7 +161,7 @@ async def test_repeats_within_the_window_make_one_row_and_a_bad_reason_is_other(
     assert {g.latest.reason for g in groups} == {"timeout", "other"}, "free text is not stored"
 
 
-async def test_a_failed_turn_leaves_an_event_and_a_direct_message_is_its_own_area(
+async def test_a_failed_turn_leaves_an_event_in_its_area_and_a_shed_one_is_only_shed(
     db_session: AsyncSession, db_engine: AsyncEngine
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -169,6 +169,9 @@ async def test_a_failed_turn_leaves_an_event_and_a_direct_message_is_its_own_are
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     TurnObservation(sm, tenant.id, "discord", is_dm=True).finish(reason=TerminationReason.UPSTREAM)
     TurnObservation(sm, tenant.id, "discord").finish(reason=TerminationReason.COMPLETED)
+    TurnObservation(sm, tenant.id, "slack").finish(
+        reason=TerminationReason.ADMISSION_CONCURRENCY_SHED
+    )
     await drain_outcomes()
     await drain_ops_events()
     async with sm() as session:
@@ -176,9 +179,10 @@ async def test_a_failed_turn_leaves_an_event_and_a_direct_message_is_its_own_are
             session, tenant_id=tenant.id, since=datetime.now(UTC) - timedelta(hours=1)
         )
 
-    assert [(g.latest.code, g.latest.area, g.latest.reason) for g in groups] == [
-        ("turn.failed", "dm", "upstream")
-    ], "only the failed turn, in the direct message area"
+    assert sorted((g.latest.code, g.latest.area, g.latest.reason) for g in groups) == [
+        ("turn.failed", "dm", "upstream"),
+        ("turn.shed", "turn", "admission_concurrency_shed"),
+    ], "the failed turn in the direct message area; the shed turn is not also a failure"
 
 
 async def test_failed_bridged_tool_calls_make_one_event_per_server_per_turn(

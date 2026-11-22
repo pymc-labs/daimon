@@ -31,6 +31,7 @@ from daimon.core.continuity.wakes import (
     is_transient_denial,
     keep_wake,
     release_wake,
+    report_wake_failed,
     settle_wake,
     start_wake,
 )
@@ -145,6 +146,9 @@ async def dispatch_watch_report(
                 kind=row.reason,
                 error_type=type(exc).__name__,
                 causes=backend_refusal_causes(exc),
+            )
+            report_wake_failed(
+                sessionmaker, row.tenant_id, row.reason, type(exc).__name__, thread_id=row.thread_id
             )
             skip_reason = "dispatch_failed"
         await settle_wake(

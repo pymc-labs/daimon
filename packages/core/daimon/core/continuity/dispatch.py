@@ -39,6 +39,7 @@ from daimon.core.continuity.wakes import (
     keep_wake,
     list_dispatchable_wakes,
     release_wake,
+    report_wake_failed,
     settle_wake,
     start_wake,
 )
@@ -319,6 +320,13 @@ async def dispatch_pending_continuations(
                     kind=row.reason,
                     error_type=type(exc).__name__,
                     causes=backend_refusal_causes(exc),
+                )
+                report_wake_failed(
+                    sessionmaker,
+                    row.tenant_id,
+                    row.reason,
+                    type(exc).__name__,
+                    thread_id=row.thread_id,
                 )
                 await _settle(sessionmaker, claim, "dispatch_failed", now)
             else:
