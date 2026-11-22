@@ -14,7 +14,7 @@ export type ArtifactDetail = ArtifactSummary & {
   people: PersonRef[]; editors: PersonRef[]; editors_can_share: boolean; data_scale: number
   link: string | null   // public: full secret link
   usage: { documents: number; max_documents: number; bytes: number; max_bytes: number }
-  watches: { id: string; name: string; owner: string; agent: string; status: "active" | "paused"; turns_today: number; max_turns_per_day: number; thread_url: string | null }[]
+  watches: ArtifactWatch[]
   asks: { threads: number; turns_7d: number }
   can: { edit: boolean; share: boolean; delete: boolean; transfer: boolean }
 }
@@ -28,3 +28,6 @@ export type ArtifactChange = Partial<{
   title: string; access: ArtifactAccess; people: string[]; editors: string[]; editors_can_share: boolean
   data: DataAccess; events: boolean; ask: boolean; data_scale: number; expires_at: string | null
 }>
+
+/** A watch on a page; `mine` when the caller made it, the only one who may resume it. */
+export type ArtifactWatch = { id: string; name: string; owner: string; mine: boolean; agent: string; status: "active" | "paused"; turns_today: number; max_turns_per_day: number; thread_url: string | null }

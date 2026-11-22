@@ -1,14 +1,17 @@
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router"
+import { toast } from "sonner"
 
 import { Ago, StatusDot } from "@/components/common"
 import { Empty } from "@/components/filters"
 import { PanelSection, Tag } from "@/components/panel"
 import { QueryState } from "@/components/QueryState"
+import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
+import { useConfirm } from "@/lib/confirm"
 import { exact, plural } from "@/lib/format"
 import { KEY } from "./bits"
-import type { ArtifactDetail, ArtifactEvent } from "./types"
+import type { ArtifactDetail, ArtifactEvent, ArtifactWatch } from "./types"
 
 const preview = (d: unknown) => (typeof d === "string" ? d : JSON.stringify(d)).slice(0, 90)
 const SENDER: Record<ArtifactEvent["sender"], string> = { member: "Member", visitor: "Visitor", anonymous: "Anonymous" }
@@ -47,19 +50,7 @@ export function Activity({ a }: { a: ArtifactDetail }) {
       {a.watches.length > 0 && (
         <PanelSection title="Watches" className={a.events ? "" : "border-t-0"}>
           <ul className="space-y-3">
-            {a.watches.map((w) => (
-              <li key={w.id} className="text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate font-medium">{w.name}</span>
-                  <StatusDot status={w.status === "active" ? "healthy" : "setup"} label={w.status === "active" ? "Active" : "Paused"} />
-                </div>
-                <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
-                  <span className="truncate">{w.owner}, {w.agent}</span>
-                  <span className="ml-auto shrink-0 tabular">{exact(w.turns_today)} of {exact(w.max_turns_per_day)} turns today</span>
-                </div>
-                {w.thread_url && <Link to={w.thread_url} className="mt-1 inline-block text-xs text-link hover:underline">Open thread</Link>}
-              </li>
-            ))}
+            {a.watches.map((w) => <Watch key={w.id} a={a} w={w} />)}
           </ul>
         </PanelSection>
       )}
@@ -72,5 +63,36 @@ export function Activity({ a }: { a: ArtifactDetail }) {
         </PanelSection>
       )}
     </>
+  )
+}
+
+function Watch({ a, w }: { a: ArtifactDetail; w: ArtifactWatch }) {
+  const qc = useQueryClient()
+  const confirm = useConfirm()
+  const path = `/api/artifacts/${a.id}/watches/${w.id}`
+  const done = (msg: string) => { void qc.invalidateQueries({ queryKey: KEY }); toast(msg) }
+  const set = useMutation({ mutationFn: (action: "pause" | "resume") => api.post(path, { action }), onSuccess: (_, act) => done(act === "pause" ? "Watch paused" : "Watch resumed") })
+  const del = useMutation({ mutationFn: () => api.del(path), onSuccess: () => done("Watch deleted") })
+  const busy = set.isPending || del.isPending
+  const paused = w.status === "paused"
+  return (
+    <li className="text-sm">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate font-medium">{w.name}</span>
+        <StatusDot status={paused ? "setup" : "healthy"} label={paused ? "Paused" : "Active"} />
+      </div>
+      <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="truncate">{w.owner}, {w.agent}</span>
+        <span className="ml-auto shrink-0 tabular">{exact(w.turns_today)} of {exact(w.max_turns_per_day)} turns today</span>
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        {w.thread_url && <Link to={w.thread_url} className="text-xs text-link hover:underline">Open thread</Link>}
+        <div className="ml-auto flex gap-2">
+          <Button variant="outline" size="sm" className="text-destructive" disabled={busy} onClick={async () => { if (await confirm({ title: "Delete watch?", body: w.name, action: "Delete", destructive: true })) del.mutate() }}>Delete</Button>
+          {!paused && <Button variant="outline" size="sm" disabled={busy} onClick={() => set.mutate("pause")}>Pause</Button>}
+          {paused && w.mine && <Button size="sm" disabled={busy} onClick={() => set.mutate("resume")}>Resume</Button>}
+        </div>
+      </div>
+    </li>
   )
 }

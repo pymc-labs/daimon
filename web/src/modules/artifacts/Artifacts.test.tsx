@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 
 import { TooltipProvider } from "@/components/ui/tooltip"
 import type { Me } from "@/lib/types"
+import { Activity } from "./Activity"
 import { filterArtifacts } from "./Artifacts"
 import { refused } from "./rules"
 import { ShareDialog } from "./Share"
@@ -61,5 +62,19 @@ describe("share dialog", () => {
     ["reads data and sends events", { data: "read" as const, events: true }],
   ])("blocks going public when the page %s", (_, over) => {
     expect(open(detail(over))).toHaveAttribute("aria-disabled", "true")
+  })
+})
+
+describe("watch actions", () => {
+  const watch = (mine: boolean, status: "active" | "paused") => ({ id: `w-${mine}-${status}`, name: `${mine ? "Mine" : "Theirs"} ${status}`, owner: "Maya", mine, agent: "Daimon", status, turns_today: 0, max_turns_per_day: 20, thread_url: null })
+  const a = { ...row({}), people: [], editors: [], editors_can_share: true, data_scale: 1, link: null, asks: { threads: 0, turns_7d: 0 },
+    usage: { documents: 0, max_documents: 1, bytes: 0, max_bytes: 1 }, can: { edit: true, share: true, delete: true, transfer: true },
+    watches: [watch(true, "paused"), watch(false, "paused"), watch(false, "active")] } satisfies ArtifactDetail
+
+  it("lets a manager pause and delete any watch, and only its owner resume it", () => {
+    render(<QueryClientProvider client={new QueryClient()}><Activity a={a} /></QueryClientProvider>)
+    expect(screen.getAllByRole("button", { name: "Delete" })).toHaveLength(3)
+    expect(screen.getAllByRole("button", { name: "Pause" })).toHaveLength(1)
+    expect(screen.getAllByRole("button", { name: "Resume" })).toHaveLength(1)
   })
 })
