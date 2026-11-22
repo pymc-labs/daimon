@@ -115,7 +115,8 @@ class ConnectSelection(BaseModel):
     Values stay strings: the flow validates them in a fixed order, so a bad value
     and a stale page refuse the same way whichever adapter parsed the body.
     `repo_access` maps a repo id to its `access_<id>` values; `unknown_fields`
-    names anything else the client sent, which an agent save refuses.
+    names anything else the client sent, which an agent save refuses. It is
+    never serialised: a retry that re-posted it would be refused as unknown.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -133,7 +134,7 @@ class ConnectSelection(BaseModel):
     repo_access: Annotated[dict[str, _Values], Field(max_length=MAX_CONFIRM_FIELDS)] = Field(
         default_factory=dict[str, tuple[str, ...]]
     )
-    unknown_fields: _Values = ()
+    unknown_fields: _Values = Field(default=(), exclude=True)
 
     def form_fields(self) -> dict[str, list[str]]:
         """The known fields as form name to values, for a retry that re-posts them."""

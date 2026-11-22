@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -30,13 +31,19 @@ from daimon.core.config import (
     WebSettings,
 )
 from daimon.core.github_connect_delivery import claim_next, settle
+from daimon.core.github_connect_flow import GitHubConnectFlow
 from daimon.core.github_connect_views import (
+    FLOW_COOKIE,
     MAX_CONFIRM_BODY_BYTES,
     MAX_CONFIRM_FIELDS,
     ConnectInstallation,
+    ConnectOutcome,
+    ConnectPage,
     ConnectRepo,
+    ConnectSelection,
     PendingInstallation,
     agent_editor_view,
+    selection_from_json,
     workspace_picker_view,
 )
 from daimon.core.github_credentials import build_multifernet
@@ -2223,6 +2230,45 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
     retried = await _submit(editor_env.browser, form.group(1), carried)
     assert retried.status_code == 200
     assert "2 repos connected to Editor only. They stay until removed." in retried.text
+    assert await editor_env.saved_repo_ids() == [101, 102]
+
+
+@pytest.mark.asyncio
+async def test_failed_save_retry_selection_as_json_saves_the_agent(
+    editor_env: _EditorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The web app re-posts a dumped `retry_selection`; it must not read as unknown fields."""
+    outcomes: list[tuple[GitHubConnectFlow, ConnectOutcome]] = []
+    save = GitHubConnectFlow.save
+
+    async def spy(self: GitHubConnectFlow, root: str, **kwargs: Any) -> ConnectOutcome:
+        outcome = await save(self, root, **kwargs)
+        outcomes.append((self, outcome))
+        return outcome
+
+    monkeypatch.setattr(GitHubConnectFlow, "save", spy)
+    _, hidden = await editor_env.open_editor()
+    editor_env.details_down = True
+    await editor_env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "repo": ["101", "102"]},
+    )
+    flow, failed = outcomes[-1]
+    assert isinstance(failed, ConnectPage) and failed.view.kind == "transient_error", failed
+    assert failed.view.retry_selection is not None, "a failed save keeps its selection"
+
+    body = failed.view.retry_selection.model_dump_json().encode()
+    selection = selection_from_json(body)
+    assert isinstance(selection, ConnectSelection), selection
+    editor_env.details_down = False
+    retried = await save(
+        flow,
+        "https://mcp.test",
+        flow_cookie=editor_env.browser.cookies[FLOW_COOKIE],
+        selection=selection,
+    )
+
+    assert isinstance(retried, ConnectPage) and retried.view.kind == "saved_agent", retried
     assert await editor_env.saved_repo_ids() == [101, 102]
 
 
