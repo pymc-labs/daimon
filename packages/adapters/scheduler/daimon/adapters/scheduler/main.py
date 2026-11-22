@@ -38,6 +38,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
+from daimon.adapters.scheduler.owner_notice import build_owner_notifier
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.authz import (
@@ -73,7 +74,11 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
-from daimon.core.discord_membership import DiscordRestMembershipResolver, send_discord_error_dm
+from daimon.core.discord_membership import (
+    DiscordRestMembershipResolver,
+    send_discord_dm,
+    send_discord_error_dm,
+)
 from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
@@ -139,7 +144,13 @@ from daimon.core.rule_views import (
     routine_origin,
 )
 from daimon.core.runtime_health import current_turn_counts, runtime_health
-from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
+from daimon.core.scheduler import (
+    FireFn,
+    OwnerNotifier,
+    RoutineDispatcher,
+    run_one_tick,
+    tell_owner,
+)
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_mutation import session_mutation_fence
@@ -244,6 +255,7 @@ async def _run_one_tick_step(
     dispatch_timeout_s: float,
     dispatcher: RoutineDispatcher | None = None,
     wait_for_completion: bool = False,
+    notify_owner: OwnerNotifier | None = None,
 ) -> None:
     """Run the routine claim and dispatch step behind the shared boundary.
 
@@ -259,6 +271,7 @@ async def _run_one_tick_step(
         dispatch_timeout_s=dispatch_timeout_s,
         dispatcher=dispatcher,
         wait_for_completion=wait_for_completion,
+        notify_owner=notify_owner,
     )
 
 
@@ -374,6 +387,7 @@ async def _build_fire(
     billing_config: BillingConfig | None = None,
     dm_turn_deps: TurnDeps | None = None,
     send_dm: Callable[[str, str, str], Awaitable[None]] | None = None,
+    notify_owner: OwnerNotifier | None = None,
 ) -> FireFn:
     """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
@@ -474,13 +488,12 @@ async def _build_fire(
             tenant_id=str(row.tenant_id),
             channel_id=row.channel_id,
         )
+        reason = TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED
         async with sm() as s, s.begin():
-            await record_routine_failure(
-                s,
-                row,
-                error="channel_budget_exceeded",
-                reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+            told = await record_routine_failure(
+                s, row, error="channel_budget_exceeded", reason=reason
             )
+        await tell_owner(notify_owner, row, reason, channel_told=told)
         return True
 
     async def _fire_dm(row: RoutineRow, owner_user_id: str, *, direct_post: DirectPost) -> None:
@@ -843,13 +856,10 @@ async def _build_fire(
                 routine_id=str(row.id),
                 tenant_id=str(row.tenant_id),
             )
+            reason = TerminationReason.ADMISSION_BALANCE_DEPLETED
             async with sm() as s, s.begin():
-                await record_routine_failure(
-                    s,
-                    row,
-                    error="balance_depleted",
-                    reason=TerminationReason.ADMISSION_BALANCE_DEPLETED,
-                )
+                told = await record_routine_failure(s, row, error="balance_depleted", reason=reason)
+            await tell_owner(notify_owner, row, reason, channel_told=told)
             return
 
         if row.destination_kind == "dm":
@@ -990,7 +1000,8 @@ async def _build_fire(
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await record_routine_failure(s, row, error=spend_block, reason=reason)
+                told = await record_routine_failure(s, row, error=spend_block, reason=reason)
+            await tell_owner(notify_owner, row, reason, channel_told=told)
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
@@ -2211,6 +2222,21 @@ async def run(
         resolver_cache=resolver_cache,
         billing_config=billing_config,
     )
+    notify_owner = (
+        build_owner_notifier(
+            sm=sm,
+            settings=settings,
+            deps=dm_turn_deps,
+            send_card=functools.partial(
+                send_discord_error_dm, settings.discord.bot_token.get_secret_value()
+            ),
+            send_text=functools.partial(
+                send_discord_dm, settings.discord.bot_token.get_secret_value()
+            ),
+        )
+        if settings.discord is not None
+        else None
+    )
     fire = await _build_fire(
         client=client,
         sm=sm,
@@ -2219,6 +2245,7 @@ async def run(
         resolver_cache=resolver_cache,
         billing_config=billing_config,
         dm_turn_deps=dm_turn_deps,
+        notify_owner=notify_owner,
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
@@ -2257,6 +2284,7 @@ async def run(
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 wait_for_completion=True,
+                notify_owner=notify_owner,
             )
             await _sweep_long_jobs(long_jobs)
             await _sweep_compute(compute)
@@ -2307,6 +2335,7 @@ async def run(
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 dispatcher=dispatcher,
+                notify_owner=notify_owner,
             )
             await _sweep_long_jobs(long_jobs)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
