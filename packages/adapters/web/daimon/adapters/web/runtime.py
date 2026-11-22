@@ -90,6 +90,12 @@ class WebRuntime:
     exchange_held: dict[tuple[uuid.UUID, str], tuple[datetime, NodeAccessProblem]] = field(
         default_factory=_no_holds
     )
+    # Artifact page calls, on a small pool of their own so a busy page never starves chat.
+    page_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+    @property
+    def pages_db(self) -> async_sessionmaker[AsyncSession]:
+        return self.page_sessionmaker or self.sessionmaker
 
 
 def _stripe_client(config: BillingConfig | None) -> StripeClient | None:
@@ -119,6 +125,15 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
     )
     sessionmaker = build_session_factory(
         engine, crypto_keys=keys, allow_plaintext=settings.crypto.allow_plaintext
+    )
+    page_engine = build_engine(
+        str(settings.database.url),
+        pool_size=web.artifact_db_pool_size,
+        max_overflow=0,
+        pool_timeout=settings.database.pool_timeout,
+    )
+    page_sessionmaker = build_session_factory(
+        page_engine, crypto_keys=keys, allow_plaintext=settings.crypto.allow_plaintext
     )
     try:
         async with (
@@ -161,6 +176,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
                     skill_descriptions=load_skill_descriptions(settings.defaults_root / "skills"),
                     agent_templates=load_agent_templates(settings.defaults_root / "agents"),
                     identity_key=node_identity_key(settings),
+                    page_sessionmaker=page_sessionmaker,
                 )
             finally:
                 listener.cancel()
@@ -169,3 +185,4 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
         await drain_outcomes()
         await drain_budget_notices()
         await engine.dispose()
+        await page_engine.dispose()

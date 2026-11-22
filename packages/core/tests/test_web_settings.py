@@ -124,3 +124,30 @@ def test_a_node_error_never_echoes_its_client_secret(monkeypatch: pytest.MonkeyP
     with pytest.raises(ValidationError) as caught:
         load_settings(_env_file=None)
     assert "s3cret-value" not in str(caught.value), "settings errors hide their input"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://pages.example.com", "https://{id}.app.example.com", "http://pages.example.net"],
+)
+def test_page_content_never_shares_the_apps_site(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_CONTENT_URL", url)
+    with pytest.raises(ValidationError, match="ARTIFACT_CONTENT_URL"):
+        load_settings(_env_file=None)
+
+
+def test_a_content_host_and_asset_hosts_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_CONTENT_URL", "https://{id}.pages.example.net")
+    monkeypatch.setenv(
+        "DAIMON_WEB__ARTIFACT_ASSET_HOSTS", "https://cdn.example.org, https://*.example.io"
+    )
+    web = load_settings(_env_file=None).web
+    assert web is not None and web.artifact_asset_hosts == (
+        "https://cdn.example.org",
+        "https://*.example.io",
+    )
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_ASSET_HOSTS", "cdn.example.org; img-src *")
+    with pytest.raises(ValidationError, match="ASSET_HOSTS"):
+        load_settings(_env_file=None)

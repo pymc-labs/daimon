@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .agent_support import OWN
 from .artifact_support import COOKIE, page_client, publish, team
 from .chat_support import build_turns, funded_workspace, one_session, sse_frames
+from .conftest import PUBLIC_URL
 
 LATER = timedelta(hours=13)
 
@@ -78,10 +79,14 @@ async def test_content_runs_sandboxed_with_the_runtime_first(
 
     assert content.status_code == 200
     [csp] = content.headers.get_list("content-security-policy")
-    assert csp == content_policy() and csp.startswith("sandbox allow-scripts")
+    assert csp == content_policy(ancestor=PUBLIC_URL) and csp.startswith("sandbox allow-scripts")
     assert "allow-same-origin" not in csp and "connect-src 'none'" in csp
     boot = json.loads(re.search(r"window.__daimon_boot=(\{.*?\});", content.text).group(1))  # pyright: ignore[reportOptionalMemberAccess]
-    assert boot["capabilities"] == ["db"] and boot["viewer"] == {"name": "Bea", "kind": "member"}
+    assert boot["capabilities"] == ["db"] and boot["viewer"] == {
+        "name": "Bea",
+        "email": "bea@example.com",
+        "kind": "member",
+    }
     assert content.text.index("__daimon_boot") < content.text.index("Vote")
 
 
@@ -132,7 +137,7 @@ async def test_a_public_page_needs_its_link_and_refuses_writes(
         )
         nolink = await client.post(api + "db.get", json={"path": "votes/a"}, headers=OWN)
 
-    assert bare.status_code == 303 and bare.headers["location"].startswith("/signin?next=")
+    assert bare.status_code == 401 and "/signin?next=" in bare.text
     assert linked.status_code == 200
     assert read.status_code == 200 and read.json()["data"] is None
     assert write.status_code == 403 and write.json()["error"]["code"] == "forbidden"
@@ -292,6 +297,7 @@ async def test_ask_runs_as_the_viewer_in_one_thread_per_page_with_the_page_in_it
     with one_session():
         async with page_client(db_session_factory, t.member, turns=turns) as client:
             api = f"/a/{page.public_id}/_api/"
+            await client.post(api + "consent", json={}, headers=OWN)
             first = await client.post(api + "ask", json={"text": "Who won?"}, headers=OWN)
             await turns.drain(10)
             turns.draining = False  # the first turn has ended; take the next one
