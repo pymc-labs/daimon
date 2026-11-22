@@ -429,7 +429,13 @@ async def _change_settings(
     saved = artifact
     if change.model_fields_set:
         saved = await store.update_settings(
-            db, saved, change, role=role, account_id=auth.account_id, now=now
+            db,
+            saved,
+            change,
+            role=role,
+            account_id=auth.account_id,
+            now=now,
+            is_admin=caller.is_admin,
         )
     if new_link:
         saved = await store.rotate_link(db, saved, role=role, now=now)

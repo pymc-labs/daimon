@@ -46,7 +46,7 @@ from daimon.core.stores import watches as watches_store
 from daimon.core.stores import web_invites
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import ArtifactDocumentRow, ArtifactRow, WebPersonRow
-from daimon.core.web_roles_rules import is_admin, role_of_account
+from daimon.core.web_roles_rules import is_admin
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from pydantic import JsonValue, ValidationError
@@ -100,21 +100,6 @@ def _doc_json(doc: ArtifactDocumentRow) -> dict[str, Any]:
         "updated_by": doc.updated_by or "",
         "size_bytes": doc.size_bytes,
     }
-
-
-async def _may_share_with(db: AsyncSession, caller: WebCaller, person: WebPersonRow) -> bool:
-    """Whether the caller may add this person to a page. A visitor brought in by a member's
-    page share is held by whoever got their sign-in link, so only that inviter or an admin
-    may share more with them; one an admin invited is open to every sharer."""
-    inviter = person.invited_by_account_id
-    if person.kind != "visitor" or is_admin(caller.role) or inviter == caller.person.account_id:
-        return True
-    if inviter is None:
-        return False
-    standing = await role_of_account(
-        db, tenant_id=person.tenant_id, account_id=inviter, chat_admin=False
-    )
-    return standing is not None and is_admin(standing)
 
 
 def artifacts_router(runtime: WebRuntime) -> APIRouter:
@@ -312,6 +297,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                     role=role,
                     account_id=caller.person.account_id,
                     now=runtime.now(),
+                    is_admin=is_admin(caller.role),
                 )
             except ArtifactError as exc:
                 raise _refused(exc) from exc
@@ -346,10 +332,6 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                 person = found[0]
                 if person.status != "active":
                     raise HTTPException(status_code=422, detail="This person can't be added.")
-                if not await _may_share_with(db, caller, person):
-                    raise HTTPException(
-                        status_code=403, detail=f"An admin needs to share with {address}."
-                    )
             else:
                 made = await web_invites.count_visitor_invites_by(
                     db, tenant_id=tenant_id, account_id=sharer, since=now - timedelta(days=1)
@@ -400,6 +382,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                         role=role,
                         account_id=sharer,
                         now=now,
+                        is_admin=is_admin(caller.role),
                     )
                 except ArtifactError as exc:
                     raise _refused(exc) from exc

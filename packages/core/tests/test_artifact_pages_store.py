@@ -179,7 +179,9 @@ async def test_a_visitor_can_open_a_page_but_never_edit_it(
     await web_people.update_person(db_session, person_id=person.id, kind="visitor")
     with pytest.raises(ArtifactError, match="Only members"):
         await _publish(db_session, tenant.id, owner.id, change=PageChange(editors=(guest.id,)))
-    page = await _publish(db_session, tenant.id, owner.id, change=PageChange(people=(guest.id,)))
+    page = await _publish(
+        db_session, tenant.id, owner.id, change=PageChange(people=(guest.id,)), is_admin=True
+    )
     with pytest.raises(ArtifactError, match="Only members"):
         await store.update_settings(
             db_session,
@@ -415,7 +417,7 @@ async def test_editors_without_sharing_may_leave_but_keep_an_outside_pages_data(
     person = await make_web_person(db_session, tenant=tenant, account=guest)
     await web_people.update_person(db_session, person_id=person.id, kind="visitor")
     change = PageChange(editors=(editor.id,), people=(guest.id,), editors_can_share=False)
-    page = await _publish(db_session, tenant.id, owner.id, change=change)
+    page = await _publish(db_session, tenant.id, owner.id, change=change, is_admin=True)
     with pytest.raises(ArtifactError, match="Ask the owner"):
         await store.update_settings(
             db_session, page, PageChange(data="read"), role="editor", account_id=editor.id, now=NOW

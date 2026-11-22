@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from urllib.parse import unquote
 
 import httpx
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN, make_admin
 from .artifact_support import COOKIE, member_of, page_client, page_settings, publish, team
+from .chat_support import visitor_of
 
 
 async def test_a_public_page_is_listed_only_to_those_who_manage_it(
@@ -151,6 +153,32 @@ async def test_sharing_by_email_makes_a_visitor_who_reaches_only_the_page(
         assert (await client.get(f"/a/{page.public_id}/poll")).status_code == 200
         assert (await client.get(f"/a/{board.public_id}/board")).status_code == 404
         assert (await client.get("/api/artifacts")).status_code == 403
+
+
+async def test_only_the_inviter_or_an_admin_adds_their_visitor_in_the_page_settings(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The settings route holds the rule the email share holds: another member cannot
+    add a visitor someone else invited, the inviter and an admin can."""
+    t = await team(db_session_factory)
+    cy = await member_of(db_session_factory, t.tenant_id, "Cy")
+    guest = await visitor_of(
+        db_session_factory, SimpleNamespace(tenant_id=t.tenant_id, person=t.member)
+    )  # type: ignore[arg-type]
+    theirs = await publish(db_session_factory, cy, slug="theirs", access="people")
+    mine = await publish(db_session_factory, t.member, slug="mine", access="people")
+    adds = {"people": [str(guest.account_id)]}
+
+    async def patch(person: WebPersonRow, page: ArtifactRow) -> httpx.Response:
+        async with page_client(db_session_factory, person) as client:
+            return await client.patch(f"/api/artifacts/{page.id}", json=adds, headers=OWN)
+
+    refused = await patch(cy, theirs)
+    assert refused.status_code == 403, refused.text
+    assert (await patch(t.member, mine)).status_code == 200, "the inviter adds them"
+    await make_admin(db_session_factory, t.owner)
+    owned = await publish(db_session_factory, t.owner, slug="owned", access="people")
+    assert (await patch(t.owner, owned)).status_code == 200, "an admin adds them"
 
 
 async def test_only_the_inviter_or_an_admin_shares_more_with_an_emailed_visitor(

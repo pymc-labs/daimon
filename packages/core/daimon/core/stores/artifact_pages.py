@@ -157,6 +157,44 @@ async def _require_members(
         raise ArtifactError("invalid", "Only members can edit a page. Visitors can open it.")
 
 
+async def _require_inviter_or_admin(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    added: Collection[uuid.UUID],
+    *,
+    actor: uuid.UUID,
+    actor_is_admin: bool,
+) -> None:
+    """A visitor made by a member's page share is held by whoever got their sign-in link, so
+    only that inviter or an admin adds them to more pages; one an admin invited, or whose
+    inviter is still an admin, is open to every sharer."""
+    if actor_is_admin or not added:
+        return
+    visitors = await session.scalars(
+        select(WebPerson).where(
+            WebPerson.tenant_id == tenant_id,
+            WebPerson.kind == "visitor",
+            WebPerson.account_id.in_(list(added)),
+        )
+    )
+    for visitor in visitors:
+        inviter = visitor.invited_by_account_id
+        if inviter == actor:
+            continue
+        standing = (
+            None
+            if inviter is None
+            else await role_of_account(
+                session, tenant_id=tenant_id, account_id=inviter, chat_admin=False
+            )
+        )
+        if standing is None or not is_admin(standing):
+            raise ArtifactError(
+                "forbidden",
+                f"An admin needs to share with {visitor.email or visitor.display_name}.",
+            )
+
+
 async def tool_role(
     session: AsyncSession, artifact: ArtifactRow, account_id: uuid.UUID, *, chat_admin: bool
 ) -> Role:
@@ -273,6 +311,9 @@ async def publish(
         settings = access.apply_change(PageSettings(), change, owner_account_id=account_id)
         access.check_change(PageSettings(), settings, role="owner", now=now)
         await _require_members(session, tenant_id, settings.editors)
+        await _require_inviter_or_admin(
+            session, tenant_id, settings.people, actor=account_id, actor_is_admin=is_admin
+        )
         orm = Artifact(
             tenant_id=tenant_id,
             public_id=new_public_id(),
@@ -300,6 +341,13 @@ async def publish(
             outside=await visible_outside_workspace(session, current),
         )
         await _require_members(session, tenant_id, set(settings.editors) - set(current.editors))
+        await _require_inviter_or_admin(
+            session,
+            tenant_id,
+            set(settings.people) - set(current.people),
+            actor=account_id,
+            actor_is_admin=is_admin,
+        )
         if new_link and not access.can_share(current, role):
             raise ArtifactError("forbidden", access.ASK_OWNER)
         _set_settings(session, orm, settings, rotate=new_link)
@@ -376,9 +424,10 @@ async def update_settings(
     role: Role,
     account_id: uuid.UUID,
     now: datetime,
+    is_admin: bool = False,
 ) -> ArtifactRow:
     """The one path for a settings change, from the web app or a republish's settings;
-    `account_id` is who changes it."""
+    `account_id` is who changes it, `is_admin` whether they are a workspace admin."""
     orm = await _locked(session, artifact.id)
     current = _row(session, orm)
     settings = access.apply_change(
@@ -393,6 +442,13 @@ async def update_settings(
         outside=await visible_outside_workspace(session, current),
     )
     await _require_members(session, orm.tenant_id, set(settings.editors) - set(current.editors))
+    await _require_inviter_or_admin(
+        session,
+        orm.tenant_id,
+        set(settings.people) - set(current.people),
+        actor=account_id,
+        actor_is_admin=is_admin,
+    )
     _set_settings(session, orm, settings, rotate=False)
     if change.title is not None:
         orm.title = check_title(change.title)
