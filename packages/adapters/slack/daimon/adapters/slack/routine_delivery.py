@@ -70,6 +70,8 @@ log = structlog.get_logger(__name__)
 _UNUSABLE_DESTINATION = frozenset(
     {"channel_not_found", "not_in_channel", "is_archived", "thread_not_found"}
 )
+#: Slack errors that mean the creator cannot get a DM at all, on every run alike.
+_UNREACHABLE = frozenset({"user_not_found", "user_disabled", "account_inactive", "cannot_dm_bot"})
 
 
 async def _dm_fallback(
@@ -130,7 +132,11 @@ async def _dm_fallback(
             routine_id=str(row.id),
             error_type=type(err).__name__,
         )
-        return DeliveryOutcome(status="skipped", note=reason, failed=type(err).__name__)
+        # A person gone or a DM Slack never allows repeats on every run: a skip, not a page.
+        closed = err.response.get("error") in _UNREACHABLE
+        return DeliveryOutcome(
+            status="skipped", note=reason, failed=None if closed else type(err).__name__
+        )
     return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
 

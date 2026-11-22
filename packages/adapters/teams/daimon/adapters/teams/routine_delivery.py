@@ -34,7 +34,7 @@ import structlog
 from daimon.adapters.teams.activity_feed import ActivityFeed, chain_id
 from daimon.adapters.teams.card import TEAMS_LIMIT
 from daimon.adapters.teams.direct_chats import DirectChats
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, send_error_details
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
@@ -143,7 +143,11 @@ def make_teams_routine_poster(
                 routine_id=str(row.id),
                 error_type=type(err).__name__,
             )
-            return DeliveryOutcome(status="skipped", note=reason, failed=type(err).__name__)
+            # The app blocked or removed, or the person gone, repeats on every run: no page.
+            closed = send_error_details(err)[0] in {403, 404}
+            return DeliveryOutcome(
+                status="skipped", note=reason, failed=None if closed else type(err).__name__
+            )
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
     async def post(row: RoutineRow) -> DeliveryOutcome:
