@@ -379,14 +379,15 @@ def _refused(
     the credential resolved it, and no server name is logged for one the relay does not have.
     With `sessions`, a refusal of a resolved tenant is also recorded as an issue."""
     # Scanner noise (an unknown path, a missing bearer) is info; the rest is a warning.
-    (log.info if reason in {"unknown_server", "no_bearer"} else log.warning)(
+    noise = reason in {"unknown_server", "no_bearer"} and tenant_id is None
+    (log.info if noise else log.warning)(
         "mcp_identity.relay_refused",
         status=status,
         reason=reason,
         server=server.name if server is not None else None,
         tenant_id=str(tenant_id) if tenant_id is not None else None,
     )
-    if sessions is not None and server is not None:
+    if sessions is not None:
         _report_relay(sessions, "bridge.relay_refused", server, tenant_id, str(status))
     return Response(status_code=status)
 
@@ -394,15 +395,30 @@ def _refused(
 def _report_relay(
     sessions: async_sessionmaker[AsyncSession],
     code: OpsCode,
-    server: SignedIdentityServer,
+    server: SignedIdentityServer | None,
     tenant_id: uuid.UUID | None,
     reason: str,
 ) -> None:
+    subject = server.name if server is not None else None
     report_ops_event(
-        sessions,
-        OpsEvent(code, tenant_id, reason=reason, subject_key=server.name),
-        logged=False,
+        sessions, OpsEvent(code, tenant_id, reason=reason, subject_key=subject), logged=False
     )
+
+
+def _claimed_tenant(claims: Mapping[str, object]) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(claims["tenant_id"]))
+    except (KeyError, ValueError):
+        return None
+
+
+async def _bearer_tenant(auth: TokenVerifier, request: Request) -> uuid.UUID | None:
+    """The tenant a valid bearer names, so a refusal before its server is known is reported."""
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        return None
+    access = await auth.verify_token(header[len("bearer ") :])
+    return _claimed_tenant(access.claims) if access is not None else None
 
 
 def _tool_name(request: Request, message: object, body: bytes) -> str | None:
@@ -435,7 +451,8 @@ def build_identity_relay_route(
     async def handler(request: Request) -> Response:
         server = servers.get(request.path_params["name"])
         if server is None:
-            return _refused(404, "unknown_server")
+            tenant = await _bearer_tenant(auth, request)
+            return _refused(404, "unknown_server", tenant_id=tenant, sessions=sessionmaker)
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("bearer "):
             return _refused(401, "no_bearer", server=server)
@@ -451,7 +468,13 @@ def build_identity_relay_route(
             agent_id = uuid.UUID(str(claims["chat_agent_id"]))
             binding = parse_relay_claim(claims[RELAY_CLAIM])
         except (KeyError, ValueError):
-            return _refused(403, "not_session_credential", server=server)
+            return _refused(
+                403,
+                "not_session_credential",
+                server=server,
+                tenant_id=_claimed_tenant(claims),
+                sessions=sessionmaker,
+            )
         if claims.get(TOKEN_KIND_CLAIM) != "agent":
             return _refused(
                 403, "not_agent_token", server=server, tenant_id=tenant_id, sessions=sessionmaker
@@ -493,7 +516,9 @@ def build_identity_relay_route(
             log.error(
                 "mcp_identity.relay_unconfigured", server=server.name, tenant_id=str(tenant_id)
             )
-            _report_relay(sessionmaker, "bridge.relay_failed", server, tenant_id, "503")
+            _report_relay(
+                sessionmaker, "bridge.relay_failed", server, tenant_id, "relay_unconfigured"
+            )
             return Response(status_code=503)
         person = claims.get("platform_user_id")
         body = await read_capped_body(request)
@@ -667,7 +692,7 @@ def build_identity_relay_route(
                 tenant_id=str(tenant_id),
                 tool=_tool_name(request, message, body),
             )
-            _report_relay(sessionmaker, "bridge.relay_failed", server, tenant_id, "503")
+            _report_relay(sessionmaker, "bridge.relay_failed", server, tenant_id, "relay_busy")
             return Response(status_code=503, headers={"retry-after": "5"})
         except httpx.HTTPError as err:
             log.warning(
