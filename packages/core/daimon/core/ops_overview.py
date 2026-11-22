@@ -11,6 +11,7 @@ reopens it as `regressed`; muted hides it until reopened. Active means seen in t
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -43,6 +44,7 @@ from daimon.core.stores.domain import (
 from daimon.core.stores.ops_events import SubjectNames
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.web_admin import audit
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,6 +69,21 @@ FAILING_RATE: Final = 0.2
 FAILING_MIN_ANSWERS: Final = 20
 FAILING_PEOPLE: Final = 3
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
+_AUDIT_ACTIONS: Final[Mapping[IssueAction, str]] = {
+    "resolve": "Resolved issue",
+    "mute": "Muted issue",
+    "reopen": "Reopened issue",
+}
+_WINDOW = re.compile(r"(\d{1,4})([mhd])")
+_UNITS: Final = {"m": timedelta(minutes=1), "h": timedelta(hours=1), "d": timedelta(days=1)}
+
+
+def parse_window(text: str) -> timedelta:
+    """`15m`, `24h` or `7d` as a length of time; ValueError for anything else."""
+    found = _WINDOW.fullmatch(text.strip().lower())
+    if found is None or int(found[1]) == 0:
+        raise ValueError(f"not a window like 15m, 24h or 7d: {text!r}")
+    return int(found[1]) * _UNITS[found[2]]
 
 
 class _Shape(BaseModel):
@@ -435,6 +452,7 @@ async def _issues(
     now: datetime,
     period: OpsPeriod,
     agent_names: Mapping[str, str],
+    window: timedelta | None = None,
     area: OpsArea | None = None,
     severity: OpsSeverity | None = None,
     agent_id: str | None = None,
@@ -443,7 +461,7 @@ async def _issues(
     groups = await store.list_issue_groups(
         session,
         tenant_id=tenant_id,
-        since=now - span * buckets,
+        since=now - (window or span * buckets),
         area=area,
         severity=severity,
         agent_id=agent_id,
@@ -483,14 +501,17 @@ async def load_issues(
     query: str | None = None,
     sort: IssueSort = "last_seen",
     agent_names: Mapping[str, str] | None = None,
+    window: timedelta | None = None,
 ) -> list[Issue]:
-    """The workspace's issues seen in `period`, filtered and sorted; the caller pages them."""
+    """The workspace's issues seen in `period` (or in the last `window`, with the period's
+    trend), filtered and sorted; the caller pages them."""
     issues = await _issues(
         session,
         tenant_id=tenant_id,
         now=now,
         period=period,
         agent_names=agent_names or {},
+        window=window,
         area=area,
         severity=severity,
         agent_id=agent_id,
@@ -503,6 +524,50 @@ async def load_issues(
     return sorted_issues(kept, sort)
 
 
+async def _one(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    fingerprint: str,
+    now: datetime,
+    period: OpsPeriod,
+    agent_names: Mapping[str, str],
+) -> tuple[OpsIssueGroupRow, _IssueFields, SubjectNames] | None:
+    found = await store.list_issue_groups(
+        session, tenant_id=tenant_id, since=_EPOCH, fingerprint=fingerprint, limit=1
+    )
+    if not found:
+        return None
+    span, count = period_span(period)
+    buckets = await store.issue_buckets(
+        session, tenant_id=tenant_id, fingerprints=[fingerprint], now=now, span=span, buckets=count
+    )
+    names, people = await _context(session, tenant_id, found)
+    fields = _fields(found[0], buckets[fingerprint], now, names, agent_names, people)
+    return found[0], fields, names
+
+
+async def load_issue_summary(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    fingerprint: str,
+    now: datetime,
+    period: OpsPeriod = "24h",
+    agent_names: Mapping[str, str] | None = None,
+) -> Issue | None:
+    """One issue as the list shows it, over its whole life; None if the workspace has none."""
+    one = await _one(
+        session,
+        tenant_id=tenant_id,
+        fingerprint=fingerprint,
+        now=now,
+        period=period,
+        agent_names=agent_names or {},
+    )
+    return None if one is None else Issue(**one[1], people=one[0].people)
+
+
 async def load_issue(
     session: AsyncSession,
     *,
@@ -513,24 +578,18 @@ async def load_issue(
     agent_names: Mapping[str, str] | None = None,
 ) -> IssueDetail | None:
     """One issue over its whole life, with its people; None if the workspace has none."""
-    found = await store.list_issue_groups(
-        session, tenant_id=tenant_id, since=_EPOCH, fingerprint=fingerprint, limit=1
+    agents = agent_names or {}
+    one = await _one(
+        session,
+        tenant_id=tenant_id,
+        fingerprint=fingerprint,
+        now=now,
+        period=period,
+        agent_names=agents,
     )
-    if not found:
+    if one is None:
         return None
-    group = found[0]
-    span, count = period_span(period)
-    buckets = (
-        await store.issue_buckets(
-            session,
-            tenant_id=tenant_id,
-            fingerprints=[fingerprint],
-            now=now,
-            span=span,
-            buckets=count,
-        )
-    )[fingerprint]
-    names, people = await _context(session, tenant_id, found)
+    group, fields, names = one
     account_ids = await store.list_issue_account_ids(
         session, tenant_id=tenant_id, fingerprint=fingerprint
     )
@@ -538,9 +597,8 @@ async def load_issue(
         session, tenant_id=tenant_id, account_ids=account_ids
     )
     agent_id = group.latest.agent_id
-    agents = agent_names or {}
     return IssueDetail(
-        **_fields(group, buckets, now, names, agents, people),
+        **fields,
         people=[p for a in account_ids if (p := person_of(a, everyone))],
         agent=Person(
             id=agent_id, name=agents.get(agent_id) or names.agents.get(agent_id) or "Agent"
@@ -589,16 +647,16 @@ async def change_issue_state(
     tenant_id: uuid.UUID,
     fingerprint: str,
     action: IssueAction,
-    by_account_id: uuid.UUID,
+    by_account_id: uuid.UUID | None,
     now: datetime,
-) -> bool:
-    """Resolve, mute or reopen an issue; False if the workspace has no such issue. The caller
-    commits and audits."""
-    found = await store.list_issue_groups(
-        session, tenant_id=tenant_id, since=_EPOCH, fingerprint=fingerprint, limit=1
-    )
-    if not found:
-        return False
+) -> Issue | None:
+    """Resolve, mute or reopen an issue and record it in the audit trail; the issue as it now
+    stands, or None if the workspace has no such issue. The caller commits."""
+    if (
+        await load_issue_summary(session, tenant_id=tenant_id, fingerprint=fingerprint, now=now)
+        is None
+    ):
+        return None
     if action == "reopen":
         await store.clear_issue_state(session, tenant_id=tenant_id, fingerprint=fingerprint)
     else:
@@ -610,7 +668,20 @@ async def change_issue_state(
             by_account_id=by_account_id,
             at=now,
         )
-    return True
+    current = await load_issue_summary(
+        session, tenant_id=tenant_id, fingerprint=fingerprint, now=now
+    )
+    assert current is not None, "the issue was just found"
+    await audit(
+        session,
+        tenant_id=tenant_id,
+        actor_account_id=by_account_id,
+        action=_AUDIT_ACTIONS[action],
+        target=current.title,
+        detail=current.subject.name if current.subject else None,
+        at=now,
+    )
+    return current
 
 
 async def load_ops_overview(

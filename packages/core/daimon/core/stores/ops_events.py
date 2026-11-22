@@ -210,7 +210,7 @@ async def set_issue_state(
     tenant_id: uuid.UUID,
     fingerprint: str,
     state: OpsIssueStateName,
-    by_account_id: uuid.UUID,
+    by_account_id: uuid.UUID | None,
     at: datetime,
 ) -> None:
     """Resolve or mute an issue, replacing an earlier state; the caller commits."""
