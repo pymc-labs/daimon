@@ -33,6 +33,7 @@ from daimon.core.turn.posture import (
     RequireApproval,
 )
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent, run_turn_on_leg
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     make_agent_message,
@@ -1512,7 +1513,9 @@ async def test_watch_send_stops_on_the_owners_used_up_allowance(db_session_facto
     await send("another-agent")
 
 
-async def test_web_watch_spend_keys_on_the_principal_platform(db_session_factory):
+async def test_web_watch_spend_keys_on_the_principal_platform(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     from decimal import Decimal
 
     from daimon.core.stores import identity, spend_allowances, tenant_ledger

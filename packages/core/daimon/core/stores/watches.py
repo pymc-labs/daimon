@@ -24,9 +24,9 @@ from daimon.core._models import (
     WatchFiring,
     WatchNoticeReceipt,
 )
+from daimon.core.artifact_pages.keys import new_key_id, page_event_key
 from daimon.core.config import Settings, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.artifact_pages.keys import new_key_id, page_event_key
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
 from daimon.core.continuity.poll_tools import PAGE_DATA_TOOL
 from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT
