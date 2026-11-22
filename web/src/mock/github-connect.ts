@@ -38,7 +38,7 @@ const grant = (r: ConnectRepo | string, extra: Partial<AgentRepo> = {}): AgentRe
 })
 const GRANTS = [
   grant(mmm, { is_working_repo: true }), grant(shared, { scope: "shared", max_access: "read", ceiling_access: "read" }), grant(mine[0]!),
-  grant("acme/legacy-reports", { installation_id: 12 }), grant("northwind/billing-archive", { installation_id: 15 }),
+  grant("acme/", { installation_id: 12 }), grant("northwind/", { installation_id: 15 }),
 ]
 
 const editor = (extra: Partial<Extract<ConnectView, { kind: "agent_editor" }>> = {}, state = "editor"): ConnectView => {

@@ -132,7 +132,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
             {workChanged && <Pill><Star className="mr-1 size-3 fill-current" />{current ? repoName(current.name) : "No working repo"}</Pill>}
             <button type="button" className="ml-auto text-xs text-link hover:underline" onClick={discard}>Discard changes</button>
           </>
-        ) : <span className="text-xs text-muted-foreground">No changes to save</span>}
+        ) : null}
       </div>
       <Actions className="mt-3">
         <Button variant="outline" size="lg" disabled={step.pending} onClick={() => step.run(() => connectApi.cancel(view.state))}>Cancel</Button>
@@ -146,7 +146,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
           <DialogHeader><DialogTitle>Add repos</DialogTitle></DialogHeader>
           {draft && (
             <RepoList
-              className="flex-1" groups={groups} checked={draft} onChange={setDraft}
+              className="flex-1" groups={groups} first={view.requested_repo_id} checked={draft} onChange={setDraft}
               note={(id) => (id in view.needs_write ? "Required" : undefined)}
               onRetry={() => step.run(() => connectApi.view(view.state))}
             />
@@ -181,10 +181,11 @@ function RepoRow({ row, working, removed, added, fixing, repairable, needsWrite,
   const g = row.grant
   const facts = [
     g && g.status !== "active" && "Unavailable",
-    row.pastCap ? "Past the 2,000-repo limit, so it can only be removed" : !row.visible && "Not visible on GitHub, so it can only be removed",
+    row.pastCap ? "Past the 2,000-repo limit" : !row.visible && "Not visible on GitHub",
     needsWrite && !fixing && "Needs write to finish setup",
   ].filter(Boolean)
   const Icon = row.visible ? BookMarked : Lock
+  const label = row.visible ? row.name : "hidden repo"
   return (
     <div className="px-3 py-2 text-sm">
       <div className="flex min-h-7 flex-wrap items-center gap-x-2 gap-y-1">
@@ -198,11 +199,11 @@ function RepoRow({ row, working, removed, added, fixing, repairable, needsWrite,
         {removed && <Pill className="text-destructive">To remove</Pill>}
         <span className="-mr-1.5 ml-auto flex shrink-0 items-center gap-1">
           {!removed && repairable && row.visible && (fixing
-            ? <Button variant="ghost" size="xs" aria-label={`Undo update of ${row.name}`} onClick={() => onFix(false)}><Undo2 />Undo</Button>
-            : <Button variant="outline" size="xs" aria-label={`Finish setup of ${row.name}`} onClick={() => onFix(true)}>Finish setup</Button>)}
+            ? <Button variant="ghost" size="xs" aria-label={`Undo update of ${label}`} onClick={() => onFix(false)}><Undo2 />Undo</Button>
+            : <Button variant="outline" size="xs" aria-label={`Finish setup of ${label}`} onClick={() => onFix(true)}>Finish setup</Button>)}
           {removed
-            ? <Button variant="ghost" size="xs" aria-label={`Undo removal of ${row.name}`} onClick={onUndo}><Undo2 />Undo</Button>
-            : <Button variant="ghost" size="xs" aria-label={`Remove ${row.visible ? row.name : "hidden repo"}`} onClick={onRemove}><Trash2 />Remove</Button>}
+            ? <Button variant="ghost" size="xs" aria-label={`Undo removal of ${label}`} onClick={onUndo}><Undo2 />Undo</Button>
+            : <Button variant="ghost" size="xs" aria-label={`Remove ${label}`} onClick={onRemove}><Trash2 />Remove</Button>}
         </span>
       </div>
       {facts.length > 0 && (

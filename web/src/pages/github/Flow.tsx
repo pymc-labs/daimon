@@ -32,7 +32,7 @@ function Flow({ id, load }: { id: string; load: () => Promise<Outcome> }) {
   const mutation = useMutation({ mutationFn: (fn: () => Promise<Outcome>) => fn(), onSuccess: setNext, meta: { inline: true } })
   const step: Step = { run: mutation.mutate, pending: mutation.isPending, error: mutation.error?.message ?? null }
   const outcome = next ?? q.data
-  useEffect(() => { if (outcome?.kind === "redirect") location.assign(outcome.url) }, [outcome])
+  useEffect(() => { if (outcome?.kind === "redirect") location.replace(outcome.url) }, [outcome])
   const retry = () => { setNext(undefined); void q.refetch() }
   if (q.error && !outcome) return <View view={{ kind: "transient_error", message: "Couldn't reach Daimon", status: 0, retry_url: null, retry_selection: null }} step={step} onRetry={retry} />
   if (outcome?.kind !== "page") return <div className="min-h-dvh bg-muted" role="status" aria-label="Loading" />

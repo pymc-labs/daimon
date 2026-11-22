@@ -35,8 +35,11 @@ export function Actions({ children, className }: { children: React.ReactNode; cl
 
 const PLACE: Record<Platform, string> = { web: "Daimon", discord: "Discord", slack: "Slack", teams: "Teams" }
 
-/** The way back to where the person came from; Slack and Teams have none. */
+const NEXT: Partial<Record<Platform, string>> = { slack: "In Slack, run /github", teams: "In Teams, ask Daimon" }
+
+/** The way back to where the person came from; Slack and Teams have no link, so a line names the next step. */
 export function BackButton({ back }: { back: Back }) {
+  if (back && !back.url && NEXT[back.platform]) return <p className="mt-6 text-sm text-muted-foreground">{NEXT[back.platform]}</p>
   if (!back?.url) return null
   return (
     <Button asChild size="lg" className="mt-6 w-full">
@@ -45,12 +48,10 @@ export function BackButton({ back }: { back: Back }) {
   )
 }
 
-/** A GitHub owner's avatar: round for a person, square for an organization. */
+/** A GitHub owner's icon: round for a person, square for an organization. The web CSP blocks GitHub's avatar images. */
 export function OwnerAvatar({ item, className }: { item?: ConnectInstallation; className?: string }) {
   const person = item?.owner_type.toLowerCase() === "user"
   const shape = person ? "rounded-full" : "rounded-md"
-  if (item?.avatar_url?.startsWith("https://avatars.githubusercontent.com/"))
-    return <img src={item.avatar_url} alt="" className={cn("size-5 shrink-0", shape, className)} />
   const Icon = person ? User : Building2
   return <span className={cn("flex size-5 shrink-0 items-center justify-center bg-accent text-muted-foreground", shape, className)}><Icon className="size-3" /></span>
 }

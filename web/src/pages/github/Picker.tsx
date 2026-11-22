@@ -18,14 +18,19 @@ const WARNING = (i: ConnectInstallation) =>
   i.state === "suspended" ? "Paused on GitHub" : i.fetch_state === "error" ? "GitHub list unavailable" : i.truncated ? "Limited to 2,000 repos" : null
 
 /** Repos grouped by GitHub owner, with a filter, bulk select and a selected-only view. `fixed` repos show ticked and cannot change. */
-export function RepoList({ groups, checked, fixed, note, onChange, onRetry, className }: {
+export function RepoList({ groups: given, first, checked, fixed, note, onChange, onRetry, className }: {
   groups: { item: ConnectInstallation; repos: ConnectRepo[] }[]
+  /** The requested repo: listed at the top, in the top group. */
+  first?: number | null
   checked: Set<number>; fixed?: Set<number>
   note: (id: number) => string | undefined
   onChange: (next: Set<number>) => void
   onRetry?: () => void
   className?: string
 }) {
+  const groups = first == null ? given : given
+    .map((g) => ({ ...g, repos: [...g.repos].sort((a, b) => Number(b.id === first) - Number(a.id === first)) }))
+    .sort((a, b) => Number(b.repos.some((r) => r.id === first)) - Number(a.repos.some((r) => r.id === first)))
   const [query, setQuery] = useState("")
   const [pressed, setOnly] = useState(false)
   const q = query.trim().toLowerCase()
@@ -99,7 +104,7 @@ export function Picker({ view, step }: { view: WorkspacePickerView; step: Step }
     <Card wide>
       <WideHead title={view.agent_name ? `Connect repos to ${view.agent_name}` : "Connect GitHub repos"} platform={view.platform} workspace={view.workspace_label} />
       <RepoList
-        className="mt-6" groups={groups} checked={checked} fixed={added} onChange={setChecked}
+        className="mt-6" groups={groups} first={view.requested_repo_id} checked={checked} fixed={added} onChange={setChecked}
         note={(id) => (id in view.needs_write ? (view.needs_write[id] ? "Needs write" : "Needed") : undefined)}
         onRetry={() => step.run(() => connectApi.view(view.state))}
       />

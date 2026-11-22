@@ -15,7 +15,7 @@ const repos = (n: number, agent: string | null) => `${plural(n, "repo")} connect
 /** Run a step from a server-built link when it carries the flow's state, else just follow the link. */
 const inPlace = (step: Step, url: string, run: (state: string) => Promise<Outcome>) => {
   const state = stateOf(url)
-  if (state) step.run(() => run(state)); else location.assign(url)
+  if (state) step.run(() => run(state)); else location.replace(url)
 }
 
 export function ErrorPage({ view }: { view: ErrorView }) {
@@ -153,7 +153,7 @@ export function DonePage({ view }: { view: DoneView }) {
   return (
     <Card mark={<Mark icon={CircleCheck} tone="ok" />}>
       <Title title="Repos connected" sub={view.agent_name ? repos(view.count, view.agent_name) : <><span className="block">{plural(view.count, "repo")} connected</span><span className="block">{sub}</span></>} />
-      <BackButton back={view.back} />
+      <BackButton back={view.same_person ? view.back : null} />
     </Card>
   )
 }

@@ -58,10 +58,10 @@ describe("github connect", () => {
   })
 
   it("follows a redirect outcome", async () => {
-    const assign = vi.fn()
-    vi.stubGlobal("location", { ...window.location, assign, origin: window.location.origin })
+    const replace = vi.fn()
+    vi.stubGlobal("location", { ...window.location, replace, origin: window.location.origin })
     server({ "GET /api/github/connect/view": () => json({ kind: "redirect", url: "https://github.com/apps/x/installations/new" }) })
     open("state=y")
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://github.com/apps/x/installations/new"))
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("https://github.com/apps/x/installations/new"))
   })
 })
