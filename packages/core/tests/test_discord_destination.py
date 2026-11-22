@@ -29,7 +29,9 @@ def _deny_everyone(bits):
     return {"id": GUILD, "type": 0, "allow": "0", "deny": str(bits)}
 
 
-def _resolver(channels, *, everyone=SPEAK, thread_members=(), owner_id="999"):
+def _resolver(
+    channels, *, everyone=SPEAK, thread_members=(), owner_id="999", defer=False, forbidden=()
+):
     """A resolver over canned REST answers: guild, roles, member and the given channels."""
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -40,6 +42,8 @@ def _resolver(channels, *, everyone=SPEAK, thread_members=(), owner_id="999"):
             return httpx.Response(200, json={"id": GUILD, "owner_id": owner_id})
         if path == f"guilds/{GUILD}/roles":
             return httpx.Response(200, json=[{"id": GUILD, "permissions": str(everyone)}])
+        if path.removeprefix("channels/") in forbidden:
+            return httpx.Response(403, json={"code": 50001, "message": "Missing Access"})
         if path.startswith("channels/") and "/thread-members/" in path:
             cid = path.split("/")[1]
             ok = (cid, path.rsplit("/", 1)[1]) in thread_members
@@ -49,7 +53,11 @@ def _resolver(channels, *, everyone=SPEAK, thread_members=(), owner_id="999"):
         return httpx.Response(404, json={})
 
     return DiscordRestDestinationResolver(
-        "token", guild_id=GUILD, owner_id=OWNER, transport=httpx.MockTransport(handle)
+        "token",
+        guild_id=GUILD,
+        owner_id=OWNER,
+        transport=httpx.MockTransport(handle),
+        defer_bot_access=defer,
     )
 
 
@@ -134,3 +142,17 @@ async def test_private_thread_needs_membership(member, allowed):
     else:
         with pytest.raises(RoutineRefused, match="can't post in 20"):
             await resolver("thread", "20")
+
+
+async def test_deferral_accepts_only_a_channel_discord_says_the_bot_cannot_access():
+    """403 Missing Access defers a channel; a 404, a thread or no deferral is refused as before."""
+    assert await _resolver({}, forbidden=("10",), defer=True)("channel", "10") == Placement(
+        channel_id="10"
+    ), "an inaccessible channel is saved"
+    for resolver, kind in (
+        (_resolver({}, defer=True), "channel"),
+        (_resolver({}, forbidden=("10",)), "channel"),
+        (_resolver({}, forbidden=("20",), defer=True), "thread"),
+    ):
+        with pytest.raises(RoutineRefused):
+            await resolver(kind, "20" if kind == "thread" else "10")

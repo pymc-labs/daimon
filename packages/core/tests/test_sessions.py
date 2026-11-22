@@ -3150,6 +3150,126 @@ async def test_create_session_mounts_the_vault_of_the_turns_hold(
     assert session_bodies[0]["vault_ids"] == ["vlt_new"]
 
 
+async def test_held_turn_session_credential_carries_the_hold_and_is_refused_elsewhere(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The per-session daimon-mcp credential (the URL the agent's server points
+    at) carries the hold like the caller's, so a read of another channel with it
+    is refused."""
+    import jwt as pyjwt
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize, build_subject
+    from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
+    from daimon.core.mcp_server_url import is_session_mcp_url
+    from daimon.core.turn_hold import TurnHold
+
+    tenant = await make_tenant(db_session, platform="slack")
+    account = await make_account(db_session, tenant=tenant)
+    hold = TurnHold(platform="slack", channel_id="C-SYN-1", client=True)
+    public_url = "https://mcp.example.com/mcp"
+    posts: list[tuple[str, dict[str, Any]]] = []
+    memory_handler = make_fake_memory_store_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/vaults":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        if request.method == "POST" and path == "/v1/vaults":
+            name = json.loads(request.content)["display_name"]
+            return httpx.Response(
+                200,
+                json={
+                    "id": f"vlt_{len(posts)}_{abs(hash(name)) % 10**6}",
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            )
+        if request.method == "POST" and path.endswith("/credentials"):
+            body = json.loads(request.content)
+            posts.append((body["auth"]["mcp_server_url"], body))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_new",
+                    "type": "credential",
+                    "vault_id": path.split("/")[3],
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": body["auth"]["mcp_server_url"],
+                    },
+                },
+            )
+        if request.method == "POST" and path.endswith("/v1/sessions"):
+            body = json.loads(request.content)
+            sent_agent = body["agent"]
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id="sess_held",
+                    agent_id=sent_agent if isinstance(sent_agent, str) else sent_agent["id"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise AssertionError(f"unexpected call: {request.method} {path}")
+
+    agent = ma_agent(
+        id="ag_held",
+        mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": public_url}],
+    )
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=agent,
+        environment=_make_env(anthropic_id="env_held"),
+        account_id=account.id,
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+        hold=hold,
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+
+    session_posts = [body for url, body in posts if is_session_mcp_url(url, public_url)]
+    assert session_posts, "the session's own daimon-mcp credential is minted"
+    for _, body in posts:
+        claims = pyjwt.decode(
+            body["auth"]["token"], "x" * 32, algorithms=["HS256"], options={"verify_exp": False}
+        )
+        assert parse_hold_claim(claims[HOLD_CLAIM]) == hold
+        assert body["metadata"]["daimon_chat_hold"]
+    session_claims = pyjwt.decode(
+        session_posts[0]["auth"]["token"],
+        "x" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    carried = parse_hold_claim(session_claims[HOLD_CLAIM])
+    subject = build_subject(is_admin=False, platform_user_id="U_OUT", client=True)
+    here = Place(channel_id="C-SYN-1", parent_channel_id="C-SYN-1")
+    elsewhere = Place(channel_id="C-SYN-2", parent_channel_id="C-SYN-2")
+    decisions = {
+        place.channel_id: authorize(
+            TenantAccessPolicy(),
+            subject=subject,
+            action=Action.READ_CHANNEL,
+            agent=AgentRef.of("anyone"),
+            place=place,
+            origin=here,
+            hold=carried,
+        ).allowed
+        for place in (here, elsewhere)
+    }
+    assert decisions == {"C-SYN-1": True, "C-SYN-2": False}
+
+
 def _session_body(
     *,
     session_id: str,

@@ -167,6 +167,8 @@ async def test_a_channel_timer_reads_the_roles_of_the_member_it_found(
 
 def _cog(factory: async_sessionmaker[AsyncSession], roles: tuple[str, ...]) -> DirectMessageCog:
     bot = MagicMock()
+    bot.working_mark = AsyncMock(return_value="👀")
+    bot.turn_model_marks = AsyncMock(return_value=())
     bot.runtime.sessionmaker = factory
     bot.runtime.turn_deps.membership_resolver = _fetch(*roles)
     bot.allows_tenant.return_value = True

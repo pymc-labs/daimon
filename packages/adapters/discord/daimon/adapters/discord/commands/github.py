@@ -221,6 +221,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                 platform="discord",
                 workspace_id=str(interaction.guild_id),
                 agent_name=target_name,
+                agent_id=target_ma_id,
             )
             await interaction.followup.send(
                 embed=connect_embed(card),

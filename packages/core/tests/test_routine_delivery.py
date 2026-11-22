@@ -257,6 +257,26 @@ def test_the_fallback_post_names_the_agent_unless_the_post_carries_its_identity(
     ), "the agent's own header says who it is from; the schedule stays"
 
 
+def test_a_fallback_post_without_the_header_is_the_result_alone() -> None:
+    """Off drops the "Result from" line only: the requester line stays, a failure notice is unchanged."""
+    row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
+    assert render_fallback_post(row, header=False) == "All green."
+    assert render_fallback_post(row, header=False, as_agent=True) == "All green."
+    assert render_fallback_post(row, header=False, platform="discord").endswith(
+        "All green.\n-# requested by <@U1>"
+    ), "the attribution line is not the header"
+    failed = _row(delivery_note="failure_notice")
+    assert render_fallback_post(failed, header=False) == render_fallback_post(failed)
+
+
+def test_the_fallback_texts_name_the_agent_by_its_display_name() -> None:
+    row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
+    assert render_fallback_post(row, agent_name="Ada").startswith(
+        "Result from Ada's Friday routine"
+    )
+    assert render_fallback_dm(row, "destination_unavailable", "Ada").startswith("Ada, ")
+
+
 def test_the_fallback_post_keeps_a_schedule_it_cannot_say_exactly_as_cron() -> None:
     row = _row(agent_name="research", cron_expr="*/15 9-17 * * 1-5", timezone="UTC")
     assert render_fallback_post(row) == (
@@ -887,3 +907,56 @@ def test_lapsed_role_is_a_fresh_member_missing_a_gated_agents_role(
         membership_fresh=fresh,
     )
     assert lapsed_role(TenantAccessPolicy(agent_rules=rules), ("helper",), owner) is lapsed
+
+
+@pytest.mark.parametrize(
+    ("mode", "roles", "expected"),
+    [
+        ("on", ("4001",), "cleared"),
+        ("on", ("4002",), "owner_outside_team"),
+        ("shadow", ("4002",), "cleared"),
+        ("off", ("4002",), "cleared"),
+    ],
+)
+async def test_a_dm_result_rechecks_the_owners_standing_in_mode_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    roles: tuple[str, ...],
+    expected: str,
+) -> None:
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    async def read(*_args: object, **_kwargs: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", read)
+    tenant = await make_tenant(db_session, platform="discord")
+    row = await new_routine(
+        db_session,
+        tenant,
+        created_by_user_id="1234",
+        agent_id="ag",
+        trigger_message="go",
+        destination_kind="dm",
+        destination_id="1234",
+        source_provenance_known=True,
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(internal_role_ids=("4001",))
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=True, role_ids=roles)
+
+    result = await clear_creator(
+        db_session_factory,
+        row,
+        platform="discord",
+        membership_resolver=CachedMembershipResolver(fetch),  # type: ignore[arg-type]
+    )
+    assert ("cleared" if isinstance(result, TenantAccessPolicy) else result) == expected

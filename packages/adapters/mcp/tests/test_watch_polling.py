@@ -1,15 +1,18 @@
 """Owner authorization, executor gating and management never trust poll results."""
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import discord
 import pytest
 from daimon.adapters.mcp.tools.watches import manage_watch_impl, rotate_watch_impl
 from daimon.adapters.mcp.watch_polling import poll_read_place as real_poll_read_place
 from daimon.adapters.mcp.watch_polling import run_poll
 from daimon.core.authz import Place
+from daimon.core.bot_access import BotAccessUnavailable
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.membership import Membership
 from daimon.core.stores import watches
@@ -27,6 +30,12 @@ from sqlalchemy import text
 from .harness import auth_identity
 
 pytestmark = pytest.mark.fresh_schema
+
+
+def _forbidden(code: int) -> discord.Forbidden:
+    return discord.Forbidden(
+        SimpleNamespace(status=403, reason="denied"), {"code": code, "message": "denied"}
+    )
 
 
 @pytest.fixture
@@ -381,6 +390,53 @@ async def test_revoked_exact_destination_stops_poll_before_source(runtime_watch)
         source.assert_not_called()
     async with runtime.session_factory() as db:
         assert (await watches.get_watch(db, watch.id)).status == "paused"
+
+
+async def test_a_destination_the_bot_cannot_reach_defers_the_poll_without_pausing(runtime_watch):
+    runtime, watch, _ = runtime_watch
+    with (
+        patch(
+            "daimon.adapters.mcp.watch_polling.poll_read_place",
+            AsyncMock(side_effect=BotAccessUnavailable),
+        ),
+        patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source,
+    ):
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.assert_not_called()
+    async with runtime.session_factory() as db:
+        kept = await watches.get_watch(db, watch.id)
+    assert kept.status != "paused", "waiting for the bot is not a revocation"
+
+
+@pytest.mark.parametrize(
+    ("wait", "error", "raises"),
+    [
+        (True, _forbidden(50001), BotAccessUnavailable),
+        (False, _forbidden(50001), discord.Forbidden),
+        (True, _forbidden(20001), discord.Forbidden),
+        (True, ToolError("channel not found"), ToolError),
+    ],
+    ids=["waits", "feature_off", "other_403", "not_found"],
+)
+async def test_only_missing_access_on_the_source_waits(runtime_watch, wait, error, raises):
+    runtime, _, auth = runtime_watch
+
+    @asynccontextmanager
+    async def client(_token):
+        yield object()
+
+    with (
+        patch("daimon.adapters.mcp.watch_polling.rest_client", client),
+        patch("daimon.adapters.mcp.watch_polling._require_bot_token", lambda _r: "t"),
+        patch(
+            "daimon.adapters.mcp.watch_polling._resolve_member",
+            AsyncMock(return_value=(None, None)),
+        ),
+        patch("daimon.adapters.mcp.watch_polling._resolve_channel", AsyncMock(side_effect=error)),
+        patch("daimon.adapters.mcp.watch_polling.bot_access_wait_on", AsyncMock(return_value=wait)),
+        pytest.raises(raises),
+    ):
+        await real_poll_read_place(runtime, auth, "4242")
 
 
 async def test_owner_registration_binds_attended_origin_and_refuses_unattended(runtime_watch):

@@ -17,6 +17,7 @@ from daimon.adapters.discord.timer_delivery import (
     require_channel_timer_access,
 )
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
+from daimon.core.bot_access import BotAccessUnavailable
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.scope_timers import DeliveryFailed, DeliveryRetry
 from daimon.core.continuity.wakes import enqueue_wake
@@ -453,3 +454,33 @@ async def test_a_transient_error_before_a_channel_turn_retries_then_settles(
     row = await _row(db_session_factory, key)
     assert row.status == "pending" and row.available_at is not None
     turn.assert_not_awaited()
+
+
+def _missing_access() -> discord.Forbidden:
+    return discord.Forbidden(
+        MagicMock(status=403, reason="x"), {"code": 50001, "message": "Missing Access"}
+    )
+
+
+@pytest.mark.parametrize("wait", [True, False])
+@pytest.mark.parametrize("case", ["locked_out", "bot_cannot_view", "channel_gone"])
+async def test_a_channel_the_bot_cannot_reach_waits_only_when_the_workspace_asks(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    wait: bool,
+) -> None:
+    row = await _access_row(db_session_factory)
+    client = discord.Client(intents=discord.Intents.none())
+    rest = Rest(client)
+    if case == "locked_out":
+        rest.channel_error = _missing_access()
+    elif case == "channel_gone":
+        rest.channel_error = _denied(discord.NotFound)
+    else:
+        rest.bot_perms = discord.Permissions(send_messages=True)
+    monkeypatch.setattr(timer_delivery, "bot_access_wait_on", AsyncMock(return_value=wait))
+
+    waits = wait and case != "channel_gone"
+    with pytest.raises(BotAccessUnavailable if waits else AdmissionDenied):
+        await require_channel_timer_access(db_session_factory, row, client)

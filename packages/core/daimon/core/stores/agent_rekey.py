@@ -70,6 +70,8 @@ REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
         ("mcp_tokens", "agent_id"),
         ("pending_skill_adds", "ma_agent_id"),
         ("routines", "agent_id"),
+        # A pending reveal rechecks Secret sharing for the share's agent.
+        ("secret_shares", "agent_id"),
         ("spend_allowances", "agent_id"),
         ("task_continuations", "target_ma_agent_id"),
         ("tenant_github_repos", "scope_agent_id"),

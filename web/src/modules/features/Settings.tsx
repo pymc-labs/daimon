@@ -6,6 +6,7 @@ import { PanelSection, SettingRow } from "@/components/panel"
 import { QueryState } from "@/components/QueryState"
 import { SettingsList, type SettingsRow } from "@/components/settings"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { useFeatureSave, useFeatures, useFeatureSchema } from "./api"
 import type { FeaturePlace, FeatureSchema, FeatureView, Tier } from "./types"
 
@@ -66,12 +67,19 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
     const base = own ? { value: above?.value ?? s.default, from: above ? (TIER_NAME[above.tier] ?? "Built-in") : "Built-in" } : { value: v.value, from: TIER_NAME[v.source] ?? "Built-in" }
     return (
       <>
-        <InheritedSelect
+        {s.maxLength ? (
+          <Input
+            aria-label={s.name} defaultValue={ownValue ?? ""} maxLength={s.maxLength} disabled={save.pending}
+            placeholder={labelOf(s, base.value)} className={width ?? "w-56"}
+            onBlur={(e) => { const next = e.target.value.trim() || DEFAULT; if (next !== (ownValue ?? DEFAULT)) void run(s, v, next, false) }}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur() }}
+          />
+        ) : <InheritedSelect
           bare label={s.name} value={ownValue} disabled={save.pending} className={width}
           inherited={{ value: base.value, label: labelOf(s, base.value), from: base.from }}
           options={s.values.map((o) => ({ value: o.value, label: o.label }))}
           onChange={(next) => void run(s, v, next ?? DEFAULT, false)}
-        />
+        />}
         {overridden && <span className="text-xs text-muted-foreground">{v.summary}</span>}
         {lockable && (
           <Button

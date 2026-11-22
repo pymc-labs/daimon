@@ -8,13 +8,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_audience import (
     ChannelAudience,
     audience_mode,
     channel_has_outsiders,
     channels_with_outsiders,
 )
+from daimon.core.channel_changes import ChannelChangeRefused
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.audience_facts import StoredRoom
 from daimon.core.stores.domain import FeatureTarget, TenantRow
 from daimon.core.stores.feature_values import set_feature_value
@@ -338,3 +342,34 @@ async def test_a_failed_facts_read_in_shadow_falls_back_to_the_registry(
         await channel_has_outsiders(
             db_session, tenant_id=tenant.id, platform="discord", channel_id=ROOM, mode="on"
         )
+
+
+async def test_on_is_refused_until_the_server_has_internal_roles(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g-2")
+    place = FeaturePlace(tenant_id=tenant.id, platform="discord")
+
+    async def turn(value: str) -> None:
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key="audience_hold",
+            value=value,
+            account_id=None,
+            surface="chat",
+        )
+
+    with pytest.raises(ChannelChangeRefused) as refused:
+        await turn("on")
+    assert refused.value.reason == "audience_hold_needs_internal_roles"
+    assert await audience_mode(db_session, place) == "off", "a refused change writes nothing"
+
+    await turn("shadow")  # report only needs no roles
+    assert await audience_mode(db_session, place) == "shadow"
+
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(internal_role_ids=("301",))
+    )
+    await turn("on")
+    assert await audience_mode(db_session, place) == "on"

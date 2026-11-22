@@ -13,8 +13,13 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 import structlog
-from daimon.adapters.discord.feedback_modal import FeedbackModal
+from daimon.adapters.discord import feedback_modal
+from daimon.adapters.discord.feedback_modal import (
+    FeedbackModal,
+    _in_private_channel,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -28,6 +33,27 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _VOTER_ID = "100000000000000001"
 _OTHER_USER_ID = "200000000000000002"
+
+
+@pytest.fixture(autouse=True)
+def _in_a_server_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seeded ids are not Discord's, so the channel type is faked; tested on its own below."""
+    monkeypatch.setattr(feedback_modal, "_in_private_channel", AsyncMock(return_value=False))
+
+
+@pytest.mark.parametrize(
+    ("found", "private"),
+    [
+        (MagicMock(spec=discord.DMChannel), True),
+        (MagicMock(spec=discord.TextChannel), False),
+        (discord.NotFound(MagicMock(status=404), "gone"), True),
+    ],
+)
+async def test_feedback_privacy_comes_from_the_channel_type(found: object, private: bool) -> None:
+    bot = MagicMock()
+    bot.get_channel.return_value = None
+    bot.fetch_channel = AsyncMock(side_effect=[found])
+    assert await _in_private_channel(bot, "123") is private
 
 
 def _runtime(*, sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:

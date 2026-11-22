@@ -18,6 +18,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_identity import agent_display_name
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.config import Settings, env_admits
@@ -87,6 +88,31 @@ async def list_dm_agents(
         else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
     return dm_agents_of(agents)
+
+
+async def dm_agent_display_name(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    anthropic: AsyncAnthropic | None,
+    records: async_sessionmaker[AsyncSession],
+    name: str,
+) -> str:
+    """A DM agent's name as people see it (its display name), else `name`; never raises."""
+    try:
+        agents = await list_dm_agents(
+            session, tenant_id=tenant_id, anthropic=anthropic, records=records
+        )
+    except Exception as exc:
+        log.warning("dm_access.display_name_failed", error_type=type(exc).__name__)
+        return name
+    found = next((a for a in agents if a.name == name), None)
+    return await agent_display_name(
+        records,
+        tenant_id=tenant_id,
+        agent_id=found.ma_agent_id if found is not None else None,
+        fallback=name,
+    )
 
 
 async def list_routable_dm_agents(

@@ -40,11 +40,18 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import AnswerMessage
+from daimon.adapters.discord.reactions import (
+    DONE,
+    WORKING,
+    arrange_reactions,
+    remember_model_message,
+)
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.adapters.discord.thread_gone import ThreadStopped
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.audience_refusal import AUDIENCE_CONTAINED
 from daimon.core.channel_budget import balance_footer
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.features.model_input import ANSWER_MESSAGES
@@ -54,9 +61,11 @@ from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.thread_models import model_label
 from daimon.core.turn.card_state import CardState as EmbedState
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import RefusalNouns, render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, ended_label, render_termination_notice
 from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
@@ -338,6 +347,19 @@ def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
     return chunks
 
 
+_BLOCK_START = re.compile(r"\||```|#|>|[-*+] |\d+[.)] ")
+
+
+def _with_ping(user_id: int, text: str) -> str:
+    """`text` after a mention of `user_id`, dropping one the model already opened with. A
+    space joins them, or a line break when `text` opens with a table, list or other block."""
+    body = re.sub(rf"^\s*<@!?{user_id}>\s*", "", text, count=1)
+    if not body:
+        return f"<@{user_id}>"
+    sep = "\n" if _BLOCK_START.match(body) else " "
+    return f"<@{user_id}>{sep}{body}"
+
+
 def _without_adjacent_repeats(messages: list[str], previous: str | None) -> list[str]:
     """``messages`` with each one dropped that repeats the one before it (or ``previous``)."""
     kept: list[str] = []
@@ -387,6 +409,11 @@ class DiscordTurnLifecycle(OutputGate):
         render_tables: bool = False,
         answer_message_cap: int = ANSWER_MESSAGES,
         model_marks: tuple[str, ...] = (),
+        model_marks_for: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
+        conversation_id: str | None = None,
+        status_reactions: bool = False,
+        post_pre_tool_text: bool = True,
+        card_timer: bool = False,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         adopt_pending_progress: DiscordTurnLifecycle | None = None,
@@ -418,7 +445,12 @@ class DiscordTurnLifecycle(OutputGate):
         # The terminal answer/card takes one of these messages.
         self._answer_message_cap = answer_message_cap
         self._model_marks = model_marks
+        # Read when the card starts, for a caller that builds the card synchronously.
+        self._model_marks_for = model_marks_for
+        self._conversation_id = conversation_id
         self._model_marked = False
+        self._status_reactions = status_reactions and not unprompted
+        self._post_pre_tool_text = post_pre_tool_text
         self._send = self.guarded_output(send)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
@@ -444,6 +476,8 @@ class DiscordTurnLifecycle(OutputGate):
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
             started_at=self._clock(),
+            model_label=model_label(model_id) if model_id else "",
+            timed=card_timer,
         )
         # Seeded only by dead-session recovery, which hands over the message the
         # failed attempt already posted. Without this the recovery lifecycle
@@ -474,6 +508,9 @@ class DiscordTurnLifecycle(OutputGate):
         self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
+        # The room became contained mid-turn and its output gate refused a write: no more
+        # progress writes, and no retry of the refused one.
+        self._output_refused: bool = False
         self._progress_edits: set[asyncio.Task[None]] = set()
         self._progress_settled = asyncio.Event()
         self._progress_settled.set()
@@ -527,7 +564,11 @@ class DiscordTurnLifecycle(OutputGate):
         self._revealed_first_chunk: str | None = None
 
     async def _requester_opted_out(self) -> bool:
-        """A person who asked never to be tagged gets the reply without the ping."""
+        """A person who asked never to be tagged gets the reply without the ping, and so
+        does a bot: a ping only sets it off, and two agents pinging each other never stop."""
+        author = getattr(self._trigger_message, "author", None)
+        if getattr(author, "bot", False) is True:
+            return True
         if self._tenant_id is None or self._requester_id is None:
             return False
         try:
@@ -543,6 +584,8 @@ class DiscordTurnLifecycle(OutputGate):
         return bool(skip)
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        if self._status_reactions:
+            return  # the status reactions show both phases, set when the card starts and ends
         if not self._notify_on_completion or self._trigger_message is None or self._unprompted:
             return
         if phase == "done" and not self._was_answered:
@@ -596,20 +639,38 @@ class DiscordTurnLifecycle(OutputGate):
 
     async def _mark_model(self) -> None:
         """React on the trigger message with the model and effort emoji the bot asked for."""
-        if not self._model_marks or self._trigger_message is None:
+        if self._trigger_message is None:
             return
-        for mark in self._model_marks:
+        if self._model_marks_for is not None:
             try:
-                await self._trigger_message.add_reaction(mark)
-            except discord.HTTPException:
-                log.warning("turn.model_reaction_failed", exc_info=True)
-                return
-        self._model_marked = True
+                self._model_marks = await self._model_marks_for()
+            except Exception:  # cosmetic boundary: the turn starts without the model emoji
+                log.warning("turn.model_marks_failed", exc_info=True)
+        if self._status_reactions:
+            arranged = await arrange_reactions(
+                self._trigger_message, status=WORKING, model=self._model_marks
+            )
+            self._model_marked = arranged and bool(self._model_marks)
+        elif self._model_marks:
+            for mark in self._model_marks:
+                try:
+                    await self._trigger_message.add_reaction(mark)
+                except discord.HTTPException:
+                    log.warning("turn.model_reaction_failed", exc_info=True)
+                    return
+            self._model_marked = True
+        if self._model_marked and self._conversation_id is not None:
+            remember_model_message(self._conversation_id, self._trigger_message)
 
     @property
     def model_marked(self) -> bool:
         """Every model and effort emoji landed on the trigger message."""
         return self._model_marked
+
+    @property
+    def model_marks(self) -> tuple[str, ...]:
+        """The model and effort emoji this card put on the trigger message."""
+        return self._model_marks
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -689,6 +750,7 @@ class DiscordTurnLifecycle(OutputGate):
         finally:
             self._mark_ended()
             self._card_writes.queue_repair()
+            await self._mark_done()
 
     async def _edit_message(
         self,
@@ -1025,6 +1087,10 @@ class DiscordTurnLifecycle(OutputGate):
                 await self._edit_message(
                     message, progress=True, embeds=embeds, view=self._cancel_view
                 )
+        except AdmissionDenied as refusal:
+            if refusal.detail != AUDIENCE_CONTAINED:
+                log.warning("turn.progress_edit_failed", exc_info=True)
+            raise
         except Exception:
             log.warning("turn.progress_edit_failed", exc_info=True)
             raise
@@ -1104,7 +1170,9 @@ class DiscordTurnLifecycle(OutputGate):
         except Exception:
             log.warning("turn.balance_footer_failed", exc_info=True)
 
-    async def _flush_terminal(self, *, summary_on_card: bool = True) -> None:
+    async def _flush_terminal(
+        self, *, summary_on_card: bool = True, mention: int | None = None
+    ) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
         bypassing debounce.
 
@@ -1127,16 +1195,38 @@ class DiscordTurnLifecycle(OutputGate):
             if summary_on_card and self._terminal_embed is not None
             else build_discord_embed(dataclasses.replace(data, footer=None, description="Done."))
         )
+        pinged: dict[str, Any] = (
+            {
+                "content": f"<@{mention}>",
+                "allowed_mentions": discord.AllowedMentions(
+                    users=[discord.Object(id=mention)], roles=False, everyone=False
+                ),
+            }
+            if mention is not None
+            else {}
+        )
+        if mention is not None:
+            await self._discard_embed()  # an edit never notifies, so a pinged card goes up anew
         if self._message_ref is None:
-            self._message_ref = await self._send_message(embeds=[embed], view=None)
+            self._message_ref = await self._send_message(embeds=[embed], view=None, **pinged)
             self._card_message_ref = self._message_ref
             self._card_writes.track(self._message_ref)
             self._initial_card_message_ref = self._message_ref
         else:
-            await self._edit_message(self._message_ref, embeds=[embed], view=None)
+            await self._edit_message(self._message_ref, embeds=[embed], view=None, **pinged)
         self._terminal_shown = True
         if summary_on_card and data.footer is not None:
             self._summary_card = self._message_ref
+
+    async def _asker_to_mention(self) -> int | None:
+        """The asker, mentioned on a thread's stop or error card; never in a DM."""
+        if self._in_dm or self._unprompted or self._requester_id is None:
+            return None
+        return None if await self._requester_opted_out() else self._requester_id
+
+    def _with_ended_line(self, body: str, reason: TerminationReason) -> str:
+        """`body` above a small line saying how the turn ended and how long it ran."""
+        return f"{body}\n\n-# {ended_label(reason, self._clock() - self._state.started_at)}"
 
     async def _show_card_error(self, title: str, body: str | None = None) -> None:
         """End the turn's card as the red error card; `body` defaults to the usual retry step."""
@@ -1150,7 +1240,10 @@ class DiscordTurnLifecycle(OutputGate):
         """Post sealed answers (text blocks a later tool call made immutable)
         as permanent messages, once each. Without this, an answer composed
         before a trailing tool call (e.g. a memory-repo write) is discarded by
-        the final-response extraction and only the post-tool recap survives."""
+        the final-response extraction and only the post-tool recap survives.
+        With `pre_tool_messages` off they stay on the card, then fold into the final answer."""
+        if not self._post_pre_tool_text:
+            return  # `_deliver_success` folds them into the answer
         async with self._sealed_lock:
             for index, text in extract_sealed_responses(
                 state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
@@ -1235,6 +1328,12 @@ class DiscordTurnLifecycle(OutputGate):
         else:
             self._ended_before = discord.utils.time_snowflake(datetime.now(UTC), high=True)
 
+    async def _mark_done(self) -> None:
+        """With status reactions, the asker's message shows ✅ first once the turn ends."""
+        trigger = self._trigger_message
+        if self._status_reactions and trigger is not None and not self._thread_stopped():
+            await arrange_reactions(trigger, status=DONE)
+
     async def on_output_refused(self) -> None:
         """End a refused watch locally without an unauthorized platform write."""
         self._terminal = True
@@ -1253,11 +1352,22 @@ class DiscordTurnLifecycle(OutputGate):
         finally:
             self._mark_ended()
             self._card_writes.queue_repair()
+            await self._mark_done()
 
     async def _deliver_success(self, state: TurnState) -> None:
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
         response_text = self._final_response(state)
+        if not self._post_pre_tool_text:
+            # Kept on the card while the turn ran, so the answer carries them now.
+            sealed = [
+                text.strip()
+                for _, text in extract_sealed_responses(
+                    state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
+                )
+                if not _pure_tool_markup(text)
+            ]
+            response_text = "\n\n".join(t for t in (*sealed, response_text) if t)
         if self._deferred_sealed_text:
             response_text = "\n\n".join([*self._deferred_sealed_text, response_text])
         if self._unprompted and not response_text:
@@ -1287,12 +1397,17 @@ class DiscordTurnLifecycle(OutputGate):
             # Any partial text stays as the agent wrote it; the card says it stopped.
             self._state = update(self._state, EmbedEvent(kind="error", label=_STOPPED_TITLE))
             self._state = dataclasses.replace(
-                self._state, notice=_STOPPED_NEXT_STEP, notice_title=_STOPPED_TITLE
+                self._state,
+                notice=self._with_ended_line(_STOPPED_NEXT_STEP, TerminationReason.INTERRUPTED),
+                notice_title=_STOPPED_TITLE,
             )
         else:
             self._state = update(self._state, EmbedEvent(kind="done", label=""))
         # A pinged answer is a fresh message with the summary; the card goes.
-        await self._flush_terminal(summary_on_card=not (notify and response_text))
+        await self._flush_terminal(
+            summary_on_card=not (notify and response_text),
+            mention=await self._asker_to_mention() if cancelled and not response_text else None,
+        )
 
         if cancelled and not response_text:
             log.info("turn.terminal_success", has_text=False, cancelled=True)
@@ -1312,7 +1427,10 @@ class DiscordTurnLifecycle(OutputGate):
                 self._summary_ref = self._message_ref
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
-            await self._show_card_error(_STOPPED_TITLE, _STOPPED_NEXT_STEP)
+            await self._show_card_error(
+                _STOPPED_TITLE,
+                self._with_ended_line(_STOPPED_NEXT_STEP, TerminationReason.INTERRUPTED),
+            )
             log.info("turn.terminal_success", has_text=False)
             return
 
@@ -1325,7 +1443,9 @@ class DiscordTurnLifecycle(OutputGate):
         if use_name_prefix:
             self._name_prefix_sent = True
         mentions = discord.AllowedMentions.none()
-        if notify:
+        collapsed_notice = _OUTPUT_COLLAPSED_NOTICE
+        # A DM answer is a fresh message, which notifies by itself: no mention.
+        if notify and not self._in_dm:
             assert self._requester_id is not None
             mentions = discord.AllowedMentions(
                 users=[discord.Object(id=self._requester_id)],
@@ -1333,10 +1453,8 @@ class DiscordTurnLifecycle(OutputGate):
                 everyone=False,
                 replied_user=False,
             )
-            response_text = f"<@{self._requester_id}>\n{response_text}"
-        collapsed_notice = _OUTPUT_COLLAPSED_NOTICE
-        if notify:
-            collapsed_notice = f"<@{self._requester_id}>\n{collapsed_notice}"
+            response_text = _with_ping(self._requester_id, response_text)
+            collapsed_notice = _with_ping(self._requester_id, collapsed_notice)
         if use_name_prefix:
             collapsed_notice = fallback_name_prefix(self._agent_name, collapsed_notice)
         overflow_files: list[discord.File] = []
@@ -1540,6 +1658,7 @@ class DiscordTurnLifecycle(OutputGate):
         finally:
             self._mark_ended()
             self._card_writes.queue_repair()
+            await self._mark_done()
 
     async def _deliver_failure(self, state: TurnState, err: Exception) -> None:
         await self._persist_sealed_responses(state)
@@ -1584,11 +1703,12 @@ class DiscordTurnLifecycle(OutputGate):
             )
             if notice is not None:
                 label, body = notice.headline, format_termination_notice(notice)
+            body = self._with_ended_line(body, reason)
         except Exception:
             log.warning("turn.terminal_notice_failed", exc_info=True)
         self._state = update(self._state, EmbedEvent(kind="error", label=label))
         self._state = dataclasses.replace(self._state, notice=body, notice_title=label)
-        await self._flush_terminal()
+        await self._flush_terminal(mention=await self._asker_to_mention())
         if self._deferred_sealed_text:
             await self._edit_message(
                 self._message_ref,
@@ -1607,13 +1727,21 @@ class DiscordTurnLifecycle(OutputGate):
         # Sole delivery path. Sealed answers first, then the embed
         # flush -- matches on_terminal_success's existing order, so a sealed
         # answer never trails behind an embed that already moved past it.
-        if self._terminal or self._thread_stopped():
+        if self._terminal or self._thread_stopped() or self._output_refused:
             return
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
         if self._unprompted and self._message_ref is None and not _has_visible_output(state):
             return  # nothing to show yet, and nobody asked: stay invisible
-        await self._maybe_flush()
+        try:
+            await self._maybe_flush()
+        except AdmissionDenied as refusal:
+            if refusal.detail != AUDIENCE_CONTAINED:
+                raise
+            # The gate is right to refuse; the card has nothing more to say. The turn ends
+            # through its own path, which renders the refusal once.
+            self._output_refused = True
+            log.info("turn.progress_stopped", reason=AUDIENCE_CONTAINED)
 
     async def _discard_embed(self) -> None:
         """Delete the embed this turn posted, if any, and forget it. Best effort."""

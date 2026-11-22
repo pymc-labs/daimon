@@ -53,7 +53,7 @@ from daimon.core.permissions import (
 )
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import access_policy as store
-from daimon.core.stores.audience_facts import StoredRoom, mark_unknown, publish_facts
+from daimon.core.stores.audience_facts import StoredRoom, mark_unknown, publish_facts, read_status
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.turn.deps import TurnDeps
 from daimon.testing.factories import make_tenant
@@ -478,6 +478,7 @@ async def test_saving_the_loaded_policy_unchanged_stores_exactly_what_was_stored
     cli = TenantAccessPolicy.model_validate(loaded.model_dump() | {"invoker_role_ids": ()})
     await store.set_access_policy(db_session, tenant_id=tenant.id, policy=screen)
     assert await _stored(db_session, tenant.id) == {**before, "internal_role_ids": ["6" * 17]}
+    _mode(monkeypatch, "shadow")  # in `on`, clearing the internal roles is refused
     await store.set_access_policy(db_session, tenant_id=tenant.id, policy=cli)
     assert await _stored(db_session, tenant.id) == before
 
@@ -752,3 +753,67 @@ async def test_a_room_in_the_workspace_default_environment_needs_confirmation_wi
         default=DEFAULT,
     )
     assert needs is (facts != "fresh")
+
+
+async def _roles(
+    db_session: AsyncSession, tenant_id: uuid.UUID, internal: tuple[str, ...], team: tuple[str, ...]
+) -> None:
+    await store.set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(internal_role_ids=internal, team_role_ids=team),
+    )
+    await db_session.commit()
+
+
+async def _usable(db_session: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    status = await read_status(db_session, tenant_id=tenant_id, now=datetime.now(UTC))
+    return status is not None and status.usable
+
+
+@pytest.mark.parametrize(
+    ("internal", "team", "unknown"),
+    [
+        (("1001", "1002"), ("1001",), False),
+        (("1001", "1003"), ("1001",), True),
+        (("1001", "1002"), (), True),
+        (("1001", "1002"), ("1002",), True),
+    ],
+    ids=["same", "internal-changed", "team-cleared", "team-changed"],
+)
+async def test_a_change_of_a_role_list_makes_the_facts_unknown(
+    db_session: AsyncSession,
+    internal: tuple[str, ...],
+    team: tuple[str, ...],
+    unknown: bool,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4301")
+    await _roles(db_session, tenant.id, ("1001", "1002"), ("1001",))
+    await _publish(db_session, tenant.id)
+    assert await _usable(db_session, tenant.id)
+    await _roles(db_session, tenant.id, internal, team)
+    assert await _usable(db_session, tenant.id) is not unknown
+
+
+@pytest.mark.parametrize(("mode", "refused"), [("off", False), ("shadow", False), ("on", True)])
+async def test_clearing_the_internal_roles_is_refused_only_while_the_hold_is_on(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, mode: AudienceMode, refused: bool
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4302" + mode[:1])
+    await _roles(db_session, tenant.id, ("1001",), ())
+    await _publish(db_session, tenant.id)
+    _mode(monkeypatch, mode)
+    if refused:
+        with pytest.raises(store.AudienceHoldNeedsInternalRoles) as caught:
+            await store.set_access_policy(
+                db_session, tenant_id=tenant.id, policy=TenantAccessPolicy()
+            )
+        assert caught.value.reason == "audience_hold_needs_internal_roles"
+        with pytest.raises(store.AudienceHoldNeedsInternalRoles):
+            await store.clear_access_policy(db_session, tenant_id=tenant.id)
+        await db_session.rollback()
+        assert await _usable(db_session, tenant.id), "a refused change leaves the facts alone"
+    else:
+        await store.set_access_policy(db_session, tenant_id=tenant.id, policy=TenantAccessPolicy())
+        await db_session.commit()
+        assert not await _usable(db_session, tenant.id)

@@ -210,6 +210,8 @@ class _Transport:
         self.refuse_skill: str | None = None
         self.fail_shared_memory_create = False
         self.retrieve_error: int | None = None
+        # Extra transport handlers, tried after the recorder and before the stock fakes.
+        self.extra_handlers: list[Any] = []
         _register(self.state, _agent())
 
     @property
@@ -289,6 +291,7 @@ class _Transport:
         return build_fake_anthropic(
             combine_handlers(
                 _record,
+                *self.extra_handlers,
                 make_fake_sessions_handler(self.state),
                 make_fake_memory_store_handler(),
                 make_fake_ma_handler(self.state.ma),
@@ -5286,3 +5289,131 @@ async def test_a_reused_session_is_refused_when_the_room_turned_contained_after_
         deps, reused, now=lambda: datetime.now(UTC)
     )
     assert same is reused
+
+
+class _FakeVaults:
+    """The vault surface a held session's credentials touch: vaults by name, credentials by vault."""
+
+    def __init__(self) -> None:
+        self.names: dict[str, str] = {}
+        self.credentials: dict[str, list[dict[str, Any]]] = {}
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        parts = request.url.path.strip("/").split("/")
+        if parts[:2] != ["v1", "vaults"]:
+            raise NotHandled
+        method = request.method
+        if len(parts) == 2 and method == "GET":
+            data = [
+                {
+                    "id": vault_id,
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                }
+                for vault_id, name in self.names.items()
+            ]
+            return httpx.Response(200, json={"data": data, "has_more": False})
+        if len(parts) == 2 and method == "POST":
+            name = json.loads(request.content)["display_name"]
+            vault_id = f"vlt_{len(self.names)}"
+            self.names[vault_id] = name
+            self.credentials[vault_id] = []
+            return httpx.Response(
+                200,
+                json={
+                    "id": vault_id,
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            )
+        vault_id = parts[2]
+        if len(parts) == 4 and parts[3] == "credentials" and method == "GET":
+            return httpx.Response(200, json={"data": self.credentials[vault_id], "has_more": False})
+        if len(parts) == 4 and parts[3] == "credentials" and method == "POST":
+            body = json.loads(request.content)
+            slot = self._slot(vault_id, f"vcrd_{len(self.credentials[vault_id])}", body)
+            self.credentials[vault_id].append(slot)
+            return httpx.Response(200, json=slot)
+        if len(parts) == 5 and parts[3] == "credentials" and method == "POST":
+            body = json.loads(request.content)
+            old = next(c for c in self.credentials[vault_id] if c["id"] == parts[4])
+            slot = self._slot(
+                vault_id, old["id"], {**old, **body, "auth": {**old["auth"], **body["auth"]}}
+            )
+            self.credentials[vault_id][self.credentials[vault_id].index(old)] = slot
+            return httpx.Response(200, json=slot)
+        raise AssertionError(f"unexpected vault call: {method} {request.url.path}")
+
+    @staticmethod
+    def _slot(vault_id: str, credential_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": credential_id,
+            "type": "vault_credential",
+            "vault_id": vault_id,
+            "metadata": body.get("metadata") or {},
+            "auth": {
+                "type": "static_bearer",
+                "mcp_server_url": body["auth"]["mcp_server_url"],
+                "token": body["auth"].get("token"),
+            },
+            "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-01T00:00:00Z",
+        }
+
+    def session_credentials(self) -> list[dict[str, Any]]:
+        return [
+            slot
+            for slots in self.credentials.values()
+            for slot in slots
+            if "daimon_chat_session" in slot["metadata"]
+        ]
+
+
+async def test_a_reused_held_session_gets_its_hold_back_on_a_credential_minted_without_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The real preparation and update path hands the turn's hold to the vault refresh: a reused
+    held session whose mounted session credential lacks the hold is refreshed with it."""
+    import jwt as pyjwt
+    from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
+    from daimon.core.mcp_vault import HOLD_METADATA_KEY
+    from pydantic import SecretStr
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    vaults = _FakeVaults()
+    transport.extra_handlers.append(vaults.handler)
+    agent = _agent_with_servers()
+    _register(transport.state, agent)
+    deps = replace(
+        _gated_deps(db_session_factory, transport),
+        mcp=McpSettings(public_url=_PUBLIC_URL, jwt_secret=SecretStr("s" * 32)),  # pyright: ignore[reportArgumentType]
+    )
+    held = replace(_admission(account=account, agent=agent), hold=_HELD)
+
+    first = await _prepare(deps, held, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    (minted,) = vaults.session_credentials()
+    assert minted["metadata"][HOLD_METADATA_KEY], "a new held session mounts a held credential"
+
+    # What a session created before the fix mounted: the same slot, no hold.
+    del minted["metadata"][HOLD_METADATA_KEY]
+
+    second = await _prepare(deps, held, tenant=tenant, account=account)
+
+    assert isinstance(second, PreparedTurn) and second.ma_session_id == first.ma_session_id
+    (refreshed,) = vaults.session_credentials()
+    assert parse_hold_claim(json.loads(refreshed["metadata"][HOLD_METADATA_KEY])) == _HELD
+    claims = pyjwt.decode(
+        refreshed["auth"]["token"], "s" * 32, algorithms=["HS256"], options={"verify_exp": False}
+    )
+    assert parse_hold_claim(claims[HOLD_CLAIM]) == _HELD
