@@ -38,7 +38,6 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
-from daimon.adapters.scheduler.owner_notice import build_owner_notifier
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.authz import (
@@ -76,7 +75,6 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import (
     DiscordRestMembershipResolver,
-    send_discord_dm,
     send_discord_error_dm,
 )
 from daimon.core.dm_access import roles_by_membership, sender_admits
@@ -113,6 +111,7 @@ from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
 from daimon.core.ops_events import drain_ops_events
 from daimon.core.ops_events_sweep import sweep_ops_events
+from daimon.core.owner_notices import build_owner_notifier, discord_owner_dm
 from daimon.core.pending_carry_over_sweep import sweep_stale_pending_carry_overs
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
@@ -2249,20 +2248,13 @@ async def run(
         resolver_cache=resolver_cache,
         billing_config=billing_config,
     )
-    notify_owner = (
-        build_owner_notifier(
-            sm=sm,
-            settings=settings,
-            deps=dm_turn_deps,
-            send_card=functools.partial(
-                send_discord_error_dm, settings.discord.bot_token.get_secret_value()
-            ),
-            send_text=functools.partial(
-                send_discord_dm, settings.discord.bot_token.get_secret_value()
-            ),
-        )
+    notify_owner = build_owner_notifier(
+        sm=sm,
+        settings=settings,
+        anthropic=client,
+        discord_dm=discord_owner_dm(settings.discord.bot_token.get_secret_value())
         if settings.discord is not None
-        else None
+        else None,
     )
     fire = await _build_fire(
         client=client,

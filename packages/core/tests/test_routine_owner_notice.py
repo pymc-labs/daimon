@@ -44,6 +44,7 @@ def test_the_notice_says_fixed_facts_and_never_the_raw_error() -> None:
     facts = owner_notice_facts(
         _row(last_error=RAW),
         TerminationReason.CEILING,
+        platform="discord",
         agent_name="Analyst",
         channel_told=True,
         now=NOW,
@@ -62,7 +63,7 @@ def test_the_notice_says_fixed_facts_and_never_the_raw_error() -> None:
 async def test_the_owner_is_told_only_when_a_failing_streak_starts() -> None:
     told: list[tuple[str | None, bool]] = []
 
-    async def notify(row: RoutineRow, reason: TerminationReason, channel_told: bool) -> None:
+    async def notify(row: RoutineRow, reason: str, channel_told: bool) -> None:
         told.append((row.last_error, channel_told))
 
     tell_owner(notify, _row(), TerminationReason.UPSTREAM, channel_told=True)
@@ -80,7 +81,7 @@ async def test_the_notice_runs_outside_the_fire_and_shutdown_ends_it() -> None:
     seen: list[object] = []
     started = asyncio.Event()
 
-    async def notify(row: RoutineRow, reason: TerminationReason, channel_told: bool) -> None:
+    async def notify(row: RoutineRow, reason: str, channel_told: bool) -> None:
         seen.append(current_intake_execution.get())
         started.set()
         await asyncio.Event().wait()

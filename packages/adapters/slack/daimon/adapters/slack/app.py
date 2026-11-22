@@ -168,7 +168,7 @@ from daimon.adapters.slack.privacy_panel.submit import (
 from daimon.adapters.slack.provider_actions import ACTION_PREFIX as PROVIDER_ACTION_PREFIX
 from daimon.adapters.slack.provider_actions import SlackProviderActions, provider_action_options
 from daimon.adapters.slack.requester_org import decide_requester_org
-from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
+from daimon.adapters.slack.routine_delivery import make_slack_owner_dm, make_slack_routine_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
     handle_routines_command,
@@ -964,6 +964,7 @@ class SlackApp:
                 platform="slack",
                 post=make_slack_routine_poster(self.runtime),
                 should_stop=lambda: self.draining,
+                owner_dm=make_slack_owner_dm(self.runtime),
             )
         )
 

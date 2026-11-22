@@ -4,7 +4,9 @@
 text), coalesced in the emitter, deleted with the person's account and pruned after
 `DAIMON_OPS_EVENTS__RETENTION_DAYS`. `ops_issue_states` keeps an admin's resolve or mute of one
 issue by fingerprint. `turn_outcomes.is_dm` marks turns in a private direct message and
-`turn_outcomes.alertable` the turns counted as answers. Downgrading drops both tables and columns.
+`turn_outcomes.alertable` the turns counted as answers. `routines.owner_notice` holds a failure
+notice for a Slack or Teams owner until that adapter sends it. Downgrading drops both tables and
+the columns.
 
 downgrade: destructive
 """
@@ -13,7 +15,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision: str = "0224_ops_events"
 down_revision: str | None = "0223_dm_watch_delivery"
@@ -40,6 +42,7 @@ def upgrade() -> None:
         sa.Column("is_dm", sa.Boolean(), nullable=False, server_default=sa.text("false")),
     )
     op.add_column("turn_outcomes", sa.Column("alertable", sa.Boolean(), nullable=True))
+    op.add_column("routines", sa.Column("owner_notice", JSONB(), nullable=True))
     op.create_table(
         "ops_events",
         sa.Column(
@@ -123,5 +126,6 @@ def downgrade() -> None:
         op.execute(statement)
     op.drop_table("ops_issue_states")
     op.drop_table("ops_events")
+    op.drop_column("routines", "owner_notice")
     op.drop_column("turn_outcomes", "alertable")
     op.drop_column("turn_outcomes", "is_dm")

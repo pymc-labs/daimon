@@ -32,7 +32,7 @@ from dataclasses import replace
 import httpx
 import structlog
 from daimon.adapters.teams.activity_feed import ActivityFeed, chain_id
-from daimon.adapters.teams.card import TEAMS_LIMIT
+from daimon.adapters.teams.card import TEAMS_LIMIT, notice_card
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, send_error_details
 from daimon.core.access_policy import TenantAccessPolicy
@@ -42,6 +42,7 @@ from daimon.core.config import DirectMessagePolicy, env_dm_policy
 from daimon.core.dm_access import groups_by_members, sender_admits
 from daimon.core.message_split import split_fenced
 from daimon.core.native_admins import GroupMembers
+from daimon.core.owner_notices import OwnerDm, OwnerNotice
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     clear_creator,
@@ -60,9 +61,52 @@ from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["make_teams_routine_poster"]
+__all__ = ["make_teams_owner_dm", "make_teams_routine_poster"]
 
 log = structlog.get_logger(__name__)
+
+
+def make_teams_owner_dm(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    teams: DirectChats,
+    *,
+    tenant_id: uuid.UUID,
+    dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
+    team_members: GroupMembers | None = None,
+) -> OwnerDm:
+    """DM a routine's owner its failure notice, under the rules of the result fallback DM."""
+
+    async def send(row: RoutineRow, notice: OwnerNotice) -> str | None:
+        if row.tenant_id != tenant_id:
+            return "other_organisation"
+        owner = row.created_by_user_id
+        async with sessionmaker() as session:
+            enabled = await dm_enabled(session, tenant_id=row.tenant_id)
+        if owner is None or not env_dm_policy(dm_policies, row.tenant_id).allows(owner):
+            return "dm_policy_denies"
+        if not enabled:
+            return "dms_off"
+        if not await sender_admits(
+            sessionmaker,
+            tenant_id=row.tenant_id,
+            agent_name=row.agent_name,
+            user_id=owner,
+            groups=groups_by_members(team_members),
+        ):
+            return "agent_closed"
+        # The owner's roster id comes from the team the routine posts in.
+        target = delivery_target(row, platform="teams")
+        member = await teams.member(target.channel_id, owner) if target else None
+        if member is None:
+            return "person_unreachable"
+        chat = await teams.open_chat(member)
+        if notice.text is not None:
+            await teams.post(chat, notice.text)
+        else:
+            await teams.post_card(chat, notice_card(f"{notice.title}\n\n{notice.body}"))
+        return None
+
+    return send
 
 
 def make_teams_routine_poster(

@@ -33,7 +33,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -121,6 +121,9 @@ __all__ = [
     "routine_agent_name",
     "run_delivery_poller",
 ]
+
+if TYPE_CHECKING:
+    from daimon.core.owner_notices import OwnerDm
 
 log = structlog.get_logger(__name__)
 
@@ -1062,14 +1065,20 @@ async def run_delivery_poller(
     post: RoutinePoster,
     should_stop: Callable[[], bool],
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
+    owner_dm: OwnerDm | None = None,
 ) -> None:
-    """Poll until `should_stop`, one `poll_deliveries_once` per interval."""
+    """Poll until `should_stop`, one `poll_deliveries_once` per interval; with `owner_dm`,
+    also send the failure notices waiting for this platform's routine owners."""
+    from daimon.core.owner_notices import poll_owner_notices_once  # imports this module
+
     owner = f"{platform}:{uuid.uuid4()}"
     while not should_stop():
         try:
             await poll_deliveries_once(
                 sessionmaker, platform=platform, post=post, now=datetime.now(UTC), owner=owner
             )
+            if owner_dm is not None:
+                await poll_owner_notices_once(sessionmaker, platform=platform, send=owner_dm)
         except Exception:
             log.exception("routine.delivery_poll_failed", platform=platform)
         await asyncio.sleep(interval_s)
