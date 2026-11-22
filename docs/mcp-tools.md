@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 238 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 239 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -527,10 +527,12 @@ Repository-scoped persistent memory, authorized by the executing turn.
 
 ## `routine_run`
 
-Run a routine now, ahead of its schedule.
+Run a routine now, ahead of its schedule; a routine run reports what kept it from its
+task.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `report_routine_problem` | all callers | Tell the workspace admins this routine run could not do its task, and why. |
 | `run_routine` | all callers | Run a routine now, ahead of its schedule; its own schedule continues after. |
 
 ## `routines`

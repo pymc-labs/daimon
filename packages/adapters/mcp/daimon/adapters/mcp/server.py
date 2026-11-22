@@ -143,6 +143,7 @@ from daimon.core.node_exchange import node_identity_key
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
 from daimon.core.operator_tokens import scope_tag
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.agent_avatars import get_avatar_by_token
@@ -475,6 +476,7 @@ def create_mcp_app(
                 pass
             finally:
                 await identity_middleware.drain_audit()
+                await drain_ops_events()
                 await slack_http.close()
                 for client in relay_clients.values():
                     await client.aclose()

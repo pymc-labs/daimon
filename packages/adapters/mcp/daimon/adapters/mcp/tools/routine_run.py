@@ -1,10 +1,11 @@
-"""Run a routine now, ahead of its schedule."""
+"""Run a routine now, ahead of its schedule; a routine run reports what kept it from its task."""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -15,7 +16,16 @@ from daimon.adapters.mcp.tools.routines import (
     _tool_errors,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core import routine_service
+from daimon.core.ops_events import OpsEvent, report_ops_event
+from daimon.core.stores.lead_intake import execution_is_active
+from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+
+RoutineProblem = Literal[
+    "blocked_access", "missing_input", "source_unavailable", "partial_result", "other"
+]
+_NOT_A_RUN = "Only a running routine can report a routine problem."
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,37 @@ async def _run_routine_impl(
     return RoutineRunQueued(routine_id=str(row.id), next_fire_at=row.next_fire_at)
 
 
+@dataclass(frozen=True)
+class RoutineProblemReported:
+    routine_id: str
+
+
+async def _report_routine_problem_impl(
+    runtime: McpRuntime, auth: AuthIdentity, category: RoutineProblem, note: str
+) -> RoutineProblemReported:
+    # The routine comes only from the signed credential of a live fire, never an argument.
+    routine_id, execution_id = auth.routine_id, auth.execution_id
+    if routine_id is None or execution_id is None:
+        raise ToolError(_NOT_A_RUN)
+    async with runtime.session_factory() as session:
+        live = await execution_is_active(session, auth.tenant_id, routine_id, execution_id)
+        row = await get_routine(session, routine_id, tenant_id=auth.tenant_id) if live else None
+    if row is None:
+        raise ToolError(_NOT_A_RUN)
+    report_ops_event(
+        runtime.session_factory,
+        OpsEvent(
+            "routine.goal_unmet",
+            auth.tenant_id,
+            reason=category,
+            routine_id=row.id,
+            agent_id=row.agent_id,
+            note=note,
+        ),
+    )
+    return RoutineProblemReported(routine_id=str(row.id))
+
+
 def register_routine_run_tool(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def run_routine(ctx: Context, routine_id: uuid.UUID) -> RoutineRunQueued:  # pyright: ignore[reportUnusedFunction]
@@ -41,6 +82,18 @@ def register_routine_run_tool(mcp: FastMCP, runtime: McpRuntime) -> None:
         The routine's owner or an admin. A paused routine is refused: resume it first.
         """
         return await _run_routine_impl(runtime, await _auth(ctx), routine_id)
+
+    @mcp.tool
+    async def report_routine_problem(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, category: RoutineProblem, note: str
+    ) -> RoutineProblemReported:
+        """Tell the workspace admins this routine run could not do its task, and why.
+
+        Only inside a routine run, once, when something kept you from the task. `note` is
+        one short line on what blocked you (at most 300 characters), with no private
+        content; admins see it on their issues page. Still put the blocker in your reply.
+        """
+        return await _report_routine_problem_impl(runtime, await _auth(ctx), category, note)
 
 
 __all__ = ["register_routine_run_tool"]

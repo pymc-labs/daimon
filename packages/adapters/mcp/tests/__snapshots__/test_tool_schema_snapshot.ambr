@@ -7982,6 +7982,38 @@
         'type': 'object',
       }),
     }),
+    'report_routine_problem': dict({
+      'description': '''
+        Tell the workspace admins this routine run could not do its task, and why.
+        <blank line>
+        Only inside a routine run, once, when something kept you from the task. `note` is
+        one short line on what blocked you (at most 300 characters), with no private
+        content; admins see it on their issues page. Still put the blocker in your reply.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'category': dict({
+            'enum': list([
+              'blocked_access',
+              'missing_input',
+              'source_unavailable',
+              'partial_result',
+              'other',
+            ]),
+            'type': 'string',
+          }),
+          'note': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'category',
+          'note',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'request_agent_backend_switch': dict({
       'description': '''
         Change an agent's model to another provider's.
