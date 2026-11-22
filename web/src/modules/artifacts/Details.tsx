@@ -69,8 +69,8 @@ export function Details({ a }: { a: ArtifactDetail }) {
             </div>
           </SettingRow>
           {a.ask && consent.allowed && (
-            <SettingRow label="You allowed asks">
-              <Button variant="outline" size="sm" disabled={consent.revoke.isPending} onClick={() => consent.revoke.mutate()}>Revoke</Button>
+            <SettingRow label="Asks allowed">
+              <Button variant="ghost" size="sm" className="-ml-2.5 text-muted-foreground" disabled={consent.revoke.isPending} onClick={() => consent.revoke.mutate()}>Revoke</Button>
             </SettingRow>
           )}
           {a.data !== "off" && (

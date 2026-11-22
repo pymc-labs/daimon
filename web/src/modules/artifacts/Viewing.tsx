@@ -31,5 +31,5 @@ export function useAskConsent(id: string, enabled = true) {
 export function RevokeAsks({ id }: { id: string }) {
   const { allowed, revoke } = useAskConsent(id)
   if (!allowed) return null
-  return <Button variant="outline" size="sm" disabled={revoke.isPending} onClick={() => revoke.mutate()}>Revoke asks</Button>
+  return <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" disabled={revoke.isPending} onClick={() => revoke.mutate()}>Revoke asks</Button>
 }
