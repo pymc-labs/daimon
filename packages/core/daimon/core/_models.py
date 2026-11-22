@@ -467,11 +467,12 @@ class Routine(Base):
     source_thread_id: Mapped[str | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
+    # A failure notice for a Slack or Teams owner, until that adapter sends it (0224).
+    # Mapped before `delivery_hold`: 0221's down/up test re-adds that column last.
+    owner_notice: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # The hold the fire of that pending result ran under (`daimon.core.routine_hold`):
     # NULL for a legacy row, else `{"held": false}` or `{"held": true, "channel_id": ...}`.
     delivery_hold: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    # A failure notice for a Slack or Teams owner, until that adapter sends it (0224).
-    owner_notice: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # 0212 leaves the old `sandbox_*` columns and `routine_sandbox_history` unmapped for the
     # release still running during a deploy; a later release drops them.
 
