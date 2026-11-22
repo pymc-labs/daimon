@@ -25,6 +25,7 @@ from daimon.adapters.web.refusals import busy, failed, refusal_for
 from daimon.adapters.web.stream import StreamRegistry, TurnStream
 from daimon.adapters.web.stream_events import ReplyView
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.artifact_pages.model import page_url
 from daimon.core.authz import Surface
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, WebSettings
@@ -40,6 +41,7 @@ from daimon.core.output_delivery import (
     sweep_outputs,
 )
 from daimon.core.output_runtime import OutputRuntime
+from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import (
@@ -81,7 +83,7 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.slots import holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
-from daimon.core.turn_origin import render_turn_origin, turn_origin
+from daimon.core.turn_origin import PageOrigin, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key, with_spend_person
 from mux.errors import ProviderError
@@ -181,7 +183,9 @@ class WebTurns:
             files: tuple[WebOutputFile, ...] = (),
             cost_usd: Decimal | None = None,
         ) -> WebMessageRow:
-            blocks = WebMessageBlocks(steps=view.steps, files=files, card=card)
+            blocks = WebMessageBlocks(
+                steps=view.steps, files=files, card=card, artifacts=lifecycle.artifacts
+            )
             async with self.sessionmaker.begin() as session:
                 row = await chat_store.upsert_assistant_message(
                     session,
@@ -450,6 +454,7 @@ class WebTurns:
                 **backend_facts(admission),
                 effective_is_admin=admission.is_admin,
                 session_state=None if continued else prepared.continuity.session_state(),
+                page=await self._page_of(thread),
             )
 
             async def reseed() -> str:
@@ -511,7 +516,30 @@ class WebTurns:
                 and (revision is None or revision.backend != "selfhosted")
             ):
                 lifecycle.files = await self._outputs(outcome.outputs, tenant_id, thread.person_id)
+            async with self.sessionmaker() as session:
+                published = await artifact_store.published_in(
+                    session,
+                    platform="web",
+                    thread_id=key,
+                    message_id=str(message.id),
+                    public_url="",
+                )
+            lifecycle.artifacts = tuple(published)
             await lifecycle.finish("done")
+
+    async def _page_of(self, thread: WebThreadRow) -> PageOrigin | None:
+        """The page an ask thread was started from, so the agent knows who reads it."""
+        if thread.artifact_id is None:
+            return None
+        async with self.sessionmaker() as session:
+            artifact = await artifact_store.get(session, thread.artifact_id)
+            if artifact is None:
+                return None
+            outside = await artifact_store.visible_outside_workspace(session, artifact)
+        url = page_url(str(self.web.public_url), artifact.public_id, artifact.slug)
+        return PageOrigin(
+            slug=artifact.slug, title=artifact.title, url=url, visible_outside_workspace=outside
+        )
 
     def _link_for(self, tenant_id: uuid.UUID) -> Callable[[str], str] | None:
         fernet = self.deps.fernet

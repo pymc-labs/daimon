@@ -28,9 +28,11 @@ from daimon.adapters.web import turns as turns_module
 from daimon.adapters.web.stream import Event
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.artifact_pages.access import PageChange
 from daimon.core.errors import TurnError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import accounts, spend_allowances, tenants, turn_outcomes, usage_events
+from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import FeatureTarget, Role, WebMessageBlocks, WebThreadRow
@@ -39,7 +41,7 @@ from daimon.core.stores.shared_channels import is_channel_shared
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_origin import current_origin_id
-from daimon.core.web_identity import place_of, principal_of
+from daimon.core.web_identity import place_of, principal_of, thread_key
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma import MARouter, sse_response
@@ -125,6 +127,45 @@ async def test_a_turn_streams_its_answer_and_saves_it(
     assert (reply.role, reply.status, reply.content) == ("assistant", "done", AGENT_TEXT)
     assert str(reply.id) == done["message"]["id"], "the saved reply is the one streamed"
     assert turns.streams.running(thread.id) is None, "the stream closes with the turn"
+
+
+async def test_a_reply_carries_the_pages_its_turn_published(
+    db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws = await funded_workspace(db_session_factory)
+    turns = build_turns(db_session_factory, build_turn_router(str(ws.tenant_id)), tmp_path)
+    thread, message = await new_thread(db_session_factory, ws)
+    async with db_session_factory.begin() as session:
+        page = await artifact_store.publish(
+            session,
+            tenant_id=ws.tenant_id,
+            agent_id=AGENT_ID,
+            account_id=ws.person.account_id,
+            is_admin=False,
+            slug="poll",
+            title="Poll",
+            html="<p>vote</p>",
+            change=PageChange(),
+            origin=artifact_store.PublishOrigin("web", thread_key(thread.id), str(message.id)),
+            new_link=False,
+            now=NOW,
+        )
+        principal = await principal_of(session, ws.person, "member")
+
+    with one_session():
+        stream = turns.start(person=ws.person, principal=principal, thread=thread, message=message)
+        events = [event async for _, event in stream.segment(0)]
+        await turns.drain(10)
+
+    url = f"/a/{page.public_id}/poll"
+    [card] = events[-1]["message"]["artifacts"]
+    assert card == {
+        "id": str(page.id),
+        "title": "Poll",
+        "url": url,
+        "version": 1,
+        "access": "workspace",
+    }
 
 
 @pytest.mark.parametrize(("chosen", "kept"), [(None, 12), ("25", 25)])

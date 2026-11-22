@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -69,13 +71,18 @@ def session_json(
     running: bool = False,
     avatar: str = "",
     model: str | None = None,
+    pages: Mapping[uuid.UUID, str] | None = None,
 ) -> dict[str, Any]:
+    """`pages` names the artifact of an ask thread (a thread a page's Ask box started)."""
+    page = thread.artifact_id
+    title = None if page is None or pages is None else pages.get(page)
     return {
         "id": str(thread.id),
         "title": thread.title,
         "agent": agent_json(agent, thread, avatar, model),
         "updated_at": thread.updated_at.isoformat(),
         "running": running,
+        "artifact": None if title is None else {"id": str(page), "title": title},
     }
 
 
@@ -106,6 +113,8 @@ def message_json(row: WebMessageRow) -> dict[str, Any]:
         msg["files"] = [f.model_dump(mode="json") for f in blocks.files]
     if blocks.attachments:
         msg["attachments"] = [{"name": a.name, "size": a.size} for a in blocks.attachments]
+    if blocks.artifacts:
+        msg["artifacts"] = [a.model_dump(mode="json") for a in blocks.artifacts]
     if blocks.card is not None:
         msg["card"] = blocks.card.model_dump(mode="json", exclude_none=True)
     return msg

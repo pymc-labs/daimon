@@ -17,7 +17,13 @@ from daimon.adapters.web.chat_json import message_json, notice_json
 from daimon.adapters.web.stream import TurnStream
 from daimon.adapters.web.stream_events import ReplyView, events_between, snapshot_events, view_of
 from daimon.core.monitoring import MonitoringNotice
-from daimon.core.stores.domain import WebCard, WebMessageRow, WebMessageStatus, WebOutputFile
+from daimon.core.stores.domain import (
+    WebArtifactRef,
+    WebCard,
+    WebMessageRow,
+    WebMessageStatus,
+    WebOutputFile,
+)
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.state import ToolUseBlock, TurnState, extract_final_response
 
@@ -61,6 +67,8 @@ class WebTurnLifecycle(TurnLifecycle):
         self.raised: WebCard | None = None
         # The files the turn made, set before it finishes.
         self.files: tuple[WebOutputFile, ...] = ()
+        # The pages the turn published, set before it finishes, for the reply's cards.
+        self.artifacts: tuple[WebArtifactRef, ...] = ()
         # What the turn cost, with the markup, set before it finishes; None while unknown.
         self.cost_usd: Decimal | None = None
         self.finished = False
