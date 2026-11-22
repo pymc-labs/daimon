@@ -41,7 +41,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
-from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -105,7 +105,6 @@ from daimon.core.tool_safety import (
 )
 from daimon.core.turn.approvals import agent_rule_lookup
 from daimon.core.turn_hold import TurnHold
-from fastmcp.exceptions import ToolError
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
@@ -296,11 +295,9 @@ async def poll_read_place(
         _, member = await _resolve_member(client, auth.external_id, auth.platform_user_id)
         try:
             resolved = await _resolve_channel(client, resource_id)
-        except (discord.Forbidden, ToolError) as err:
-            # The bot's own read of the channel. A missing channel is `ToolError`.
-            if (
-                isinstance(err, discord.Forbidden) or str(err) == "channel not found"
-            ) and await bot_access_wait_on(
+        except discord.Forbidden as err:
+            # The bot's own read of the channel. A missing channel keeps its old handling.
+            if is_missing_access(err.status, err.code) and await bot_access_wait_on(
                 runtime.session_factory, tenant_id=auth.tenant_id, platform="discord"
             ):
                 raise BotAccessUnavailable from None
@@ -730,6 +727,8 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
         # Never log remote content, arguments, credentials, lease capabilities or
         # exception text. A remote isError or transport failure (McpCallError) is
         # transient: it backs off and stops the watch only after a day of errors.
+        from fastmcp.exceptions import ToolError
+
         capped = isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "54000"
         async with runtime.session_factory.begin() as db:
             await poll_failed(

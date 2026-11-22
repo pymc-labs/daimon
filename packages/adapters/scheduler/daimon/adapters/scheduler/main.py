@@ -591,12 +591,32 @@ async def _build_fire(
             ),
         )
 
+    async def _bot_locked_out(row: RoutineRow) -> bool:
+        """Whether the workspace waits for the bot's access and Discord says it has none here.
+
+        Read before the firing transaction, so the REST call holds no connection.
+        """
+        target = delivery_target(row, platform="discord")
+        if target is None or not target.channel_id.isdigit():
+            return False
+        async with sm() as s:
+            tenant = await get_tenant(s, row.tenant_id)
+        if tenant is None or tenant.platform != "discord":
+            return False
+        if not await bot_access_wait_on(sm, tenant_id=row.tenant_id, platform="discord"):
+            return False
+        async with httpx.AsyncClient(timeout=10) as http:
+            return await bot_access_blocked(
+                http, settings, guild_id=tenant.external_id, destination_id=target.channel_id
+            )
+
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
             async with sm() as s, s.begin():
                 await _refuse(s, row, "This routine has no owner. Create it again.")
             return
         granted = row.destination_kind != "dm" or await _owner_granted(row, row.created_by_user_id)
+        bot_locked_out = await _bot_locked_out(row)
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
@@ -787,18 +807,7 @@ async def _build_fire(
                         )
                 # The bot's own access comes after every owner check, so a revoked owner
                 # still stops the routine. Waiting costs no turn and tells nobody.
-                if (
-                    policy_error is None
-                    and target is not None
-                    and await bot_access_wait_on(sm, tenant_id=row.tenant_id, platform=platform)
-                    and await bot_access_blocked(
-                        settings,
-                        sm,
-                        platform=platform,
-                        workspace_id=tenant.external_id,
-                        channel_id=routine_destination_channel(row) or target.channel_id,
-                    )
-                ):
+                if policy_error is None and bot_locked_out:
                     policy_error = BOT_ACCESS_UNAVAILABLE
             if policy_error is not None:
                 log.info(

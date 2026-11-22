@@ -1131,7 +1131,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Work for a channel Daimon cannot reach waits, without failing, and runs once it can."
         ),
-        platforms=EVERY_PLATFORM,
+        platforms=_DISCORD,
         authority=_SERVER_ADMIN,
     ),
     _capability(

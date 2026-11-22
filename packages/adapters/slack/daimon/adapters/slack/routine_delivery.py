@@ -32,7 +32,6 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
-from daimon.core.bot_access import BOT_ACCESS_UNAVAILABLE, bot_access_wait_on
 from daimon.core.config import DirectMessagePolicy, env_dm_policy
 from daimon.core.dm_access import sender_admits
 from daimon.core.message_split import split_fenced
@@ -66,8 +65,6 @@ __all__ = ["make_slack_routine_poster"]
 
 log = structlog.get_logger(__name__)
 
-#: The part of the errors below that is the bot's own missing access, which can be granted.
-_BOT_NOT_IN_CHANNEL = frozenset({"channel_not_found", "not_in_channel"})
 #: Slack errors that mean the destination itself is unusable (not a transient
 #: failure): the result goes to the creator by DM instead.
 _UNUSABLE_DESTINATION = frozenset(
@@ -188,10 +185,8 @@ async def _destination_refusal(
             is_guest=is_guest,
             caller_is_member=is_member,
         ):
-            if not is_im_or_mpim and is_archived:
+            if not is_im_or_mpim and (is_archived or not bot_is_member):
                 return "destination_unavailable"
-            if not is_im_or_mpim and not bot_is_member:
-                return BOT_ACCESS_UNAVAILABLE
             return "creator_cannot_post"
         if target.thread_ts is not None:
             replies = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]
@@ -202,8 +197,6 @@ async def _destination_refusal(
                 return "destination_unavailable"
     except SlackApiError as err:
         error = str(cast("dict[str, object]", err.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
-        if error in _BOT_NOT_IN_CHANNEL:
-            return BOT_ACCESS_UNAVAILABLE
         if error in _UNUSABLE_DESTINATION or error == "message_not_found":
             return "destination_unavailable"
         raise
@@ -285,13 +278,6 @@ def make_slack_routine_poster(
             )
 
         async def fallback(reason: str) -> DeliveryOutcome:
-            if reason == BOT_ACCESS_UNAVAILABLE:
-                # A channel the bot is not in waits quietly: no DM, and the next run retries.
-                if await bot_access_wait_on(
-                    runtime.sessionmaker, tenant_id=row.tenant_id, platform="slack"
-                ):
-                    return DeliveryOutcome(status="skipped", note=reason)
-                reason = "destination_unavailable"
             if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(
@@ -361,8 +347,6 @@ def make_slack_routine_poster(
                 await post_as_agent(client, identity, text=chunk, **place)
         except SlackApiError as err:
             error = str(cast("dict[str, object]", err.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
-            if error in _BOT_NOT_IN_CHANNEL:
-                return await fallback(BOT_ACCESS_UNAVAILABLE)
             if error in _UNUSABLE_DESTINATION:
                 return await fallback("destination_unavailable")
             raise

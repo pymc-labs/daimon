@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 import aiohttp
 import structlog
-from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.scope_timers import DeliveryFailed, DeliveryRetry
 from daimon.core.dm_access import roles_by_membership, sender_admission
@@ -234,8 +234,8 @@ async def require_channel_timer_access(
         me = await guild.fetch_member(client.user.id)
         try:
             channel = await guild.fetch_channel(int(row.parent_channel_id))
-        except (discord.Forbidden, discord.NotFound):
-            if wait:
+        except discord.Forbidden as error:
+            if wait and is_missing_access(error.status, error.code):
                 raise BotAccessUnavailable from None
             raise
         if not isinstance(channel, discord.TextChannel) or str(channel.id) != row.parent_channel_id:

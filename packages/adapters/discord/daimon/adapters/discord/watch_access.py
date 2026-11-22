@@ -9,8 +9,9 @@ member, channel or thread object (or cache-derived attribute) supplies authority
 Tenant and destination IDs come from the persisted binding. A missing, invalid
 or failed REST proof refuses output without parent fallback. Only proved loss of
 access pauses the watch; transient transport failures refuse that output alone. With
-`bot_access_wait` on, a channel the bot itself cannot fetch raises `BotAccessUnavailable`
-instead: the wake waits and nothing is paused.
+`bot_access_wait` on, a channel the bot itself is locked out of (Missing Access, or no
+right to post) raises `BotAccessUnavailable` after the owner's checks pass: the wake waits
+and nothing is paused.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from daimon.core.audience_gate import PostAudience
-from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.continuity.continuation import WATCH_REASONS
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
@@ -47,13 +48,37 @@ async def _bot_fetch(
     guild: discord.Guild,
     channel_id: int,
 ) -> discord.abc.GuildChannel | discord.Thread:
-    """The bot's own read of a channel; with the wait on, a refusal means wait, not revoked."""
+    """The bot's own read of a channel; with the wait on, Missing Access means wait, not revoked."""
     try:
         return await guild.fetch_channel(channel_id)
-    except (discord.Forbidden, discord.NotFound):
-        if await bot_access_wait_on(sessions, tenant_id=row.tenant_id, platform="discord"):
+    except discord.Forbidden as error:
+        if is_missing_access(error.status, error.code) and await bot_access_wait_on(
+            sessions, tenant_id=row.tenant_id, platform="discord"
+        ):
             raise BotAccessUnavailable from None
         raise
+
+
+async def _require_bot_may_post(
+    sessions: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    guild: discord.Guild,
+    client: discord.Client,
+    channel: discord.TextChannel | discord.ForumChannel,
+    *needs: str,
+) -> None:
+    """With the wait on, the bot itself must hold each named permission in `channel`."""
+    if not await bot_access_wait_on(sessions, tenant_id=row.tenant_id, platform="discord"):
+        return
+    if client.user is None:
+        raise ValueError("Watch bot identity is unavailable")
+    try:
+        me = await guild.fetch_member(client.user.id)
+    except (discord.Forbidden, discord.NotFound):
+        raise BotAccessUnavailable from None
+    permissions = channel.permissions_for(me)
+    if not all(getattr(permissions, need) for need in needs):
+        raise BotAccessUnavailable
 
 
 async def require_watch_thread_access(
@@ -87,6 +112,10 @@ async def require_watch_thread_access(
         guild._roles = {role.id: role for role in roles}  # pyright: ignore[reportPrivateUsage]
         if not any(role.id == guild_id for role in roles):
             raise ValueError("Watch guild roles are incomplete")
+        # The owner is read before the bot's own access, so an owner who left still pauses.
+        member = await guild.fetch_member(int(row.requester_external_user_id))
+        if str(member.id) != row.requester_external_user_id:
+            raise ValueError("Watch member binding changed")
         current = await _bot_fetch(sessions, row, guild, int(row.thread_id))
         if (
             not isinstance(current, discord.Thread)
@@ -95,9 +124,6 @@ async def require_watch_thread_access(
         ):
             raise ValueError("Reporting thread binding changed")
         thread = current
-        member = await guild.fetch_member(int(row.requester_external_user_id))
-        if str(member.id) != row.requester_external_user_id:
-            raise ValueError("Watch member binding changed")
         parent = await _bot_fetch(sessions, row, guild, thread.parent_id)
         if (
             not isinstance(parent, (discord.TextChannel, discord.ForumChannel))
@@ -135,6 +161,10 @@ async def require_watch_thread_access(
                 membership = await thread.fetch_member(member.id)
                 if membership.id != member.id or membership.thread_id != thread.id:
                     raise ValueError("Watch thread membership binding changed")
+            if reason is None:
+                await _require_bot_may_post(
+                    sessions, row, guild, client, parent, "view_channel", "send_messages_in_threads"
+                )
     except (discord.Forbidden, discord.NotFound, ValueError):
         reason = "Watch paused: reporting thread or owner membership is unavailable."
     if reason is not None:
@@ -210,6 +240,17 @@ async def require_watch_parent_access(
                 reason = "Watch paused: owner can no longer post in the reporting channel."
             elif not (permissions.create_public_threads and permissions.send_messages_in_threads):
                 reason = "Watch paused: owner can no longer start threads in the reporting channel."
+            if reason is None:
+                await _require_bot_may_post(
+                    sessions,
+                    row,
+                    guild,
+                    client,
+                    parent,
+                    "view_channel",
+                    "create_public_threads",
+                    "send_messages_in_threads",
+                )
     except (discord.Forbidden, discord.NotFound, ValueError):
         reason = "Watch paused: reporting channel or owner membership is unavailable."
     if reason is not None:

@@ -116,7 +116,7 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.audience_refusal import AUDIENCE_CONTAINED
 from daimon.core.authz import build_agent_ref
 from daimon.core.billing_panel import fmt_usd
-from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import drain_budget_notices, run_budget_alert_poller
@@ -4245,9 +4245,9 @@ class DaimonBot(commands.Bot):
         Goes through `dispatch_continuations_in_thread`, so a wake takes the
         same per-thread guard and the same admit -> bind -> run path as any
         continuation. A thread Discord says is gone or forbidden has its wakes
-        settled, unless `bot_access_wait` is on. That, and any other failure,
-        returns False and the poller pushes the thread back. While draining,
-        the rows are left for the next process.
+        settled, unless `bot_access_wait` is on and the bot is only missing access.
+        That, and any other failure, returns False and the poller pushes the thread
+        back. While draining, the rows are left for the next process.
         """
         if self.draining:
             return True
@@ -4268,10 +4268,14 @@ class DaimonBot(commands.Bot):
             return True
         try:
             channel = self.get_channel(thread_id) or await self.fetch_channel(thread_id)
-        except (discord.NotFound, discord.Forbidden):
+        except (discord.NotFound, discord.Forbidden) as exc:
             channel = None
-            if await bot_access_wait_on(
-                self.runtime.sessionmaker, tenant_id=wake.tenant_id, platform="discord"
+            if (
+                isinstance(exc, discord.Forbidden)
+                and is_missing_access(exc.status, exc.code)
+                and await bot_access_wait_on(
+                    self.runtime.sessionmaker, tenant_id=wake.tenant_id, platform="discord"
+                )
             ):
                 # The bot cannot see it yet: keep the wakes and look again, as for any thread
                 # that could not be opened.

@@ -85,7 +85,7 @@ Where each feature can be set, and its default.
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Secret sharing | `secret_sharing` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
-| Wait for bot access | `bot_access_wait` | Capability | Off |  | ✓ |  |  |  |  |  |
+| Wait for bot access | `bot_access_wait` | Capability | Off |  | ✓ |  |  |  |  | Only Discord |
 | Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |

@@ -114,8 +114,8 @@ def create_command(
         bool,
         typer.Option(
             "--defer-bot-access",
-            help="Save a channel the bot cannot see yet; it waits until the bot has access. "
-            "Needs the bot_access_wait feature on.",
+            help="Save a channel the bot has no access to yet; it waits until the bot has access. "
+            "Channel destinations only; needs the bot_access_wait feature on.",
         ),
     ] = False,
 ) -> None:
@@ -123,10 +123,10 @@ def create_command(
 
     A channel or thread destination must be one the owner could post in, the same
     checks as creating the routine in chat. --defer-bot-access skips them for a channel
-    the bot cannot see yet; a thread still needs its parent channel to resolve.
+    Discord says the bot cannot access yet (not for a thread or dm).
     """
     if defer_bot_access and destination == "dm":
-        raise UserFacingError("--defer-bot-access is for a channel or thread destination.")
+        raise UserFacingError("--defer-bot-access is for a channel destination, not dm.")
     if (destination == "dm") != (destination_id is None):
         raise UserFacingError(
             "Give --destination-id with channel or thread, and not with dm."
@@ -305,11 +305,19 @@ async def run_create_channel_routine(
         raise UserFacingError("The owner must be a Discord user ID.")
     if not trigger.strip():
         raise UserFacingError("A trigger message is required.")
+    if defer_bot_access and kind != "channel":
+        raise UserFacingError("--defer-bot-access is for a channel destination, not a thread.")
+    if defer_bot_access and not (destination_id.isascii() and destination_id.isdecimal()):
+        raise UserFacingError("--defer-bot-access needs the channel's Discord ID.")
     async with rt.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
     if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
         raise UserFacingError("Select an active Discord tenant.")
+    if defer_bot_access and not await bot_access_wait_on(
+        rt.sessionmaker, tenant_id=tenant_id, platform="discord"
+    ):
+        raise UserFacingError("Turn on the bot_access_wait feature for this workspace first.")
     subject = await resolve_subject(
         rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
     )
@@ -322,10 +330,6 @@ async def run_create_channel_routine(
     )
     if agent is None:
         raise UserFacingError(f"No agent named {agent_name!r} found for this tenant.")
-    if defer_bot_access and not await bot_access_wait_on(
-        rt.sessionmaker, tenant_id=tenant_id, platform="discord"
-    ):
-        raise UserFacingError("Turn on the bot_access_wait feature for this workspace first.")
     if destination_resolver is None:
         if rt.settings.discord is None:
             raise UserFacingError("Discord bot credentials are required to verify the destination.")
