@@ -544,14 +544,15 @@ def rotate_link_command(
         async with build_runtime(load_settings()) as runtime:
             async with runtime.sessionmaker.begin() as db:
                 try:
-                    token = await rotate_callback_link(
+                    token, legacy_id = await rotate_callback_link(
                         db, watch_id, tenant_id=tenant, now=datetime.now(UTC)
                     )
                 except ValueError as exc:
                     raise typer.BadParameter(str(exc)) from None
                 url = f"{base}/callbacks/watches/{watch_id}/{token}"
                 if urls_out is not None:
-                    _write_urls(urls_out, {str(watch_id): url})
+                    # Keyed as `import --urls-out` keys it, so a forwarder finds its own id.
+                    _write_urls(urls_out, {legacy_id or str(watch_id): url})
             if urls_out is None:
                 typer.echo(url)
             else:

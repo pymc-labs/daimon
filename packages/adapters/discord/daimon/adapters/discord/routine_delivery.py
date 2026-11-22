@@ -56,11 +56,14 @@ from daimon.core.routine_delivery import (
     clear_creator,
     delivery_target,
     discord_creator_may_post,
+    private_delivery_refusal,
     render_fallback_dm,
     render_fallback_post,
+    routine_agent_name,
     tenant_dm_still_open,
 )
 from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
+from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import DeliveryGate, delivery_gate, result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.direct_messages import dm_enabled
@@ -224,6 +227,7 @@ def make_discord_routine_poster(
             "routine_dms_disabled": "Routine DMs are disabled for this server.",
             "restricted_source": "A restricted source cannot deliver by DM.",
             "agent_not_allowed": "The agent is not allowed to run privately.",
+            "owner_outside_team": "The owner holds no internal role, so the result can't go by DM.",
             "destination_unavailable": "The routine server or recipient is unavailable.",
         }
         return DeliveryOutcome(
@@ -403,7 +407,11 @@ def make_discord_routine_poster(
                 return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
-                await _untagged(sessionmaker, row, render_fallback_dm(row, reason)),
+                await _untagged(
+                    sessionmaker,
+                    row,
+                    render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row)),
+                ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
@@ -458,6 +466,15 @@ def make_discord_routine_poster(
                 return False
             if await creator_still_cleared(row) is not None:
                 return False
+            # Every DM send of a channel routine (the fallback and its attachments) asks
+            # again whether the owner is still inside the team (`on` only).
+            if (
+                await private_delivery_refusal(
+                    sessionmaker, row, membership_resolver=membership_resolver
+                )
+                is not None
+            ):
+                return False
             if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
                 return False
             creator = row.created_by_user_id
@@ -489,7 +506,15 @@ def make_discord_routine_poster(
                 text = (
                     f"Routine {row.trigger_message[:60]}\n"
                     f"Run {row.id} / {row.last_fired_at}\n\n"
-                    + await _untagged(sessionmaker, row, render_fallback_post(row))
+                    + await _untagged(
+                        sessionmaker,
+                        row,
+                        render_fallback_post(
+                            row,
+                            agent_name=await routine_agent_name(sessionmaker, row),
+                            header=await routine_header_shown(sessionmaker, row, "discord"),
+                        ),
+                    )
                 )
                 for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
                     if (refused := await creator_still_cleared(row)) is not None:
@@ -622,7 +647,16 @@ def make_discord_routine_poster(
         )
         if client is None or identity is None or identity.builtin:
             for chunk in split_fenced(
-                await _untagged(sessionmaker, row, render_fallback_post(row, platform="discord")),
+                await _untagged(
+                    sessionmaker,
+                    row,
+                    render_fallback_post(
+                        row,
+                        platform="discord",
+                        agent_name=await routine_agent_name(sessionmaker, row),
+                        header=await routine_header_shown(sessionmaker, row, "discord"),
+                    ),
+                ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
@@ -649,7 +683,15 @@ def make_discord_routine_poster(
         for index, chunk in enumerate(
             split_fenced(
                 await _untagged(
-                    sessionmaker, row, render_fallback_post(row, as_agent=True, platform="discord")
+                    sessionmaker,
+                    row,
+                    render_fallback_post(
+                        row,
+                        as_agent=True,
+                        platform="discord",
+                        agent_name=identity.name,
+                        header=await routine_header_shown(sessionmaker, row, "discord"),
+                    ),
                 ),
                 limit,
                 word_boundary=True,

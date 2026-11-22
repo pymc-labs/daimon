@@ -24,7 +24,7 @@ from daimon.adapters.discord.context import (
     input_context,
 )
 from daimon.core.features.model_input import CHANNEL_BACKFILL
-from daimon.core.media.vision import MAX_VISION_IMAGE_BYTES
+from daimon.core.media.vision import MAX_DOWNSCALE_SOURCE_BYTES
 from daimon.core.untrusted import UNTRUSTED_NOTE
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -474,7 +474,7 @@ class TestBuildContextXml:
             filename="huge.png",
             url="https://cdn.discord.com/huge.png",
             content_type="image/png",
-            size=MAX_VISION_IMAGE_BYTES + 1,
+            size=MAX_DOWNSCALE_SOURCE_BYTES + 1,
         )
         m1 = _make_message(msg_id=1, content="big files", attachments=[svg, huge])
         trigger = _make_message(msg_id=10, content="see those?")

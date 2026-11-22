@@ -41,6 +41,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -69,6 +70,8 @@ from daimon.core.continuity.watch_projection import (
 from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import mint_chat_mcp_token
+from daimon.core.mcp_identity import RelayBinding, relay_server_name
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_annotations import annotations_from_mcp
 from daimon.core.mcp_tool_call import McpToolSession, mcp_tool_session
@@ -78,6 +81,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.direct_messages import is_dm_thread
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watch_credentials import load_watch_credential
@@ -100,6 +104,7 @@ from daimon.core.tool_safety import (
     classify_tool,
 )
 from daimon.core.turn.approvals import agent_rule_lookup
+from daimon.core.turn_hold import TurnHold
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
@@ -157,6 +162,8 @@ OFF_DEFER_S = 600
 
 #: Opens the bounded MCP session for one poll; tests swap in a fake server.
 open_source = mcp_tool_session
+#: A relay poll's own credential outlives the poll's 25-second bound, and no more.
+RELAY_POLL_TTL = timedelta(minutes=2)
 
 
 def operator_denied(policy: ToolSafetyPolicy, *, server_name: str, tool: str) -> bool:
@@ -199,11 +206,39 @@ async def poll_credential(
     owner_account_id: uuid.UUID,
     server_url: str,
     credential: str,
+    relay: RelayBinding | None = None,
+    hold: TurnHold | None = None,
 ) -> str | None:
     """Decrypt exactly one credential for this exact URL: the agent-wide one, the
-    watch owner's own key (looked up by tenant and owner, never another owner's), or none."""
+    watch owner's own key (looked up by tenant and owner, never another owner's), or none.
+
+    Credential "relay" instead mints the owner a short-lived credential for this
+    Daimon's own relay URL, signing the `relay` binding (the watch it polls for, if
+    any), so the relay names the owner as an unattended caller and the watch's place.
+    """
     if credential == "none":
         return None
+    if credential == "relay":
+        mcp = runtime.settings.mcp
+        if (
+            relay is None
+            or mcp.public_url is None
+            or mcp.jwt_secret is None
+            or relay_server_name(server_url, str(mcp.public_url)) is None
+        ):
+            raise PollAccessRevoked("Watch credential unavailable")
+        async with runtime.session_factory.begin() as db:
+            token, _, _ = await mint_chat_mcp_token(
+                db,
+                account_id=owner_account_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id),
+                secret=mcp.jwt_secret.get_secret_value().encode(),
+                now=datetime.now(UTC),
+                relay=relay,
+                hold=hold,
+                ttl=RELAY_POLL_TTL,
+            )
+        return token
     if credential not in ("agent", "owner") or runtime.fernet is None:
         raise PollAccessRevoked("Watch credential unavailable")
     if credential == "owner":
@@ -258,9 +293,16 @@ async def poll_read_place(
         raise PollAccessRevoked("Missing owner identity")
     async with rest_client(_require_bot_token(runtime)) as client:
         _, member = await _resolve_member(client, auth.external_id, auth.platform_user_id)
-        channel = _require_guild_channel(
-            await _resolve_channel(client, resource_id), auth.external_id
-        )
+        try:
+            resolved = await _resolve_channel(client, resource_id)
+        except discord.Forbidden as err:
+            # The bot's own read of the channel. A missing channel keeps its old handling.
+            if is_missing_access(err.status, err.code) and await bot_access_wait_on(
+                runtime.session_factory, tenant_id=auth.tenant_id, platform="discord"
+            ):
+                raise BotAccessUnavailable from None
+            raise
+        channel = _require_guild_channel(resolved, auth.external_id)
         if isinstance(channel, discord.Thread):
             await _check_thread_view(client, channel, member, auth.platform_user_id)
             parent = await _ensure_thread_parent_cached(channel)
@@ -289,16 +331,17 @@ async def authorize_poll(
     runtime: McpRuntime,
     watch: WatchRow,
 ) -> tuple[AuthIdentity, ChannelReadPolicy]:
-    auth, read, _ = await authorize_source(runtime, watch)
+    auth, read, _, _ = await authorize_source(runtime, watch)
     return auth, read
 
 
 async def authorize_source(
     runtime: McpRuntime,
     watch: WatchRow,
-) -> tuple[AuthIdentity, ChannelReadPolicy, str | None]:
+) -> tuple[AuthIdentity, ChannelReadPolicy, str | None, str]:
     """Recheck access for every poll, before and after the read. Also returns the name
-    the agent attaches an MCP source under now, or None for a native source."""
+    the agent attaches an MCP source under now (None for a native source) and the
+    agent's own name now."""
     server_name: str | None = None
     if watch.source in ("poll", "mcp_poll"):
         # The operator registry, read fresh each time: before and after every read.
@@ -454,7 +497,7 @@ async def authorize_source(
         origin_channel_ids=frozenset({watch.parent_channel_id, watch.thread_id}),
     ):
         raise PollAccessRevoked("Poll source is sealed")
-    return auth, read, server_name
+    return auth, read, server_name, str(agent.name)
 
 
 async def read_native(
@@ -488,7 +531,7 @@ async def read_native(
 
 
 async def read_mcp(
-    runtime: McpRuntime, watch: WatchRow, *, server_name: str, credential: str
+    runtime: McpRuntime, watch: WatchRow, *, server_name: str, credential: str, agent_name: str
 ) -> JsonValue:
     """One `tools/list` and one `tools/call` on the exact registered URL.
 
@@ -499,15 +542,24 @@ async def read_mcp(
     server_url = str(watch.source_state["server_url"])
     tool = str(watch.source_state["tool"])
     arguments = TypeAdapter(dict[str, JsonValue]).validate_python(watch.source_state["arguments"])
-    token = await poll_credential(
-        runtime,
-        tenant_id=watch.tenant_id,
-        agent_id=watch.agent_id,
-        owner_account_id=watch.owner_account_id,
-        server_url=server_url,
-        credential=credential,
+    # A poll reports where the watch does, so a contained room's audience rule binds it
+    # as it binds a turn there; a DM has no audience.
+    hold = (
+        None
+        if watch.delivery == "dm" or is_dm_thread(watch.platform, watch.thread_id)
+        else TurnHold(watch.platform, watch.parent_channel_id, client=False, relay=True)
     )
     with SOURCE_BUDGET.take(ascii_mcp_url(server_url)):
+        token = await poll_credential(
+            runtime,
+            tenant_id=watch.tenant_id,
+            agent_id=watch.agent_id,
+            owner_account_id=watch.owner_account_id,
+            server_url=server_url,
+            credential=credential,
+            relay=RelayBinding(agent_name, watch_id=watch.id, owner=watch.owner_external_id),
+            hold=hold,
+        )
         async with open_source(ascii_mcp_url(server_url), token) as source:
             entry = await listed_read_tool(
                 runtime, source, server_name=server_name, tool=tool, arguments=arguments
@@ -591,7 +643,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     key=key,
                     evidence=evidence_fields,
                 )
-            auth, read, server_name = await authorize_source(runtime, watch)
+            auth, read, server_name, agent_name = await authorize_source(runtime, watch)
             if not load_watches_settings().enabled:
                 return False
             if server_name is None:
@@ -599,7 +651,11 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 kind = "human_rows_v1"
             else:
                 document = await read_mcp(
-                    runtime, watch, server_name=server_name, credential=listed.credential
+                    runtime,
+                    watch,
+                    server_name=server_name,
+                    credential=listed.credential,
+                    agent_name=agent_name,
                 )
                 kind = "mcp_v1"
             # The raw read is bounded and projected; only the projection is kept.
@@ -639,8 +695,9 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 )
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
-    except SourceBusy:
-        # This server's own budget is spent. Step back in the claim queue, or due
+    except (SourceBusy, BotAccessUnavailable):
+        # This server's own budget is spent, or the bot cannot read the source yet (not an
+        # error, not a revocation). Step back in the claim queue, or due
         # watches on one busy server would fill every claim and starve the rest.
         until = datetime.now(UTC) + timedelta(seconds=BUSY_DEFER_S + random.uniform(0, 30))
         async with runtime.session_factory.begin() as db:

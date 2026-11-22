@@ -99,6 +99,7 @@ async def update_requester_card(
                 platform="discord",
                 workspace_id=str(thread.guild.id),
                 agent_name=request.agent_name,
+                agent_id=request.ma_agent_id,
             )
             if link_url
             else None
@@ -319,6 +320,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             platform="discord",
             workspace_id=str(interaction.guild_id),
             agent_name=request.agent_name,
+            agent_id=request.ma_agent_id,
         )
         await interaction.followup.send(
             embed=connect_embed(card), view=connect_button_view(url), ephemeral=True
@@ -477,6 +479,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         platform="discord",
         workspace_id=str(interaction.guild_id),
         agent_name=request.agent_name,
+        agent_id=request.ma_agent_id,
     )
     await interaction.followup.send(
         embed=connect_embed(card), view=connect_button_view(url), ephemeral=True

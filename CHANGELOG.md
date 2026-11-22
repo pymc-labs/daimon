@@ -11,6 +11,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cases, share them, and move them between deployments as signed or encrypted
   bundles. `daimon evals bundle validate` checks a bundle offline.
 
+- **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
+  With the new Wait for bot access setting on (off by default, set per
+  workspace by a server admin), a routine, timer or watch whose channel Daimon
+  cannot see or post in is held back, not failed: a routine's fire is refused
+  before any turn runs, so it costs nothing, and shows `bot_access_unavailable`
+  as its last error; a channel timer and a watch's wake are offered again
+  later; a poll watch backs off without an error. Nothing is paused or
+  reported to the owner, and all of it runs again once Daimon is given access.
+  A channel that is gone or in another server, and a person losing their own
+  permission, are handled as before. `daimon routines create
+  --defer-bot-access` saves a channel routine whose channel Daimon has no
+  access to yet.
+
+- **Moving people in is easier for repository memory and rotated links.**
+  `scripts/import_repo_memory.py` takes `--tenant`: a creator with no account on
+  this deployment gets a Discord identity there, so the accounts map is only for
+  people already here, and a dry run's manifest still matches the apply's. The
+  image has no `scripts/`, so the migration guide shows how to run it in a worker
+  container. `daimon watches rotate-link --urls-out` keys an imported watch's new
+  link by its old id, as `watches import --urls-out` does, so a forwarder that
+  looks links up by its own ids finds it.
+
+- **Callback watches and relay wake links work in Discord DMs.** A callback watch
+  made in a DM, including the one behind a relay server's `_meta.wake_url`, was
+  refused, so a job started from a DM never woke the conversation and the agent
+  had to check on it. Each post now runs a fresh private turn of the owner in
+  that DM, the way a DM timer runs, under the same read-and-report rules as any
+  watch. The person's open DM conversation stays theirs, and its next turn is
+  told what the report said, so they can reply to it. Poll watches made in a
+  Discord DM follow the same rule: they reported nowhere before, and ones
+  already saved move over on upgrade. A watch made in a DM that was moved from a
+  channel keeps that channel's seal and budget, and pauses when the conversation
+  is gone. Slack and Teams refuse any watch made in a DM, and such watches
+  already saved are paused: they have no way to run a watch's fire there.
+
+- **Discord can time the working card, pick the model from menus and answer
+  bots.** With the new Working card timer setting on, the card says Working or
+  Thinking with the time so far, and its footer names the model with /model to
+  change it. /model with no options shows a model menu and an effort menu, and
+  a pick swaps the model emoji on the message that last showed them. With the
+  new Answer bots setting on (off by default; set by an admin for the server or
+  one agent), a bot that mentions the agent is answered under the same access
+  rules as a person. It answers only a mention the bot typed, never a reply to
+  the agent's own post, a reply's automatic ping, or itself, and its answers
+  never ping a bot.
+
+- **Routine results can post without their header.** A routine's result
+  normally starts with `Result from <agent>'s <schedule>:`. The new Routine
+  result header setting, on by default, turns that line off for a deployment,
+  a workspace, an agent, a channel or one routine, on every platform and for
+  channel, thread and direct-message results alike. The requester line and the
+  failure notice are unchanged. Set one routine's value with
+  `daimon features set routine_result_header off --routine <id>`; its value
+  beats its agent's.
+
+- **Discord answers read the same in DMs and threads, and agents can have a
+  display name.** DM turns now get the working, done and model reactions, 👍/👎
+  feedback, voice messages and the card's model footer. Pings are joined with a
+  space and never repeat a mention the model wrote; stop and error cards say
+  what happened and for how long. Tables drop their placeholder and size columns
+  to their content. New settings, each defaulting to today's behaviour: Status
+  reactions, Lock reaction, Text before tool calls, Thread title style, Thread
+  archive time, and an agent's Display name, shown wherever people see its name.
+  The first five can also be set per agent. A display name is plain words, and
+  never another agent's name or Daimon's.
+
+- **Watches can poll a signed-identity relay server.** List a tool in
+  `DAIMON_WATCHES__POLLABLE_TOOLS` with `"credential": "relay"` and its
+  `<root>/mcp-identity/<name>` URL. Each poll mints the watch owner a
+  two-minute relay credential bound to that watch, so a `requester_meta`
+  server sees the owner, `requester_kind` `"routine"` and the place the watch
+  reports to. A paused or deleted watch's credential names nobody. Such
+  watches could not be created before: no stored key matches a relay URL.
+
+- **Share a secret with one person on Discord.** With the new Secret sharing
+  feature on (off by default; a server admin turns it on, for the server or one
+  agent), `/share-secret` sends a secret to a person's DMs. The
+  `share_secret_with` tool sends one of the agent's keys to an admin, the
+  agent's owner or whoever saved the key, while they are in the conversation;
+  a key an admin names for someone else goes once the admin clicks Send. The
+  person reveals it once within a day; the value is encrypted, never in chat or
+  the tool's result, and deleted on reveal or expiry.
+
+- **A relay server's requester fields come from the turn that made the call.**
+  Each call is stamped from the turn holding its session, so concurrent or
+  queued turns in one thread never lend it their person or message; a call
+  made while no turn holds the session names nobody.
+
+- **Images over 5 MiB, or over 8000 px on an edge, are resized instead of sent
+  as a link.** In Discord, Slack, Teams and the web app, an image of up to 25
+  MiB is shrunk to fit the model's limits and shown to the agent inline, with
+  its orientation applied and its colour profile and transparency kept. An
+  image that cannot be read still falls back to a link rather than ending the
+  turn.
+
+- **Approvals can be set for one agent.** An agent's own Approvals sits between
+  the workspace and the channel, so one agent can Allow writes while the rest
+  Ask; a channel or thread setting still wins. Set it from the CLI
+  (`daimon features set approvals off --tier agent --agent NAME --reason ...`),
+  the web app or an agent, by a chat admin or the operator, audited as before.
+  With "Approvals in direct messages" on, a DM follows its agent's value.
+  An agent that calls other agents decides their writes with its own value.
+  A deleted agent's value is cleared with `--agent ID`.
+
+- **A relay server's long jobs can wake the conversation when they end.** List the
+  tools that start them in `"wake_tools"` on a `requester_meta` entry of
+  `DAIMON_MCP_IDENTITY__SERVERS`: a person's call then carries a private callback
+  watch link in `_meta.wake_url`, and the server posts the outcome to it. See
+  `docs/mcp-servers.md`.
+
+- **Watch instructions can be up to 4000 characters.** Creating, editing and
+  importing a watch all allowed 2000, so longer imported instructions were cut.
+
+- **`daimon routines sandbox-tools --agent` works while a channel is private.**
+  The operator's command was refused with "This channel is private" once any
+  channel was kept to its own agents. It now acts as the operator, like
+  `daimon features set`.
+
+- **"Approvals in direct messages" no longer changes Approvals for everyone.**
+  Setting it, from the CLI, the web app or an agent, wrote the server-wide
+  Approvals value instead of its own, so Off turned Allow writes on everywhere.
+  It now changes only itself; a server admin or the operator still sets it.
+  If an admin changed it before this release, re-check Approvals: that change
+  wrote the server-wide setting.
+
+- **Operators can rename a workspace's own agent.** `daimon agents rename OLD NEW`
+  keeps the agent's id, so its saved MCP logins, memory and sessions stay, and
+  moves every channel default, rule, routine and access-policy rule to the new
+  name. `--replace-seeded` retires the built-in agent that holds NEW in that
+  workspace only, so a later `defaults apply` leaves the renamed agent alone.
+  `--dry-run` shows what would change.
+
+- **Direct messages can match channel behaviour.** Three new settings, all off
+  by default. "Approvals in direct messages" lets a DM follow the team's
+  Approvals setting, so Allow writes reaches DMs too; only a server admin sets
+  it. "Completion pings in direct messages" lets a Discord DM answer follow
+  Completion pings. "/new in threads" lets `/new` start a fresh conversation in
+  a Discord thread Daimon started. `/new` is now listed in servers, where it
+  refuses outside such a thread as before.
+
+- **Trusted tool hints reach identity relay servers.** A server attached through
+  the identity relay and named in `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS` had
+  its tool list read at the relay, which refused it, so the tool name decided.
+  Daimon now reads the server's own URL with its bearer key, so a tool it marks
+  `readOnlyHint` runs without a card. The chat worker needs that server's key in
+  `DAIMON_MCP_IDENTITY__BEARERS`; a signed server is read without one.
+
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.

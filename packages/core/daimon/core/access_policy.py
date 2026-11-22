@@ -50,6 +50,15 @@ class ChannelRule(BaseModel):
 OPEN_RULE = ChannelRule()
 
 
+class AgentApprovals(BaseModel):
+    """One agent's own Approvals choice; an agent without one inherits."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    approvals: Literal["off", "on"]
+    approvals_set_by: str
+
+
 class AgentRule(BaseModel):
     """Where one agent may run and which humans may invoke it."""
 
@@ -151,6 +160,8 @@ class TenantAccessPolicy(BaseModel):
     category_rules: dict[str, ChannelRule] = Field(default_factory=dict)
     # Agent name -> its rule. An agent not named here runs wherever the cascade sends it.
     agent_rules: dict[str, AgentRule] = Field(default_factory=dict)
+    # Agent id -> its own Approvals; it sits between the workspace and the channel rules.
+    agent_approvals: dict[str, AgentApprovals] = Field(default_factory=dict)
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
     # Whether an admin chose `enabled_backends`. False: the tenant follows the
     # deployment default (`daimon.core.provider_keys`), resolved when it is loaded.

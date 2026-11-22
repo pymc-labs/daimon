@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core.admin_actions import DelegatedAction
@@ -19,10 +20,12 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.features import service
+from daimon.core.features.registry import FEATURES
 from daimon.core.features.service import FeatureActor, OperatorActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.settings_panel import chat_actor
-from daimon.core.stores.domain import ChangeSurface
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
@@ -63,7 +66,12 @@ async def _set(
         key="approvals",
         tier=tier,  # pyright: ignore[reportArgumentType]
         value="off",
-        place=FeaturePlace.of(actor.tenant_id, "discord", "c1" if tier == "channel" else None),
+        place=FeaturePlace.of(
+            actor.tenant_id,
+            "discord",
+            "c1" if tier == "channel" else None,
+            agent_id="a1" if tier == "agent" else None,
+        ),
     )
 
 
@@ -74,9 +82,11 @@ async def test_the_operator_sets_approvals_and_the_audit_row_names_who_and_why(
     await db_session.commit()
     await _set(db_session_factory, _operator(tenant.id))
     await _set(db_session_factory, _operator(tenant.id, "external channel"), tier="channel")
+    await _set(db_session_factory, _operator(tenant.id, "one agent"), tier="agent")
     assert [(e.platform_user_id, e.reason) for e in await _audit_rows(db_session, tenant.id)] == [
         ("operator:ops", "server:inherit->off (unattended integration)"),
         ("operator:ops", "c1:inherit->off (external channel)"),
+        ("operator:ops", "agent:a1:inherit->off (one agent)"),
     ], "each operator change is audited with operator, old and new value and the reason"
 
 
@@ -100,6 +110,92 @@ async def test_other_actors_are_refused_even_when_admin_for_says_yes(
     with pytest.raises(ChannelChangeRefused):
         await _set(db_session_factory, actor)
     assert not await _audit_rows(db_session, tenant.id), "a refused change writes no audit row"
+
+
+async def _dm_approvals(
+    factory: async_sessionmaker[AsyncSession], actor: FeatureActor, value: str
+) -> str:
+    place = FeaturePlace.of(actor.tenant_id, "discord", None)
+    change = await change_feature(
+        factory, _settings(), actor, key="dm_approvals", tier="workspace", value=value, place=place
+    )
+    return change.view.resolved.value
+
+
+async def test_dm_approvals_is_stored_as_a_feature_and_leaves_the_approval_gate_alone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    await _set(db_session_factory, _operator(tenant.id))  # approvals off
+    audits = len(await _audit_rows(db_session, tenant.id))
+    for value in ("on", "off"):
+        assert await _dm_approvals(db_session_factory, _operator(tenant.id), value) == value
+    db_session.expire_all()
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.approvals == "off", "the server-wide Approvals value is not dm_approvals'"
+    assert len(await _audit_rows(db_session, tenant.id)) == audits, "the gate was not written"
+
+
+async def test_dm_approvals_changes_are_audited_with_who_and_why(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    await _dm_approvals(db_session_factory, _operator(tenant.id, "dm rollout"), "off")
+    admin = AsyncMock(return_value=Subject(is_admin=True, platform_user_id="u1"))
+    monkeypatch.setattr(service, "approval_admin", admin)
+    chat = FeatureActor(tenant.id, None, "web", admin_for=_yes, native_user_id="u1")
+    await _dm_approvals(db_session_factory, chat, "on")
+    rows = await list_events(db_session, tenant_id=tenant.id, tool_name="dm_approvals")
+    assert [(e.platform_user_id, e.reason) for e in rows] == [
+        ("operator:ops", "workspace:default->off (dm rollout)"),
+        ("u1", "workspace:off->on"),
+    ]
+
+
+async def test_dm_approvals_still_needs_a_native_admin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    actor = FeatureActor(tenant.id, None, "web", admin_for=_yes, native_user_id=None)
+    with pytest.raises(ChannelChangeRefused, match="approvals in direct messages"):
+        await _dm_approvals(db_session_factory, actor, "on")
+
+
+async def test_only_approvals_writes_the_approval_gate(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native feature other than Approvals is stored as a feature; the gate is not its
+    store. Every native feature in the registry is covered, so a future one is too."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+
+    async def gate(*_: object, **__: object) -> object:
+        raise AssertionError("the approval gate was written")
+
+    monkeypatch.setattr(service, "_change_approvals", gate)
+    others = [
+        spec for spec in FEATURES.values() if spec.authority.native and spec.key != "approvals"
+    ]
+    assert others
+    for spec in others:
+        tier = next(tier for tier in spec.tiers if tier != "deployment")
+        platform = next(p for p in CHAT_PLATFORMS if spec.on_platform(p))
+        await change_feature(
+            db_session_factory,
+            _settings(),
+            _operator(tenant.id),
+            key=spec.key,
+            tier=tier,  # pyright: ignore[reportArgumentType]
+            value=next(iter(spec.values)),
+            place=FeaturePlace.of(tenant.id, platform, None),
+        )
 
 
 @pytest.mark.parametrize(

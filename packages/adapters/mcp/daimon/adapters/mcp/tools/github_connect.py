@@ -90,6 +90,7 @@ async def _post_discord_connect_card(
     requester_id: str,
     intent_id: uuid.UUID,
     agent_name: str,
+    agent_ma_id: str,
     requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
@@ -101,6 +102,7 @@ async def _post_discord_connect_card(
         platform="discord",
         workspace_id=auth.external_id,
         agent_name=agent_name,
+        agent_id=agent_ma_id,
         requested_repo=requested_repo,
     )
     view = discord.ui.View(timeout=None)
@@ -132,6 +134,7 @@ async def _post_slack_connect_card(
     requester_id: str,
     url: str,
     agent_name: str,
+    agent_ma_id: str,
     requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
@@ -143,6 +146,7 @@ async def _post_slack_connect_card(
         platform="slack",
         workspace_id=auth.external_id,
         agent_name=agent_name,
+        agent_id=agent_ma_id,
         requested_repo=requested_repo,
     )
     client = await slack_web_client(runtime, team_id=auth.external_id)
@@ -162,6 +166,7 @@ async def _post_teams_connect_card(
     channel_id: str,
     url: str,
     agent_name: str,
+    agent_ma_id: str,
     requested_repo: str | None = None,
 ) -> None:
     # Teams has no message only its sender sees, and the link is a bearer link:
@@ -173,6 +178,7 @@ async def _post_teams_connect_card(
         platform="teams",
         workspace_id=auth.external_id or "",
         agent_name=agent_name,
+        agent_id=agent_ma_id,
         requested_repo=requested_repo,
     )
     await send_card_to_caller(
@@ -406,6 +412,7 @@ async def _github_connect_impl(
                 requester_id=auth.platform_user_id,
                 intent_id=intent_id,
                 agent_name=agent.name,
+                agent_ma_id=str(agent.id),
                 requested_repo=repo_name.strip() if repo_name else None,
             )
         elif auth.platform == "teams":
@@ -416,6 +423,7 @@ async def _github_connect_impl(
                 channel_id=origin.parent_channel_id,
                 url=f"{root}/oauth/github/connect/{token}",
                 agent_name=agent.name,
+                agent_ma_id=str(agent.id),
                 requested_repo=repo_name.strip() if repo_name else None,
             )
         else:
@@ -428,6 +436,7 @@ async def _github_connect_impl(
                 requester_id=auth.platform_user_id,
                 url=f"{root}/oauth/github/connect/{token}",
                 agent_name=agent.name,
+                agent_ma_id=str(agent.id),
                 requested_repo=repo_name.strip() if repo_name else None,
             )
     except Exception:

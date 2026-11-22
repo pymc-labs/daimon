@@ -320,3 +320,32 @@ async def test_refreshing_a_mounted_held_vault_keeps_its_hold(
         posts[0]["auth"]["token"], SECRET, algorithms=["HS256"], options={"verify_exp": False}
     )
     assert claims[HOLD_CLAIM] == {"platform": "slack", "channel_id": "C-SYN-1", "client": True}
+
+
+async def test_refreshing_a_mounted_unheld_vault_for_a_held_turn_mints_the_hold(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A reused session whose vault was minted without the hold never keeps it."""
+    account_id, agent_id = await _account(db_session_factory), uuid.uuid4()
+    metadata = await _warm_held_metadata(db_session_factory, account_id, agent_id, None)
+    posts: list[dict[str, Any]] = []
+
+    await refresh_mounted_mcp_vaults(
+        _client(_warm_handler("unused", metadata, posts)),
+        vault_ids=["vlt_w"],
+        account_id=account_id,
+        agent_id=agent_id,
+        jwt_secret=SECRET,
+        public_url=URL,
+        now=NOW,
+        session_factory=db_session_factory,
+        scope=Scope.legacy_host_authorized(call_site="test_mcp_vault_hold"),
+        hold=HOLD,
+    )
+
+    assert len(posts) == 1
+    assert posts[0]["metadata"][HOLD_METADATA_KEY] == hold_metadata_value(HOLD)
+    claims = pyjwt.decode(
+        posts[0]["auth"]["token"], SECRET, algorithms=["HS256"], options={"verify_exp": False}
+    )
+    assert claims[HOLD_CLAIM]["channel_id"] == "C-SYN-1"

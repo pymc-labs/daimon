@@ -86,6 +86,7 @@ class PurgePreview(BaseModel):
     dm_rules: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     dm_grant_users: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
+    secret_shares: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow

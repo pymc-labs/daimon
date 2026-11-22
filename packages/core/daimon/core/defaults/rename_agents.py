@@ -74,7 +74,7 @@ class AgentRenameAmbiguous(DefaultsError):
 
 def _only_unmanaged(agents: Collection[BetaManagedAgentsAgent]) -> bool:
     """Whether only a workspace's own agents hold this name, never the seeded one."""
-    return bool(agents) and not any(_managed(agent) for agent in agents)
+    return bool(agents) and not any(is_managed(agent) for agent in agents)
 
 
 def pending_renames(present_names: Collection[str]) -> list[tuple[str, str]]:
@@ -83,7 +83,7 @@ def pending_renames(present_names: Collection[str]) -> list[tuple[str, str]]:
     return [(old, new)] if new in present_names and old not in present_names else []
 
 
-def _managed(agent: BetaManagedAgentsAgent) -> bool:
+def is_managed(agent: BetaManagedAgentsAgent) -> bool:
     return agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
 
 
@@ -91,13 +91,26 @@ def _reader_sources(agent: BetaManagedAgentsAgent) -> list[str]:
     return agent.metadata.get(MA_METADATA_KEY_READER_SOURCE, "").split("\n")
 
 
-def _named(agents: Collection[BetaManagedAgentsAgent], name: str) -> list[BetaManagedAgentsAgent]:
+def agents_named(
+    agents: Collection[BetaManagedAgentsAgent], name: str
+) -> list[BetaManagedAgentsAgent]:
     """`agents` whose name matches `name` in any case, as agent names compare."""
     wanted = normalize_agent_name(name)
     return [
         agent
         for agent in agents
         if normalize_agent_name(agent.metadata.get(MA_METADATA_KEY_NAME, "")) == wanted
+    ]
+
+
+def source_readers(
+    agents: Collection[BetaManagedAgentsAgent], name: str
+) -> list[BetaManagedAgentsAgent]:
+    """The reader variants of the agent named `name`: `<name>-reader`, sourced from it."""
+    return [
+        reader
+        for reader in agents_named(agents, f"{name}{_READER_SUFFIX}")
+        if name in _reader_sources(reader)
     ]
 
 
@@ -114,14 +127,10 @@ def _legacy_readers(
     so the stale old reader is left as it is, which is how readers are
     treated when nothing else uses them.
     """
-    readers = [
-        reader
-        for reader in _named(agents, f"{old}{_READER_SUFFIX}")
-        if old in _reader_sources(reader)
-    ]
+    readers = source_readers(agents, old)
     if not readers or old_agent_live:
         return []
-    taken = _named(agents, f"{new}{_READER_SUFFIX}")
+    taken = agents_named(agents, f"{new}{_READER_SUFFIX}")
     if taken and _serves_renamed_seeded(agents, taken, new=new):
         return []
     if taken:
@@ -136,14 +145,14 @@ def _serves_renamed_seeded(
     new: str,
 ) -> bool:
     """Whether every reader is a reader variant of the seeded agent now named `new`."""
-    return any(_managed(agent) for agent in _named(agents, new)) and all(
+    return any(is_managed(agent) for agent in agents_named(agents, new)) and all(
         MA_METADATA_KEY_READER_OF in reader.metadata
         and normalize_agent_name(new) in map(normalize_agent_name, _reader_sources(reader))
         for reader in readers
     )
 
 
-async def _rename_on_provider(
+async def rename_on_provider(
     client: AsyncAnthropic,
     agent: BetaManagedAgentsAgent,
     *,
@@ -156,7 +165,7 @@ async def _rename_on_provider(
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         metadata = dict(fresh.metadata)
         name = metadata.get(MA_METADATA_KEY_NAME, "")
-        # Compare as `_named` does, which picked this agent; a reader's suffix is plain ASCII.
+        # Compare as `agents_named` does, which picked this agent; a reader's suffix is plain ASCII.
         folded, folded_old = normalize_agent_name(name), normalize_agent_name(old)
         if not folded.startswith(folded_old):
             return fresh  # a concurrent apply renamed it first
@@ -206,10 +215,10 @@ async def plan_seeded_rename(
     `AgentRenameAmbiguous` when self-hosted records differ from `old` only in
     case: nothing is renamed and the caller skips the agent pass, so that agent is never adopted.
     """
-    olds = _named(agents, old)
-    legacy = [agent for agent in olds if _managed(agent)]
+    olds = agents_named(agents, old)
+    legacy = [agent for agent in olds if is_managed(agent)]
     readers = _legacy_readers(agents, old=old, new=new, old_agent_live=len(olds) > len(legacy))
-    if (legacy or readers) and _only_unmanaged(_named(agents, new)):
+    if (legacy or readers) and _only_unmanaged(agents_named(agents, new)):
         raise AgentRenameBlocked(old=old, new=new)
     selfhosted = await inspect_selfhosted_rename(session, tenant_id=tenant_id, old=old, new=new)
     _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
@@ -240,7 +249,7 @@ async def move_seeded_rename(
     """The provider half of `rename`, then its access rules. Idempotent."""
     if client is not None:
         for agent in rename.moves:
-            await _rename_on_provider(
+            await rename_on_provider(
                 client, agent, tenant_id=tenant_id, old=rename.old, new=rename.new
             )
     async with session_factory() as session, session.begin():

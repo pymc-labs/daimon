@@ -14,7 +14,8 @@ from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import DeliveryOutcome
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import get_post, list_reply_posts
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import FeatureTarget, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -100,6 +101,21 @@ async def test_a_thread_destination_gets_the_result_in_the_thread(
     assert await _post(db_session_factory, teams, _row()) == DeliveryOutcome(status="delivered")
     [(where, text)] = teams.posts
     assert where == f"{CHANNEL};messageid=17" and "All green." in text
+
+
+async def test_with_the_header_off_the_result_posts_without_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="teams", id=TENANT)
+        await set_feature_value(
+            session, tenant_id=TENANT, target=FeatureTarget("workspace"),
+            key="routine_result_header", value="off", set_by=None, surface="cli",
+        )  # fmt: skip
+    teams = _Teams()
+    assert (await _post(db_session_factory, teams, _row())).status == "delivered"
+    [(_, text)] = teams.posts
+    assert text.startswith("All green.") and "Result from" not in text, text
 
 
 @pytest.mark.parametrize(
