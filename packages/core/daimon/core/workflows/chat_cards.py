@@ -102,6 +102,14 @@ _GRANT_WORDS: Final[dict[str, str]] = {
     "scoped_write": "writes only to set places",
 }
 
+#: A draft card shows this many limited writes, each cut at this many characters.
+_LIMIT_LINES: Final = 3
+_LIMIT_CHARS: Final = 300
+
+
+def _clip(text: str, size: int) -> str:
+    return text if len(text) <= size else text[: size - 1].rstrip() + "…"
+
 
 @dataclass(frozen=True)
 class ChatPlace:
@@ -264,6 +272,10 @@ def draft_card(workflow_id: uuid.UUID, draft: views.Draft, web: TenantLinks | No
             dict.fromkeys(_GRANT_WORDS.get(g.kind, g.kind) for g in draft.new_grants)
         )
         facts.append(f"An admin approves before it goes live: {grants}.")
+        scoped = list(dict.fromkeys(g.detail for g in draft.new_grants if g.kind == "scoped_write"))
+        facts += [f"Writes only within: {_clip(d, _LIMIT_CHARS)}" for d in scoped[:_LIMIT_LINES]]
+        if len(scoped) > _LIMIT_LINES:
+            facts.append(f"And {len(scoped) - _LIMIT_LINES} more with limits, on the web page.")
     if errors := draft.validation.errors:
         facts.append(
             f"Fix {len(errors)} problem{'s' if len(errors) > 1 else ''} before publishing."

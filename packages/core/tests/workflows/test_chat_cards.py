@@ -18,6 +18,7 @@ from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import tenant_agents, tenant_skills
 from daimon.core.workflows.chat_cards import ChatPlace, Presser
 from daimon.core.workflows.service import Env
+from daimon.core.workflows.views import Grant
 from daimon.testing.builders import skill_listed
 from daimon.testing.workflows import NOW, World, ma_agents_with, make_world
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -53,6 +54,20 @@ async def _world(db_session: AsyncSession) -> tuple[World, Presser]:
 
 def _ids(card: PostedCard) -> list[str]:
     return [b.custom_id or b.label for b in card.buttons]
+
+
+async def test_the_draft_card_shows_the_limits_an_admin_approves(db_session: AsyncSession) -> None:
+    world, _ = await _world(db_session)
+    env = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW)
+    draft = await service.get_draft(env, world.workflow_id)
+    limits = "mail/send_reply: to is an address at example.com. Any text in body."
+    grants = [Grant(kind="scoped_write", node="think", detail=d) for d in (limits, "x" * 400)]
+    card = chat_cards.draft_card(
+        world.workflow_id, draft.model_copy(update={"new_grants": grants}), None
+    )
+    assert f"Writes only within: {limits}" in card.facts
+    assert any(f.startswith("Writes only within: xx") and f.endswith("…") for f in card.facts)
+    assert "An admin approves before it goes live: writes only to set places." in card.facts
 
 
 async def test_the_draft_card_publishes_its_own_revision_only(db_session: AsyncSession) -> None:
