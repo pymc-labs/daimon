@@ -1870,7 +1870,7 @@ DataAccess = Literal["off", "read", "write"]
 
 class CollectionRule(BaseModel):
     """What a page's viewers may do in one collection: `own` is the documents they created.
-    Managers and tools are not bound by it."""
+    Managers are not bound by it, nor are tools acting for one."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

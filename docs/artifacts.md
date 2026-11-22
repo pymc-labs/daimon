@@ -40,7 +40,7 @@ Roles follow Google Drive.
 | Role | May |
 | --- | --- |
 | Owner and admins | Everything, including delete, transfer and turning editor sharing off. |
-| Editors | Republish and change settings. They change who can open the page unless the owner turned that off with `editors_can_share`; then, on a page people outside the workspace can open, data, events and `data_scale` are locked too. An editor may always leave. |
+| Editors | Republish and change settings. They change who can open the page unless the owner turned that off with `editors_can_share`; then, on a page people outside the workspace can open, data, events and `data_scale` and collection rules are locked too. An editor may always leave. |
 | Viewers | Open the page. In the web app they see its Details only, not its data, activity or older versions. |
 
 Editors, and so owners, must be members: visitors can only open pages. The first publisher owns the page. `artifact_transfer` gives it to one of its editors, and the old owner stays an editor. Deleting a page removes its versions, data and watches. Deleting a member's account deletes the pages they own.
@@ -109,7 +109,7 @@ Collection names are 1 to 64 letters, digits, `_` or `-`. Names starting with `_
 
 ### Collection rules
 
-By default every viewer reads and writes every document. Per collection, `rules` narrow that: `read` is `all` or `own`, `write` is `all`, `own` or `none`, where `own` means documents the viewer created. Set them with `artifact_publish(rules={"votes": {"read": "own", "write": "own"}})` or in the Data tab. They bind the page API only: agents, owners, editors and admins are not bound, and anonymous viewers own nothing. A refused write fails with `not_allowed`.
+By default every viewer reads and writes every document. Per collection, `rules` narrow that: `read` is `all` or `own`, `write` is `all`, `own` or `none`, where `own` means documents the viewer created. Set them with `artifact_publish(rules={"votes": {"read": "own", "write": "own"}})` or in the Data tab. They bind the page API and agent tools alike: owners, editors and admins (and agents acting for them) are not bound, a member's agent is, and anonymous viewers own nothing. A refused write fails with `not_allowed`.
 
 ### Asking the agent
 

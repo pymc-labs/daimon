@@ -652,8 +652,9 @@ async def _sandbox_admin(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
     vault token from before the sweep), must not be an operator token, an
     agent key or an agent in a conversation, and its holder must be a
     verified member and admin of the Discord server on a fresh membership
-    read. Any other platform fails closed, as `watches.fresh_admin` does; the
-    operator uses the CLI there.
+    read. Any other platform fails closed; the operator uses the CLI there. (Off
+    Discord, `watches.fresh_admin` trusts the token's admin claim, but only in an
+    attended turn.)
     """
     if (
         auth.token_jti is None

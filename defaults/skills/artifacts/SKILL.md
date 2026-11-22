@@ -32,7 +32,7 @@ Publishing again with the same slug makes a new version (20 kept) and open pages
 | role | May |
 | --- | --- |
 | owner (whoever published first) and admins | everything, plus `artifact_delete`, `artifact_transfer` and `editors_can_share` |
-| editors | republish and change settings; change access, people, editors, expiry and the link unless the owner set `editors_can_share=false` (then also data, events and `data_scale` while outsiders can open the page); always leave |
+| editors | republish and change settings; change access, people, editors, expiry and the link unless the owner set `editors_can_share=false` (then also data, events and `data_scale` and `rules` while outsiders can open the page); always leave |
 
 When someone asks for a page to be shared for editing, add them to `editors`. `artifact_transfer(slug, person)` hands a page to one of its editors; the previous owner stays on as an editor.
 
@@ -96,7 +96,7 @@ const stop = db.collection('runs').orderBy('createdAt', 'desc').limit(200)
 - `merge` is shallow: a nested object replaces the stored one.
 - `orderBy` takes one top-level field; ISO timestamps sort correctly. Default order: id. `limit` is at most 1000, and also the default.
 - `onSnapshot` calls back at once, then within about 3 s of any change by anyone, while the page is visible.
-- Rules: `artifact_publish(rules={"votes": {"read": "own", "write": "own"}})` limits viewers per collection. `read`: `all` or `own`; `write`: `all`, `own` or `none`; `own` is what that viewer created, and anonymous viewers own nothing. A refused call fails with `not_allowed`. Use them for ballots and private entries; tools and managers are not bound.
+- Rules: `artifact_publish(rules={"votes": {"read": "own", "write": "own"}})` limits viewers per collection. `read`: `all` or `own`; `write`: `all`, `own` or `none`; `own` is what that viewer created, and anonymous viewers own nothing. A refused call fails with `not_allowed`. Use them for ballots and private entries; managers are not bound, and your tools follow them unless you act for a manager.
 - Limits: 64 KiB per document, 5,000 documents and 20 MiB per page (times `data_scale`), 4 MiB per list reply (`too_large`: lower `limit`), 600 calls a minute per viewer.
 
 ## Connect it to Daimon

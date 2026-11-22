@@ -37,6 +37,7 @@ from daimon.core.artifact_pages.model import (
     page_url,
 )
 from daimon.core.config import ArtifactPagesSettings
+from daimon.core.continuity.poll_tools import PAGE_DATA_TOOL
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores import watches
 from daimon.core.stores.agent_files import _cipher  # pyright: ignore[reportPrivateUsage]
@@ -131,6 +132,11 @@ async def _locked(session: AsyncSession, artifact_id: uuid.UUID) -> Artifact:
     return orm
 
 
+async def lock(session: AsyncSession, artifact: ArtifactRow) -> None:
+    """Hold the page's row until the transaction ends, so a cap counted under it holds."""
+    await _locked(session, artifact.id)
+
+
 async def _require_members(
     session: AsyncSession, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
 ) -> None:
@@ -166,6 +172,14 @@ async def tool_role(
     if not access.can_use_with_tools(artifact, role):
         return "none"
     return "viewer" if role == "none" else role
+
+
+def bound_rule(artifact: ArtifactRow, collection: str, role: Role) -> CollectionRule | None:
+    """The collection rule that binds a role, None for managers: tools act as their person,
+    so a member's agent sees and writes no more than that member's page would."""
+    return (
+        None if access.can_edit(role) else documents.rule_of(artifact.collection_rules, collection)
+    )
 
 
 def _set_settings(
@@ -907,10 +921,11 @@ async def scrub_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
 async def woken_by_outside_page(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, thread_id: str
 ) -> bool:
-    """Whether the thread's running watch turn was woken by an event from a page people
-    outside the workspace can read: such a turn may not write to another such page."""
+    """Whether the thread's running watch turn was woken by a page people outside the
+    workspace can read, by one of its events or by a poll of its data: such a turn may not
+    write to another such page."""
     woke = (
-        select(Watch.page_id)
+        select(Watch.source, Watch.page_id, Watch.source_state)
         .join(WatchFiring, WatchFiring.watch_id == Watch.id)
         .join(TaskContinuation, TaskContinuation.idempotency_key == WatchFiring.wake_key)
         .where(
@@ -922,11 +937,19 @@ async def woken_by_outside_page(
                 WatchFiring.delivery_thread_id == thread_id,
             ),
             TaskContinuation.status == "claimed",
-            Watch.source == "page_event",
+            Watch.source.in_(("page_event", "poll")),
         )
     )
-    pages = await session.scalars(select(Artifact).where(Artifact.id.in_(woke)))
-    for orm in pages:
-        if await visible_outside_workspace(session, _row(session, orm)):
+    for source, page_id, state in (await session.execute(woke)).all():
+        if source == "page_event":
+            orm = await session.get(Artifact, page_id)
+        elif state.get("tool") == PAGE_DATA_TOOL:
+            slug = state["arguments"]["slug"]
+            orm = await session.scalar(
+                select(Artifact).where(Artifact.tenant_id == tenant_id, Artifact.slug == slug)
+            )
+        else:
+            continue
+        if orm is not None and await visible_outside_workspace(session, _row(session, orm)):
             return True
     return False

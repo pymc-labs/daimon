@@ -135,7 +135,15 @@ def test_an_editor_without_sharing_may_leave_but_not_remove_others() -> None:
         access.check_change(current, others, role="editor", now=NOW, actor=EDITOR)
 
 
-@pytest.mark.parametrize("change", [{"data": "read"}, {"events": True}, {"data_scale": 2}])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"data": "read"},
+        {"events": True},
+        {"data_scale": 2},
+        {"collection_rules": {"votes": CollectionRule(read="own")}},
+    ],
+)
 def test_data_and_events_are_sharing_while_outsiders_see_the_page(
     change: dict[str, object],
 ) -> None:

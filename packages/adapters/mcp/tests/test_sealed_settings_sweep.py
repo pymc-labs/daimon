@@ -467,6 +467,19 @@ EXEMPT: dict[str, str] = {
 #: The hub mount's tools. It forwards turns to a Daimon and lists sessions; it changes no setting.
 _HUB = "forwards a turn or reads a session of a Daimon; changes no channel or agent setting"
 HUB_EXEMPT: dict[str, str] = {
+    **{
+        name: _PAGES
+        for name in (
+            "artifact_db_query",
+            "artifact_db_write",
+            "artifact_delete",
+            "artifact_list",
+            "artifact_publish",
+            "artifact_source",
+            "artifact_transfer",
+            "artifact_upload_url",
+        )
+    },
     "ask": _HUB,
     "continue_turn": _HUB,
     "describe_daimon": _HUB,

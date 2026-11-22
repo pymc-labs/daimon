@@ -57,8 +57,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 NO_PAGE: Final = "No page named {slug!r} that you can use."
 NOT_A_PERSON: Final = "Not a person in the app yet. Ask an admin to invite them."
 CROSS_PAGE: Final = (
-    "An event from a page people outside the workspace can read woke this turn, so it "
-    "cannot write to such a page. Ask a person to."
+    "An event from a page people outside the team can read woke you, so you cannot "
+    "write to such a page. Ask a person to."
 )
 SOURCE_TTL: Final = timedelta(minutes=15)
 DEFAULT_QUERY_LIMIT: Final = 100
@@ -504,14 +504,21 @@ async def query_impl(
             limits=limits,
         )
         async with runtime.session_factory() as db:
-            artifact, _ = await _usable(db, auth, slug)
+            artifact, role = await _usable(db, auth, slug)
+            rule = store.bound_rule(artifact, collection, role)
             if doc_id is None:
+                if rule is not None and rule.read == "own":
+                    query = query.model_copy(update={"created_by": auth.account_id})
                 rows = await store.list_docs(db, artifact.id, query, limits=limits)
             else:
                 one = await store.get_doc(
                     db, artifact.id, collection, documents.check_doc_id(doc_id)
                 )
-                rows = [] if one is None else [one]
+                readable = one is not None and (
+                    rule is None
+                    or documents.may_read(rule, one.created_by_account_id, auth.account_id)
+                )
+                rows = [one] if one is not None and readable else []
     body = json.dumps(
         [
             {
@@ -551,14 +558,15 @@ async def write_impl(
     now = datetime.now(UTC)
     with refusals():
         async with runtime.session_factory.begin() as db:
-            artifact, _ = await _usable(db, auth, slug)
+            artifact, role = await _usable(db, auth, slug)
             if await _woken_by_outside_page(db, auth, now) and (
                 await store.visible_outside_workspace(db, artifact)
             ):
                 raise ToolError(CROSS_PAGE)
+            rule = store.bound_rule(artifact, collection, role)
             if data is None:
                 revision = await store.delete_doc(
-                    db, artifact, collection, doc_id, rule=None, account_id=auth.account_id
+                    db, artifact, collection, doc_id, rule=rule, account_id=auth.account_id
                 )
                 return Written(revision=revision, deleted=True)
             _, revision = await store.write_doc(
@@ -569,7 +577,7 @@ async def write_impl(
                 documents.DocumentWrite(mode=mode, data=data),
                 by="agent",
                 account_id=auth.account_id,
-                rule=None,
+                rule=rule,
                 now=now,
                 limits=limits,
             )
@@ -656,6 +664,7 @@ async def create_page_watch(
             artifact, role = await _usable(db, auth, slug, watch=True)
             if not artifact.events:
                 raise ToolError(f"Page {slug!r} does not send events. Turn events on first.")
+            await store.lock(db, artifact)  # two makers cannot both pass the caps below
             live = [
                 w
                 for w in await watches.page_watches(
@@ -686,7 +695,7 @@ async def create_page_watch(
             return watch, key_id
 
 
-_TURN: Final = "Pass this active turn's origin_context_id."
+_TURN: Final = "Pass your active `origin_context_id`."
 _DOC: Final = {
     "artifact_upload_url": cleandoc(
         """
@@ -704,7 +713,7 @@ _DOC: Final = {
         Step 2 of 2 after artifact_upload_url: pass its `upload`. A new page needs an
         upload and a title; later calls without `upload` change settings only. Returns the
         page URL; give it to the user. {_TURN}
-        `access`: "workspace" (everyone in the workspace, the default), "people" (only
+        `access`: `workspace` (everyone on the team, the default), "people" (only
         `people`) or "public" (anyone with the link, which the URL carries). `people` and
         `editors` are people in the app, named by their id there, a chat user id or an
         @mention. Editors republish and change settings. `expires_in_days` takes the page
@@ -716,7 +725,8 @@ _DOC: Final = {
         lets viewers ask you from the page. `data_scale` (1-10) multiplies the data caps.
         `rules` sets what viewers may do per collection, replacing the page's rules:
         {{"votes": {{"read": "all"|"own", "write": "all"|"own"|"none"}}}}, where "own" is the
-        documents that viewer created. Owners, editors and your tools are not bound by them.
+        documents that viewer created. Owners and editors are not bound by them, and nor are
+        you when you act for one; you follow them for anyone else.
         `new_link` replaces a public page's link. Only a person's own message can publish.
         """
     ),
@@ -751,8 +761,8 @@ _DOC: Final = {
         `mode` "set" replaces the document, "merge" replaces the top-level fields you pass,
         "update" does the same to a document that must exist. Without `data` the document
         is deleted (also from `_events`). Collections starting with `_` are Daimon's and
-        cannot be written. If the page is visible outside the workspace, write nothing
-        internal to it; a turn an event from such a page woke cannot write to such a page.
+        cannot be written. If people outside the team can read the page, write nothing
+        internal to it; when an event from such a page woke you, you cannot write to one.
         Returns the new data revision.
         """
     ),
@@ -770,7 +780,7 @@ _DOC: Final = {
         """
     ),
 }
-_HUB: Final = "`daimon_id` (from list_daimons) is the Daimon whose workspace holds the page."
+_HUB: Final = "`daimon_id` (from list_daimons) is the Daimon that holds the page."
 
 
 def _hub_doc(name: str) -> str:

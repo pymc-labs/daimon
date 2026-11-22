@@ -4,6 +4,8 @@ permanent and report in new chats, and someone who doesn't manage the page holds
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -228,13 +230,22 @@ async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
 
 
 @pytest.mark.parametrize("platform", ["web", "slack", "teams"])
-async def test_an_admin_proven_in_the_turn_may_raise_the_daily_limit_off_discord(
-    platform: str,
+async def test_an_admin_is_proven_only_in_a_turn_a_person_attends(
+    platform: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = cast(Any, SimpleNamespace())
+    @asynccontextmanager
+    async def session() -> AsyncIterator[None]:
+        yield None
+
+    runtime = cast(Any, SimpleNamespace(session_factory=session))
     account, tenant = uuid.uuid4(), uuid.uuid4()
-    admin = auth_identity(account, tenant, platform=platform)
-    member = auth_identity(account, tenant, Role.USER, platform=platform)
+    chat = uuid.uuid4()
+    admin = auth_identity(account, tenant, platform=platform, chat_session_id=chat)
+    member = auth_identity(account, tenant, Role.USER, platform=platform, chat_session_id=chat)
+    unattended = SimpleNamespace(attended=False)
+    attended = SimpleNamespace(attended=True)
+    lookup = AsyncMock(return_value=attended)
+    monkeypatch.setattr(tools.turn_origins, "get_session_origin", lookup)
     for auth, ok in ((admin, True), (member, False)):
         raised = tools.admin_approval(
             runtime, auth, permanent=False, max_turns_per_day=48, check_ceiling=False
@@ -244,3 +255,8 @@ async def test_an_admin_proven_in_the_turn_may_raise_the_daily_limit_off_discord
         else:
             with pytest.raises(ToolError, match="Only an admin"):
                 await raised
+    lookup.return_value = unattended
+    with pytest.raises(ToolError, match="Only an admin"):
+        await tools.admin_approval(
+            runtime, admin, permanent=False, max_turns_per_day=48, check_ceiling=False
+        )

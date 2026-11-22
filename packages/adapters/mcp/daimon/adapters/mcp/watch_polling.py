@@ -565,11 +565,16 @@ async def read_page_data(runtime: McpRuntime, watch: WatchRow) -> JsonValue:
         page = await artifact_pages.get_by_slug(
             db, tenant_id=watch.tenant_id, slug=str(arguments["slug"])
         )
-        if page is None or (
-            await artifact_pages.tool_role(db, page, watch.owner_account_id, chat_admin=False)
-            == "none"
-        ):
+        role = (
+            "none"
+            if page is None
+            else await artifact_pages.tool_role(db, page, watch.owner_account_id, chat_admin=False)
+        )
+        if page is None or role == "none":
             raise PollAccessRevoked("Watch owner can no longer use the page")
+        rule = artifact_pages.bound_rule(page, query.collection, role)
+        if rule is not None and rule.read == "own":
+            query = query.model_copy(update={"created_by": watch.owner_account_id})
         rows = await artifact_pages.list_docs(db, page.id, query, limits=limits)
     return {"rows": [{"id": row.doc_id, "data": row.data} for row in rows]}
 

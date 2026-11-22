@@ -500,3 +500,55 @@ async def test_a_turn_woken_by_an_outside_pages_event_is_known(
     assert await store.woken_by_outside_page(
         db_session, tenant_id=binding.tenant_id, platform="discord", thread_id="9999"
     ), "a report in a new thread is the same turn"
+
+
+@pytest.mark.fresh_schema
+async def test_a_turn_woken_by_a_poll_of_an_outside_pages_data_is_known(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime.now(UTC)
+    db_session.info["crypto_keys"] = (Fernet.generate_key().decode(),)
+    binding = await watch_owner(db_session, monkeypatch)
+    page = await _publish(
+        db_session,
+        binding.tenant_id,
+        binding.requester_account_id,
+        change=PageChange(access="public", events=True),
+        now=now,
+    )
+    watch = await watches.register_poll_watch(
+        db_session,
+        binding,
+        instructions="Say when a vote lands.",
+        tool=watches.WEB_POLL_TOOL,
+        arguments={"slug": page.slug, "collection": "votes", "limit": 20},
+        projection=".rows",
+        rule="change",
+        interval=60,
+        expires_at=now + timedelta(days=1),
+        now=now,
+    )
+
+    async def poll(value: int) -> None:
+        await db_session.execute(
+            update(Watch).where(Watch.id == watch.id).values(next_check_at=now - timedelta(hours=1))
+        )
+        (claimed,) = [
+            r
+            for r in await watches.claim_poll_watches(db_session)
+            if r["watch_id"] == str(watch.id)
+        ]
+        leased = await watches.leased_poll(db_session, watch.id, claimed["lease"], now=now)
+        assert leased is not None
+        await watches.finish_poll(db_session, leased, claimed["lease"], value=value, payload="x")
+
+    await poll(1)
+    await poll(2)
+    await db_session.execute(
+        update(TaskContinuation)
+        .where(TaskContinuation.tenant_id == binding.tenant_id)
+        .values(status="claimed")
+    )
+    assert await store.woken_by_outside_page(
+        db_session, tenant_id=binding.tenant_id, platform="discord", thread_id="4242"
+    ), "the running turn came from a poll of a public page's data"

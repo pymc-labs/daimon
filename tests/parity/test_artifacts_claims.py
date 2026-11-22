@@ -7,33 +7,36 @@ from pathlib import Path
 from daimon.core.artifact_pages.content import ASSET_HOSTS
 from daimon.core.artifact_pages.model import Limits
 from daimon.core.capability_tools import CAPABILITY_TOOLS
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.page_events import MAX_EVENT_BYTES
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILL = (ROOT / "defaults/skills/artifacts/SKILL.md").read_text()
 DOCS = (ROOT / "docs/artifacts.md").read_text()
 MIB, KIB = 1024 * 1024, 1024
+LIMITS = ArtifactPagesSettings()  # the defaults the docs state
 
 SKILL_CLAIMS = (
-    f"{Limits.HTML_BYTES // MIB} MiB of HTML",
-    f"{Limits.DOCUMENT_BYTES // KIB} KiB per document",
-    f"{Limits.DOCUMENTS:,} documents and {Limits.DATA_BYTES // MIB} MiB",
-    f"{Limits.LIST_BYTES // MIB} MiB per list reply",
-    f"{Limits.EVENTS:,} events ({Limits.EVENTS_BYTES // MIB} MiB)",
-    f"{Limits.API_PER_MINUTE} calls a minute",
-    f"past {Limits.ASK_PER_MINUTE} a minute",
-    f"({Limits.VERSIONS_KEPT} kept)",
-    f"up to {MAX_EVENT_BYTES // KIB} KiB",
+    f"{LIMITS.html_bytes // MIB} MiB of HTML",
+    f"{LIMITS.document_bytes // KIB} KiB per document",
+    f"{LIMITS.documents:,} documents and {LIMITS.data_bytes // MIB} MiB",
+    f"{LIMITS.list_bytes // MIB} MiB per list reply",
+    f"{LIMITS.events:,} events ({LIMITS.events_bytes // MIB} MiB)",
+    f"{LIMITS.requests_per_minute} calls a minute",
+    f"past {LIMITS.asks_per_minute} a minute",
+    f"({LIMITS.versions_kept} kept)",
+    f"up to {LIMITS.event_bytes // KIB} KiB",
+    f"event over {MAX_EVENT_BYTES // KIB} KiB",
 )
 DOCS_CLAIMS = (
-    f"| Page HTML | {Limits.HTML_BYTES // MIB} MiB |",
-    f"| Versions kept | {Limits.VERSIONS_KEPT} |",
-    f"| One document | {Limits.DOCUMENT_BYTES // KIB} KiB |",
-    f"| Documents per page | {Limits.DOCUMENTS:,}, times",
-    f"| Data per page | {Limits.DATA_BYTES // MIB} MiB, times",
-    f"| One event | {MAX_EVENT_BYTES // KIB} KiB |",
-    f"| Page API calls | {Limits.API_PER_MINUTE} a minute",
-    f"| Questions to the agent | {Limits.ASK_PER_MINUTE} a minute |",
+    f"| Page HTML | {LIMITS.html_bytes // MIB} MiB |",
+    f"| Versions kept | {LIMITS.versions_kept} |",
+    f"| One document | {LIMITS.document_bytes // KIB} KiB |",
+    f"| Documents per page | {LIMITS.documents:,}, times",
+    f"| Data per page | {LIMITS.data_bytes // MIB} MiB, times",
+    f"| One event | {LIMITS.event_bytes // KIB} KiB |",
+    f"| Page API calls | {LIMITS.requests_per_minute} a minute",
+    f"| Questions to the agent | {LIMITS.asks_per_minute} a minute |",
     f"| People and editors | {Limits.PEOPLE} and {Limits.EDITORS} |",
 )
 

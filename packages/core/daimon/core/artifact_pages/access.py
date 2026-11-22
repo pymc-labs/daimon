@@ -4,10 +4,10 @@ Roles follow Google Drive: the owner and workspace admins do everything; editors
 republish and change settings, and change sharing unless `editors_can_share` is off;
 only the owner and admins delete, transfer or turn editor sharing off. An editor may
 always leave. While editors may not share, a page seen outside the workspace keeps its
-data, events and data scale too: those decide what outsiders may do. A public page's
-viewers are anonymous, so it cannot take their data writes, cannot both read data and
-send events (an event could talk an agent into writing what the sender reads back), and
-cannot ask (no person to run the turn as).
+data, events, data scale and collection rules too: those decide what outsiders may do.
+A public page's viewers are anonymous, so it cannot take their data writes, cannot both
+read data and send events (an event could talk an agent into writing what the sender reads
+back), and cannot ask (no person to run the turn as).
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def check_change(
         raise ArtifactError("forbidden", ASK_OWNER)
     sharing = ["access", "people", "editors", "expires_at"]
     if outside:
-        sharing += ["data", "events", "data_scale"]
+        sharing += ["data", "events", "data_scale", "collection_rules"]
     leaving = tuple(e for e in current.editors if e != actor)
     changed = [k for k in sharing if getattr(current, k) != getattr(new, k)]
     if changed == ["editors"] and new.editors == leaving:

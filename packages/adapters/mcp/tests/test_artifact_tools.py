@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools.artifacts import (
     write_impl,
 )
 from daimon.core.artifact_pages.access import PageChange
+from daimon.core.artifact_pages.documents import CollectionRule, DocumentWrite
 from daimon.core.artifact_pages.keys import page_event_key
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.page_events import sign_page_event
@@ -393,6 +394,77 @@ async def test_query_reads_one_document_with_who_changed_it_and_its_revision(wor
     )
     body = json.loads(html.unescape(seen).splitlines()[-2])
     assert [(d["id"], d["updated_by"], d["revision"]) for d in body] == [("b", "agent", 2)], body
+
+
+async def test_a_members_agent_follows_the_collection_rules_a_manager_is_free_of(
+    world: World,
+) -> None:
+    """Tools act as their person: a member's agent reads only that member's documents of
+    an `own` collection and cannot write another's, while the page's owner sees all."""
+    await put_page(world, collection_rules={"votes": CollectionRule(read="own", write="own")})
+    for doc_id in ("ada", "bob"):
+        await write_impl(
+            world.runtime,
+            world.auth,
+            slug="votes",
+            collection="votes",
+            doc_id=doc_id,
+            data={"by": doc_id},
+            mode="set",
+        )
+    async with world.factory.begin() as db:
+        member = await make_account(db, tenant=world.tenant)
+        await make_platform_principal(
+            db, platform="discord", external_id="456", tenant=world.tenant, account=member
+        )
+        await store.write_doc(
+            db,
+            (await store.get_by_slug(db, tenant_id=world.tenant.id, slug="votes")),  # type: ignore[arg-type]
+            "votes",
+            "mine",
+            DocumentWrite(data={"by": "member"}),
+            by="member",
+            account_id=member.id,
+            rule=None,
+            now=datetime.now(UTC),
+            limits=LIMITS,
+        )
+    theirs = auth_identity(
+        member.id,
+        world.tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="456",
+        external_id=world.tenant.external_id,
+        chat_session_id="grant",
+    )
+
+    async def ids(auth: AuthIdentity, doc_id: str | None = None) -> list[str]:
+        seen = await query_impl(
+            world.runtime,
+            auth,
+            slug="votes",
+            collection="votes",
+            order_by=None,
+            descending=False,
+            limit=None,
+            doc_id=doc_id,
+        )
+        return [d["id"] for d in json.loads(html.unescape(seen).splitlines()[-2])]
+
+    assert sorted(await ids(world.auth)) == ["ada", "bob", "mine"], "a manager reads all"
+    assert await ids(theirs) == ["mine"], "a member reads only their own"
+    assert await ids(theirs, "ada") == [], "and not another's by id"
+    with pytest.raises(ToolError, match="only their own"):
+        await write_impl(
+            world.runtime,
+            theirs,
+            slug="votes",
+            collection="votes",
+            doc_id="ada",
+            data={"by": "member"},
+            mode="set",
+        )
 
 
 async def test_a_turn_an_outside_pages_event_woke_cannot_write_to_an_outside_page(

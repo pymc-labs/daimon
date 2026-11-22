@@ -256,7 +256,8 @@ async def test_stopped_or_expired_watches_refuse(db_session_factory, link):
     assert await count(db_session_factory, "watch_inbox") == 0
 
 
-async def test_only_an_admin_makes_a_page_watch_permanent(db_session_factory, link):
+async def test_a_page_watch_may_be_permanent_without_an_admin(db_session_factory, link):
+    """A page watch ends with its page, so it needs no admin approval to have no expiry."""
     watch, _ = link
     assert watch.expires_at is not None
     async with db_session_factory.begin() as db:
@@ -273,17 +274,17 @@ async def test_only_an_admin_makes_a_page_watch_permanent(db_session_factory, li
             reason="watch_fired",
             idempotency_key=uuid.uuid4(),
         )
-        with pytest.raises(ValueError, match="permanent"):
-            await watches.register_page_watch(
-                db,
-                binding,
-                instructions="x",
-                page_id=uuid.uuid4(),
-                expires_at=None,
-                now=datetime.now(UTC),
-                source="page_event",
-                permanent_approved_by=watch.owner_account_id,
-            )
+        permanent = await watches.register_page_watch(
+            db,
+            binding,
+            instructions="x",
+            page_id=uuid.uuid4(),
+            expires_at=None,
+            now=datetime.now(UTC),
+            source="page_event",
+        )
+    assert permanent.expires_at is None, "a page watch may have no expiry"
+    assert permanent.permanent_approved_by is None, "and needs no admin to say so"
 
 
 def _manifest_watch(**kw):

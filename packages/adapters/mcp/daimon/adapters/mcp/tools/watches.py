@@ -63,7 +63,7 @@ from daimon.core.mcp_tool_call import McpCallError
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.stores import artifact_pages, mux_state, watches, web_people
+from daimon.core.stores import artifact_pages, mux_state, turn_origins, watches, web_people
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, dm_enabled
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
@@ -249,12 +249,33 @@ async def private_key_delivery(
     )
 
 
+async def _in_attended_turn(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """Whether a person is in the calling turn: a watch, routine or ask turn has no one
+    there, however admin its token's owner. A web turn's origin is under `web`."""
+    if auth.chat_session_id is None:
+        return False
+    async with runtime.session_factory() as db:
+        for platform in {auth.platform or "web", "web"}:
+            origin = await turn_origins.get_session_origin(
+                db,
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                platform=platform,
+                chat_session_id=auth.chat_session_id,
+                now=datetime.now(UTC),
+            )
+            if origin is not None:
+                return origin.attended
+    return False
+
+
 async def fresh_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
-    """An admin now: Discord looks it up afresh; web, Slack and Teams prove it in the turn."""
+    """An admin now: Discord looks it up afresh; web, Slack and Teams take the token's
+    admin claim, but only in a turn a person is attending."""
     if not auth.admin_for():
         return False
     if auth.platform in ("web", "slack", "teams"):
-        return True
+        return await _in_attended_turn(runtime, auth)
     if auth.platform != "discord" or auth.platform_user_id is None:
         return False
     subject = await resolve_subject(
@@ -347,7 +368,7 @@ async def owner_principal(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id
         )
         if person is None or person.kind == "visitor":
-            raise ToolError("Only members of this workspace can make a watch.")
+            raise ToolError("Only members of this team can make a watch.")
         platform, external_id = await linked_identity(db, person)
     return None if platform == "web" else cast(ChatPlatform, platform), external_id
 
@@ -1281,8 +1302,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         empty. A page watch reports in this thread, or with "new_thread" in a new thread
         per report. `permanent=true` needs no admin for a page watch, which still ends
         with its page. A page holds up to 5 watches; someone who does not manage it holds
-        one. Page watches work on every platform. Other sources need Discord, except a
-        poll of artifact_db_query from the Daimon app.
+        one. Page watches work in every chat. Other sources are offered only where the
+        deployment supports them, and a poll of artifact_db_query also works in the Daimon app.
 
         Binds the current human owner, tenant, agent and exact thread.
         `delivery` says where each report goes: "thread" (this thread, the default),
@@ -1465,7 +1486,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags=WATCH_PLATFORMS)
     async def pause_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
-        """Pause your watch and cancel its queued wakes. Workspace admins may pause another
+        """Pause your watch and cancel its queued wakes. Admins may pause another
         owner's watch.
         """
         return await manage_watch_impl(runtime, await _auth(ctx), watch_id=watch_id, action="pause")
