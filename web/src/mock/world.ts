@@ -47,6 +47,7 @@ const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString
 export const SESSIONS: Record<string, ChatSession[]> = {
   p_maya: [
     { id: "s_ask_runsheet", title: "Content run sheet", agent: agent("ag_default"), updated_at: hoursAgo(0.1), artifact: { id: "k4rm7q2xdn", title: "Content run sheet" } },
+    { id: "s_watch_req", title: "Watch report: New run requests", agent: agent("ag_default"), updated_at: hoursAgo(0.07) },
     { id: "s_runsheet", title: "Build a run sheet for the content team", agent: agent("ag_default"), updated_at: hoursAgo(2.5) },
     { id: "s_q3", title: "Q3 media mix readout for Larkspur", agent: agent("ag_mmm"), updated_at: hoursAgo(0.3) },
     { id: "s_churn", title: "Cobalt churn model priors", agent: agent("ag_default"), updated_at: hoursAgo(3) },

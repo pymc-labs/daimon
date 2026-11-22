@@ -78,6 +78,7 @@ const artifacts: Stored[] = [
     watches: [
       { id: "w_req", name: "New run requests", owner: "Maya Lindqvist", agent: "Daimon", status: "active", turns_today: 3, max_turns_per_day: 50, thread_url: "/chat/s_runsheet" },
       { id: "w_stage", name: "Stage changes to Review", owner: "Jonas Weber", agent: "Daimon", status: "paused", turns_today: 0, max_turns_per_day: 20, thread_url: null },
+      { id: "w_done", name: "Requests marked done", owner: "Maya Lindqvist", agent: "Daimon", status: "paused", turns_today: 0, max_turns_per_day: 20, thread_url: null },
     ],
     asks: { threads: 4, turns_7d: 17 },
   }),
@@ -138,6 +139,13 @@ export function artifactThread(sid: string): Msg[] | null {
         steps: [{ id: "a", label: "Wrote page", detail: "content-run-sheet, 38 KB", status: "done", ms: 5_200 }, { id: "b", label: "Published artifact", detail: "version 7", status: "done", ms: 640 }],
       },
     ]
+  }
+  if (sid === "s_watch_req") {
+    return [{
+      id: "m_wr_1", role: "assistant", created_at: at(4), cost_usd: 0.03, ms: 3_900, feedback: null,
+      content: "Tom Okafor requested a new run on the **Content run sheet**: \"Add a podcast clip run for the pricing episode\".\n\nIt is the only open request from this week. No run is planned for the pricing episode yet.",
+      steps: [{ id: "a", label: "Read page data", detail: "requests, 3 documents", status: "done", ms: 410 }],
+    }]
   }
   if (sid === "s_ask_runsheet") {
     return [
