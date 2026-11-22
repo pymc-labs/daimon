@@ -30,7 +30,7 @@ from daimon.core.pricing import (
 from daimon.core.release import current_release
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TurnState, tool_errors_by_server
 from daimon.core.turn.termination import (
     USER_VISIBLE_FAILURES,
     TerminationReason,
@@ -296,6 +296,7 @@ class TurnObservation:
             failed = resolved in USER_VISIBLE_FAILURES
             duration_ms = max(0, int((time.monotonic() - self._started) * 1000))
             tenant = str(self.tenant_id) if self.tenant_id is not None else None
+            tool_errors = tool_errors_by_server(state.content) if state else {}
             # The denominator for failure-rate alerts: every answered turn, not only failures.
             log.info(
                 "turn.finished",
@@ -308,7 +309,23 @@ class TurnObservation:
                 agent_id=self.agent_id,
                 duration_ms=duration_ms,
                 recovered=recovered,
+                tool_errors=sum(tool_errors.values()),
             )
+            # One event per server per turn, however many of its calls failed.
+            for server in tool_errors:
+                report_ops_event(
+                    self.sessionmaker,
+                    OpsEvent(
+                        "bridge.tool_errors",
+                        self.tenant_id,
+                        agent_id=self.agent_id,
+                        platform=self.platform,
+                        channel_id=self.channel_id,
+                        thread_id=self.thread_id,
+                        session_id=self.session_id,
+                        subject_key=server,
+                    ),
+                )
             if failed:
                 log.warning(
                     "turn.user_failure",

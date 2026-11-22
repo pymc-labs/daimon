@@ -25,7 +25,9 @@ from daimon.core.ops_overview import (
 )
 from daimon.core.stores import ops_events as store
 from daimon.core.stores.domain import OpsIssueGroupRow, OpsIssueStateRow
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
+from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -177,6 +179,44 @@ async def test_a_failed_turn_leaves_an_event_and_a_direct_message_is_its_own_are
     assert [(g.latest.code, g.latest.area, g.latest.reason) for g in groups] == [
         ("turn.failed", "dm", "upstream")
     ], "only the failed turn, in the direct message area"
+
+
+async def test_failed_bridged_tool_calls_make_one_event_per_server_per_turn(
+    db_session: AsyncSession, db_engine: AsyncEngine
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    def call(server: str, *, failed: bool) -> ToolUseBlock:
+        return ToolUseBlock(
+            kind="tool_use",
+            id=str(uuid.uuid4()),
+            type="agent.mcp_tool_use",
+            name="search",
+            input={},
+            mcp_server_name=server,
+            status="failed" if failed else "complete",
+            is_error=failed,
+        )
+
+    content: list[ContentBlock] = [
+        call("crm", failed=True),
+        call("crm", failed=True),
+        call("docs", failed=False),
+        call(DAIMON_SERVER_NAME, failed=True),
+    ]
+    TurnObservation(sm, tenant.id, "discord").finish(state=TurnState(content=content))
+    await drain_outcomes()
+    await drain_ops_events()
+    async with sm() as session:
+        groups = await store.list_issue_groups(
+            session, tenant_id=tenant.id, since=datetime.now(UTC) - timedelta(hours=1)
+        )
+
+    assert [(g.latest.code, g.latest.subject_key, g.events) for g in groups] == [
+        ("bridge.tool_errors", "crm", 1)
+    ], "one event for the failing server; working servers and daimon's own refusals add none"
 
 
 async def test_an_event_that_cannot_be_written_is_swallowed(
