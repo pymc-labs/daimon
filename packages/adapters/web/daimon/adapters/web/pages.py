@@ -641,10 +641,13 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             # An older version is for those who manage the page (its version history).
             number = v if v is not None and can_edit(role) else artifact.current_version
             version = await artifact_store.get_version(db, artifact.id, number)
-            # A manager's preview captures a version's thumbnail once.
+            # A manager's preview captures a version's thumbnail once, and only of a page
+            # that shows no data or thread: the picture is stored for everyone who can open it.
             capture = (
                 version is not None
                 and can_edit(role)
+                and artifact.data == "off"
+                and not artifact.ask
                 and not await thumbnails_store.has_thumbnail(db, artifact.id, version.version)
             )
         if version is None:

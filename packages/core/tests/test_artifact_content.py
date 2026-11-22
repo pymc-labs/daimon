@@ -36,9 +36,8 @@ def test_a_per_page_content_host_serves_only_its_own_pages_content(
 
 def test_without_a_content_host_content_stays_on_the_app() -> None:
     assert route_host(APP, PAGE, public_netloc=APP, content=None) == "serve"
-    single = ContentHost.parse("https://pages.example.net:443/")
-    assert single.origin("abcdefgh23") == "https://pages.example.net"
-    assert route_host("pages.example.net", PAGE, public_netloc=APP, content=single) == "serve"
+    host = ContentHost.parse("https://{id}.pages.example.net:443/")
+    assert host.origin("abcdefgh23") == "https://abcdefgh23.pages.example.net"
 
 
 def _png(width: int, height: int) -> bytes:

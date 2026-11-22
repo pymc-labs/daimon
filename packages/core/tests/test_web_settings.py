@@ -128,9 +128,16 @@ def test_a_node_error_never_echoes_its_client_secret(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.parametrize(
     "url",
-    ["https://pages.example.com", "https://{id}.app.example.com", "http://pages.example.net"],
+    [
+        "https://pages.example.com",
+        "https://pages.example.net",
+        "https://{id}.app.example.com",
+        "http://{id}.pages.example.net",
+    ],
 )
-def test_page_content_never_shares_the_apps_site(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+def test_page_content_is_one_host_per_page_off_the_apps_site(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
     monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
     monkeypatch.setenv("DAIMON_WEB__ARTIFACT_CONTENT_URL", url)
     with pytest.raises(ValidationError, match="ARTIFACT_CONTENT_URL"):

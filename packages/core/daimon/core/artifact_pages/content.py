@@ -1,7 +1,7 @@
 """A page's HTML as served: runtime injected first, sandbox policy around it.
 
-Page code runs in a sandboxed frame on an origin other than the app's: a content host of
-its own (`ContentHost`), else an opaque one. Either way it can never use the web
+Page code runs in a sandboxed frame on an origin other than the app's: a content host per
+page (`ContentHost`), else an opaque one. Either way it can never use the web
 session cookie, call the web API or read other pages. Its only way out is the runtime's
 postMessage bridge to the shell, which the server checks on every call.
 `connect-src 'none'` keeps data from leaving; libraries, fonts and images load from
@@ -30,11 +30,12 @@ ASSET_HOSTS: Final = (
     "https://cdnjs.cloudflare.com",
     "https://unpkg.com",
 )
-# Video and document players, which need a real origin: only with a content host.
-PLAYER_HOSTS: Final = (
-    "https://www.youtube.com",
-    "https://www.youtube-nocookie.com",
-    "https://drive.google.com",
+# Video and document players, which need a real origin: only with a content host. Paths
+# only, since a whole host may carry a fetch proxy (Drive's /viewerng/viewer?url=).
+PLAYER_FRAMES: Final = (
+    "https://www.youtube.com/embed/",
+    "https://www.youtube-nocookie.com/embed/",
+    "https://drive.google.com/file/",
 )
 # Never allow-top-navigation, and no popups: links and window.open go to the shell,
 # which asks before opening another site. allow-same-origin only on a content host.
@@ -46,32 +47,28 @@ HostRoute = Literal["serve", "redirect", "not_found"]
 
 @dataclass(frozen=True)
 class ContentHost:
-    """`DAIMON_WEB__ARTIFACT_CONTENT_URL`: one host, or one per page (`{id}.` first)."""
+    """`DAIMON_WEB__ARTIFACT_CONTENT_URL`: `https://{id}.pages.example.net`, one host per
+    page, so no two pages share an origin."""
 
     scheme: str
     netloc: str  # lowercase host[:port], without a default port or the `{id}.` label
-    per_page: bool
 
     @classmethod
     def parse(cls, url: str) -> ContentHost:
         parts = urlsplit(url.strip())
-        host = (parts.hostname or "").lower()
+        host = (parts.hostname or "").lower().removeprefix("{id}.")
         port = parts.port
         suffix = "" if port is None or port == _DEFAULT_PORTS.get(parts.scheme) else f":{port}"
-        per_page = host.startswith("{id}.")
-        return cls(parts.scheme, host.removeprefix("{id}.") + suffix, per_page)
+        return cls(parts.scheme, host + suffix)
 
     def netloc_of(self, public_id: str) -> str:
-        return f"{public_id}.{self.netloc}" if self.per_page else self.netloc
+        return f"{public_id}.{self.netloc}"
 
     def origin(self, public_id: str) -> str:
         return f"{self.scheme}://{self.netloc_of(public_id)}"
 
     def page_of(self, netloc: str) -> str | None:
-        """For a request's host: `""` on a single content host, the page's id on a per-page
-        one, None when the host is not the content host."""
-        if not self.per_page:
-            return "" if netloc == self.netloc else None
+        """For a request's host: the page's id, None when the host is not a page's."""
         label, dot, rest = netloc.partition(".")
         ok = dot and rest == self.netloc and re.fullmatch(r"[a-z2-7]{10}", label)
         return label if ok else None
@@ -87,7 +84,7 @@ def route_host(
     page = None if content is None else content.page_of(netloc)
     if page is not None:
         found = _CONTENT_PATH.fullmatch(path)
-        return "serve" if found and page in ("", found[1]) else "not_found"
+        return "serve" if found and page == found[1] else "not_found"
     if not path.startswith("/a/"):
         return "serve"
     if netloc != public_netloc:
@@ -123,7 +120,7 @@ def content_policy(
     host gives the page a real origin (`allow-same-origin`), which the players need."""
     hosts = " ".join((*ASSET_HOSTS, *asset_hosts))
     sandbox = f"{SANDBOX} allow-same-origin" if content_host else SANDBOX
-    frames = " ".join(PLAYER_HOSTS) if content_host else "'none'"
+    frames = " ".join(PLAYER_FRAMES) if content_host else "'none'"
     return "; ".join(
         (
             f"sandbox {sandbox}",

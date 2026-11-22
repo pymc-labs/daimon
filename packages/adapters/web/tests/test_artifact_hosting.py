@@ -18,7 +18,7 @@ from httpx import AsyncClient, Response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN
-from .artifact_support import page_client, publish, team
+from .artifact_support import HTML, page_client, publish, team
 from .chat_support import build_turns, funded_workspace, one_session, sse_frames
 from .conftest import web_settings
 
@@ -93,7 +93,11 @@ async def test_a_content_host_gives_each_page_its_own_origin_and_serves_nothing_
     )
     assert content.status_code == 200, content.text
     csp = content.headers["content-security-policy"]
-    assert "allow-same-origin" in csp and "https://www.youtube-nocookie.com" in csp, csp
+    assert "allow-same-origin" in csp, csp
+    assert (
+        "frame-src https://www.youtube.com/embed/ https://www.youtube-nocookie.com/embed/ " in csp
+    )
+    assert "https://drive.google.com/file/;" in csp and "drive.google.com;" not in csp, csp
     assert "frame-ancestors https://web.example.com;" in csp and "connect-src 'none'" in csp, csp
     assert content.headers["referrer-policy"] == "strict-origin"
     assert "x-frame-options" not in content.headers, "frame-ancestors names the shell's origin"
@@ -241,6 +245,11 @@ async def test_a_managers_preview_sets_a_thumbnail_everyone_who_opens_the_page_s
         refused = await client.put(url, content=_png(64, 40), headers=headers)
         shown = await client.get(url)
         none = await client.get(f"/api/artifacts/{page.id}/versions/2/thumbnail")
+    await publish(db_session_factory, t.owner, html=HTML + "<!-- v2 -->")
+    async with page_client(db_session_factory, t.member) as client:
+        old_for_viewer = await client.get(url)
+    async with page_client(db_session_factory, t.owner) as client:
+        old_for_manager = await client.get(url)
 
     assert before == url and after is None, "captured once, by a manager's preview"
     assert bad.status_code == 422 and huge.status_code == 422, "only a thumbnail-sized PNG"
@@ -250,3 +259,16 @@ async def test_a_managers_preview_sets_a_thumbnail_everyone_who_opens_the_page_s
     assert shown.headers["content-type"] == "image/png"
     assert shown.headers["x-content-type-options"] == "nosniff"
     assert none.status_code == 404
+    assert old_for_viewer.status_code == 404, "older versions are for those who manage the page"
+    assert old_for_manager.status_code == 200
+
+
+async def test_a_page_with_data_or_asks_is_never_captured(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    t = await team(db_session_factory)
+    async with page_client(db_session_factory, t.owner) as client:
+        for slug, change in (("data", {"data": "read"}), ("asks", {"ask": True})):
+            page = await publish(db_session_factory, t.owner, slug=slug, **change)
+            thumbnail = _bridge(await client.get(_path(page)))["thumbnail"]
+            assert thumbnail is None, f"a page with {slug} shows data the picture would keep"

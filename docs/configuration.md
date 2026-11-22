@@ -1221,10 +1221,10 @@ public URL is localhost or a loopback address.
 
 `str | None` · optional · default unset
 
-Where artifact page code runs, on a site other than the public URL's: a host
-(`https://pages.example.com`) or, recommended, a host per page
-(`https://{id}.pages.example.com`, a wildcard DNS record and certificate). Pages can
-then embed YouTube and Drive players. Unset: an opaque sandbox.
+Where artifact page code runs: a host per page (`https://{id}.pages.example.com`, a
+wildcard DNS record and certificate) on a domain of its own, other than the public
+URL's. Pages can then keep storage and embed YouTube and Drive players. Unset: an opaque
+sandbox.
 
 ### `DAIMON_WEB__ARTIFACT_ASSET_HOSTS`
 

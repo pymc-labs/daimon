@@ -2,8 +2,9 @@
 to a page's asks, and the version thumbnails the list and chat cards show.
 
 A thumbnail is captured in a manager's browser while they preview the version (the shell
-asks the page's runtime for it), so only managers may set one; anyone who can open the
-page may see it.
+asks the page's runtime for it, only for a page with no data and no asks), so only
+managers may set one. Anyone who can open the page sees the current version's; older
+ones are for managers.
 """
 
 from __future__ import annotations
@@ -68,7 +69,9 @@ def artifact_viewing_router(runtime: WebRuntime) -> APIRouter:
     async def get_thumbnail(artifact_id: uuid.UUID, version: int, caller: Viewer) -> Response:  # pyright: ignore[reportUnusedFunction]
         async with runtime.pages_db() as db:
             artifact = await load(db, caller, artifact_id)
-            await manages(db, caller, artifact)
+            manager = await manages(db, caller, artifact)
+            if not manager and version != artifact.current_version:
+                raise HTTPException(status_code=404, detail="No thumbnail yet.")
             png = await thumbnails_store.get_thumbnail(db, artifact.id, version)
         if png is None:
             raise HTTPException(status_code=404, detail="No thumbnail yet.")
