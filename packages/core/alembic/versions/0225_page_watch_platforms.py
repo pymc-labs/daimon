@@ -5,8 +5,11 @@ A web watch reports into a web thread but runs as the owner's linked chat princi
 page and poll ports join the principal on it. A page watch may be permanent (it still ends
 with its page) and may report into a new thread per firing, which needs no live session.
 
-downgrade: unsupported
+downgrade: destructive
 """
+
+import importlib.util
+from pathlib import Path
 
 import sqlalchemy as sa
 from alembic import op
@@ -355,5 +358,54 @@ def upgrade() -> None:
     op.execute(f"REVOKE CREATE ON SCHEMA {schema} FROM daimon_watch_ingress_owner")
 
 
+def _frozen_0164() -> tuple[str, str]:
+    """0164's poll and page function bodies, which this revision replaced."""
+    path = Path(__file__).with_name("0164_watch_lifetime_caps.py")
+    spec = importlib.util.spec_from_file_location("frozen_0164_watch_lifetime_caps", path)
+    assert spec is not None and spec.loader is not None, "0164 is a file beside this one"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.POLL_SQL, module.PAGE_SQL
+
+
 def downgrade() -> None:
-    raise NotImplementedError("Web, permanent and new-thread page watches must be retained")
+    """Back to Discord-only, expiring, thread-delivery page watches; refused while any
+    other kind exists, since the old constraints and functions cannot hold them."""
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    bind = op.get_bind()
+    kept = bind.scalar(
+        sa.text(
+            "SELECT count(*) FROM watches WHERE principal_platform IS NOT NULL OR platform = 'web'"
+            " OR (source = 'page_event' AND (expires_at IS NULL OR delivery <> 'thread'))"
+        )
+    )
+    if kept:
+        raise NotImplementedError("Web, permanent and new-thread page watches must be retained")
+    schema = bind.dialect.identifier_preparer.quote_schema(
+        bind.scalar(sa.text("SELECT current_schema()"))
+    )
+    op.drop_constraint("ck_watches_delivery_source", "watches", type_="check")
+    op.create_check_constraint(
+        "ck_watches_delivery_source",
+        "watches",
+        "delivery = 'thread' OR source IN ('poll', 'mcp_poll', 'callback')",
+    )
+    op.drop_constraint("ck_watches_permanent", "watches", type_="check")
+    op.create_check_constraint(
+        "ck_watches_permanent",
+        "watches",
+        "expires_at IS NOT NULL OR source = 'callback' OR "
+        "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",
+    )
+    for sql in _frozen_0164():
+        op.execute(sql.format(schema=schema))
+    op.execute(
+        f"REVOKE ALL ON FUNCTION {schema}.{POLL_SIGNATURE} "
+        "FROM PUBLIC,daimon_sidecar,daimon_watch_ingress_owner"
+    )
+    op.execute(f"GRANT CREATE ON SCHEMA {schema} TO daimon_watch_ingress_owner")
+    op.execute(f"REVOKE ALL ON FUNCTION {schema}.{PAGE_SIGNATURE} FROM PUBLIC")
+    op.execute(f"ALTER FUNCTION {schema}.{PAGE_SIGNATURE} OWNER TO daimon_watch_ingress_owner")
+    op.execute(f"GRANT EXECUTE ON FUNCTION {schema}.{PAGE_SIGNATURE} TO daimon_sidecar")
+    op.execute(f"REVOKE CREATE ON SCHEMA {schema} FROM daimon_watch_ingress_owner")
+    op.drop_column("watches", "principal_platform")
