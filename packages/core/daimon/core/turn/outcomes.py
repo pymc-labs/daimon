@@ -17,6 +17,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEv
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.context_prompt import TurnContext
 from daimon.core.model_presets import OPUS, OPUS_FAST
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.pricing import (
     MODEL_PRICING,
     ProviderPrice,
@@ -115,6 +116,8 @@ class TurnObservation:
     alertable: bool = field(default=True, kw_only=True)
     """False for a turn nobody asked for (an unprompted reply): its failure is
     recorded in the outcome row but never logged as `turn.user_failure`."""
+    is_dm: bool = field(default=False, kw_only=True)
+    """Set at session binding; logged on `turn.finished` and `turn.user_failure`."""
     eval_key: dict[str, JsonValue] | None = field(default=None, kw_only=True)
     """`EvalKey.to_json()` of what the turn ran with; None where nothing set it."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
@@ -308,6 +311,23 @@ class TurnObservation:
                 turn_id=str(self.id),
                 tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
             )
+            # The line above is what the log-based metric counts, so the event is not logged twice.
+            report_ops_event(
+                self.sessionmaker,
+                OpsEvent(
+                    "turn.failed",
+                    self.tenant_id,
+                    reason=resolved.value,
+                    area="dm" if self.is_dm else None,
+                    agent_id=self.agent_id,
+                    account_id=self.account_id,
+                    platform=self.platform,
+                    channel_id=self.channel_id,
+                    thread_id=self.thread_id,
+                    session_id=self.session_id,
+                ),
+                logged=False,
+            )
         samples = self._counted_samples()
 
         def total(getter: Callable[[UsageSample], int | None]) -> int | None:
@@ -377,6 +397,7 @@ class TurnObservation:
             unpriced_calls=unpriced_calls,
             billing_posture=posture,
             eval_key=self.eval_key,
+            is_dm=self.is_dm,
         )
         if not self.usage_available:
             # SDK polling/dispatch paths have outcomes but do not consume model spans.

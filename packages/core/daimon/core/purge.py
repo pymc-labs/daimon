@@ -197,6 +197,7 @@ class PurgeReport(BaseModel):
     lead_intakes: int = 0
     web_people: int = 0
     monitored_events: int = 0
+    ops_events: int = 0
     web_admin_grants: int = 0
     # The account's private provider slots and what hangs off them (stores.mux_erasure).
     mux_slots: int = 0

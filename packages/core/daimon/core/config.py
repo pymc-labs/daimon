@@ -2992,6 +2992,17 @@ class MonitoringSettings(BaseModel):
     )
 
 
+class OpsEventsSettings(BaseModel):
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a failure or warning shown on the admin Issues page is kept before the "
+            "scheduler deletes it, default 30."
+        ),
+    )
+
+
 class ProviderLimitsSettings(BaseModel):
     """How many turns one provider key serves at once (`DAIMON_PROVIDER_LIMITS__*`)."""
 
@@ -3058,6 +3069,7 @@ class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    ops_events: OpsEventsSettings = Field(default_factory=OpsEventsSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,

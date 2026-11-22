@@ -185,6 +185,7 @@ TAIL = (
     "0221_routine_delivery_hold",
     "0222_secret_shares",
     "0223_dm_watch_delivery",
+    "0224_ops_events",
 )
 HEAD = TAIL[-1]
 

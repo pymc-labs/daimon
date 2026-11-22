@@ -37,6 +37,7 @@ LinkKey = Literal[
     "routine",
     "skill",
     "environment",
+    "overview",
     "person",
     "invites",
     "audit",
@@ -68,6 +69,7 @@ DEEP_LINKS: Final[Mapping[LinkKey, DeepLink]] = {
     "routine": DeepLink("/routines", "routine", "routines", "routines.view"),
     "skill": DeepLink("/agents/skills/{id}", None, "agents", "workspace.manage"),
     "environment": DeepLink("/agents/environments", "env", "agents", "workspace.manage"),
+    "overview": DeepLink("/admin", None, "admin", "audit.view"),
     "person": DeepLink("/admin/people", "person", "admin", "people.manage"),
     "invites": DeepLink("/admin/invites", "invite", "admin", "people.manage"),
     "audit": DeepLink("/admin/audit", None, "admin", "audit.view"),
@@ -200,7 +202,7 @@ class TenantLinks:
             "spend": self._path("spend"),
             "integrations": self._path("integrations"),
             "github": self._path("github"),
-            "admin": self._path("person"),
+            "admin": self._path("overview"),
         }
         pages = {key: path for key, path in found.items() if path is not None}
         pages["profile"] = "/profile"
