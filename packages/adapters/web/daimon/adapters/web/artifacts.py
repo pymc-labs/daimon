@@ -161,7 +161,8 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
         watches = [
             w
             for w in await watches_store.list_tenant_watches(db, tenant_id=tenant_id, now=now)
-            if w.watch.page_id == artifact.id
+            if can_edit(role)  # viewers see the page's Details only
+            and w.watch.page_id == artifact.id
             and w.watch.source == "page_event"
             and w.watch.status in ("active", "paused")
         ]
@@ -324,7 +325,8 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/{artifact_id}/versions")
     async def versions(artifact_id: uuid.UUID, caller: Caller) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
         async with runtime.sessionmaker() as db:
-            artifact, _ = await load(db, caller, artifact_id)
+            artifact, role = await load(db, caller, artifact_id)
+            require(can_edit(role))  # versions, data and events are for those who manage it
             found = await artifact_store.list_versions(db, artifact.id)
             people = await people_of(
                 db,
@@ -374,7 +376,8 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/{artifact_id}/data")
     async def collections(artifact_id: uuid.UUID, caller: Caller) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
         async with runtime.sessionmaker() as db:
-            artifact, _ = await load(db, caller, artifact_id)
+            artifact, role = await load(db, caller, artifact_id)
+            require(can_edit(role))
             found = await artifact_store.list_collections(db, artifact.id)
         return [
             {"name": c.name, "documents": c.documents, "bytes": c.bytes}
@@ -387,7 +390,8 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
         artifact_id: uuid.UUID, collection: str, caller: Caller, after: str | None = None
     ) -> JSONResponse:
         async with runtime.sessionmaker() as db:
-            artifact, _ = await load(db, caller, artifact_id)
+            artifact, role = await load(db, caller, artifact_id)
+            require(can_edit(role))
             try:
                 query = build_list_query(
                     check_page_collection(collection), limit=_DOCS_PAGE, after=after
@@ -442,7 +446,8 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/{artifact_id}/events")
     async def events(artifact_id: uuid.UUID, caller: Caller) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
         async with runtime.sessionmaker() as db:
-            artifact, _ = await load(db, caller, artifact_id)
+            artifact, role = await load(db, caller, artifact_id)
+            require(can_edit(role))
             query = build_list_query(
                 EVENTS_COLLECTION, order_by="at", descending=True, limit=_EVENTS_SHOWN
             )

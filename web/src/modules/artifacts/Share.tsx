@@ -55,9 +55,10 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
 )
 
 /** The people picker: searches the workspace; chips keep the names of everyone picked. */
-function People({ value, onChange, label, locked }: { value: PersonRef[]; onChange: (p: PersonRef[]) => void; label: string; locked?: string[] }) {
+function People({ value, onChange, label, locked, members }: { value: PersonRef[]; onChange: (p: PersonRef[]) => void; label: string; locked?: string[]; members?: boolean }) {
   const [found, setFound] = useState<PersonRef[]>([])
-  const search = (q: string) => api.get<PersonRef[]>(`/api/artifacts/people?q=${encodeURIComponent(q)}`).then(setFound)
+  const search = (q: string) => api.get<PersonRef[]>(`/api/artifacts/people?q=${encodeURIComponent(q)}`)
+    .then((people) => setFound(members ? people.filter((p) => p.kind === "member") : people))
   const known = new Map([...found, ...value].map((p) => [p.id, p]))
   const items: PickItem[] = [...known.values()].map((p) => ({ id: p.id, label: p.kind === "visitor" ? `${p.name} (guest)` : p.name }))
   return (
@@ -113,7 +114,7 @@ function Form({ a, close }: { a: ArtifactDetail; close: () => void }) {
           </Field>
         )}
         <Field label="Editors">
-          <People value={editors} onChange={setEditors} label="Search people" />
+          <People value={editors} onChange={setEditors} label="Search members" members />
           <label className="mt-2.5 flex items-center justify-between gap-3 text-sm">
             Editors can share
             <Switch checked={share} onCheckedChange={setShare} aria-label="Editors can share" />

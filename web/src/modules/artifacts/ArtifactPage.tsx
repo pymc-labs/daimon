@@ -77,7 +77,7 @@ export function ArtifactPage() {
   const [v, setV] = useParam("v")
   const [sharing, setSharing] = useState(false)
   const [transferring, setTransferring] = useState(false)
-  const versions = useQuery({ queryKey: [...KEY, "versions", id], queryFn: () => api.get<ArtifactVersion[]>(`/api/artifacts/${id}/versions`), enabled: !!a })
+  const versions = useQuery({ queryKey: [...KEY, "versions", id], queryFn: () => api.get<ArtifactVersion[]>(`/api/artifacts/${id}/versions`), enabled: !!a?.can.edit })
   const del = useMutation({
     mutationFn: () => api.del(`/api/artifacts/${id}`),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: KEY }); navigate("/artifacts"); toast("Artifact deleted") },
@@ -124,9 +124,12 @@ export function ArtifactPage() {
         <aside className="w-[360px] shrink-0 overflow-y-auto border-l max-lg:w-full max-lg:overflow-visible max-lg:border-t max-lg:border-l-0">
           <DrawerTabs tabs={[
             { value: "details", label: "Details", children: <Details a={a} /> },
-            { value: "data", label: "Data", children: <Data a={a} /> },
-            { value: "activity", label: "Activity", children: <Activity a={a} /> },
-            { value: "versions", label: "Versions", children: <Versions versions={versions.data ?? []} viewing={viewing} onPick={setVersion} /> },
+            // Data, activity and versions are for those who manage the page.
+            ...(a.can.edit ? [
+              { value: "data", label: "Data", children: <Data a={a} /> },
+              { value: "activity", label: "Activity", children: <Activity a={a} /> },
+              { value: "versions", label: "Versions", children: <Versions versions={versions.data ?? []} viewing={viewing} onPick={setVersion} /> },
+            ] : []),
           ]} />
         </aside>
       </div>

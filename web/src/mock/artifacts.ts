@@ -183,7 +183,7 @@ function detail(a: Stored): ArtifactDetail {
   const all = docsOf(a)
   return {
     ...summary(a), people: a.people, editors: a.editors, editors_can_share: a.editors_can_share, data_scale: a.data_scale, link: a.link,
-    watches: a.watches, asks: a.asks, can: can(a),
+    watches: can(a).edit ? a.watches : [], asks: a.asks, can: can(a),
     usage: { documents: all.length, max_documents: 5_000 * a.data_scale, bytes: all.reduce((n, d) => n + d.size_bytes, 0), max_bytes: 20 * 1_048_576 * a.data_scale },
   }
 }
@@ -240,6 +240,7 @@ export const artifactsHandlers: HttpHandler[] = [
     if (b.data_scale !== undefined && !(b.data_scale >= 1 && b.data_scale <= 10)) return invalid("Data space is 1x to 10x.")
     const lists = { people: b.people && people_of(b.people), editors: b.editors && people_of(b.editors) }
     if ((b.people && lists.people!.length !== b.people.length) || (b.editors && lists.editors!.length !== b.editors.length)) return invalid("Pick people from the list.")
+    if (lists.editors?.some((p) => p.kind === "visitor")) return invalid("Only members can edit a page. Visitors can open it.")
     if (b.title !== undefined) a.title = b.title.trim() || a.title
     if (lists.people) a.people = lists.people
     if (lists.editors) a.editors = lists.editors
@@ -274,12 +275,13 @@ export const artifactsHandlers: HttpHandler[] = [
     const to = a.editors.find((e) => e.id === person)
     if (!to) return invalid("Pick one of the editors.")
     a.editors = [a.owner, ...a.editors.filter((e) => e.id !== to.id)]
+    a.people = a.people.filter((p) => p.id !== to.id)
     a.owner = to
     return HttpResponse.json(detail(a))
   }),
   http.get("/api/artifacts/:id/versions", async ({ params }) => {
     await wait()
-    const { a, res } = guard(params.id)
+    const { a, res } = guard(params.id, "edit")
     return a ? HttpResponse.json(a.versions) : res
   }),
   http.post("/api/artifacts/:id/versions/:v/restore", async ({ params }) => {
@@ -293,14 +295,14 @@ export const artifactsHandlers: HttpHandler[] = [
   }),
   http.get("/api/artifacts/:id/data", async ({ params }) => {
     await wait()
-    const { a, res } = guard(params.id)
+    const { a, res } = guard(params.id, "edit")
     if (!a) return res
     const out: DataCollection[] = Object.entries(a.docs).map(([name, d]) => ({ name, documents: d.length, bytes: d.reduce((n, x) => n + x.size_bytes, 0) }))
     return HttpResponse.json(out)
   }),
   http.get("/api/artifacts/:id/data/:collection", async ({ params }) => {
     await wait()
-    const { a, res } = guard(params.id)
+    const { a, res } = guard(params.id, "edit")
     const rows = a?.docs[String(params.collection)]
     return a ? (rows ? HttpResponse.json(rows) : notFound()) : res
   }),
@@ -327,7 +329,7 @@ export const artifactsHandlers: HttpHandler[] = [
   }),
   http.get("/api/artifacts/:id/events", async ({ params }) => {
     await wait()
-    const { a, res } = guard(params.id)
+    const { a, res } = guard(params.id, "edit")
     return a ? HttpResponse.json(a.events_log) : res
   }),
 ]
