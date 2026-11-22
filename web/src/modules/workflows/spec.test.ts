@@ -81,4 +81,13 @@ describe("loops and scoped grants", () => {
       "mail/send_reply: to is a@x.org or is an address at example.com. Any text in subject, body.",
     )
   })
+
+  it("gives a scoped write grant the same words as the limits", () => {
+    const scope = { tool: "mail/send_reply", where: { to: { domains: ["example.com"] } }, free: ["body"] }
+    const s: Spec = {
+      schema: "daimon.workflow/v1", name: "reply", start: "send",
+      nodes: { send: { kind: "action", tool: "mail/send_reply", writes_to: [scope], next: "done" }, done: { kind: "finish" } },
+    }
+    expect(safety(s).grants).toContainEqual({ kind: "scoped_write", node: "send", detail: scopeText(scope) })
+  })
 })

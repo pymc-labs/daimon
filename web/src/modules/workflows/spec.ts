@@ -298,7 +298,7 @@ export function safety(spec: Spec) {
     if (tainted.has(id)) c.push("U")
     if (n.kind === "agent" || n.kind === "for_each" || (n.kind === "action" && !toolWrites(n.tool))) c.push("S")
     if (writes(n) || scopesOf(n).length) c.push("W")
-    for (const s of scopesOf(n)) grants.push({ kind: "scoped_write", node: id, detail: s.tool })
+    for (const s of scopesOf(n)) grants.push({ kind: "scoped_write", node: id, detail: scopeText(s) })
     classes[id] = c
     if (writes(n) && !boundBy(spec, id)) grants.push({ kind: "unattended_write", node: id, detail: n.tool ?? "Agent writes" })
     const b = n.builtins ?? n.do?.builtins
