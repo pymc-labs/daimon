@@ -7,7 +7,10 @@ restart's catch-up loop, moves on to the next message), ahead of
 the call that starts admission, so a message answering no ask goes on as ordinary chat
 (each adapter's `test_workflow_asks` shows chat in another thread is not claimed).
 `daimon.core.workflows.mentions.claim_mention` comes next, the same way, in every handler but
-the DM ones (`DMS`): a direct message tags no one in a channel a trigger listens to.
+the DM ones (`DMS`): a direct message tags no one in a channel a trigger listens to. A
+restart's replay (Discord) and catch-up (Teams) claim it too: the mention event's message id
+dedupes a message a live handler already claimed (`test_mentions.py`). Discord's replay skips
+the ask claim only.
 """
 
 from __future__ import annotations
@@ -94,3 +97,24 @@ def test_the_ask_claim_returns_before_admission(path: str, handler: str, admits:
         return
     mention = _gate(func, origins, _is_mention)
     assert claim.lineno < mention.lineno < min(later), f"{path}:{handler} misorders the mention"
+
+
+@pytest.mark.parametrize(
+    ("path", "handler"),
+    [
+        ("discord/daimon/adapters/discord/bot.py", "on_message"),
+        ("teams/daimon/adapters/teams/app.py", "catch_up_graph_messages"),
+    ],
+)
+def test_a_restart_replay_claims_mention_triggers_like_a_live_message(
+    path: str, handler: str
+) -> None:
+    tree = ast.parse((_ADAPTERS / path).read_text())
+    [func] = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef) and n.name == handler
+    ]
+    gate = _gate(func, _origins(tree), _is_mention)
+    names = {n.id for n in ast.walk(gate.test) if isinstance(n, ast.Name)}
+    assert "startup_replay" not in names, f"{path}:{handler} skips mentions on a replay"

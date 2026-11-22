@@ -325,6 +325,7 @@ EXEMPT: dict[str, str] = {
     "DELETE /api/workflows/{workflow_id}": _WORKFLOW,
     "PUT /api/workflows/{workflow_id}/draft": _WORKFLOW,
     "DELETE /api/workflows/{workflow_id}/draft": _WORKFLOW,
+    "DELETE /api/workflows/{workflow_id}/state": _WORKFLOW,
     "POST /api/workflows/{workflow_id}/draft/publish": _WORKFLOW,
     "POST /api/workflows/{workflow_id}/draft/request": _WORKFLOW,
     "POST /api/workflows/{workflow_id}/validate": _WORKFLOW,
