@@ -8,10 +8,12 @@ administer an agent's repositories.
 
 Register one GitHub App for the deployment. `<root>` below is
 [`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url) without the
-trailing `/mcp`. Set the App's user authorization callback to
-`<root>/oauth/github/callback` and its setup URL to
-`<root>/oauth/github/setup`. GitHub must reach both, so `localhost` works only
-through a tunnel.
+trailing `/mcp`, and `<web>` is
+[`DAIMON_WEB__PUBLIC_URL`](configuration.md#daimon_web__public_url). Add
+`<root>/oauth/github/callback` to the App's callback URLs, and also
+`<web>/oauth/github/callback` when the web app runs. Set the setup URL to
+`<web>/oauth/github/setup`, or `<root>/oauth/github/setup` without the web app.
+GitHub must reach them, so `localhost` works only through a tunnel.
 
 1. Copy the App's values into `.env`: `DAIMON_GITHUB_APP__APP_ID`, `APP_SLUG`,
    `PRIVATE_KEY`, `CLIENT_ID` and `CLIENT_SECRET`. See
@@ -25,7 +27,8 @@ through a tunnel.
    The route mounts only when it is set, and boot fails without the App ID,
    private key and `DAIMON_CRYPTO__KEYS`.
 4. Restart the services. The connect routes mount only when these values and the
-   public URL are present.
+   public URL are present. With the web app on, connect links open there, and
+   the MCP host sends old links and its setup URL on to it.
 5. Keep the scheduler running. It removes expired connection flows and their
    encrypted tokens.
 

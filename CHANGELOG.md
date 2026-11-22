@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daimon features set routine_result_header off --routine <id>`; its value
   beats its agent's.
 
+- **GitHub repo connect runs in the web app when it is on.** Every Connect
+  GitHub link, from chat, the web panel, the CLI and pending requests, opens
+  the web app's pages, and the MCP host sends old links and its setup URL on
+  to them. A link started in the web app returns to the agent's GitHub tab.
+  Before upgrading, add `<web>/oauth/github/callback` to the GitHub App's
+  callback URLs and keep the MCP one for personal account links; the setup
+  URL may move to `<web>/oauth/github/setup`.
+
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎
   feedback, voice messages and the card's model footer. Pings are joined with a
