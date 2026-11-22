@@ -417,6 +417,78 @@ async def test_require_dm_delivery_with_open_grant_passes(db_session_factory):
 
 
 @pytest.mark.parametrize(
+    ("mode", "roles", "refused"),
+    [
+        ("on", ("4001",), False),
+        ("on", ("4002",), True),
+        ("shadow", ("4002",), False),
+        ("off", ("4002",), False),
+    ],
+)
+async def test_require_dm_delivery_rechecks_standing_in_mode_on(
+    db_session_factory, monkeypatch, mode, roles, refused
+):
+    """A private answer goes only to a recipient who still holds an internal role."""
+    from daimon.core.stores.access_policy import set_access_policy
+
+    async def read(*_args, **_kwargs):
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", read)
+    tenant, _, admission, deps = await cold(db_session_factory)
+    reply = await reply_for(deps, admission, tenant)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(internal_role_ids=("4001",))
+        )
+    deps = replace(
+        deps,
+        membership_resolver=CachedMembershipResolver(
+            AsyncMock(return_value=Membership(is_member=True, role_ids=roles))
+        ),
+    )
+    if refused:
+        with pytest.raises(DirectMessageAccessRevoked, match="Private access revoked"):
+            await require_dm_delivery(deps, reply)
+    else:
+        await require_dm_delivery(deps, reply)
+
+
+@pytest.mark.parametrize(
+    ("mode", "error"),
+    [("on", DirectMessageAccessRevoked), ("shadow", "unknown"), ("off", "unknown")],
+)
+async def test_require_dm_delivery_with_unknown_membership_refuses_only_in_mode_on(
+    db_session_factory, monkeypatch, mode, error
+):
+    """A failed lookup proves no role: `on` refuses the private output, the other modes
+    keep the old answer (membership unknown, so the caller may retry)."""
+    from daimon.core.direct_messages import DirectMessageMembershipUnknown
+    from daimon.core.stores.access_policy import set_access_policy
+
+    async def read(*_args, **_kwargs):
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", read)
+    tenant, _, admission, deps = await cold(db_session_factory)
+    reply = await reply_for(deps, admission, tenant)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(internal_role_ids=("4001",))
+        )
+    deps = replace(
+        deps, membership_resolver=CachedMembershipResolver(AsyncMock(return_value=Membership()))
+    )
+    if error == "unknown":
+        with pytest.raises(DirectMessageMembershipUnknown):
+            await require_dm_delivery(deps, reply)
+    else:
+        with pytest.raises(error) as caught:
+            await require_dm_delivery(deps, reply)
+        assert not isinstance(caught.value, DirectMessageMembershipUnknown)
+
+
+@pytest.mark.parametrize(
     ("kind", "grant_users", "grant_groups"),
     [("listed", ["1"], []), ("excluded", ["999"], [])],
 )

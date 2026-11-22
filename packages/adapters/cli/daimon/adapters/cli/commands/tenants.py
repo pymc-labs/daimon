@@ -1018,13 +1018,16 @@ async def tenants_access_policy_set(
         if clear:
             try:
                 current = await load_access_policy(session, tenant_id=tenant_id)
-                if current.approvals != "inherit" or any(
-                    rule.approvals != "inherit" for rule in current.channel_rules.values()
+                if (
+                    current.approvals != "inherit"
+                    or current.agent_approvals
+                    or any(rule.approvals != "inherit" for rule in current.channel_rules.values())
                 ):
                     raise typer.BadParameter(
-                        "clear approval overrides from the native /here admin control "
-                        "first; each change requires a native admin and an audit event. "
-                        "Nothing was changed."
+                        "clear approval overrides first with `daimon features set approvals "
+                        "default --reason ...` (add --agent NAME, --channel ID or --thread ID "
+                        "for those levels; a deleted agent is cleared by its id); each change "
+                        "is audited. Nothing was changed."
                     )
                 dropped = sorted(current.agent_rules)
             except AccessPolicyUnreadable:

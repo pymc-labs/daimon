@@ -22,6 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.config import PollableTool, load_watches_settings
 from daimon.core.continuity.watch_projection import bounded, projection_path, validate_rule
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
@@ -201,5 +202,8 @@ def canonical_source_id(value: object) -> str:
 def require_distinct_source(arguments: Mapping[str, object], destination: str) -> None:
     """Reporting into the source would turn each report into another firing."""
     source = canonical_source_id(arguments.get("thread_id", arguments.get("channel_id")))
+    # A DM's scope id is no resource id, so a watch made in a DM never reports into its source.
+    if destination.startswith(DM_SCOPE_PREFIX):
+        return
     if source == canonical_source_id(destination):
         raise ValueError("Poll source must differ from the reporting thread")

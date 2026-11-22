@@ -643,9 +643,13 @@ a server stays in its channel with no long-term memory, a fresh session per chan
 and no handoffs, because the server answers with what the channel's readers can read.
 Set channel_scoped to false for a server that checks each call's asker and place itself:
 its agents then get their normal memory and sessions, so what they learn can surface in
-their other channels. The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any
-server is signed; chat workers use the same server policy without the signing key.
-Default: [] (off).
+their other channels. A requester_meta server may list wake_tools: a person's call to
+one carries params._meta.wake_url, a private callback watch link for that conversation;
+each POST of the work's outcome to it wakes the conversation once. Each call gets its
+own link to one watch per conversation, which lasts a day after the latest call. Needs
+the watches feature and DAIMON_WATCHES__CALLBACK_BASE_URL. The MCP service requires
+DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat workers use the same
+server policy without the signing key. Default: [] (off).
 
 ### `DAIMON_MCP_IDENTITY__BEARERS`
 
@@ -654,8 +658,10 @@ Default: [] (off).
 Keys for the servers whose auth is "bearer", by server name: a JSON object such as
 {"tools": "&lt;key&gt;"}. Kept apart from DAIMON_MCP_IDENTITY__SERVERS so the key is set
 as a secret. Daimon sends the key as the server's bearer in place of the caller's own
-credential, which never reaches the server. Only the MCP service needs them, and there
-every bearer server needs one; no other server may have one. Default: {} (none).
+credential, which never reaches the server. The MCP service needs them, and there every
+bearer server needs one; no other server may have one. A chat worker given one reads
+that server's tool hints when DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS names it. Default:
+{} (none).
 
 ## Hub
 
@@ -2047,13 +2053,15 @@ JSON list of the tools a watch may poll in this deployment. Only a listed tool c
 polled: a watch on a tool taken off the list pauses at its next poll and its owner is
 told. Each entry has server ("daimon-mcp" for a native reader, otherwise an https MCP
 server URL, never a server name), tool (exact name), credential ("none" for native
-readers; "agent" or "owner" for MCP servers), returns_chat (required: true only for
-native readers, which drop Daimon's own messages), max_interval_floor_s (shortest
+readers; "agent", "owner" or "relay" for MCP servers), returns_chat (required: true only
+for native readers, which drop Daimon's own messages), max_interval_floor_s (shortest
 interval, at least 60, default 300) and label (shown on the approval card). Native
 entries must be read_thread or read_channel. Daimon's chat readers and chat_tools are
 refused on MCP servers. Credential owner polls with each watch owner's own read-only
 key, which they send once through a private form: for example a read-scoped API key the
-person creates on that server. A server's read-only annotation never allows a poll; only
+person creates on that server. Credential relay polls a signed-identity relay server
+(&lt;root&gt;/mcp-identity/&lt;name&gt;) as the watch owner, marked unattended, at the
+place the watch reports to. A server's read-only annotation never allows a poll; only
 this list does, and a server can still write when it says it only reads. A watch below a
 raised floor polls at the floor. Default (also used when the value is empty):
 read_thread and read_channel on daimon-mcp, credential none, returns_chat true, floor

@@ -385,6 +385,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     platform="slack",
                     workspace_id=team_id,
                     agent_name=request.agent_name,
+                    agent_id=request.ma_agent_id,
                 )
                 if url
                 else None

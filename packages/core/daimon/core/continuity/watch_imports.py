@@ -15,7 +15,7 @@ from pydantic import (
 )
 
 #: What a stored instruction or timer note may hold. A longer one is cut and counted.
-INSTRUCTIONS_LIMIT = 2000
+INSTRUCTIONS_LIMIT = 4000
 NOTE_LIMIT = 2000
 #: The file as a whole is capped at 1 MiB; this only keeps one field from taking all of it.
 _FILE_TEXT_CAP = 200_000

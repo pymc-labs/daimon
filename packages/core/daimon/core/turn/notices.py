@@ -15,6 +15,7 @@ from daimon.core.platform_words import Place, words_for
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
 from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
+from daimon.core.turn.status_lines import format_duration
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.drivers.selfhosted.wire import CLEANUP_EXHAUSTED
@@ -504,6 +505,29 @@ class TerminationNotice:
         if (ref := self.ref_line) is not None:
             lines.append(ref)
         return "\n\n".join(lines)
+
+
+_STOPPED_ENDS = frozenset(
+    {
+        TerminationReason.INTERRUPTED,
+        TerminationReason.INTERRUPT_TIMEOUT,
+        TerminationReason.RECOVERY_CANCELLED,
+    }
+)
+_NOT_STARTED_PREFIXES = ("admission_", "missing_config", "resolver_miss", "session_")
+_STARTED_SESSION_ENDS = frozenset({TerminationReason.SESSION_TERMINATED})
+
+
+def ended_label(reason: TerminationReason, elapsed_seconds: float) -> str:
+    """What happened to a turn that gave no answer, and how long it ran: "Stopped after 3m 5s"."""
+    if reason.value.startswith(_NOT_STARTED_PREFIXES) and reason not in _STARTED_SESSION_ENDS:
+        return "Not started"
+    took = format_duration(elapsed_seconds)
+    if reason in _STOPPED_ENDS:
+        return f"Stopped after {took}"
+    if reason is TerminationReason.CEILING:
+        return f"Timed out after {took}"
+    return f"Ended with an error after {took}"
 
 
 def render_termination_notice(

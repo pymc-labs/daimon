@@ -14,11 +14,14 @@ import pytest
 from cryptography.fernet import MultiFernet
 from daimon.core import mcp_tool_annotations
 from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
+from daimon.core.config import McpIdentitySettings
+from daimon.core.mcp_identity import relay_url
 from daimon.core.mcp_oauth.discovery import read_mcp_catalogue
 from daimon.core.mcp_tool_annotations import (
     agent_mcp_token_for,
     annotations_from_mcp,
     mcp_annotation_lookup,
+    relay_catalogues,
 )
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy, classify_tool
 from daimon.core.turn.approvals import AnnotationLookup, interactive_decider, unattended_decider
@@ -329,3 +332,76 @@ async def test_the_catalogue_read_keeps_annotations_and_sends_no_empty_bearer(
         ToolAnnotations(read_only_hint=False),
     ]
     assert seen_auth == [None, None, None]
+
+
+_RELAY_PUBLIC_URL = "https://daimon.example/mcp"
+
+
+def _identity(**server: Any) -> McpIdentitySettings:
+    return McpIdentitySettings.model_validate(
+        {
+            "servers": [
+                {
+                    "name": "billing",
+                    "url": "https://billing.example.com/mcp",
+                    "auth": "bearer",
+                    "workspaces": ["discord:1"],
+                    "agents": ["daimon"],
+                    **server,
+                }
+            ],
+            "bearers": {"billing": "operator-key"},
+        }
+    )
+
+
+async def test_a_relay_url_attached_under_another_name_is_not_trusted() -> None:
+    """Trust is by attached name: `tracker` trusted must not read the hints of the relay
+    server `billing` that an agent attached under that name."""
+    relays = relay_catalogues(
+        _identity(), public_url=_RELAY_PUBLIC_URL, workspace="discord:1", agent_name="daimon"
+    )
+    reads: list[tuple[str, str | None]] = []
+
+    async def _read(url: str, token: str | None) -> Sequence[Mapping[str, JsonValue]]:
+        reads.append((url, token))
+        if url == relay_url(_RELAY_PUBLIC_URL, "billing"):
+            raise httpx.ConnectError("the relay takes only a session's credential")
+        return _BRIDGE_TOOLS
+
+    async def lookup_for(name: str) -> ToolAnnotations | None:
+        lookup = mcp_annotation_lookup(
+            server_urls={name: relay_url(_RELAY_PUBLIC_URL, "billing")},
+            token_for=_no_token,
+            read_catalogue=_read,
+            relays=relays,
+        )
+        return await lookup(_call("memory_flag_list", server=name))
+
+    assert await lookup_for("billing") == ToolAnnotations(read_only_hint=True)
+    assert reads == [("https://billing.example.com/mcp", "operator-key")]
+    reads.clear()
+    assert await lookup_for("tracker") is None, "no hints under a name that is not the relay's"
+    assert reads == [(relay_url(_RELAY_PUBLIC_URL, "billing"), None)], (
+        "read at the attached URL with no operator key, as any unrelated server"
+    )
+
+
+@pytest.mark.parametrize(
+    ("workspace", "agent_name", "listed"),
+    [
+        ("discord:1", "daimon", True),
+        ("discord:2", "daimon", False),
+        (None, "daimon", False),
+        ("discord:1", "other", False),
+    ],
+    ids=["allowed", "other-workspace", "no-workspace", "other-agent"],
+)
+def test_a_relay_server_the_workspace_or_agent_may_not_use_is_not_read(
+    workspace: str | None, agent_name: str, listed: bool
+) -> None:
+    """The relay refuses such a caller, so its catalogue is not read with the operator key."""
+    relays = relay_catalogues(
+        _identity(), public_url=_RELAY_PUBLIC_URL, workspace=workspace, agent_name=agent_name
+    )
+    assert bool(relays) is listed, "a relay server is read only for an allowed workspace and agent"

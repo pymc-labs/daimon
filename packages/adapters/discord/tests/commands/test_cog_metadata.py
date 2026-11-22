@@ -90,8 +90,8 @@ def test_direct_message_cog_registers_dm_me_not_dm() -> None:
     )
 
 
-def test_new_slash_is_dm_only() -> None:
-    """/new replaces a private conversation, so Discord lists it in DMs and nowhere else."""
+def test_new_slash_is_listed_in_dms_and_servers() -> None:
+    """/new replaces a private conversation, and in servers a thread's where `thread_new` is on."""
     cmd = next(
         c
         for c in DirectMessageCog.__cog_app_commands__  # type: ignore[attr-defined]
@@ -99,7 +99,8 @@ def test_new_slash_is_dm_only() -> None:
     )
     ctx = cmd.allowed_contexts
     assert ctx is not None and ctx.dm_channel is True, f"/new must allow DMs; got {ctx!r}"
-    assert ctx.guild is False, f"/new must not be offered in server channels; got {ctx!r}"
+    assert ctx.guild is True, f"/new must be offered in servers for threads; got {ctx!r}"
+    assert ctx.private_channel is False, f"/new is not for group DMs; got {ctx!r}"
 
 
 def test_billing_cog_registers_billing_slash() -> None:

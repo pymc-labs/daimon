@@ -78,6 +78,7 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
         requester_id="456",
         intent_id=uuid.UUID(int=1),
         agent_name="ResearchBot",
+        agent_ma_id="ma_agent",
     )
     kwargs = thread.send.await_args.kwargs
     assert thread.send.await_args.args == ()
@@ -103,6 +104,7 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
         requester_id="U1",
         url="https://mcp.test/private-link",
         agent_name="ResearchBot",
+        agent_ma_id="ma_agent",
     )
     slack_client.chat_postEphemeral.assert_awaited_once()
     slack_client.conversations_open.assert_not_awaited()

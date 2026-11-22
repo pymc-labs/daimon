@@ -51,6 +51,7 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.billing import BillingConfig, load_billing_config
+from daimon.core.bot_access import BOT_ACCESS_UNAVAILABLE, bot_access_blocked, bot_access_wait_on
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import (
     agent_native_provider,
@@ -121,6 +122,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     record_routine_failure,
     render_routine_controls,
+    routine_agent_name,
     routine_links,
 )
 from daimon.core.routine_files import collect_routine_files
@@ -181,6 +183,7 @@ from daimon.core.stores.routines import (
     update_routine_agent_id,
 )
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.stores.secret_shares import clear_lapsed_shares
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
@@ -448,7 +451,7 @@ async def _build_fire(
             if owner is None or send_dm is None or not await _owner_dm_open(s, row, platform):
                 return
         try:
-            await send_dm(owner, *lapsed_role_card(row))
+            await send_dm(owner, *lapsed_role_card(row, await routine_agent_name(sm, row)))
         except (httpx.HTTPError, ValueError) as exc:
             # The routine stays paused; the panel shows why.
             log.warning(
@@ -588,12 +591,32 @@ async def _build_fire(
             ),
         )
 
+    async def _bot_locked_out(row: RoutineRow) -> bool:
+        """Whether the workspace waits for the bot's access and Discord says it has none here.
+
+        Read before the firing transaction, so the REST call holds no connection.
+        """
+        target = delivery_target(row, platform="discord")
+        if target is None or not target.channel_id.isdigit():
+            return False
+        async with sm() as s:
+            tenant = await get_tenant(s, row.tenant_id)
+        if tenant is None or tenant.platform != "discord":
+            return False
+        if not await bot_access_wait_on(sm, tenant_id=row.tenant_id, platform="discord"):
+            return False
+        async with httpx.AsyncClient(timeout=10) as http:
+            return await bot_access_blocked(
+                http, settings, guild_id=tenant.external_id, destination_id=target.channel_id
+            )
+
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
             async with sm() as s, s.begin():
                 await _refuse(s, row, "This routine has no owner. Create it again.")
             return
         granted = row.destination_kind != "dm" or await _owner_granted(row, row.created_by_user_id)
+        bot_locked_out = await _bot_locked_out(row)
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
@@ -782,6 +805,10 @@ async def _build_fire(
                             and lapsed_role(policy, (row.agent_name,), subject)
                             else initial.reason
                         )
+                # The bot's own access comes after every owner check, so a revoked owner
+                # still stops the routine. Waiting costs no turn and tells nobody.
+                if policy_error is None and bot_locked_out:
+                    policy_error = BOT_ACCESS_UNAVAILABLE
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",
@@ -1176,6 +1203,19 @@ async def _sweep_wizard_sessions(sm: async_sessionmaker[AsyncSession]) -> None:
         await sweep_expired_wizard_sessions(sm, now=datetime.now(UTC))
     except SQLAlchemyError:
         log.exception("scheduler.wizard_sweep.failed")
+
+
+@scheduler_step
+async def _sweep_secret_shares(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Delete shared-secret values past their day, revealed or not, so none outlives it.
+    Boundary catch: a sweep failure must not kill the scheduler loop; the next tick retries.
+    """
+    try:
+        async with sm.begin() as session:
+            cleared = await clear_lapsed_shares(session, now=datetime.now(UTC))
+        log.info("secret_share_sweep.cleared", count=cleared)
+    except SQLAlchemyError:
+        log.exception("scheduler.secret_share_sweep.failed")
 
 
 @scheduler_step
@@ -2204,6 +2244,7 @@ async def run(
                 sweep=lambda: _sweep_headless_usage(client, sm, markup=settings.billing.markup),
             )
             await _sweep_wizard_sessions(sm)
+            await _sweep_secret_shares(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_pending_carry_overs(sm)
@@ -2245,6 +2286,7 @@ async def run(
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
+            await _sweep_secret_shares(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_pending_carry_overs(sm)

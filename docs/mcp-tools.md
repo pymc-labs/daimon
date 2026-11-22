@@ -578,6 +578,14 @@ The Settings group from chat: `get_settings` (anyone) and `change_setting` (card
 | `change_setting` | Discord callers, Slack callers, Teams callers | Change one setting where you are, after the person presses Approve. |
 | `get_settings` | Discord callers, Slack callers, Teams callers | Report this conversation's settings (features set up here or with a saved value). |
 
+## `secret_shares`
+
+`share_secret_with`: send one of the agent's keys to a person's DMs, revealed once.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `share_secret_with` | Discord callers | Send one of this agent's saved keys to a person's Discord DMs, where they can reveal it once within a day. |
+
 ## `self_edit`
 
 MCP tools for an agent to edit its own ``agent_files`` from inside an MA turn.
