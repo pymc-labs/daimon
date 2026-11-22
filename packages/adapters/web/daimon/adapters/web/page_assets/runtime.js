@@ -5,12 +5,42 @@
   "use strict";
   const config = window.__daimon_boot;
   if (!config || window.daimon) return;
-  // WebRTC reaches any host, past connect-src. CSP `webrtc 'block'` stops it where
-  // browsers support that; elsewhere this is a speed bump only (docs/artifacts.md).
-  for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel",
-    "RTCRtpSender", "RTCRtpReceiver", "RTCIceCandidate", "RTCSessionDescription"]) {
-    try { delete window[name]; } catch { /* not configurable here */ }
+  // WebRTC reaches any host, past connect-src. CSP `webrtc 'block'` stops it only where
+  // browsers support it (Chrome does not), so this is best effort: no constructors here,
+  // and none in a child frame, which would bring its own. Frames the page makes without
+  // an https address (srcdoc, about:blank) are removed, and the windows a frame element
+  // hands out are stripped. What it cannot reach is in docs/artifacts.md.
+  const RTC = ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel",
+    "RTCRtpSender", "RTCRtpReceiver", "RTCIceCandidate", "RTCSessionDescription"];
+  const hardened = new WeakSet();
+  function harden(win) {
+    try {
+      for (const name of RTC) delete win[name];
+      if (hardened.has(win)) return win;
+      for (const kind of ["HTMLIFrameElement", "HTMLFrameElement", "HTMLObjectElement"]) {
+        const proto = win[kind].prototype;
+        for (const key of ["contentWindow", "contentDocument"]) {
+          const get = Object.getOwnPropertyDescriptor(proto, key)?.get;
+          if (get) Object.defineProperty(proto, key, { configurable: true, enumerable: true, get() {
+            const value = get.call(this);
+            if (value) harden(key === "contentWindow" ? value : value.defaultView);
+            return value;
+          } });
+        }
+      }
+      hardened.add(win);
+    } catch { /* a cross-origin window: nothing of ours to strip */ }
+    return win;
   }
+  harden(window);
+  // Only an iframe with an https address stays; it still starts as about:blank, see the docs.
+  const kept = (el) => /^(IFRAME|FRAME)$/.test(el.tagName) && !el.hasAttribute("srcdoc")
+    && /^https:/i.test(el.src);
+  const dropFrames = () => document.querySelectorAll("iframe, frame, object, embed")
+    .forEach((el) => { if (!kept(el)) el.remove(); });
+  new MutationObserver(dropFrames).observe(document, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcdoc"],
+  });
   const POLL_MS = 3000;
   const FRAGMENT = /^#[A-Za-z0-9_.:-]{1,128}$/;
   const validHash = (hash) => hash === "" || FRAGMENT.exec(hash)?.[0] === hash;
