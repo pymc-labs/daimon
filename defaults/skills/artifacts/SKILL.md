@@ -15,7 +15,7 @@ Interactive analysis for a client (widgets over data, a model to explore) is a m
 2. `artifact_upload_url()` returns an `upload_url` and an `upload` handle. Send the file with `curl -sS -X PUT --data-binary @/tmp/run-sheet.html "<upload_url>"`.
 3. `artifact_publish(slug="run-sheet", upload=<handle>, title="Run sheet", data="write", events=true, origin_context_id=...)` returns the page URL. Send it to the user; open nothing yourself.
 
-Publishing again with the same slug makes a new version (20 kept) and open pages pick it up. Omitted fields keep their value; without `upload`, only settings change. To edit a page you did not just write, `artifact_source` gives a 15-minute link to curl.
+Publishing again with the same slug makes a new version (20 kept) and open pages pick it up. Omitted fields keep their value; without `upload`, only settings change. To edit a page you did not just write, `artifact_source` gives a 15-minute link to curl; older versions only for its owner, editors and admins.
 
 | access | Who opens it |
 | --- | --- |
@@ -23,7 +23,7 @@ Publishing again with the same slug makes a new version (20 kept) and open pages
 | `people` | Only the people in `people` (they may be visitors invited to the workspace) |
 | `public` | Anyone with the secret link in the URL, no sign-in. Every visitor is anonymous, members too |
 
-`people` and `editors` take people in the app: their id there, a chat user id or an @mention. Someone not in the app yet must be invited by an admin first. For a client: `access="people"` if they can be invited (safer), else `access="public"`. `new_link=true` replaces a leaked link.
+`people` and `editors` take people in the app: their id there, a chat user id or an @mention. Someone not in the app yet must be invited by an admin first. Editors, and so owners, are members: visitors only open pages. For a client: `access="people"` if they can be invited (safer), else `access="public"`. `new_link=true` replaces a leaked link.
 
 **Expiry.** `expires_in_days` takes a page offline (0: never). A page turning public gets 30 days unless set. Recommend an expiry that fits the use; make a page permanent only when the user asks.
 
@@ -70,8 +70,8 @@ All methods return promises. Errors are `Error`s with `.code`: `invalid`, `unaut
 - `daimon.me()`: `{name, kind}` of the viewer, `kind` being `member` or `visitor`; null for an anonymous viewer.
 - `daimon.artifact`: `{id, slug, title, version, data, events, ask}`. `daimon.capabilities`: the subset of `['db', 'events', 'ask']` that is on.
 - `daimon.notify(event, data)`: send an event; resolves to its id. `event`: 1-64 of `A-Z a-z 0-9 _ . : -`; `data`: JSON, up to 4 KiB. `forbidden` unless `events=true`.
-- `daimon.ask(text, {onText})`: the viewer's question, answered by the agent as that viewer in their own conversation, streamed to `onText`. Call it from a click. `forbidden` unless `ask=true`; `rate_limited` past 10 a minute.
-- `daimon.thread()`: that conversation as `[{role, text, at}]`, the last 50; `[]` before the first ask.
+- `daimon.ask(text, {onText})`: the viewer's question, answered by the agent as that viewer in their own conversation, streamed to `onText`. One question per click in the page; `forbidden` unless `ask=true`; `rate_limited` past 10 a minute. The agent reads it as page text, not the viewer's own message, so tools that need a person's own message refuse.
+- `daimon.thread()`: that conversation as `[{role, text, at}]`, the last 50; `[]` before the first ask. Only the page writes in it.
 - `daimon.copyLink(hash)`: copy the page's shareable address ending in `hash` (e.g. `'#pricing'`; may be empty) and resolve to it; call it from a click. Give sections stable `id`s and set `location.hash` when a reader picks one.
 
 `window.claude.use` is the same as `daimon.use`, so Claude artifacts that use storage run unchanged.
@@ -100,7 +100,7 @@ const stop = db.collection('runs').orderBy('createdAt', 'desc').limit(200)
 
 ## Connect it to Daimon
 
-- **Events** (a submit, "request review"): every event is saved to the page's `_events` collection (read it with `artifact_db_query`; the page cannot) and, on Discord, wakes the page's watches. Make one there with `create_watch(source="page_event", page="run-sheet", instructions=...)`: up to 5 per page, each reporting in the thread that made it. Slack, Teams and the web app cannot make page watches; read `_events` instead. `_events` keeps the newest 1,000 events (4 MiB). Delete handled ones with `artifact_db_write(data=null)`; you cannot write there.
+- **Events** (a submit, "request review"): every event is saved to the page's `_events` collection (read it with `artifact_db_query`; the page cannot) and wakes the page's watches. Where `create_watch` is offered, make one with `source="page_event"` and `page` set to the slug: up to 5 per page, each reporting in the thread that made it, and only while its maker may still use the page. Elsewhere, read `_events`. `_events` keeps the newest 1,000 events (4 MiB). Delete handled ones with `artifact_db_write(data=null)`; you cannot write there.
 - **Daimon writes back**: `artifact_db_write(slug, collection, doc_id, data)`; viewers see it within seconds.
 - **Work that needs a model**: use `ask=true`, or `data="write", events=true`: the page writes a request document and calls `notify`; the watch's turn does the work and writes the result with `artifact_db_write`; `onSnapshot` shows it. Show the pending state meanwhile.
 

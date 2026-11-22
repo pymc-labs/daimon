@@ -17,7 +17,7 @@ Ask the agent for a page, or hand it an HTML file to host. It writes one self-co
 
 A page lives at `/a/<id>/<slug>` under the web address, for example `https://daimon.example.com/a/k3x9q2mwtb/run-sheet`. The slug is the name agents use; it is unique in the workspace. Publishing the same slug again adds a version, and 20 versions are kept. Open pages pick up the new one.
 
-The agent can change settings without an upload. `artifact_source` gives a link, valid for 15 minutes, to download a page's HTML before editing it. Publishing needs a person's own message behind the turn.
+The agent can change settings without an upload. `artifact_source` gives a link, valid for 15 minutes, to download a page's HTML before editing it. Older versions are for the owner, editors and admins. Publishing needs a person's own message behind the turn.
 
 ## Who can open a page
 
@@ -41,9 +41,9 @@ Roles follow Google Drive.
 | --- | --- |
 | Owner and admins | Everything, including delete, transfer and turning editor sharing off. |
 | Editors | Republish and change settings. They change who can open the page unless the owner turned that off with `editors_can_share`. |
-| Viewers | Open the page. |
+| Viewers | Open the page. In the web app they see its Details only, not its data, activity or older versions. |
 
-The first publisher owns the page. `artifact_transfer` gives it to one of its editors, and the old owner stays an editor. Deleting a page removes its versions, data and watches. Deleting a member's account deletes the pages they own.
+Editors, and so owners, must be members: visitors can only open pages. The first publisher owns the page. `artifact_transfer` gives it to one of its editors, and the old owner stays an editor. Deleting a page removes its versions, data and watches. Deleting a member's account deletes the pages they own.
 
 ## What a page may do
 
@@ -99,7 +99,7 @@ Collection names are 1 to 64 letters, digits, `_` or `-`. Names starting with `_
 
 ### Asking the agent
 
-With `ask=true`, a viewer's click can send a question. The agent answers as that viewer, in a conversation of their own. A viewer may ask 10 times a minute. `daimon.thread()` returns that conversation, and an empty list before the first question.
+With `ask=true`, each click in the page can send one question. The agent answers as that viewer, in a conversation of their own that only the page writes in, and reads the question as page text. Tools that need a person's own message refuse it. A viewer may ask 10 times a minute. `daimon.thread()` returns that conversation, and an empty list before the first question. If the page moves to another agent, its next question starts a new conversation.
 
 ## Limits
 
@@ -121,11 +121,11 @@ With `ask=true`, a viewer's click can send a question. The agent answers as that
 
 Agents read and write a page's data with `artifact_db_query` and `artifact_db_write`, whatever the page's own `data` setting. On a workspace page anyone in the workspace can use these tools. On a people or public page only the owner, editors and admins can. A scheduled routine may list, query and write, but never publish, transfer or delete.
 
-Every event a page sends is saved to its `_events` collection, which the page cannot read. Each carries the sender's name as `by`, a `sender` of `member`, `visitor` or `anonymous`, and `page_visible_outside_workspace`. Agents may delete handled events but never write there.
+Every event a page sends is saved to its `_events` collection, which the page cannot read. Each carries the sender's name as `by`, a `sender` of `member`, `visitor` or `anonymous`, and `page_visible_outside_workspace`. On a public page only the owner, editors and admins are named; other viewers are anonymous. Agents may delete handled events but never write there.
 
 ### Wake an agent on events
 
-From Discord, an owner can ask an agent to wake on a page's events with `create_watch(source="page_event", page=<slug>)`. The page needs `events` on. Each event then starts a read-and-report turn in that thread, within the [watch](watches.md) limits. A page holds at most 5 watches. Daimon derives each watch's signing key from the deployment's encryption keys, so no key is shown or sent.
+From Discord, an owner can ask an agent to wake on a page's events with `create_watch(source="page_event", page=<slug>)`. The page needs `events` on, and a watch gets events only while its maker may still use the page with tools. Each event then starts a read-and-report turn in that thread, within the [watch](watches.md) limits. A page holds at most 5 watches. Daimon derives each watch's signing key from the deployment's encryption keys, so no key is shown or sent.
 
 Page watches can only be made from Discord. On Slack, Teams and the web app the agent reads `_events` when asked instead.
 
