@@ -22,6 +22,7 @@ OpsCode = Literal[
     "routine.fire_failed",
     "routine.goal_unmet",
     "routine.delivery_failed",
+    "routine.owner_notice_failed",
     "delivery.output_failed",
     "watch.poll_failed",
     "watch.paused_failing",
@@ -70,6 +71,9 @@ CATALOG: Final[Mapping[OpsCode, CodeSpec]] = {
     "routine.delivery_failed": CodeSpec(
         "delivery", "error", "Routine result not delivered", "routine"
     ),
+    "routine.owner_notice_failed": CodeSpec(
+        "routine", "warning", "Owner not told of a failed run", "routine"
+    ),
     "delivery.output_failed": CodeSpec(
         "delivery", "warning", "File or table not delivered", "platform"
     ),
@@ -110,7 +114,7 @@ def fingerprint_of(
     code: OpsCode, area: OpsArea, subject: str | None, reason: str | None, person: str | None
 ) -> str:
     """The stable id of an issue; 32 hex characters, so it is also a valid UUID string."""
-    parts = (code, area, subject or "", reason or "", person if CATALOG[code].by_person else "")
+    parts = (code, area, subject or "", reason or "", (CATALOG[code].by_person and person) or "")
     return hashlib.md5("|".join(parts).encode(), usedforsecurity=False).hexdigest()
 
 
