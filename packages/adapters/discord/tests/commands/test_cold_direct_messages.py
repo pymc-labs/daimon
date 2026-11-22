@@ -1827,3 +1827,20 @@ async def test_a_dropped_dm_is_an_issue_unless_a_deploy_or_an_interruption_dropp
         assert issues.await_args.kwargs["user_id"] == str(msg.author.id), "with its person"
     assert sent_text(msg.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
     await cog.cog_unload()
+
+
+async def test_the_person_is_told_before_the_issue_is_recorded(db_session_factory, monkeypatch):
+    """A failing database delays only the issue, never the person's notice."""
+    cog, *_ = await setup(db_session_factory, monkeypatch)
+    order: list[str] = []
+    msg = dm_message(101, "one")
+    msg.channel.send.side_effect = lambda *_a, **_k: order.append("notice")
+
+    async def issue(*_args, **_kwargs):
+        order.append("issue")
+
+    monkeypatch.setattr(module, "report_dm_issue", issue)
+    monkeypatch.setattr(module, "is_shutting_down", lambda: False)
+    await cog._tell_dropped(msg, reason="conversation_moved", tenant_id=uuid.uuid4())
+    assert order == ["notice", "issue"], "the notice goes first"
+    await cog.cog_unload()

@@ -417,10 +417,13 @@ class DirectMessageCog(commands.Cog):
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )
-            await self._report(tenant.id, "discovery", message)
-            await message.channel.send(
-                _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
-            )
+            try:
+                await message.channel.send(
+                    _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                )
+            finally:
+                # After the notice: a failing database must not delay it.
+                await self._report(tenant.id, "discovery", message)
             return _Eligibility(failed=True)
         return _Eligibility(admission=admission)
 
@@ -1270,11 +1273,11 @@ class DirectMessageCog(commands.Cog):
                 user_id=str(message.author.id),
                 reason="discovery_unavailable",
             )
-            await self._report(tenant_id, "discovery", message)
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+            await self._report(tenant_id, "discovery", message)
             return None
 
     def _open_pick(self, key: tuple[int, int]) -> _PendingSelection | None:
@@ -1321,11 +1324,11 @@ class DirectMessageCog(commands.Cog):
                 error_type=type(exc).__name__,
                 user_id=str(first.author.id),
             )
-            await self._report(tenant_id, "reply", first)
             with contextlib.suppress(discord.HTTPException):
                 await first.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+            await self._report(tenant_id, "reply", first)
             return scope_id
 
     async def _report(
@@ -1361,13 +1364,13 @@ class DirectMessageCog(commands.Cog):
             tenant_id=str(tenant_id) if tenant_id is not None else None,
             reason="process_stopping" if stopping else reason,
         )
-        if not stopping and reason != "burst_interrupted":
-            await self._report(tenant_id, "dropped", message)
         with contextlib.suppress(discord.HTTPException):
             await message.channel.send(
                 embed=build_notice_embed(_DROPPED_NOTICE),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+        if not stopping and reason != "burst_interrupted":
+            await self._report(tenant_id, "dropped", message)
 
     async def _explain_no_private_chat(
         self,
@@ -1614,11 +1617,13 @@ class DirectMessageCog(commands.Cog):
                     path="dm",
                     reason="queue_full",
                 )
-                await self._report(conversation.tenant_id, "queue_full", message)
-                await message.channel.send(
-                    embed=build_notice_embed(GLOBAL_CAP_NOTICE),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                try:
+                    await message.channel.send(
+                        embed=build_notice_embed(GLOBAL_CAP_NOTICE),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                finally:
+                    await self._report(conversation.tenant_id, "queue_full", message)
                 return
             working: str | None = None
             if isinstance(message, discord.Message):
@@ -1764,7 +1769,6 @@ class DirectMessageCog(commands.Cog):
                 return
             if cards and cards[-1].ended:
                 return  # the card already shows how the turn ended
-            await self._report(conversation.tenant_id, "reply", message)
             error = _error_text(
                 exc,
                 "Couldn't verify or complete this private conversation. Please retry.",
@@ -1775,3 +1779,4 @@ class DirectMessageCog(commands.Cog):
                     embed=build_notice_embed(error),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+            await self._report(conversation.tenant_id, "reply", message)
