@@ -4351,6 +4351,7 @@ class DaimonBot(commands.Bot):
                         status="skipped",
                         now=datetime.now(UTC),
                         skip_reason="thread_unavailable",
+                        row=row,
                     )
                 continue
             self._spawn(

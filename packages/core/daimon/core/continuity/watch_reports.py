@@ -100,12 +100,18 @@ async def dispatch_watch_report(
         if seed is None:
             # Paused, deleted, revoked or changed since it fired: nobody is waiting.
             await settle_wake(
-                sessionmaker, claim, status="skipped", now=now(), skip_reason="skip_target_changed"
+                sessionmaker,
+                claim,
+                status="skipped",
+                now=now(),
+                skip_reason="skip_target_changed",
+                row=row,
             )
             return
         if not await start_wake(sessionmaker, claim, now=now()):
             return
         skip_reason: str | None = None
+        error_class: str | None = None
         try:
             async with keep_wake(
                 sessionmaker, claim, now=now, tenant_id=row.tenant_id, kind=row.reason
@@ -113,6 +119,13 @@ async def dispatch_watch_report(
                 await run_report(row, seed)
         except AnthropicDisabled:
             log.warning("watch_report.provider_guard_denied", row_id=str(row.id))
+            report_wake_failed(
+                sessionmaker,
+                row.tenant_id,
+                row.reason,
+                "provider_guard_denied",
+                thread_id=row.thread_id,
+            )
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
             return
         except SessionBusyError as busy:
@@ -147,16 +160,15 @@ async def dispatch_watch_report(
                 error_type=type(exc).__name__,
                 causes=backend_refusal_causes(exc),
             )
-            report_wake_failed(
-                sessionmaker, row.tenant_id, row.reason, type(exc).__name__, thread_id=row.thread_id
-            )
-            skip_reason = "dispatch_failed"
+            skip_reason, error_class = "dispatch_failed", type(exc).__name__
         await settle_wake(
             sessionmaker,
             claim,
             status="delivered" if skip_reason is None else "skipped",
             now=now(),
             skip_reason=skip_reason,
+            row=row,
+            error_class=error_class,
         )
 
 

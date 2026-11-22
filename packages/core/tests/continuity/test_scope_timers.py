@@ -15,7 +15,9 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.scope_timers import dispatch_scope_timer
 from daimon.core.continuity.wakes import enqueue_wake
 from daimon.core.errors import DaimonError
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
+from daimon.core.stores.ops_events import list_issue_groups
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn.errors import (
     AdmissionDenied,
@@ -95,19 +97,39 @@ async def test_a_second_dispatch_of_a_settled_timer_does_not_run_it_again(
     assert calls == 1
 
 
+async def _wake_issues(
+    sessionmaker: async_sessionmaker[AsyncSession], row: TaskContinuationRow
+) -> list[tuple[str, str | None, str]]:
+    await drain_ops_events()
+    async with sessionmaker() as session:
+        groups = await list_issue_groups(
+            session, tenant_id=row.tenant_id, since=datetime.now(UTC) - timedelta(hours=1)
+        )
+    return [(g.latest.code, g.latest.reason, g.latest.severity) for g in groups]
+
+
 @pytest.mark.parametrize(
-    ("error", "reason"),
+    ("error", "reason", "issue"),
     [
-        (AdmissionDenied(reason="invoker_not_allowed"), "admission_denied:invoker_not_allowed"),
-        (SessionPreparationFailed(reasons=("x",), stage="s", retry_after=datetime.now(UTC)), None),
-        (TurnNotStarted("stopped"), "not_started:stopped"),
-        (DaimonError("boom"), "dispatch_failed"),
+        (
+            AdmissionDenied(reason="invoker_not_allowed"),
+            "admission_denied:invoker_not_allowed",
+            ("admission_denied:invoker_not_allowed", "warning"),
+        ),
+        (
+            SessionPreparationFailed(reasons=("x",), stage="s", retry_after=datetime.now(UTC)),
+            None,
+            ("blocked_preparation_failed", "error"),
+        ),
+        (TurnNotStarted("stopped"), "not_started:stopped", ("not_started:stopped", "warning")),
+        (DaimonError("boom"), "dispatch_failed", ("DaimonError", "error")),
     ],
 )
 async def test_a_refused_dm_timer_settles_skipped_and_never_retries(
     db_session_factory: async_sessionmaker[AsyncSession],
     error: Exception,
     reason: str | None,
+    issue: tuple[str, str],
 ) -> None:
     row = await _seed(db_session_factory)
 
@@ -120,6 +142,9 @@ async def test_a_refused_dm_timer_settles_skipped_and_never_retries(
     assert settled.status == "skipped"
     if reason is not None:
         assert settled.skip_reason == reason
+    assert await _wake_issues(db_session_factory, row) == [("wake.failed", *issue)], (
+        "every failed skip is an issue, at the severity of its reason"
+    )
 
 
 @pytest.mark.parametrize("cause", ["provider_busy", "provider_cooling"])
@@ -182,6 +207,9 @@ async def test_a_disabled_provider_releases_the_timer(
 
     again = await _read(db_session_factory, row.idempotency_key)
     assert again.status == "pending"
+    assert await _wake_issues(db_session_factory, row) == [
+        ("wake.failed", "provider_guard_denied", "warning")
+    ]
 
 
 async def test_only_timers_run_in_a_dm_scope(

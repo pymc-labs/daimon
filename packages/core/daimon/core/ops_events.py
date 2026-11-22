@@ -25,6 +25,7 @@ from daimon.core.ops_catalog import (
     CATALOG,
     OpsArea,
     OpsCode,
+    OpsSeverity,
     clean_note,
     clean_reason,
     fingerprint_of,
@@ -53,6 +54,9 @@ class OpsEvent:
     skip reason or category. Anything else is stored as `other`."""
     area: OpsArea | None = None
     """Only to move a `turn.failed` in a direct message to `dm`."""
+    severity: OpsSeverity | None = None
+    """Only to soften a code whose reasons differ in weight (`wake.failed`); the reason is in
+    the fingerprint, so one issue keeps one severity."""
     agent_id: str | None = None
     routine_id: uuid.UUID | None = None
     watch_id: uuid.UUID | None = None
@@ -101,7 +105,7 @@ def record_of(event: OpsEvent, *, at: datetime) -> OpsEventRecord:
         count=1,
         code=event.code,
         area=area,
-        severity=spec.severity,
+        severity=event.severity or spec.severity,
         reason=reason,
         fingerprint=fingerprint_of(
             event.code, area, subject, reason, str(event.account_id) if event.account_id else None
