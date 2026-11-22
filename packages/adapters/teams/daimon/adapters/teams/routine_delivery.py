@@ -138,7 +138,11 @@ def make_teams_routine_poster(
             ):
                 await record(row, chat, await teams.post(chat, chunk), delivery=delivery)
         except TEAMS_SEND_ERRORS as err:
-            log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=type(err).__name__)
+            log.warning(
+                "routine.delivery_fallback_failed",
+                routine_id=str(row.id),
+                error_type=type(err).__name__,
+            )
             return DeliveryOutcome(status="skipped", note=reason)
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 

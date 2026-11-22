@@ -934,6 +934,8 @@ _POST_FAILURE_NOTES = frozenset(
         "post_failed",
         "Delivery was interrupted; it will not be retried.",
         "The DM could not be delivered; it will not be retried.",
+        "access_policy_unreadable",
+        "The server access settings could not be read.",
     }
 )
 

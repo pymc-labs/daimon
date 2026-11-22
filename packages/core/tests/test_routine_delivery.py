@@ -871,6 +871,7 @@ async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_sess
     [
         ("tenant_archived", "routine.delivery_skipped"),
         ("post_failed", "routine.delivery_failed"),
+        ("access_policy_unreadable", "routine.delivery_failed"),
     ],
 )
 async def test_deliberate_skip_is_not_a_delivery_failure(
