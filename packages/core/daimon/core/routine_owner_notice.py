@@ -16,7 +16,6 @@ from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.cron_words import routine_phrase
 from daimon.core.ops_catalog import reason_label
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.turn.termination import TerminationReason
 
 _PAUSE = "Pause it from /routines."
 
@@ -42,7 +41,7 @@ class OwnerNoticeFacts:
 
 def owner_notice_facts(
     row: RoutineRow,
-    reason: TerminationReason,
+    reason: str,
     *,
     agent_name: str,
     channel_told: bool,
@@ -56,7 +55,7 @@ def owner_notice_facts(
     return OwnerNoticeFacts(
         routine=row.name or routine_phrase(row.cron_expr, row.timezone),
         agent=agent_name,
-        what_failed=reason_label(reason.value) or "Unknown",
+        what_failed=reason_label(reason) or "Unknown",
         failed_at=_when(now),
         channel_told=channel_told,
         next_run=next_run,

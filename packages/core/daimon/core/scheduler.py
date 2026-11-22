@@ -19,6 +19,7 @@ from daimon.core.stores.lead_intake import configured_routines, routine_executio
 from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
+    record_result,
     release_claimed_slot,
     skip_slots_during_fire,
 )
@@ -30,8 +31,9 @@ log = structlog.get_logger(__name__)
 
 
 FireFn = Callable[[RoutineRow], Awaitable[None]]
-#: Tells a routine's owner that a run failed: the routine, why, and whether its channel was told.
-OwnerNotifier = Callable[[RoutineRow, TerminationReason, bool], Awaitable[None]]
+#: Tells a routine's owner that a run failed: the routine, why (a `TerminationReason` or a
+#: refusal's fixed word), and whether its channel was told.
+OwnerNotifier = Callable[[RoutineRow, str, bool], Awaitable[None]]
 
 
 _NOTICES: set[asyncio.Task[None]] = set()
@@ -40,7 +42,7 @@ _NOTICES: set[asyncio.Task[None]] = set()
 def tell_owner(
     notify: OwnerNotifier | None,
     row: RoutineRow,
-    reason: TerminationReason | None,
+    reason: str | None,
     *,
     channel_told: bool,
 ) -> None:
@@ -62,9 +64,7 @@ def tell_owner(
     task.add_done_callback(_NOTICES.discard)
 
 
-async def _notify(
-    notify: OwnerNotifier, row: RoutineRow, reason: TerminationReason, channel_told: bool
-) -> None:
+async def _notify(notify: OwnerNotifier, row: RoutineRow, reason: str, channel_told: bool) -> None:
     try:
         await notify(row, reason, channel_told)
     except Exception as exc:
@@ -193,6 +193,57 @@ async def _record_fire_error(
         log.exception("record_result(error) failed", routine_id=str(row.id))
         return
     tell_owner(notify_owner, row, reason, channel_told=told)
+
+
+async def record_refusal(
+    s: AsyncSession,
+    sm: async_sessionmaker[AsyncSession],
+    row: RoutineRow,
+    reason: str,
+    *,
+    error: str | None = None,
+    fault: bool = False,
+    notify_owner: OwnerNotifier | None,
+    expected_destination: tuple[str | None, str | None] | None = None,
+    expected_private: RoutineRow | None = None,
+    expected_row: RoutineRow | None = None,
+) -> None:
+    """Record a fire refused before it ran, on `s`, as an issue, and tell the owner.
+
+    `reason` is a fixed word; `error` the text the routine panel shows, else `reason`. A
+    `fault` (Daimon's, not the owner's) is logged as `routine.fire_failed`, which alerting
+    counts; a refusal the owner can fix logs `routine.fire_refused` at info. Both record
+    a `routine.fire_failed` issue, a refusal at warning. `notify_owner` None tells nobody.
+    """
+    await record_result(
+        s,
+        row.id,
+        tail=None,
+        error=error or reason,
+        expected_destination=expected_destination,
+        expected_private=expected_private,
+        expected_row=expected_row,
+    )
+    (log.warning if fault else log.info)(
+        "routine.fire_failed" if fault else "routine.fire_refused",
+        tenant_id=str(row.tenant_id),
+        routine_id=str(row.id),
+        agent_id=row.agent_id,
+        reason=reason,
+    )
+    report_ops_event(
+        sm,
+        OpsEvent(
+            "routine.fire_failed",
+            row.tenant_id,
+            reason=reason,
+            severity=None if fault else "warning",
+            routine_id=row.id,
+            agent_id=row.agent_id,
+        ),
+        logged=False,
+    )
+    tell_owner(notify_owner, row, reason, channel_told=False)
 
 
 async def _release_slot(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:

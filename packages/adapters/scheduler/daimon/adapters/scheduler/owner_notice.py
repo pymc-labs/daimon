@@ -61,7 +61,7 @@ def build_owner_notifier(
 ) -> OwnerNotifier:
     """The scheduler's `notify_owner`: `send_card(user, title, body)`, `send_text(user, text)`."""
 
-    async def notify(row: RoutineRow, reason: TerminationReason, channel_told: bool) -> None:
+    async def notify(row: RoutineRow, reason: str, channel_told: bool) -> None:
         owner = row.created_by_user_id
         async with sm() as s:
             if (
