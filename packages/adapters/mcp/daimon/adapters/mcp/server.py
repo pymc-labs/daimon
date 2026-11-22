@@ -69,6 +69,7 @@ from daimon.adapters.mcp.tools.agent_memory import register_agent_memory_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.allowances import register_allowance_tools
+from daimon.adapters.mcp.tools.artifacts import register_artifact_tools
 from daimon.adapters.mcp.tools.audit_log import register_audit_log_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_copies import register_channel_copy_tools
@@ -608,6 +609,7 @@ def create_mcp_app(
     self_edit.register_self_edit_tools(mcp, runtime)  # agent self-edit tools
     register_notebook_tools(mcp, runtime)  # notebook publish (raises when unconfigured)
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
+    register_artifact_tools(mcp, runtime)  # artifact pages: publish, data, share
     register_propagation_tools(mcp, runtime)  # set/clear agent default
     register_here_tools(mcp, runtime)
     register_admin_tools(mcp, runtime)

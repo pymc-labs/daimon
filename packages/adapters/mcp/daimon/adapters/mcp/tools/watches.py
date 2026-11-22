@@ -24,6 +24,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.artifacts import create_page_watch, enroll_page_key
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
@@ -58,7 +59,7 @@ from daimon.core.mcp_tool_call import McpCallError
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.stores import mux_state, watches
+from daimon.core.stores import artifact_pages, mux_state, watches
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, dm_enabled
 from daimon.core.stores.domain import ChatPlatform, TurnOriginRow, WatchDelivery, WatchRow
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
@@ -463,12 +464,16 @@ async def create_watch_impl(
     delivery: WatchDelivery = "thread",
     permanent: bool = False,
     max_turns_per_day: int | None = None,
+    page: str | None = None,
 ) -> WatchSummary:
     origin = await require_attended_owner(
         runtime, auth, origin_context_id, tool_name="create_watch"
     )
     if source == "page_event":
-        raise ToolError("Page-event watches are unavailable until a page-event producer exists")
+        if page is None:
+            raise ToolError("Name the page to watch in `page`.")
+        if delivery != "thread" or permanent:
+            raise ToolError("A page watch reports in this thread and cannot be permanent.")
     assert auth.platform_user_id is not None
     await require_skip_defaults(
         runtime,
@@ -512,6 +517,22 @@ async def create_watch_impl(
         idempotency_key=uuid.uuid4(),
     )
     await require_delivery_allowed(runtime, auth, origin, delivery)
+    if source == "page_event":
+        assert page is not None and expires_at is not None
+        try:
+            row, key_id = await create_page_watch(
+                runtime,
+                auth,
+                binding,
+                slug=page,
+                instructions=instructions,
+                expires_at=expires_at,
+                max_turns_per_day=daily,
+                now=now,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return summary(row, key_id=key_id)
     if source == "callback":
         return await create_callback_watch(
             runtime,
@@ -778,6 +799,10 @@ async def rotate_watch_impl(
         )
         if watch.source != "page_event":
             raise ValueError("Poll watches have no signing key")
+        async with runtime.session_factory() as db:
+            on_page = await artifact_pages.get(db, watch.page_id) is not None
+        if on_page:
+            return await rotate_page_key(runtime, auth, watch)
         key_id, key = secrets.token_hex(12), secrets.token_urlsafe(48)
         async with runtime.session_factory.begin() as db:
             current = await watches.require_owned_watch(
@@ -798,6 +823,18 @@ async def rotate_watch_impl(
         return await deliver_rotated_key(runtime, auth, watch, key_id=key_id, key=key)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def rotate_page_key(runtime: McpRuntime, auth: AuthIdentity, watch: WatchRow) -> WatchSummary:
+    """A page watch's key is derived, not delivered: enroll a fresh one and say its id."""
+    async with runtime.session_factory.begin() as db:
+        current = await watches.require_owned_watch(
+            db, watch.id, tenant_id=auth.tenant_id, account_id=auth.account_id, is_admin=False
+        )
+        require_unchanged_enrollment(watch, current)
+        keys = tuple(k.get_secret_value() for k in runtime.settings.crypto.keys)
+        key_id = await enroll_page_key(db, watch, keys, now=datetime.now(UTC))
+    return summary(watch, key_id=key_id)
 
 
 async def enrollment_preflight(
@@ -1157,7 +1194,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         origin_context_id: str,
         instructions: str,
-        source: Literal["poll", "callback"],
+        source: Literal["poll", "callback", "page_event"],
         server: str = DAIMON_SERVER_NAME,
         tool: str = "read_thread",
         arguments: dict[str, object] | None = None,
@@ -1170,8 +1207,10 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         delivery: Literal["thread", "dm", "new_thread"] = "thread",
         permanent: bool = False,
         max_turns_per_day: int | None = None,
+        page: str | None = None,
     ) -> WatchSummary:
-        """Watch a listed read tool from this conversation, or wake on posts to a secret link.
+        """Watch a listed read tool from this conversation, wake on posts to a secret link, or
+        wake on a page's events.
 
         With source "callback" nothing is polled: Daimon DMs the owner a private link, and
         each POST to it (UTF-8 text, 4 KiB unless the deployment allows more) wakes the agent
@@ -1181,6 +1220,9 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Daimon allows (30 days unless they changed it, or permanent), so
         `lifetime_days` and `permanent` do not apply to it.
         The tool, server, arguments, projection, rule, interval and key fields are for polls.
+        With source "page_event", `page` names a page you can use that sends events: each
+        event its viewers send wakes the agent in this thread, and no key is shown or needed.
+        It reports in this thread and cannot be permanent; a page holds up to 5 watches.
 
         Binds the current human owner, tenant, agent and exact Discord thread.
         `delivery` says where each report goes: "thread" (this thread, the default),
@@ -1220,7 +1262,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         and an owner has at most 5. `max_turns_per_day` (default 24) is how many
         reports a day this watch may make, up to the ceiling whoever runs Daimon sets;
         above 24 also needs an admin. Producers remain disabled until both operator
-        gates are enabled. Page-event watches are refused until a producer exists.
+        gates are enabled.
         """
         return await create_watch_impl(
             runtime,
@@ -1240,6 +1282,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             delivery=delivery,
             permanent=permanent,
             max_turns_per_day=max_turns_per_day,
+            page=page,
         )
 
     @mcp.tool(tags={"discord"})
@@ -1383,10 +1426,10 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"discord"})
     async def rotate_watch_key(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
-        """Rotate a page signing key, revoke the old key and cancel queued wakes. The fresh
-        key goes to its owner by private DM once. Requires an attended owner turn;
-        an admin cannot rotate another owner's key. Server-side owner card proof is
-        required; backends without tool confirmation refuse.
+        """Rotate a watch's signing key, revoke the old key and cancel queued wakes. A page
+        watch's new key is set up by Daimon; any other's goes to its owner by private DM once.
+        Requires an attended owner turn; an admin cannot rotate another owner's key.
+        Server-side owner card proof is required; backends without tool confirmation refuse.
         """
         return await rotate_watch_impl(
             runtime, await _auth(ctx), watch_id=watch_id, origin_context_id=origin_context_id
