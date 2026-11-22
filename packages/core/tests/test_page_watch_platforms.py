@@ -16,7 +16,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import sign_page_event
 from daimon.core.continuity.poll_tools import validate_poll
 from daimon.core.stores import watches
-from daimon.core.stores.domain import WatchRow
+from daimon.core.stores.domain import TaskContinuationRow, WatchRow
 from daimon.core.stores.identity import create_platform_principal, get_or_create_platform_principal
 from daimon.core.web_identity import place_of, thread_key
 from daimon.testing.builders import new_thread_session
@@ -120,6 +120,12 @@ async def test_a_permanent_web_page_watch_reports_in_a_new_thread_as_its_linked_
         "watch_report",
         "d-owner",
     )
+    report = TaskContinuationRow.model_validate(row)
+    await watches.record_delivery_thread(db_session, report.idempotency_key, "web:report")
+    seed = await watches.watch_seed(
+        db_session, report.model_copy(update={"thread_id": "web:report"}), now=datetime.now(UTC)
+    )
+    assert seed is not None and "untrusted" in seed and "yes" in seed, "the event is untrusted"
 
 
 async def test_a_web_watch_polls_a_pages_data(

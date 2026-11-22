@@ -21,6 +21,7 @@ from daimon.adapters.web.runtime import build_runtime
 from daimon.adapters.web.server_skills import server_skills_node, sync_server_skills_forever
 from daimon.adapters.web.single_process import WebProcessAlreadyRunning
 from daimon.adapters.web.turns import WebTurns
+from daimon.adapters.web.watch_runner import WebWatchRunner
 from daimon.core.config import Settings, WebSettings, load_settings
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
@@ -114,6 +115,9 @@ async def _serve(settings: Settings, web: WebSettings) -> None:
             asyncio.create_task(sweep_stale_web_uploads_forever(runtime.sessionmaker)),
             asyncio.create_task(sweep_expired_artifacts_forever(runtime.sessionmaker)),
         ]
+        if (turns := runtime.turns) is not None:
+            watching = WebWatchRunner(turns).pollers(lambda: turns.draining)
+            sweepers.extend(asyncio.create_task(poller) for poller in watching)
         node = server_skills_node(runtime)
         if node is not None:
             sweepers.append(asyncio.create_task(sync_server_skills_forever(runtime, node)))
