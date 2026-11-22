@@ -1520,6 +1520,8 @@ class WatchRow(BaseModel):
     owner_account_id: uuid.UUID
     owner_external_id: str
     platform: str
+    # None: the principal is on `platform`.
+    principal_platform: str | None = None
     parent_channel_id: str
     thread_id: str
     agent_id: str

@@ -28,6 +28,7 @@ from daimon.core.config import Settings, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
 from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT
+from daimon.core.continuity.watch_projection import projection_path
 from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.features.registry import limit_int
 from daimon.core.features.snapshot import FeaturePlace, feature_in, feature_in_or_none
@@ -71,6 +72,12 @@ MAX_PERMANENT_PER_OWNER = 5
 #: Sources that poll for good when permanent, so a permanent one needs a named admin and
 #: room under `MAX_PERMANENT_PER_OWNER` (`require_permanent_allowed`).
 POLLED_SOURCES = ("poll", "mcp_poll")
+#: Where a page watch can be made; each runs its report turns and rechecks the owner's access.
+PAGE_WATCH_PLATFORMS = ("discord", "slack", "teams", "web")
+#: Where a watch can report into a new thread per firing.
+NEW_THREAD_PLATFORMS = ("discord", "web")
+#: The one tool a web poll watch may check: a page's own data, read as its owner.
+WEB_POLL_TOOL = "artifact_db_query"
 #: Daily firing limits with no ceiling stored, and the hard limits no ceiling passes.
 #: The firing SQL (0164) holds the same numbers.
 DEFAULT_WATCH_CAP = 24
@@ -191,7 +198,7 @@ async def _exact_live_binding(
     principal = await find_platform_principal(
         session,
         tenant_id=binding.tenant_id,
-        platform=binding.platform,
+        platform=binding.principal_platform or binding.platform,
         external_id=binding.requester_external_user_id,
     )
     if principal is None or principal.account_id != binding.requester_account_id:
@@ -227,14 +234,21 @@ async def register_page_watch(
     source: Literal["page_event", "poll", "mcp_poll", "callback"] = "page_event",
     permanent_approved_by: uuid.UUID | None = None,
     max_lifetime: timedelta = MAX_LIFETIME,
+    delivery: WatchDelivery = "thread",
+    select_path: str | None = None,
 ) -> WatchRow:
     """Register a human-admitted owner's exact live binding; never called by ingress.
 
     `expires_at=None` is a permanent watch (`require_permanent_allowed`); for a polled one
     the caller has checked a fresh admin approved it, named in `permanent_approved_by`.
+    A page watch's `delivery` is checked here; a polled one's by its caller, which sets it.
+    `select_path` keeps only that part of each page event, dropping empty ones.
     """
-    if binding.platform != "discord":
-        raise ValueError("Page-event enrollment currently requires a Discord thread")
+    require_watch_platform(binding.platform, source)
+    if source == "page_event":
+        delivery = require_delivery(binding, delivery)
+    if select_path is not None:
+        projection_path(select_path)
     if not 0 < len(instructions) <= INSTRUCTIONS_LIMIT:
         raise ValueError(f"Instructions must be 1 to {INSTRUCTIONS_LIMIT} characters")
     if expires_at is not None and not now < expires_at <= now + max_lifetime:
@@ -270,10 +284,12 @@ async def register_page_watch(
         thread_id=binding.thread_id,
         agent_id=binding.target_ma_agent_id,
         agent_name=binding.target_name,
-        session_id=live.ma_session_id,
+        principal_platform=binding.principal_platform,
+        session_id=live.ma_session_id if delivery == "thread" else None,
+        delivery=delivery,
         instructions=instructions,
         page_id=page_id,
-        rule={},
+        rule={} if select_path is None else {"projection": select_path},
         source=source,
         expires_at=expires_at,
         permanent_approved_by=None if expires_at is not None else permanent_approved_by,
@@ -299,10 +315,10 @@ async def require_permanent_allowed(
     A polled one needs a fresh admin (`approved_by`) and room under
     `MAX_PERMANENT_PER_OWNER`. A callback one polls nothing and is permanent only when the
     deployment's `callback_watch_lifetime` is permanent (0), which is its approval. A page-event
-    watch is never permanent. Every permanent watch counts toward the live-watch limit and
-    expires after `PAUSED_PERMANENT_EXPIRY` paused.
+    watch needs no approval: it still ends when its page is deleted or purged. Every permanent
+    watch counts toward the live-watch limit and expires after `PAUSED_PERMANENT_EXPIRY` paused.
     """
-    if source == "callback":
+    if source in ("callback", "page_event"):
         return
     if source not in POLLED_SOURCES or approved_by is None:
         raise ValueError("Only an admin can approve a permanent watch")
@@ -874,7 +890,7 @@ async def watch_seed(
     principal = await find_platform_principal(
         session,
         tenant_id=watch.tenant_id,
-        platform=watch.platform,
+        platform=watch.principal_platform or watch.platform,
         external_id=watch.owner_external_id,
     )
     if principal is None or principal.account_id != watch.owner_account_id:
@@ -1204,9 +1220,22 @@ def require_delivery_place(
         if platform != "discord":
             raise ValueError("A watch can't be made in a DM here. Make it in a channel.")
         return "dm"
-    if delivery != "thread" and platform != "discord":
+    if delivery != "thread" and platform not in NEW_THREAD_PLATFORMS:
         raise ValueError("Watches here can only report in this thread. Leave delivery as thread.")
     return delivery
+
+
+def require_watch_platform(platform: str, source: str, tool: str | None = None) -> None:
+    """Where each kind of watch can be made. Page watches run everywhere a chat does; a
+    polled one needs Discord's runner and access checks, except a web poll of the page data
+    (`WEB_POLL_TOOL`), which reads only what the owner can already read."""
+    if source == "page_event" and platform in PAGE_WATCH_PLATFORMS:
+        return
+    if platform == "discord":
+        return
+    if platform == "web" and source == "poll" and tool in (None, WEB_POLL_TOOL):
+        return
+    raise ValueError("This kind of watch can only be made in Discord")
 
 
 def _delivery_values(delivery: WatchDelivery) -> dict[str, object]:
@@ -1240,6 +1269,7 @@ async def register_poll_watch(
     from daimon.core.tool_safety import DAIMON_SERVER_NAME
     from pydantic import JsonValue, TypeAdapter
 
+    require_watch_platform(binding.platform, "poll", tool)
     # The operator registry is the only thing that allows a poll.
     listed = require_listed(DAIMON_SERVER_NAME, tool)
     floor = listed.max_interval_floor_s
@@ -1806,7 +1836,7 @@ async def import_watch(
         clip,
         map_poll_source,
     )
-    from daimon.core.continuity.watch_projection import bounded, projection_path
+    from daimon.core.continuity.watch_projection import bounded
 
     binding = definition.os_binding
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
@@ -2222,7 +2252,7 @@ async def confirm_import(
 
 
 async def claim_import_notice(
-    session: AsyncSession, *, now: datetime
+    session: AsyncSession, *, now: datetime, platform: str = "discord"
 ) -> tuple[WatchRow, str] | None:
     """Claim import and lifecycle notices on the existing adapter notice cadence."""
     reason = Watch.source_state["reason"].astext
@@ -2257,7 +2287,7 @@ async def claim_import_notice(
     row = await session.scalar(
         select(Watch)
         .where(
-            Watch.platform == "discord",
+            Watch.platform == platform,
             # Keep expiries older than 24 hours silent; failed deliveries retry within
             # this window (`notice_retry_in`), allowing for outages and deploys.
             or_(
