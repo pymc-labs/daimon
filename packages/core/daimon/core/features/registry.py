@@ -1246,7 +1246,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_webhooks",
         "Workflow webhooks",
-        "Start runs from webhooks.",
+        "Webhook runs.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1255,7 +1255,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_code",
         "Workflow code steps",
-        "Run code steps.",
+        "Code steps.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1264,7 +1264,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_mentions",
         "Workflow mentions",
-        "Start runs from mentions.",
+        "Mention runs.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1273,7 +1273,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_polls",
         "Workflow polls",
-        "Start runs from polls.",
+        "Poll runs.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1282,7 +1282,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "workflow_scoped_writes",
         "Workflow scoped writes",
-        "Write unattended within limits.",
+        "Limited unattended writes.",
         tiers=("deployment", "workspace"),
         binds="turn",
         default="off",
@@ -1291,7 +1291,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "workflow_run_budget",
         "Workflow run budget",
-        "The most a run may spend.",
+        "Most a run spends.",
         {"50": "$50", "20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
         default="5",
         tiers=("deployment", "workspace"),
@@ -1301,7 +1301,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _limit(
         "workflow_retention_days",
         "Workflow run history",
-        "How long runs keep steps.",
+        "Step history kept.",
         {"400": "400 days", "180": "180 days", "90": "90 days", "30": "30 days"},
         default="90",
         tiers=("deployment", "workspace"),

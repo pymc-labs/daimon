@@ -1102,7 +1102,7 @@ Run workflows.
 
 ## Workflow webhooks
 
-Start runs from webhooks.
+Webhook runs.
 
 | | |
 | --- | --- |
@@ -1114,7 +1114,7 @@ Start runs from webhooks.
 
 ## Workflow code steps
 
-Run code steps.
+Code steps.
 
 | | |
 | --- | --- |
@@ -1126,7 +1126,7 @@ Run code steps.
 
 ## Workflow mentions
 
-Start runs from mentions.
+Mention runs.
 
 | | |
 | --- | --- |
@@ -1138,7 +1138,7 @@ Start runs from mentions.
 
 ## Workflow polls
 
-Start runs from polls.
+Poll runs.
 
 | | |
 | --- | --- |
@@ -1150,7 +1150,7 @@ Start runs from polls.
 
 ## Workflow scoped writes
 
-Write unattended within limits.
+Limited unattended writes.
 
 | | |
 | --- | --- |
@@ -1162,7 +1162,7 @@ Write unattended within limits.
 
 ## Workflow run budget
 
-The most a run may spend.
+Most a run spends.
 
 | | |
 | --- | --- |
@@ -1174,7 +1174,7 @@ The most a run may spend.
 
 ## Workflow run history
 
-How long runs keep steps.
+Step history kept.
 
 | | |
 | --- | --- |
