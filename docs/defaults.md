@@ -50,7 +50,7 @@ off the agent at the provider and out of its fingerprint, so `apply` and
 `verify` read the agent as if the entry were absent. Each turn on a listed
 platform adds it to the session instead.
 
-- It fills only the room left under the 20-skill limit, and counts before a
+- It fills only the room left under the 50-skill limit, and counts before a
   channel's skills.
 - Only the Anthropic backend gets it.
 - A skill the provider refuses at session start is dropped for an hour, with a

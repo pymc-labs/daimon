@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
+  an earlier Managed Agents limit; the provider now accepts far more. 50 is the most
+  every backend carries, since an OpenAI agent keeps its skill list in a bounded
+  metadata field. The web inspector, chat and MCP skill tools, channel skills and
+  platform skills use the new limit; an over-limit list the provider still refuses is
+  reported as before.
+
 - **Admins can see what is failing in a workspace.** Failed answers, direct messages,
   routines, deliveries, watches, follow-ups and bridged-tool calls are recorded once per
   issue, without message content, and read on the Overview and Issues pages. An issue can

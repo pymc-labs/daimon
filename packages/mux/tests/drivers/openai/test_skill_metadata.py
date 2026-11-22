@@ -31,6 +31,13 @@ def test_eleven_long_ids_round_trip_in_bounded_integrity_checked_chunks() -> Non
     assert decode(encoded) == pins()
 
 
+def test_fifty_long_ids_fit_the_metadata_that_bounds_daimons_skill_cap() -> None:
+    """`daimon.core.constants.AGENT_SKILL_CAP` (50) must stay within this field."""
+    fifty = tuple(SkillRef(id="skill_" + "x" * 46 + f"{n:02}", version="1") for n in range(50))
+    context = Context(FakeTransport(), "offline", "openai.persistent_workspace", None)
+    assert decode(encode_metadata(fifty, context)) == fifty
+
+
 def test_legacy_single_metadata_value_is_unchanged_and_still_decodes() -> None:
     encoded = encode_metadata(
         (SkillRef(id="short", version="1"),),
