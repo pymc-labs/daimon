@@ -35,7 +35,8 @@ def upgrade() -> None:
             revision = revision + 1,
             source_state = source_state
                 || jsonb_build_object('dm_migration', jsonb_build_object('session_id', session_id))
-        WHERE platform = 'discord' AND {_OLD_DM_WATCH}
+        WHERE platform = 'discord' AND source IN ('poll', 'mcp_poll', 'callback')
+          AND {_OLD_DM_WATCH}
         """
     )
     # Queued fires of the rows paused below go with them, as `pause_watch` does.
