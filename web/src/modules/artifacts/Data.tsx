@@ -15,9 +15,10 @@ import { api } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { useParam, rowProps } from "@/lib/filters"
 import { exact } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import { bytes } from "../chat/format"
-import { KEY } from "./bits"
-import type { ArtifactDetail, DataCollection, DataDocument } from "./types"
+import { KEY, useChange } from "./bits"
+import type { ArtifactDetail, CollectionRule, DataCollection, DataDocument } from "./types"
 
 const Meter = ({ label, value, of }: { label: string; value: string; of: string }) => (
   <div className="flex-1">
@@ -25,6 +26,43 @@ const Meter = ({ label, value, of }: { label: string; value: string; of: string 
     <div className="mt-0.5 text-sm tabular"><span className="font-medium">{value}</span><span className="text-muted-foreground"> of {of}</span></div>
   </div>
 )
+
+const ANYONE: CollectionRule = { read: "all", write: "all" }
+const CHOICES = {
+  read: [["all", "All"], ["own", "Their own"]],
+  write: [["all", "All"], ["own", "Their own"], ["none", "None"]],
+} as const
+
+/** What the page's viewers may read and change here; managers and the agent are not bound. */
+function Rules({ a, collection }: { a: ArtifactDetail; collection: string }) {
+  const rule = a.collection_rules[collection] ?? ANYONE
+  const save = useChange(a.id, () => toast("Rules saved"))
+  const set = (next: CollectionRule) => {
+    const { [collection]: _, ...rest } = a.collection_rules
+    save.mutate({ collection_rules: next.read === "all" && next.write === "all" ? rest : { ...rest, [collection]: next } })
+  }
+  return (
+    <PanelSection title="Viewers can" className="space-y-2.5 py-3">
+      {(["read", "write"] as const).map((k) => (
+        <div key={k} role="radiogroup" aria-label={k === "read" ? "Viewers read" : "Viewers write"} className="flex items-center gap-2">
+          <span className="w-10 shrink-0 text-xs text-muted-foreground">{k === "read" ? "Read" : "Write"}</span>
+          <div className={cn("grid flex-1 gap-1.5", k === "read" ? "grid-cols-2" : "grid-cols-3")}>
+            {CHOICES[k].map(([v, label]) => {
+              const on = rule[k] === v
+              return (
+                <button
+                  key={v} type="button" role="radio" aria-checked={on} disabled={save.isPending}
+                  onClick={() => !on && set({ ...rule, [k]: v })}
+                  className={cn("h-9 rounded-lg border px-2 text-xs font-medium transition-colors", on ? "border-primary bg-accent/50 ring-1 ring-primary" : "hover:bg-accent/50")}
+                >{label}</button>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+    </PanelSection>
+  )
+}
 
 function download(name: string, rows: DataDocument[]) {
   const url = URL.createObjectURL(new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" }))
@@ -126,6 +164,7 @@ export function Data({ a }: { a: ArtifactDetail }) {
                   <SelectContent>{cols.map((c) => <SelectItem key={c.name} value={c.name}>{c.name}<span className="ml-2 text-faint tabular">{c.documents}</span></SelectItem>)}</SelectContent>
                 </Select>
               </PanelSection>
+              {a.can.edit && !name.startsWith("_") && <Rules a={a} collection={name} />}
               <Documents key={name} a={a} collection={name} />
             </>
           )

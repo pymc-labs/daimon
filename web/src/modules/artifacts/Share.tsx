@@ -6,6 +6,7 @@ import { CopyButton } from "@/components/common"
 import { MultiPicker, type PickItem } from "@/components/picker"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -15,7 +16,7 @@ import { useMe } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { ACCESS, expiry, KEY, useChange } from "./bits"
 import { publicRefusal } from "./rules"
-import type { ArtifactAccess, ArtifactDetail, PersonRef } from "./types"
+import type { ArtifactAccess, ArtifactDetail, EmailShare, PersonRef } from "./types"
 
 const DAYS = [["never", "Never"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["365", "1 year"]] as const
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString()
@@ -71,6 +72,41 @@ function People({ value, onChange, label, locked, members }: { value: PersonRef[
   )
 }
 
+const Copyable = ({ text, label }: { text: string; label: string }) => (
+  <div className="flex items-center gap-1.5">
+    <div className="h-8 min-w-0 flex-1 truncate rounded-md border bg-muted px-2.5 font-mono text-xs leading-8" title={text}>{text}</div>
+    <CopyButton text={text} label={label} className="size-8 border" />
+  </div>
+)
+
+/** Invite by email: adds the workspace's person, or a new guest who gets a sign-in link once. */
+function ByEmail({ id, onAdded }: { id: string; onAdded: (people: PersonRef[]) => void }) {
+  const qc = useQueryClient()
+  const [email, setEmail] = useState("")
+  const [sent, setSent] = useState<{ email: string; link: string } | null>(null)
+  const invite = useMutation({
+    mutationFn: () => api.post<EmailShare>(`/api/artifacts/${id}/people`, { email }),
+    onSuccess: (r) => {
+      void qc.invalidateQueries({ queryKey: KEY })
+      onAdded(r.people)
+      setSent(r.invite_link ? { email, link: r.invite_link } : null)
+      setEmail("")
+      toast(r.invite_link ? "Guest invited" : "Person added")
+    },
+    meta: { inline: true },
+  })
+  return (
+    <Field label="Invite by email">
+      <form className="flex gap-1.5" onSubmit={(e) => { e.preventDefault(); if (email.trim()) invite.mutate() }}>
+        <Input type="email" placeholder="name@company.com" value={email} onChange={(e) => setEmail(e.target.value)} className="h-8" aria-label="Email" />
+        <Button type="submit" variant="outline" size="sm" className="h-8" disabled={!email.trim() || invite.isPending}>Invite</Button>
+      </form>
+      {invite.error && <p role="alert" className="text-xs text-destructive">{invite.error.message}</p>}
+      {sent && <div className="space-y-1 pt-1"><div className="text-xs text-muted-foreground">Sign-in link for {sent.email}</div><Copyable text={sent.link} label="Copy sign-in link" /></div>}
+    </Field>
+  )
+}
+
 function Form({ a, close }: { a: ArtifactDetail; close: () => void }) {
   const { data: me } = useMe()
   const qc = useQueryClient()
@@ -101,11 +137,13 @@ function Form({ a, close }: { a: ArtifactDetail; close: () => void }) {
       </div>
       <div className="space-y-4">
         {access !== "public" && <Field label={access === "people" ? "People" : "Also share with"}><People value={people} onChange={setPeople} label="Search people" /></Field>}
+        {access === "people" && a.access === "people" && a.can.share && (
+          <ByEmail id={a.id} onAdded={(added) => setPeople((p) => [...p, ...added.filter((n) => !p.some((o) => o.id === n.id))])} />
+        )}
         {access === "public" && a.link && (
           <Field label="Link">
             <div className="flex items-center gap-1.5">
-              <div className="h-8 min-w-0 flex-1 truncate rounded-md border bg-muted px-2.5 font-mono text-xs leading-8" title={a.link}>{a.link}</div>
-              <CopyButton text={a.link} label="Copy link" className="size-8 border" />
+              <div className="min-w-0 flex-1"><Copyable text={a.link} label="Copy link" /></div>
               <Button
                 variant="outline" size="sm" className="h-8" disabled={replace.isPending}
                 onClick={async () => { if (await confirm({ title: "Replace link?", body: "The old link stops working.", action: "Replace", destructive: true })) replace.mutate() }}
@@ -117,7 +155,7 @@ function Form({ a, close }: { a: ArtifactDetail; close: () => void }) {
           <People value={editors} onChange={setEditors} label="Search members" members />
           <label className="mt-2.5 flex items-center justify-between gap-3 text-sm">
             Editors can share
-            <Switch checked={share} onCheckedChange={setShare} aria-label="Editors can share" />
+            <Switch checked={share} onCheckedChange={setShare} disabled={a.role === "editor"} aria-label="Editors can share" />
           </label>
         </Field>
         <Field label="Expires">
