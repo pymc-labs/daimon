@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from cryptography.fernet import Fernet
@@ -15,6 +17,7 @@ from daimon.core.artifact_pages.keys import new_key_id, page_event_key
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import sign_page_event
 from daimon.core.continuity.poll_tools import validate_poll
+from daimon.core.continuity.watch_turn import pause_for_lost_access
 from daimon.core.stores import watches
 from daimon.core.stores.domain import TaskContinuationRow, WatchRow
 from daimon.core.stores.identity import create_platform_principal, get_or_create_platform_principal
@@ -26,6 +29,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.fresh_schema
+
+
+class _Sessions:
+    """A sessionmaker over the test's one session, so writes land in its transaction."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    @asynccontextmanager
+    async def begin(self) -> AsyncIterator[AsyncSession]:
+        yield self.db
 
 
 async def _web_owner(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> ContinuationRequest:
@@ -126,6 +140,10 @@ async def test_a_permanent_web_page_watch_reports_in_a_new_thread_as_its_linked_
         db_session, report.model_copy(update={"thread_id": "web:report"}), now=datetime.now(UTC)
     )
     assert seed is not None and "untrusted" in seed and "yes" in seed, "the event is untrusted"
+    denied = await pause_for_lost_access(cast(Any, _Sessions(db_session)), report)
+    assert denied.reason == "invoker_not_allowed"
+    paused = await watches.get_watch(db_session, watch.id)
+    assert paused is not None and paused.status == "paused", "a lost owner pauses the watch"
 
 
 async def test_a_web_watch_polls_a_pages_data(
