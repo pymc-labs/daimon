@@ -18,6 +18,9 @@ from daimon.core._models import (
     Artifact,
     ArtifactDocument,
     ArtifactVersion,
+    TaskContinuation,
+    Watch,
+    WatchFiring,
     WebMessage,
     WebPerson,
     WebThread,
@@ -27,13 +30,13 @@ from daimon.core.artifact_pages.access import PageChange, PageSettings, Role
 from daimon.core.artifact_pages.events import PageEvent
 from daimon.core.artifact_pages.model import (
     ArtifactError,
-    Limits,
     check_slug,
     check_title,
     new_link_secret,
     new_public_id,
     page_url,
 )
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores import watches
 from daimon.core.stores.agent_files import _cipher  # pyright: ignore[reportPrivateUsage]
@@ -43,6 +46,7 @@ from daimon.core.stores.domain import (
     ArtifactRow,
     ArtifactUsage,
     ArtifactVersionRow,
+    CollectionRule,
     WebArtifactRef,
 )
 from daimon.core.web_roles_rules import is_admin, role_of_account
@@ -54,6 +58,7 @@ from sqlalchemy import (
     delete,
     func,
     literal,
+    null,
     select,
     text,
     update,
@@ -112,6 +117,7 @@ def _row(session: AsyncSession, orm: Artifact) -> ArtifactRow:
         current_version=orm.current_version,
         size_bytes=orm.size_bytes,
         data_revision=orm.data_revision,
+        collection_rules=orm.collection_rules,
         created_at=orm.created_at,
         updated_at=orm.updated_at,
     )
@@ -174,6 +180,7 @@ def _set_settings(
     orm.ask = settings.ask
     orm.data_scale = settings.data_scale
     orm.expires_at = settings.expires_at
+    orm.collection_rules = {k: v.model_dump() for k, v in settings.collection_rules.items()}
     if settings.access != "public":
         orm.link_secret = None
     elif rotate or orm.link_secret is None:
@@ -189,11 +196,12 @@ async def _add_version(
     agent_id: str,
     origin: PublishOrigin | None,
     now: datetime,
+    limits: ArtifactPagesSettings,
 ) -> None:
     size = len(html.encode())
-    if size > Limits.HTML_BYTES:
+    if size > limits.html_bytes:
         raise ArtifactError(
-            "too_large", f"The page is {size:,} bytes; the limit is {Limits.HTML_BYTES:,}."
+            "too_large", f"The page is {size:,} bytes; the limit is {limits.html_bytes:,}."
         )
     orm.current_version += 1
     orm.size_bytes = size
@@ -216,7 +224,7 @@ async def _add_version(
     await session.execute(
         delete(ArtifactVersion).where(
             ArtifactVersion.artifact_id == orm.id,
-            ArtifactVersion.version <= orm.current_version - Limits.VERSIONS_KEPT,
+            ArtifactVersion.version <= orm.current_version - limits.versions_kept,
         )
     )
 
@@ -235,6 +243,7 @@ async def publish(
     origin: PublishOrigin | None,
     new_link: bool,
     now: datetime,
+    limits: ArtifactPagesSettings,
 ) -> ArtifactRow:
     """Create the page (owned by `account_id`) or add a version to the one at `slug`, which
     takes an owner, editor or admin; changing who sees it takes `can_share` as well."""
@@ -267,7 +276,14 @@ async def publish(
         settings = access.apply_change(
             access.settings_of(current), change, owner_account_id=orm.owner_account_id
         )
-        access.check_change(access.settings_of(current), settings, role=role, now=now)
+        access.check_change(
+            access.settings_of(current),
+            settings,
+            role=role,
+            now=now,
+            actor=account_id,
+            outside=await visible_outside_workspace(session, current),
+        )
         await _require_members(session, tenant_id, set(settings.editors) - set(current.editors))
         if new_link and not access.can_share(current, role):
             raise ArtifactError("forbidden", access.ASK_OWNER)
@@ -275,7 +291,14 @@ async def publish(
         orm.title = title
         orm.agent_id = agent_id
     await _add_version(
-        session, orm, html=html, account_id=account_id, agent_id=agent_id, origin=origin, now=now
+        session,
+        orm,
+        html=html,
+        account_id=account_id,
+        agent_id=agent_id,
+        origin=origin,
+        now=now,
+        limits=limits,
     )
     await session.flush()
     await session.refresh(orm)
@@ -331,15 +354,29 @@ async def visible_outside_workspace(session: AsyncSession, artifact: ArtifactRow
 
 
 async def update_settings(
-    session: AsyncSession, artifact: ArtifactRow, change: PageChange, *, role: Role, now: datetime
+    session: AsyncSession,
+    artifact: ArtifactRow,
+    change: PageChange,
+    *,
+    role: Role,
+    account_id: uuid.UUID,
+    now: datetime,
 ) -> ArtifactRow:
-    """The one path for a settings change, from the web app or a republish's settings."""
+    """The one path for a settings change, from the web app or a republish's settings;
+    `account_id` is who changes it."""
     orm = await _locked(session, artifact.id)
     current = _row(session, orm)
     settings = access.apply_change(
         access.settings_of(current), change, owner_account_id=orm.owner_account_id
     )
-    access.check_change(access.settings_of(current), settings, role=role, now=now)
+    access.check_change(
+        access.settings_of(current),
+        settings,
+        role=role,
+        now=now,
+        actor=account_id,
+        outside=await visible_outside_workspace(session, current),
+    )
     await _require_members(session, orm.tenant_id, set(settings.editors) - set(current.editors))
     _set_settings(session, orm, settings, rotate=False)
     if change.title is not None:
@@ -443,6 +480,7 @@ async def restore(
     role: Role,
     account_id: uuid.UUID | None,
     now: datetime,
+    limits: ArtifactPagesSettings,
 ) -> ArtifactRow:
     """Publish an earlier version again, as a new version."""
     if not access.can_edit(role):
@@ -461,6 +499,7 @@ async def restore(
         agent_id=old.agent_id,
         origin=None,
         now=now,
+        limits=limits,
     )
     await session.flush()
     return _row(session, orm)
@@ -538,25 +577,33 @@ async def get_doc(
 
 
 async def list_docs(
-    session: AsyncSession, artifact_id: uuid.UUID, query: documents.ListQuery
+    session: AsyncSession,
+    artifact_id: uuid.UUID,
+    query: documents.ListQuery,
+    *,
+    limits: ArtifactPagesSettings,
 ) -> list[ArtifactDocumentRow]:
-    """One page of a collection; refused when it would be over `Limits.LIST_BYTES`."""
-    order = (
+    """One page of a collection; refused when it would be over `limits.list_bytes`."""
+    order: ColumnElement[Any] = (
         ArtifactDocument.data[query.order_by]
         if query.order_by is not None
-        else ArtifactDocument.doc_id
+        else (
+            ArtifactDocument.created_at if query.by_creation else ArtifactDocument.doc_id
+        ).expression
     )
     selected = select(ArtifactDocument).where(
         ArtifactDocument.artifact_id == artifact_id, ArtifactDocument.collection == query.collection
     )
     if query.after is not None:
         selected = selected.where(ArtifactDocument.doc_id > query.after)
+    if query.created_by is not None:
+        selected = selected.where(ArtifactDocument.created_by_account_id == query.created_by)
     selected = selected.order_by(
-        order.desc() if query.descending else order.asc(), ArtifactDocument.doc_id
+        (order.desc() if query.descending else order.asc()).nulls_last(), ArtifactDocument.doc_id
     ).limit(query.limit)
     page = selected.subquery()
     size: int = await session.scalar(select(func.coalesce(func.sum(page.c.size_bytes), 0))) or 0
-    documents.check_list_size(size)
+    documents.check_list_size(size, limits)
     return [_doc_row(orm) for orm in await session.scalars(selected)]
 
 
@@ -607,24 +654,45 @@ async def write_doc(
     *,
     by: str | None,
     account_id: uuid.UUID | None,
+    rule: CollectionRule | None,
     now: datetime,
+    limits: ArtifactPagesSettings,
 ) -> tuple[ArtifactDocumentRow, int]:
     """Write one document under the page's caps; returns it and the new data revision.
-    `by` is the writer's name as shown (`agent` for a tool), `account_id` theirs."""
+    `by` is the writer's name as shown (`agent` for a tool), `account_id` theirs. `rule`
+    is the collection's rule for a page viewer, None for managers and tools."""
     documents.check_writable_collection(collection)
     documents.check_doc_id(doc_id)
     orm = await _locked(session, artifact.id)
     existing = await _get_doc_orm(session, artifact.id, collection, doc_id)
+    if rule is not None:
+        documents.check_write(
+            rule,
+            exists=existing is not None,
+            created_by=None if existing is None else existing.created_by_account_id,
+            viewer=account_id,
+        )
     data = documents.apply_write(write, None if existing is None else existing.data)
-    size = documents.measure(data)
+    size = documents.measure(data, limits.document_bytes)
     documents.check_capacity(
         await usage(session, artifact.id),
         new_size=size,
         replaced_size=None if existing is None else existing.size_bytes,
         scale=orm.data_scale,
+        limits=limits,
     )
+    revision = orm.data_revision + 1
     saved = await _save_doc(
-        session, orm, collection, doc_id, data, size=size, by=by, account_id=account_id, now=now
+        session,
+        orm,
+        collection,
+        doc_id,
+        data,
+        size=size,
+        by=by,
+        account_id=account_id,
+        revision=revision,
+        now=now,
     )
     return saved, await _bump(session, orm)
 
@@ -639,6 +707,7 @@ async def _save_doc(
     size: int,
     by: str | None,
     account_id: uuid.UUID | None,
+    revision: int,
     now: datetime,
 ) -> ArtifactDocumentRow:
     values = {
@@ -646,6 +715,7 @@ async def _save_doc(
         "size_bytes": size,
         "updated_by": by,
         "updated_by_account_id": account_id,
+        "revision": revision,
         "updated_at": now,
     }
     upsert = (
@@ -656,6 +726,7 @@ async def _save_doc(
             collection=collection,
             doc_id=doc_id,
             created_at=now,
+            created_by_account_id=account_id,
             **values,
         )
         .on_conflict_do_update(index_elements=["artifact_id", "collection", "doc_id"], set_=values)
@@ -669,11 +740,26 @@ async def _save_doc(
 
 
 async def delete_doc(
-    session: AsyncSession, artifact: ArtifactRow, collection: str, doc_id: str
+    session: AsyncSession,
+    artifact: ArtifactRow,
+    collection: str,
+    doc_id: str,
+    *,
+    rule: CollectionRule | None,
+    account_id: uuid.UUID | None,
 ) -> int:
-    """Delete one document (a missing one too, as Firestore does); returns the revision."""
+    """Delete one document (a missing one too, as Firestore does); returns the revision.
+    `rule` binds a page viewer (`account_id`), as in `write_doc`."""
     documents.check_collection(collection)
     orm = await _locked(session, artifact.id)
+    if rule is not None:
+        existing = await _get_doc_orm(session, artifact.id, collection, doc_id)
+        documents.check_write(
+            rule,
+            exists=existing is not None,
+            created_by=None if existing is None else existing.created_by_account_id,
+            viewer=account_id,
+        )
     deleted = await session.execute(
         delete(ArtifactDocument).where(
             ArtifactDocument.artifact_id == artifact.id,
@@ -693,12 +779,13 @@ async def add_event(
     *,
     account_id: uuid.UUID | None,
     now: datetime,
+    limits: ArtifactPagesSettings,
 ) -> None:
     """Save an event to `_events` before any watch sees it, so it outlives a paused or
-    missing watch. The newest `Limits.EVENTS` (and `EVENTS_BYTES`) stay. The page cannot
-    read `_events`, so the data revision stays put."""
+    missing watch. The newest `limits.events` (and `events_bytes`), times the data scale,
+    stay. The page cannot read `_events`, so the data revision stays put."""
     orm = await _locked(session, artifact.id)
-    size = documents.measure(event.document)
+    size = documents.measure(event.document, limits.event_bytes)
     await session.execute(
         text(
             "DELETE FROM artifact_documents d USING ("
@@ -711,8 +798,8 @@ async def add_event(
         {
             "id": artifact.id,
             "events": documents.EVENTS_COLLECTION,
-            "count": Limits.EVENTS,
-            "bytes": Limits.EVENTS_BYTES - size,
+            "count": limits.events * orm.data_scale,
+            "bytes": limits.events_bytes * orm.data_scale - size,
         },
     )
     by = event.document.get("by")
@@ -725,6 +812,7 @@ async def add_event(
         size=size,
         by=by if isinstance(by, str) else None,
         account_id=account_id,
+        revision=orm.data_revision,
         now=now,
     )
 
@@ -766,7 +854,9 @@ async def delete_owned(session: AsyncSession, *, account_id: uuid.UUID) -> int:
 
 def _mentions(account_id: uuid.UUID) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
     listed = Artifact.people.contains([account_id]) | Artifact.editors.contains([account_id])
-    return listed, ArtifactDocument.updated_by_account_id == account_id
+    return listed, (ArtifactDocument.updated_by_account_id == account_id) | (
+        ArtifactDocument.created_by_account_id == account_id
+    )
 
 
 async def count_mentions(session: AsyncSession, *, account_id: uuid.UUID) -> int:
@@ -788,15 +878,22 @@ async def scrub_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
             editors=func.array_remove(Artifact.editors, account_id),
         )
     )
+    theirs = ArtifactDocument.updated_by_account_id == account_id
     docs = await session.execute(
         update(ArtifactDocument)
         .where(wrote)
         .values(
-            updated_by=None,
-            updated_by_account_id=None,
+            updated_by=case((theirs, null()), else_=ArtifactDocument.updated_by),
+            updated_by_account_id=case(
+                (theirs, null()), else_=ArtifactDocument.updated_by_account_id
+            ),
+            created_by_account_id=case(
+                (ArtifactDocument.created_by_account_id == account_id, null()),
+                else_=ArtifactDocument.created_by_account_id,
+            ),
             data=case(
                 (
-                    ArtifactDocument.collection == documents.EVENTS_COLLECTION,
+                    theirs & (ArtifactDocument.collection == documents.EVENTS_COLLECTION),
                     ArtifactDocument.data.op("-")(literal("by")),
                 ),
                 else_=ArtifactDocument.data,
@@ -804,3 +901,27 @@ async def scrub_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
         )
     )
     return _count(pages) + _count(docs)
+
+
+async def woken_by_outside_page(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, thread_id: str
+) -> bool:
+    """Whether the thread's running watch turn was woken by an event from a page people
+    outside the workspace can read: such a turn may not write to another such page."""
+    woke = (
+        select(Watch.page_id)
+        .join(WatchFiring, WatchFiring.watch_id == Watch.id)
+        .join(TaskContinuation, TaskContinuation.idempotency_key == WatchFiring.wake_key)
+        .where(
+            TaskContinuation.tenant_id == tenant_id,
+            TaskContinuation.platform == platform,
+            TaskContinuation.thread_id == thread_id,
+            TaskContinuation.status == "claimed",
+            Watch.source == "page_event",
+        )
+    )
+    pages = await session.scalars(select(Artifact).where(Artifact.id.in_(woke)))
+    for orm in pages:
+        if await visible_outside_workspace(session, _row(session, orm)):
+            return True
+    return False

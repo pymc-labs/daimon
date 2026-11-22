@@ -10,12 +10,15 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.core.artifact_pages import access, content, documents, events
 from daimon.core.artifact_pages.access import PageChange, PageSettings, Viewer
-from daimon.core.artifact_pages.model import ArtifactError, Limits
+from daimon.core.artifact_pages.model import ArtifactError
 from daimon.core.artifact_pages.tickets import Ticket, fernet_of, open_ticket, seal
-from daimon.core.stores.domain import ArtifactRow, ArtifactUsage
+from daimon.core.config import ArtifactPagesSettings
+from daimon.core.continuity.page_events import MAX_EVENT_BYTES
+from daimon.core.stores.domain import ArtifactRow, ArtifactUsage, CollectionRule
 
 NOW = datetime(2026, 11, 1, tzinfo=UTC)
 OWNER, EDITOR, LISTED, MEMBER = (uuid.UUID(int=i) for i in range(1, 5))
+LIMITS = ArtifactPagesSettings()
 
 
 def _page(**values: object) -> ArtifactRow:
@@ -99,7 +102,6 @@ def test_tools_reach_only_workspace_pages_unless_managing() -> None:
         ({"data": "write"}, "cannot write"),
         ({"data": "read", "events": True}, "not both"),
         ({"ask": True}, "cannot ask"),
-        ({"expires_at": None}, "needs an expiry"),
     ],
 )
 def test_public_pages_refuse_what_anonymous_viewers_must_not_do(
@@ -118,6 +120,58 @@ def test_an_editor_without_sharing_may_change_capabilities_but_not_who_sees_it()
     with pytest.raises(ArtifactError, match="Ask the owner") as refused:
         access.check_change(current, public, role="editor", now=NOW)
     assert refused.value.code == "forbidden", "a role refusal is forbidden, not invalid"
+
+
+def test_a_public_page_may_never_expire() -> None:
+    access.check_settings(PageSettings(access="public", expires_at=None))
+
+
+def test_an_editor_without_sharing_may_leave_but_not_remove_others() -> None:
+    current = PageSettings(editors=(EDITOR, MEMBER), editors_can_share=False)
+    left = access.apply_change(current, PageChange(editors=(MEMBER,)), owner_account_id=OWNER)
+    access.check_change(current, left, role="editor", now=NOW, actor=EDITOR)
+    others = access.apply_change(current, PageChange(editors=(EDITOR,)), owner_account_id=OWNER)
+    with pytest.raises(ArtifactError, match="Ask the owner"):
+        access.check_change(current, others, role="editor", now=NOW, actor=EDITOR)
+
+
+@pytest.mark.parametrize("change", [{"data": "read"}, {"events": True}, {"data_scale": 2}])
+def test_data_and_events_are_sharing_while_outsiders_see_the_page(
+    change: dict[str, object],
+) -> None:
+    current = PageSettings(editors_can_share=False)
+    new = access.apply_change(current, PageChange.model_validate(change), owner_account_id=OWNER)
+    access.check_change(current, new, role="editor", now=NOW, outside=False)
+    with pytest.raises(ArtifactError, match="Ask the owner"):
+        access.check_change(current, new, role="editor", now=NOW, outside=True)
+    access.check_change(current, new, role="owner", now=NOW, outside=True)
+
+
+def test_only_the_owner_or_an_admin_turns_editor_sharing_off() -> None:
+    current = PageSettings()
+    off = access.apply_change(current, PageChange(editors_can_share=False), owner_account_id=OWNER)
+    with pytest.raises(ArtifactError, match="Ask the owner"):
+        access.check_change(current, off, role="editor", now=NOW)
+    access.check_change(current, off, role="admin", now=NOW)
+
+
+def test_collection_rules_bind_viewers_to_their_own_documents() -> None:
+    own = CollectionRule(read="own", write="own")
+    assert documents.may_read(own, MEMBER, MEMBER), "their own"
+    assert not documents.may_read(own, MEMBER, LISTED), "someone else's"
+    assert not documents.may_read(own, None, None), "anonymous viewers own nothing"
+    documents.check_write(own, exists=False, created_by=None, viewer=MEMBER)
+    documents.check_write(own, exists=True, created_by=MEMBER, viewer=MEMBER)
+    for exists, created_by, viewer in [(True, MEMBER, LISTED), (False, None, None)]:
+        with pytest.raises(ArtifactError) as refused:
+            documents.check_write(own, exists=exists, created_by=created_by, viewer=viewer)
+        assert refused.value.code == "not_allowed", (exists, viewer)
+    with pytest.raises(ArtifactError, match="read-only"):
+        documents.check_write(
+            CollectionRule(write="none"), exists=False, created_by=None, viewer=MEMBER
+        )
+    with pytest.raises(ArtifactError):
+        access.check_settings(PageSettings(collection_rules={"_events": own}))
 
 
 def test_apply_change_drops_the_owner_from_editors_and_keeps_unset_fields() -> None:
@@ -166,18 +220,19 @@ def test_document_writes_follow_firestore_and_reserve_daimons_collections() -> N
     with pytest.raises(ArtifactError):
         documents.check_writable_collection("_events")
     with pytest.raises(ArtifactError):
-        documents.measure({"x": "a" * Limits.DOCUMENT_BYTES})
+        documents.measure({"x": "a" * LIMITS.document_bytes}, LIMITS.document_bytes)
 
 
 @pytest.mark.parametrize("scale", [1, 3])
 def test_capacity_scales_with_data_scale(scale: int) -> None:
-    full = ArtifactUsage(documents=Limits.DOCUMENTS * scale, bytes=0)
-    documents.check_capacity(full, new_size=10, replaced_size=5, scale=scale)
+    full = ArtifactUsage(documents=LIMITS.documents * scale, bytes=0)
+    check = documents.check_capacity
+    check(full, new_size=10, replaced_size=5, scale=scale, limits=LIMITS)
     with pytest.raises(ArtifactError, match="at most"):
-        documents.check_capacity(full, new_size=10, replaced_size=None, scale=scale)
-    heavy = ArtifactUsage(documents=1, bytes=Limits.DATA_BYTES * scale)
+        check(full, new_size=10, replaced_size=None, scale=scale, limits=LIMITS)
+    heavy = ArtifactUsage(documents=1, bytes=LIMITS.data_bytes * scale)
     with pytest.raises(ArtifactError, match="limit"):
-        documents.check_capacity(heavy, new_size=10, replaced_size=None, scale=scale)
+        check(heavy, new_size=10, replaced_size=None, scale=scale, limits=LIMITS)
 
 
 def test_build_event_carries_server_facts_and_refuses_oversize() -> None:
@@ -191,6 +246,7 @@ def test_build_event_carries_server_facts_and_refuses_oversize() -> None:
         visible_outside_workspace=True,
         event_id=event_id,
         now=NOW,
+        max_bytes=LIMITS.event_bytes,
     )
     body = json.loads(built.body)
     assert body["id"] == str(event_id) and body["sender"] == "visitor", body
@@ -199,14 +255,35 @@ def test_build_event_carries_server_facts_and_refuses_oversize() -> None:
         events.build_event(
             slug="runsheet",
             name="vote",
-            data="x" * 5000,
+            data="x" * LIMITS.event_bytes,
             sender="member",
             by=None,
             visible_outside_workspace=False,
             event_id=event_id,
             now=NOW,
+            max_bytes=LIMITS.event_bytes,
         )
-    assert large.value.code == "too_large", "events stay within watch evidence bounds"
+    assert large.value.code == "too_large", "events stay within their limit"
+
+
+def test_a_large_event_reaches_watches_as_a_bounded_preview() -> None:
+    data = {"note": "é" * 20_000}
+    built = events.build_event(
+        slug="runsheet",
+        name="vote",
+        data=data,
+        sender="member",
+        by="Ines",
+        visible_outside_workspace=False,
+        event_id=uuid.uuid4(),
+        now=NOW,
+        max_bytes=LIMITS.event_bytes,
+    )
+    assert built.document["data"] == data, "the saved event is whole"
+    body = json.loads(built.body)
+    assert len(built.body) <= MAX_EVENT_BYTES, "the signed copy fits a watch's bound"
+    assert body["data_truncated"] is True and body["data"] is None, body.keys()
+    assert json.dumps(data, ensure_ascii=False).startswith(body["data_preview"]), "a prefix"
 
 
 def test_policies_keep_page_code_sandboxed_and_offline() -> None:

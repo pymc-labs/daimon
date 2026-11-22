@@ -49,6 +49,9 @@ def upgrade() -> None:
         sa.Column("current_version", sa.Integer(), server_default="0", nullable=False),
         sa.Column("size_bytes", sa.Integer(), server_default="0", nullable=False),
         sa.Column("data_revision", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column(
+            "collection_rules", postgresql.JSONB(), server_default=sa.text("'{}'"), nullable=False
+        ),
         _now("created_at"),
         _now("updated_at"),
         sa.CheckConstraint("public_id ~ '^[a-z2-7]{10}$'", name="ck_artifacts_public_id"),
@@ -66,7 +69,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "access <> 'public' OR (data <> 'write' AND NOT (data = 'read' AND events)"
-            " AND NOT ask AND expires_at IS NOT NULL)",
+            " AND NOT ask)",
             name="ck_artifacts_public",
         ),
         sa.CheckConstraint(
@@ -126,6 +129,8 @@ def upgrade() -> None:
         sa.Column("size_bytes", sa.Integer(), nullable=False),
         sa.Column("updated_by", sa.Text(), nullable=True),
         sa.Column("updated_by_account_id", _UUID, nullable=True),
+        sa.Column("created_by_account_id", _UUID, nullable=True),
+        sa.Column("revision", sa.BigInteger(), server_default="0", nullable=False),
         _now("created_at"),
         _now("updated_at"),
         sa.CheckConstraint(
@@ -137,10 +142,14 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["artifact_id"], ["artifacts.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["updated_by_account_id"], ["accounts.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["created_by_account_id"], ["accounts.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("artifact_id", "collection", "doc_id"),
     )
     op.create_index(
         "ix_artifact_documents_account", "artifact_documents", ["updated_by_account_id"]
+    )
+    op.create_index(
+        "ix_artifact_documents_creator", "artifact_documents", ["created_by_account_id"]
     )
     op.add_column("web_threads", sa.Column("artifact_id", _UUID, nullable=True))
     op.create_foreign_key(

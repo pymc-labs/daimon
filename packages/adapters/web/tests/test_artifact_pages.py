@@ -21,7 +21,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import watches, web_sessions
 from daimon.core.stores import web_chat as chat_store
-from daimon.core.stores.domain import ArtifactRow
+from daimon.core.stores.domain import ArtifactRow, CollectionRule, WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.builders import new_thread_session
 from daimon.testing.turn_router import build_turn_router
@@ -193,6 +193,44 @@ async def test_the_page_api_refuses_cross_site_calls(
     assert own.status_code == 200 and own.json() == {"revision": 0}
 
 
+async def test_collection_rules_bind_every_page_api_path_but_not_managers(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    t = await team(db_session_factory)
+    own = CollectionRule(read="own", write="own")
+    page = await publish(
+        db_session_factory,
+        t.owner,
+        data="write",
+        people=(t.visitor.account_id,),
+        collection_rules={"votes": own, "log": CollectionRule(write="none")},
+    )
+    api = f"/a/{page.public_id}/_api/"
+
+    async def call(person: WebPersonRow, method: str, body: dict[str, Any]) -> Any:
+        async with page_client(db_session_factory, person) as client:
+            return await client.post(api + method, json=body, headers=OWN)
+
+    mine = await call(t.member, "db.set", {"path": "votes/m", "data": {"n": 1}})
+    assert mine.status_code == 200, mine.text
+    added = await call(t.visitor, "db.add", {"collection": "votes", "data": {"n": 2}})
+    assert added.status_code == 200, added.text
+    hidden = await call(t.visitor, "db.get", {"path": "votes/m"})
+    assert hidden.json()["data"] is None, "another viewer's document reads as missing"
+    listed = await call(t.visitor, "db.list", {"collection": "votes"})
+    assert [d["id"] for d in listed.json()["docs"]] == [added.json()["id"]], "only their own"
+    for method, body in [
+        ("db.set", {"path": "votes/m", "data": {"n": 9}}),
+        ("db.delete", {"path": "votes/m"}),
+        ("db.add", {"collection": "log", "data": {}}),
+    ]:
+        refused = await call(t.visitor, method, body)
+        assert refused.status_code == 403, (method, refused.text)
+        assert refused.json()["error"]["code"] == "not_allowed", method
+    managed = await call(t.owner, "db.list", {"collection": "votes"})
+    assert len(managed.json()["docs"]) == 2, "managers are not bound"
+
+
 async def _page_watch(
     factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, page: ArtifactRow
 ) -> uuid.UUID:
@@ -252,7 +290,12 @@ async def test_notify_saves_the_event_and_wakes_the_pages_watch(
             # Shared with the member only: the watch's maker can no longer use the page.
             change = PageChange(access="people", people=(t.member.account_id,))
             await artifact_store.update_settings(
-                db, page, change, role="owner", now=datetime.now(UTC)
+                db,
+                page,
+                change,
+                role="owner",
+                account_id=t.owner.account_id,
+                now=datetime.now(UTC),
             )
         unseen = await client.post(api, json={"event": "vote", "data": {}}, headers=OWN)
 

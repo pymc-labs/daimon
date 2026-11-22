@@ -71,7 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and write. `create_watch(source="page_event", page=...)` wakes an agent on a
   page's events from Discord, and `rotate_watch_key` no longer sends a key for
   such a watch. The new Artifacts feature is on wherever the web app is, and the
-  seeded agent gets an `artifacts` skill. See the Artifacts page.
+  seeded agent gets an `artifacts` skill. Sharers can invite an email address
+  as a page-only visitor, managers can limit viewers to their own documents per
+  collection, Claude Code plugin logins publish as their person, and the limits
+  are `DAIMON_ARTIFACT_PAGES__*` settings. See the Artifacts page.
 
 - **Artifact pages can run on their own domain, and ask before acting as the
   viewer.** `DAIMON_WEB__ARTIFACT_CONTENT_URL` serves each page from its own

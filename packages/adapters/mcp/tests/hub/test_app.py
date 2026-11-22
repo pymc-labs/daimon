@@ -38,6 +38,14 @@ _HUB_TOOLS = {
     "get_session",
     "list_events",
     "list_my_sessions",
+    "artifact_upload_url",
+    "artifact_publish",
+    "artifact_list",
+    "artifact_source",
+    "artifact_db_query",
+    "artifact_db_write",
+    "artifact_delete",
+    "artifact_transfer",
 }
 
 

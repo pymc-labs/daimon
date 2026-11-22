@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link, useNavigate, useParams } from "react-router"
+import { Link, useNavigate, useParams, useSearchParams } from "react-router"
 
 import { AgentAvatar } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { api, ApiError } from "@/lib/api"
 import { shortDate, usd } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
+import { isServerPage, safeNext } from "@/lib/safe-next"
 import type { AgentRef } from "@/lib/types"
 import { landingOf } from "./landing"
 import { Card } from "./Card"
@@ -28,12 +29,14 @@ const Row = ({ k, children }: { k: string; children: React.ReactNode }) => (
 export function InviteLanding() {
   const { token } = useParams()
   const navigate = useNavigate()
+  // A page shared by email lands on that page; nothing else may be named.
+  const page = safeNext(useSearchParams()[0].get("next"))
   const qc = useQueryClient()
   const me = useMe()
   const { data, error } = useQuery({ queryKey: ["invite", token], queryFn: () => api.get<Invite>(`/api/invites/${token}`), retry: false })
   const accept = useMutation({
     mutationFn: () => api.post(`/api/invites/${token}/accept`),
-    onSuccess: () => { qc.clear(); navigate(landingOf(data!)) },
+    onSuccess: () => { qc.clear(); if (isServerPage(page)) window.location.assign(page); else navigate(landingOf(data!)) },
     meta: { inline: true },
   })
   if (error) return (

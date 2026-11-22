@@ -1,10 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render, screen } from "@testing-library/react"
-import { describe, expect, it } from "vitest"
+import userEvent from "@testing-library/user-event"
+import { MemoryRouter } from "react-router"
+import { describe, expect, it, vi } from "vitest"
 
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { api } from "@/lib/api"
 import type { Me } from "@/lib/types"
 import { filterArtifacts } from "./Artifacts"
+import { Data } from "./Data"
 import { refused } from "./rules"
 import { ShareDialog } from "./Share"
 import type { ArtifactDetail, ArtifactSummary } from "./types"
@@ -40,11 +44,12 @@ describe("public page rules", () => {
   })
 })
 
+const detail = (over: Partial<ArtifactDetail>): ArtifactDetail => ({
+  ...row({}), people: [], editors: [], editors_can_share: true, data_scale: 1, collection_rules: {}, link: null, watches: [], asks: { threads: 0, turns_7d: 0 },
+  usage: { documents: 0, max_documents: 5000, bytes: 0, max_bytes: 1 }, can: { edit: true, share: true, delete: true, transfer: true }, ...over,
+})
+
 describe("share dialog", () => {
-  const detail = (over: Partial<ArtifactDetail>): ArtifactDetail => ({
-    ...row({}), people: [], editors: [], editors_can_share: true, data_scale: 1, link: null, watches: [], asks: { threads: 0, turns_7d: 0 },
-    usage: { documents: 0, max_documents: 5000, bytes: 0, max_bytes: 1 }, can: { edit: true, share: true, delete: true, transfer: true }, ...over,
-  })
   const open = (a: ArtifactDetail) => {
     const client = new QueryClient()
     client.setQueryData(["me"], { workspace: { name: "Fernhill Labs" } } as Me)
@@ -61,5 +66,34 @@ describe("share dialog", () => {
     ["reads data and sends events", { data: "read" as const, events: true }],
   ])("blocks going public when the page %s", (_, over) => {
     expect(open(detail(over))).toHaveAttribute("aria-disabled", "true")
+  })
+})
+
+describe("share by email and rules", () => {
+  const wrap = (ui: React.ReactNode) => {
+    const client = new QueryClient()
+    client.setQueryData(["me"], { workspace: { name: "Fernhill Labs" } } as Me)
+    return render(<QueryClientProvider client={client}><MemoryRouter><TooltipProvider>{ui}</TooltipProvider></MemoryRouter></QueryClientProvider>)
+  }
+
+  it("invites a new address and shows its sign-in link once", async () => {
+    const guest = { id: "p9", name: "ana", kind: "visitor" as const }
+    const post = vi.spyOn(api, "post").mockResolvedValue({ ...detail({ access: "people", people: [guest] }), invite_link: "https://x.example/invite/t?next=%2Fa%2Fa1%2Fa1" } as never)
+    wrap(<ShareDialog artifact={detail({ access: "people" })} open onOpenChange={() => {}} />)
+    await userEvent.type(screen.getByRole("textbox", { name: "Email" }), "ana@example.com")
+    await userEvent.click(screen.getByRole("button", { name: "Invite" }))
+    expect(post).toHaveBeenCalledWith("/api/artifacts/a1/people", { email: "ana@example.com" })
+    expect(await screen.findByText("Sign-in link for ana@example.com")).toBeInTheDocument()
+  })
+  it("lets only the owner or an admin turn editor sharing off", () => {
+    wrap(<ShareDialog artifact={detail({ role: "editor" })} open onOpenChange={() => {}} />)
+    expect(screen.getByRole("switch", { name: "Editors can share" })).toBeDisabled()
+  })
+  it("saves a collection's viewer rule", async () => {
+    vi.spyOn(api, "get").mockResolvedValue([{ name: "votes", documents: 1, bytes: 9 }] as never)
+    const patch = vi.spyOn(api, "patch").mockResolvedValue(detail({}) as never)
+    wrap(<Data a={detail({ data: "write", collection_rules: { votes: { read: "own", write: "all" } } })} />)
+    await userEvent.click(await screen.findByRole("radio", { name: "None" }))
+    expect(patch).toHaveBeenCalledWith("/api/artifacts/a1", { collection_rules: { votes: { read: "own", write: "none" } } })
   })
 })

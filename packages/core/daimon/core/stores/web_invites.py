@@ -14,7 +14,7 @@ from decimal import Decimal
 from daimon.core._models import WebInvite, WebInviteAgent
 from daimon.core.cursor import Cursor
 from daimon.core.stores.domain import WebInviteKind, WebInviteRole, WebInviteRow
-from sqlalchemy import literal, select, tuple_, update
+from sqlalchemy import func, literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -166,6 +166,24 @@ async def list_invites(
     if limit is not None:
         query = query.limit(limit)
     return await _with_agents(session, (await session.scalars(query)).all())
+
+
+async def count_visitor_invites_by(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, since: datetime
+) -> int:
+    """Visitor invites `account_id` created since `since`, revoked ones too."""
+    return (
+        await session.scalar(
+            select(func.count()).where(
+                WebInvite.tenant_id == tenant_id,
+                WebInvite.kind == "invite",
+                WebInvite.role == "visitor",
+                WebInvite.created_by_account_id == account_id,
+                WebInvite.created_at >= since,
+            )
+        )
+        or 0
+    )
 
 
 async def claim_invite(

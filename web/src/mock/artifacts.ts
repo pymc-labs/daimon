@@ -46,7 +46,7 @@ type Seed = Pick<Stored, "id" | "slug" | "title" | "agent" | "owner" | "access" 
   & Partial<Stored> & { size: number; versionsBy: PersonRef[]; chat?: Record<number, string> }
 const art = ({ size, versionsBy, chat, ...a }: Seed): Stored => ({
   link: null, docs: {}, events_log: [], watches: [], asks: { threads: 0, turns_7d: 0 }, editors: [], people: [], editors_can_share: true, data_scale: 1,
-  ...a, size_bytes: size,
+  collection_rules: {}, ...a, size_bytes: size,
   versions: versions(a.version, "x".repeat(size), versionsBy, a.agent.name, (Date.now() - new Date(a.updated_at).getTime()) / 3_600_000, chat),
 })
 
@@ -56,6 +56,7 @@ const artifacts: Stored[] = [
     id: "k4rm7q2xdn", slug: "content-run-sheet", title: "Content run sheet", agent: ag("ag_default"), owner: MAYA, access: "workspace",
     data: "write", events: true, ask: true, version: 7, size: 38_400, created_at: ago(24 * 19), updated_at: ago(2.5), expires_at: null,
     editors: [JONAS], editors_can_share: true, versionsBy: [MAYA, JONAS], chat: { 7: "/chat/s_runsheet", 5: "/chat/s_runsheet" },
+    collection_rules: { runs: { read: "all", write: "own" } },
     docs: {
       runs: [
         doc("run_0041", { title: "Spring launch teaser", channel: "LinkedIn", stage: "Plan", owner: "Sofia Brandt", due: "2026-11-27" }, 30, "Sofia Brandt"),
@@ -186,6 +187,7 @@ function detail(a: Stored): ArtifactDetail {
   const all = docsOf(a)
   return {
     ...summary(a), people: a.people, editors: a.editors, editors_can_share: a.editors_can_share, data_scale: a.data_scale, link: a.link,
+    collection_rules: a.collection_rules,
     watches: can(a).edit ? a.watches : [], asks: a.asks, can: can(a),
     usage: { documents: all.length, max_documents: 5_000 * a.data_scale, bytes: all.reduce((n, d) => n + d.size_bytes, 0), max_bytes: 20 * 1_048_576 * a.data_scale },
   }
@@ -239,6 +241,7 @@ export const artifactsHandlers: HttpHandler[] = [
     const b = (await request.json()) as ArtifactChange
     const sharing = ["access", "people", "editors", "editors_can_share", "expires_at"].some((k) => k in b)
     if (sharing && !can(a).share) return forbidden("Ask the owner or an admin.")
+    if (b.editors_can_share !== undefined && b.editors_can_share !== a.editors_can_share && !can(a).delete) return forbidden("Ask the owner or an admin.")
     const next = { access: b.access ?? a.access, data: b.data ?? a.data, events: b.events ?? a.events, ask: b.ask ?? a.ask }
     if (next.access === "public") {
       const why = publicRefusal(next)
@@ -253,11 +256,26 @@ export const artifactsHandlers: HttpHandler[] = [
     if (lists.editors) a.editors = lists.editors
     if (b.editors_can_share !== undefined) a.editors_can_share = b.editors_can_share
     if (b.data_scale !== undefined) a.data_scale = b.data_scale
+    if (b.collection_rules) a.collection_rules = b.collection_rules
     if (b.expires_at !== undefined) a.expires_at = b.expires_at
     else if (next.access === "public" && a.access !== "public" && !a.expires_at) a.expires_at = inDays(30)
     a.link = next.access === "public" ? (a.link ?? `${ORIGIN}/a/${a.id}/${a.slug}?k=${secret()}`) : null
     Object.assign(a, next)
     return HttpResponse.json(detail(a))
+  }),
+  http.post("/api/artifacts/:id/people", async ({ params, request }) => {
+    await wait(250)
+    const { a, res } = guard(params.id, "share")
+    if (!a) return res
+    const email = String(((await request.json()) as { email: string }).email).trim().toLowerCase()
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return invalid("Enter an email address.")
+    if (a.access !== "people") return invalid("Share with specific people first.")
+    const known = PEOPLE.find((p) => p.email.toLowerCase() === email)
+    const person: PersonRef = known ? ref(known.id)! : { id: `p_${secret()}`, name: email.split("@")[0]!, kind: "visitor" }
+    if (!known) EXTRA.push(person)
+    if (!a.people.some((p) => p.id === person.id)) a.people = [...a.people, person]
+    const invite_link = known ? null : `${ORIGIN}/invite/${secret()}?next=${encodeURIComponent(`/a/${a.id}/${a.slug}`)}`
+    return HttpResponse.json({ ...detail(a), invite_link })
   }),
   http.delete("/api/artifacts/:id", async ({ params }) => {
     await wait(200)

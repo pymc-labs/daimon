@@ -15,7 +15,6 @@ _PUBLIC_ID_ALPHABET: Final = "abcdefghijklmnopqrstuvwxyz234567"
 # An escaped NUL in JSON text, not an escaped backslash before "u0000": jsonb refuses it.
 _JSON_NUL: Final = re.compile(r"(?<!\\)(?:\\\\)*\\u0000")
 MAX_TITLE: Final = 120
-_MIB: Final = 1024 * 1024
 
 ErrorCode = Literal[
     "invalid",
@@ -24,6 +23,7 @@ ErrorCode = Literal[
     "forbidden",
     "too_large",
     "rate_limited",
+    "not_allowed",
     "unavailable",
 ]
 
@@ -37,20 +37,9 @@ class ArtifactError(UserFacingError):
 
 
 class Limits:
-    """Fixed caps. Page data caps are per page, times its `data_scale` (1-10)."""
+    """Caps the database checks too; the rest are `ArtifactPagesSettings`."""
 
-    HTML_BYTES: Final = 2 * _MIB
-    VERSIONS_KEPT: Final = 20
-    DOCUMENT_BYTES: Final = 64 * 1024
-    DOCUMENTS: Final = 5000
-    DATA_BYTES: Final = 20 * _MIB
     MAX_DATA_SCALE: Final = 10
-    LIST_DOCUMENTS: Final = 1000
-    LIST_BYTES: Final = 4 * _MIB
-    EVENTS: Final = 1000
-    EVENTS_BYTES: Final = 4 * _MIB
-    API_PER_MINUTE: Final = 600
-    ASK_PER_MINUTE: Final = 10
     PEOPLE: Final = 200
     EDITORS: Final = 50
 

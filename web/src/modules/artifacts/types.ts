@@ -2,6 +2,8 @@ export type ArtifactAccess = "workspace" | "people" | "public"
 export type DataAccess = "off" | "read" | "write"
 export type ArtifactRole = "owner" | "editor" | "admin" | "viewer"
 export type PersonRef = { id: string; name: string; kind: "member" | "visitor" }
+/** Which documents a page's viewers may read and change in one collection. */
+export type CollectionRule = { read: "all" | "own"; write: "all" | "own" | "none" }
 export type ArtifactSummary = {
   id: string; slug: string; title: string; url: string   // url: /a/<id>/<slug>
   agent: { id: string; name: string; avatar?: string | null }
@@ -12,6 +14,7 @@ export type ArtifactSummary = {
 }
 export type ArtifactDetail = ArtifactSummary & {
   people: PersonRef[]; editors: PersonRef[]; editors_can_share: boolean; data_scale: number
+  collection_rules: Record<string, CollectionRule>
   link: string | null   // public: full secret link
   usage: { documents: number; max_documents: number; bytes: number; max_bytes: number }
   watches: { id: string; name: string; owner: string; agent: string; status: "active" | "paused"; turns_today: number; max_turns_per_day: number; thread_url: string | null }[]
@@ -27,4 +30,7 @@ export type ArtifactEvent = { id: string; event: string; data: unknown; by: stri
 export type ArtifactChange = Partial<{
   title: string; access: ArtifactAccess; people: string[]; editors: string[]; editors_can_share: boolean
   data: DataAccess; events: boolean; ask: boolean; data_scale: number; expires_at: string | null
+  collection_rules: Record<string, CollectionRule>
 }>
+/** What `POST /api/artifacts/:id/people` answers: a new visitor's sign-in link, shown once. */
+export type EmailShare = ArtifactDetail & { invite_link: string | null }
