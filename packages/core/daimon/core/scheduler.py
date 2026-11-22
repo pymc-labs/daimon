@@ -241,7 +241,6 @@ async def run_one_tick(
                             row.tenant_id,
                             row.id,
                             lifetime_s=dispatch_timeout_s,
-                            register=(row.tenant_id, row.id) in intake_bindings,
                         ):
                             await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
