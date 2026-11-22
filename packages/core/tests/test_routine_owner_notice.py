@@ -4,12 +4,12 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.routine_owner_notice import (
     owner_notice_card,
     owner_notice_facts,
     owner_notice_prompt,
 )
-from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.scheduler import drain_owner_notices, tell_owner
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.turn.termination import TerminationReason
