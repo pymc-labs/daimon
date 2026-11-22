@@ -19,15 +19,19 @@ export function useSwitchWorkspace(next: string, { replace = false, onError }: {
 export const useProviders = () => useQuery({ queryKey: ["auth", "providers"], queryFn: () => api.get<Provider[]>("/auth/providers") })
 
 /** A list the server pages: `data` is every row loaded so far, `loadMore` fetches the next page. */
-export function usePaged<T>(key: readonly unknown[], path: string) {
+export function usePaged<T>(key: readonly unknown[], path: string, { refetchInterval }: { refetchInterval?: number } = {}) {
   const q = useInfiniteQuery({
     queryKey: key,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam }) => api.page<T>(path, pageParam),
     getNextPageParam: (last) => last.next,
+    refetchInterval,
   })
   const data = useMemo(() => q.data?.pages.flatMap((p) => p.rows), [q.data])
-  return { data, error: q.error, isError: q.isError, refetch: q.refetch, hasMore: q.hasNextPage, loadMore: q.fetchNextPage, loadingMore: q.isFetchingNextPage }
+  return {
+    data, error: q.error, isError: q.isError, refetch: q.refetch, hasMore: q.hasNextPage, loadMore: q.fetchNextPage, loadingMore: q.isFetchingNextPage,
+    updatedAt: q.dataUpdatedAt,
+  }
 }
 export type Paged<T> = ReturnType<typeof usePaged<T>>
 

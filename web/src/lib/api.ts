@@ -68,9 +68,9 @@ export type Page<T> = { rows: T[]; next: string | null }
 
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
-  /** `path` carries no query string. */
+  /** `path` may carry filters; the cursor joins them. */
   page: async <T>(path: string, cursor?: string | null): Promise<Page<T>> => {
-    const res = await send("GET", path + qs({ cursor }), undefined, true)
+    const res = await send("GET", path + (cursor && path.includes("?") ? `&${qs({ cursor }).slice(1)}` : qs({ cursor })), undefined, true)
     return { rows: (await res.json()) as T[], next: res.headers.get("X-Next-Cursor") }
   },
   post: <T>(path: string, body: unknown = {}, retry = false) => request<T>("POST", path, body, retry),
