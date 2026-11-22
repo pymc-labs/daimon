@@ -185,6 +185,7 @@ TAIL = (
     "0221_routine_delivery_hold",
     "0222_secret_shares",
     "0223_dm_watch_delivery",
+    "0224_ops_events",
 )
 HEAD = TAIL[-1]
 
@@ -241,6 +242,7 @@ AFTER_MERGE_COLUMNS = {
     ("usage_observation", "provider"),
     ("usage_observation", "observed_at"),
     ("routines", "delivery_hold"),
+    ("routines", "owner_notice"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 

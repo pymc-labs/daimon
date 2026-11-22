@@ -33,7 +33,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -61,6 +61,7 @@ from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.mentions import attribution_line, render_post
 from daimon.core.outbound.opt_out import opt_out_names
 from daimon.core.permissions import any_writers_none, limiting_ids_at
@@ -120,6 +121,9 @@ __all__ = [
     "routine_agent_name",
     "run_delivery_poller",
 ]
+
+if TYPE_CHECKING:
+    from daimon.core.owner_notices import OwnerDm
 
 log = structlog.get_logger(__name__)
 
@@ -438,7 +442,7 @@ async def record_failure(
     error: str,
     reason: TerminationReason | None,
     expected_row: RoutineRow | None = None,
-) -> None:
+) -> bool:
     """Record a failed run and, for the first failure in a row, queue a notice.
 
     `reason` is why the run ended, classified where it was caught; `None`
@@ -446,16 +450,20 @@ async def record_failure(
     notice goes through the same outbox as a result, so the chat adapter
     posts it with every check a result gets. One per failing streak: a routine
     that keeps failing stays quiet until a run succeeds (`queue_failure_notice`).
+    Returns whether a notice was queued.
     """
+    queued = False
     if reason is not None:
         notice = failure_notice_text(
             reason, platform=await routine_platform(session, routine_id) or ""
         )
-        if await queue_failure_notice(
+        queued = await queue_failure_notice(
             session, routine_id, notice=notice, expected_row=expected_row
-        ):
+        )
+        if queued:
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))
     await record_result(session, routine_id, tail=None, error=error, expected_row=expected_row)
+    return queued
 
 
 async def record_routine_failure(
@@ -464,12 +472,12 @@ async def record_routine_failure(
     *,
     error: str,
     reason: TerminationReason | None,
-) -> None:
+) -> bool:
     """Record a fire that failed or was refused, fenced on the row it was claimed as.
 
     An owner-DM routine records only the error, and only while its private
-    revision and destination are unchanged; any other routine goes through
-    `record_failure`.
+    revision and destination are unchanged: its owner is told by `tell_owner`. Any
+    other routine goes through `record_failure`. Returns whether its channel is told.
     """
     if row.destination_kind == "dm":
         await record_result(
@@ -480,8 +488,8 @@ async def record_routine_failure(
             expected_destination=(row.destination_kind, row.destination_id),
             expected_private=row,
         )
-    else:
-        await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
+        return False
+    return await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
 def render_fallback_post(
@@ -946,6 +954,8 @@ class DeliveryOutcome:
     #: A `SkipReason`, or `dm_fallback:<reason>` for a result delivered to the
     #: creator by direct message instead of the destination.
     note: str | None = None
+    #: The error class of a post that was tried and failed, such as a fallback DM.
+    failed: str | None = None
 
 
 #: The adapter hook: post `row`'s result (or refuse) and say what happened.
@@ -989,6 +999,7 @@ async def poll_deliveries_once(
                     status="post_failed",
                     error_type=type(err).__name__,
                 )
+                _report_delivery_failed(sessionmaker, row, platform, type(err).__name__)
                 outcome = DeliveryOutcome(
                     status="skipped",
                     note=(
@@ -1015,7 +1026,7 @@ async def poll_deliveries_once(
         )
         if outcome.status == "skipped" and outcome.note != "no_result" and not raised:
             # Real post failures page; deliberate skips (policy, archive, ...) only log.
-            failed = outcome.note in _POST_FAILURE_NOTES
+            failed = outcome.failed is not None or outcome.note in _POST_FAILURE_NOTES
             (log.warning if failed else log.info)(
                 "routine.delivery_failed" if failed else "routine.delivery_skipped",
                 tenant_id=str(row.tenant_id),
@@ -1023,7 +1034,28 @@ async def poll_deliveries_once(
                 status="skipped",
                 note=outcome.note,
             )
+            if failed:
+                _report_delivery_failed(
+                    sessionmaker, row, platform, outcome.failed or "post_failed"
+                )
     return len(claimed)
+
+
+def _report_delivery_failed(
+    sm: async_sessionmaker[AsyncSession], row: RoutineRow, platform: str, reason: str
+) -> None:
+    report_ops_event(
+        sm,
+        OpsEvent(
+            "routine.delivery_failed",
+            row.tenant_id,
+            reason=reason,
+            routine_id=row.id,
+            agent_id=row.agent_id,
+            platform=platform,
+        ),
+        logged=False,
+    )
 
 
 async def run_delivery_poller(
@@ -1033,14 +1065,20 @@ async def run_delivery_poller(
     post: RoutinePoster,
     should_stop: Callable[[], bool],
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
+    owner_dm: OwnerDm | None = None,
 ) -> None:
-    """Poll until `should_stop`, one `poll_deliveries_once` per interval."""
+    """Poll until `should_stop`, one `poll_deliveries_once` per interval; with `owner_dm`,
+    also send the failure notices waiting for this platform's routine owners."""
+    from daimon.core.owner_notices import poll_owner_notices_once  # imports this module
+
     owner = f"{platform}:{uuid.uuid4()}"
     while not should_stop():
         try:
             await poll_deliveries_once(
                 sessionmaker, platform=platform, post=post, now=datetime.now(UTC), owner=owner
             )
+            if owner_dm is not None:
+                await poll_owner_notices_once(sessionmaker, platform=platform, send=owner_dm)
         except Exception:
             log.exception("routine.delivery_poll_failed", platform=platform)
         await asyncio.sleep(interval_s)

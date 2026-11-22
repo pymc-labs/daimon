@@ -44,6 +44,7 @@ import functools
 import hashlib
 import secrets
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -61,6 +62,7 @@ from daimon.adapters.teams.image_preview import MAX_PREVIEWS, preview_attachment
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.media.vision import sniff_image_media_type
 from daimon.core.output_delivery import (
@@ -170,6 +172,10 @@ async def _log_channel_skip(file: SkippedFile) -> None:
 
 async def _log_skip(file: SkippedFile) -> None:
     log.info("teams.output.oversize", file_id=file.file_id, size_bytes=file.size_bytes)
+
+
+def _tenant(inbound: TeamsInbound) -> uuid.UUID:
+    return derive_tenant_uuid(platform="teams", workspace_id=inbound.entra_tenant_id)
 
 
 class Spawn(Protocol):
@@ -331,6 +337,9 @@ class TeamsOutputDelivery:
                 sleep=self._sleep,
                 order=previews_first,
                 quiet_s=quiet_s,
+                tenant_id=_tenant(inbound),
+                platform="teams",
+                sessions=self._runtime.sessionmaker,
             )
             # In the answer, above the consent cards; else one message each.
             inline = previews[:MAX_PREVIEWS]
@@ -433,6 +442,9 @@ class TeamsOutputDelivery:
                 sleep=self._sleep,
                 order=previews_first,
                 quiet_s=quiet_s,
+                tenant_id=_tenant(inbound),
+                platform="teams",
+                sessions=self._runtime.sessionmaker,
             )
             # Links and images in one edit of the answer; refused, each goes as on its own.
             text = "\n".join(links)
@@ -472,6 +484,9 @@ class TeamsOutputDelivery:
             max_bytes=0,
             discard_skipped_up_to=MAX_BYTES_PER_FILE,
             quiet_s=quiet_s,
+            tenant_id=_tenant(inbound),
+            platform="teams",
+            sessions=self._runtime.sessionmaker,
         )
 
     async def _thumbnails(self, lookups: list[asyncio.Task[Attachment | None]]) -> list[Attachment]:

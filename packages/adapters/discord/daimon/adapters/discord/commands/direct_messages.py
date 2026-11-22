@@ -77,6 +77,7 @@ from daimon.core.dm_access import (
     list_routable_dm_agents,
 )
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
+from daimon.core.dm_failures import DmStage, report_dm_issue
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
@@ -416,9 +417,13 @@ class DirectMessageCog(commands.Cog):
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )
-            await message.channel.send(
-                _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
-            )
+            try:
+                await message.channel.send(
+                    _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                )
+            finally:
+                # After the notice: a failing database must not delay it.
+                await self._report(tenant.id, "discovery", message)
             return _Eligibility(failed=True)
         return _Eligibility(admission=admission)
 
@@ -427,7 +432,9 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         *,
         expected_scope_id: str | None = None,
+        tried: list[uuid.UUID] | None = None,
     ) -> DirectMessageRow | None:
+        """`tried` collects each server looked at, so a failure can name the last one."""
         if self._unloaded or not self._claim_discovery(message.author.id):
             return None
         tenants = await list_tenants_by_platform(self.bot.runtime.sessionmaker, platform="discord")
@@ -435,6 +442,8 @@ class DirectMessageCog(commands.Cog):
         denied: set[uuid.UUID] = set()
         unknown = False
         for tenant in tenants:
+            if tried is not None:
+                tried.append(tenant.id)
             found = await self._eligible(tenant, message, denied=denied)
             if found.failed:
                 return None
@@ -457,6 +466,8 @@ class DirectMessageCog(commands.Cog):
         if len(candidates) == 1 and expected_scope_id is None:
             only = candidates[0]
             if only.admission is not None:
+                if tried is not None:
+                    tried.append(only.tenant.id)
                 return await self._start(
                     message, only.tenant, only.admission, expected_scope_id=None
                 )
@@ -1242,18 +1253,21 @@ class DirectMessageCog(commands.Cog):
                 # An error no turn handled, or a cancellation: nothing left goes unheard.
                 if await self._bursts.end(key, burst):
                     await self._tell_dropped(
-                        message.channel,
+                        message,
                         reason="burst_interrupted",
                         tenant_id=found.tenant_id if found is not None else None,
                     )
 
     async def _open(self, message: discord.Message) -> DirectMessageRow | None:
         """The conversation a first message starts; None once it offered a pick or said why not."""
+        tried: list[uuid.UUID] = []
         try:
-            return await self._discover(message)
+            return await self._discover(message, tried=tried)
         except _DM_FAILURES as exc:
+            tenant_id = tried[-1] if tried else None
             log.warning(
                 "discord.dm.discovery_failed",
+                tenant_id=str(tenant_id) if tenant_id is not None else None,
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
                 user_id=str(message.author.id),
@@ -1263,6 +1277,7 @@ class DirectMessageCog(commands.Cog):
                 await message.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+            await self._report(tenant_id, "discovery", message)
             return None
 
     def _open_pick(self, key: tuple[int, int]) -> _PendingSelection | None:
@@ -1313,22 +1328,49 @@ class DirectMessageCog(commands.Cog):
                 await first.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+            await self._report(tenant_id, "reply", first)
             return scope_id
 
-    async def _tell_dropped(
-        self, channel: discord.abc.Messageable, *, reason: str, tenant_id: uuid.UUID | None
+    async def _report(
+        self,
+        tenant_id: uuid.UUID | None,
+        reason: DmStage | Literal["queue_full"],
+        message: discord.Message | _DmRequest,
     ) -> None:
-        """Tell the person messages taken in for a turn that will not run were not sent."""
-        log.warning(
-            "discord.dm.dropped",
+        """Record a DM failure as an issue, with its person and agent; the caller logs."""
+        await report_dm_issue(
+            self.bot.runtime.sessionmaker,
+            tenant_id,
+            reason,
+            platform="discord",
+            route_key=str(message.channel.id),
+            user_id=str(message.author.id),
+        )
+
+    async def _tell_dropped(
+        self,
+        message: discord.Message | _DmRequest,
+        *,
+        reason: str,
+        tenant_id: uuid.UUID | None,
+    ) -> None:
+        """Tell the person messages taken in for a turn that will not run were not sent.
+
+        A deploy stopping the process is not an issue, and an interrupted burst only
+        warns: the error that interrupted it is reported where it happened."""
+        stopping = is_shutting_down()
+        (log.info if stopping else log.warning)(
+            "discord.dm.dropped_on_stop" if stopping else "discord.dm.dropped",
             tenant_id=str(tenant_id) if tenant_id is not None else None,
-            reason="process_stopping" if is_shutting_down() else reason,
+            reason="process_stopping" if stopping else reason,
         )
         with contextlib.suppress(discord.HTTPException):
-            await channel.send(
+            await message.channel.send(
                 embed=build_notice_embed(_DROPPED_NOTICE),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+        if not stopping and reason != "burst_interrupted":
+            await self._report(tenant_id, "dropped", message)
 
     async def _explain_no_private_chat(
         self,
@@ -1510,7 +1552,7 @@ class DirectMessageCog(commands.Cog):
             # Messages sent before /dm-me moved the conversation.
             self._suppress(message, "conversation_moved")
             await self._tell_dropped(
-                message.channel,
+                message,
                 reason="conversation_moved",
                 tenant_id=conversation.tenant_id if conversation is not None else None,
             )
@@ -1575,10 +1617,13 @@ class DirectMessageCog(commands.Cog):
                     path="dm",
                     reason="queue_full",
                 )
-                await message.channel.send(
-                    embed=build_notice_embed(GLOBAL_CAP_NOTICE),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                try:
+                    await message.channel.send(
+                        embed=build_notice_embed(GLOBAL_CAP_NOTICE),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                finally:
+                    await self._report(conversation.tenant_id, "queue_full", message)
                 return
             working: str | None = None
             if isinstance(message, discord.Message):
@@ -1734,3 +1779,4 @@ class DirectMessageCog(commands.Cog):
                     embed=build_notice_embed(error),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+            await self._report(conversation.tenant_id, "reply", message)

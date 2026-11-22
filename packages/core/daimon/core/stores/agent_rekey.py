@@ -9,11 +9,13 @@ checks that every agent-id column in the metadata is in exactly one of the two.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import Final
 
 from daimon.core._models import Base
 from daimon.core.ma_identity import derive_agent_uuid
-from sqlalchemy import Column, DateTime, Table, and_, case, func, or_, select, update
+from daimon.core.ops_catalog import CATALOG, fingerprint_of
+from sqlalchemy import Column, DateTime, Table, and_, case, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
@@ -66,6 +68,7 @@ REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
         # the "told they are monitored" notices must too, or admins lose the past and
         # people are told again.
         ("monitored_events", "agent_id"),
+        ("ops_events", "agent_id"),
         ("mcp_oauth_flows", "agent_id"),
         ("mcp_tokens", "agent_id"),
         ("pending_skill_adds", "ma_agent_id"),
@@ -137,6 +140,12 @@ async def rekey_agent(
     old_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=old_id)
     new_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=new_id)
     moved = 0
+    await _rekey_issues(
+        session,
+        tenant_id=tenant_id,
+        spellings=(old_id, str(old_uuid)),
+        renamed=lambda agent_id: new_id if agent_id == old_id else str(new_uuid),
+    )
     for table_name, column_name in sorted(REKEYED):
         table: Table = Base.metadata.tables[table_name]
         column = table.c[column_name]
@@ -153,6 +162,55 @@ async def rekey_agent(
         result = await session.execute(update(table).where(match).values({column_name: value}))
         moved += int(getattr(result, "rowcount", 0) or 0)
     return moved
+
+
+async def _rekey_issues(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    spellings: tuple[str, str],
+    renamed: Callable[[str], str],
+) -> None:
+    """Carry the agent's issues to its new key: an issue's fingerprint hashes the agent id, so
+    without this a resolved or muted issue would come back as new. Runs before `REKEYED`
+    moves `ops_events.agent_id`, which it reads. A state the new key already has wins."""
+    events, states = Base.metadata.tables["ops_events"], Base.metadata.tables["ops_issue_states"]
+    seen = await session.execute(
+        select(
+            events.c.fingerprint,
+            events.c.code,
+            events.c.area,
+            events.c.reason,
+            events.c.account_id,
+            events.c.agent_id,
+        )
+        .distinct()
+        .where(events.c.tenant_id == tenant_id, events.c.agent_id.in_(spellings))
+    )
+    for old, code, area, reason, account_id, agent_id in seen.all():
+        spec = CATALOG.get(code)
+        if spec is None or spec.subject != "agent":
+            continue
+        new = fingerprint_of(
+            code, area, renamed(agent_id), reason, str(account_id) if account_id else None
+        )
+        if new == old:
+            continue
+        await session.execute(
+            update(events)
+            .where(events.c.tenant_id == tenant_id, events.c.fingerprint == old)
+            .values(fingerprint=new)
+        )
+        taken = states.alias()
+        await session.execute(
+            update(states)
+            .where(
+                states.c.tenant_id == tenant_id,
+                states.c.fingerprint == old,
+                ~exists().where(taken.c.tenant_id == tenant_id, taken.c.fingerprint == new),
+            )
+            .values(fingerprint=new)
+        )
 
 
 async def open_agent_work(session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str) -> int:

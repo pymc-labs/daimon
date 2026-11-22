@@ -40,6 +40,8 @@ from daimon.core.mcp_tool_call import (
     mcp_tool_session,
     strict_json,
 )
+from daimon.core.ops_catalog import OpsCode
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
@@ -255,6 +257,7 @@ class ConnectorRelay:
                 tenant_id=str(turn.tenant_id),
                 account_id=str(turn.requester),
             )
+            self._report(turn, "connector.reconnect_needed", key, "no_token")
             return _error(request_id, -32001, RECONNECT_TEXT)
         try:
             if method == "tools/list":
@@ -269,9 +272,26 @@ class ConnectorRelay:
                 tenant_id=str(turn.tenant_id),
                 account_id=str(turn.requester),
             )
+            self._report(turn, "connector.call_failed", key, error.kind)
             if method == "tools/list":
                 return _error(request_id, -32002, FAILED_TEXT)
             return _reply(request_id, _tool_text(FAILED_TEXT))
+
+    def _report(self, turn: RelayTurn, code: OpsCode, key: str, reason: str) -> None:
+        report_ops_event(
+            self._sessionmaker,
+            OpsEvent(
+                code,
+                turn.tenant_id,
+                reason=reason,
+                agent_id=str(turn.agent_id),
+                account_id=turn.requester,
+                platform=turn.platform,
+                session_id=turn.chat_session_id,
+                subject_key=key,
+            ),
+            logged=False,
+        )
 
     async def _origin(self, turn: RelayTurn) -> TurnOriginRow | None:
         async with self._sessionmaker() as session:

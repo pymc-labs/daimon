@@ -100,7 +100,7 @@ function AllowanceTable({ data }: { data: Allowance[] }) {
 }
 
 function SubjectName({ s }: { s: Subject }) {
-  if (s.kind === "group") return <Link to={`/admin?group=${encodeURIComponent(s.id)}`} className="truncate hover:underline">{s.name || "Deleted group"}</Link>
+  if (s.kind === "group") return <Link to={`/admin/people?group=${encodeURIComponent(s.id)}`} className="truncate hover:underline">{s.name || "Deleted group"}</Link>
   if (s.kind === "person") return <PersonLink id={s.id} name={s.name || null} />
   return <span className="truncate">{s.name}</span>
 }

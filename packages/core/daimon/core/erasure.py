@@ -31,6 +31,7 @@ from daimon.core.stores import (
     lead_intake,
     mcp_tokens,
     monitoring,
+    ops_events,
     routines,
     secret_shares,
     slack_turn_contexts,
@@ -514,4 +515,7 @@ ERASABLE: tuple[Erasable, ...] = (
     ),
     # What the person asked monitored agents, in every workspace; cascades too, but counted.
     by_account("monitored_events", (monitoring.count_for_account, monitoring.delete_for_account)),
+    # The failures a person hit, kept for admins; the admin's own resolve or mute only
+    # loses their name (ops_issue_states.by_account_id is SET NULL).
+    by_account("ops_events", (ops_events.count_for_account, ops_events.delete_for_account)),
 )

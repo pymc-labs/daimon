@@ -24,6 +24,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.native_admins import GroupMembersCache
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
@@ -230,5 +231,6 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
             await turn_deps.context_providers.aclose()
             await turn_deps.provider_clients.aclose()
             await drain_outcomes()
+            await drain_ops_events()
             await drain_budget_notices()
             await engine.dispose()

@@ -201,6 +201,27 @@ async def send_discord_error_dm(
     For hosts with no gateway client. Raises `httpx.HTTPError` or `ValueError`;
     neither carries the token or the text.
     """
+    embed = {"title": title[:256], "description": description[:4096], "color": _ERROR_COLOR}
+    await _send_dm(bot_token, user_id, {"embeds": [embed]}, transport)
+
+
+async def send_discord_dm(
+    bot_token: str,
+    user_id: str,
+    text: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> None:
+    """DM `user_id` one plain message that pings nobody; raises as `send_discord_error_dm`."""
+    await _send_dm(bot_token, user_id, {"content": text[:2000]}, transport)
+
+
+async def _send_dm(
+    bot_token: str,
+    user_id: str,
+    message: dict[str, object],
+    transport: httpx.AsyncBaseTransport | None,
+) -> None:
     if not user_id.isascii() or not user_id.isdecimal():
         raise ValueError("a user id is a decimal number")
     async with discord_client(bot_token, transport) as client:
@@ -212,11 +233,6 @@ async def send_discord_error_dm(
             raise ValueError("no DM channel id in the reply")
         sent = await client.post(
             f"channels/{channel}/messages",
-            json={
-                "embeds": [
-                    {"title": title[:256], "description": description[:4096], "color": _ERROR_COLOR}
-                ],
-                "allowed_mentions": {"parse": []},
-            },
+            json={**message, "allowed_mentions": {"parse": []}},
         )
         sent.raise_for_status()

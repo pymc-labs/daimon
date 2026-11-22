@@ -287,7 +287,7 @@
     }),
     'add_server_skill': dict({
       'description': '''
-        Only for the connected data server: list what it serves, or take one of its offers
+        Only for the connected data server: list the skills it offers, or take one
         by name or URI into the library, kept current with that server. A person confirms on
         a card, and you pass your ``origin_context_id``. Not for any other source, nor for giving
         an agent what the library already holds.
@@ -945,6 +945,35 @@
         }),
         'required': list([
           'handle',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'change_issue_state': dict({
+      'description': '''
+        Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). Resolve
+        hides it until a newer event arrives; mute hides it until it is reopened. Only an
+        admin or owner may do this; an operator token never can.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'action': dict({
+            'enum': list([
+              'resolve',
+              'mute',
+              'reopen',
+            ]),
+            'type': 'string',
+          }),
+          'fingerprint': dict({
+            'maxLength': 64,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'fingerprint',
+          'action',
         ]),
         'type': 'object',
       }),
@@ -4338,6 +4367,31 @@
         'type': 'object',
       }),
     }),
+    'get_issue': dict({
+      'description': '''
+        Read one issue by its ``fingerprint`` (from list_issues): what it is about, when it
+        started, who it reached and its latest events. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'events_limit': dict({
+            'default': 20,
+            'maximum': 100,
+            'minimum': 0,
+            'type': 'integer',
+          }),
+          'fingerprint': dict({
+            'maxLength': 64,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'fingerprint',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'get_long_job': dict({
       'description': '''
         Read an owner/admin job; return source-restricted metadata when content is private.
@@ -4495,6 +4549,30 @@
         'required': list([
           'handle',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'get_ops_overview': dict({
+      'description': '''
+        Read how the workspace is doing: answers and the share that failed, direct message and
+        routine failures, status (healthy, degraded or failing, from the last hour), failures per
+        area, an answers chart and the issues that need attention. ``period`` is 1h, 24h, 7d or
+        30d. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'period': dict({
+            'default': '24h',
+            'enum': list([
+              '1h',
+              '24h',
+              '7d',
+              '30d',
+            ]),
+            'type': 'string',
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -5816,6 +5894,70 @@
         'required': list([
           'origin_context_id',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'list_issues': dict({
+      'description': '''
+        List the workspace's failures and warnings, grouped into issues, newest first. ``since``
+        is how far back to look, like 15m, 24h or 7d. ``active_only`` keeps open issues seen in
+        the last day; resolved and muted ones are otherwise included. Each issue has a
+        ``fingerprint`` for get_issue. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'active_only': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'area': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'turn',
+                  'dm',
+                  'routine',
+                  'delivery',
+                  'watch',
+                  'wake',
+                  'bridge',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit': dict({
+            'default': 50,
+            'maximum': 200,
+            'minimum': 1,
+            'type': 'integer',
+          }),
+          'severity': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'error',
+                  'warning',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'since': dict({
+            'default': '24h',
+            'maxLength': 8,
+            'type': 'string',
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -7865,6 +8007,38 @@
         'required': list([
           'name',
           'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'report_routine_problem': dict({
+      'description': '''
+        Tell the admins this routine run could not do its task, and why.
+        <blank line>
+        Only inside a routine run, once, when something kept you from the task. `note` is
+        one short line on what blocked you (at most 300 characters), with no private
+        content; admins see it on their issues page. Still put the blocker in your reply.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'category': dict({
+            'enum': list([
+              'blocked_access',
+              'missing_input',
+              'source_unavailable',
+              'partial_result',
+              'other',
+            ]),
+            'type': 'string',
+          }),
+          'note': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'category',
+          'note',
         ]),
         'type': 'object',
       }),

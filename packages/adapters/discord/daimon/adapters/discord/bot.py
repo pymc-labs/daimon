@@ -154,6 +154,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.model_reactions import model_marks
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.output_runtime import OutputRuntime
@@ -890,6 +891,21 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(_log_bg_task_exception)
         return task
 
+    def _report_shed(self, tenant_id: uuid.UUID, thread_id: int, reason: str) -> None:
+        """Record a turn turned away at the process-wide cap; the caller logs its own line."""
+        report_ops_event(
+            self.runtime.sessionmaker,
+            OpsEvent(
+                "turn.shed",
+                tenant_id,
+                reason=reason,
+                platform="discord",
+                channel_id=str(thread_id),
+                thread_id=str(thread_id),
+            ),
+            logged=False,
+        )
+
     def _track_processing_task(self, thread_id: int) -> None:
         task = asyncio.current_task()
         if task is not None:
@@ -946,6 +962,7 @@ class DaimonBot(commands.Bot):
                 requester_id=attributed.requester_id if attributed is not None else None,
                 requester_label=requester_label,
                 reply_to=attributed.files_reply_to(thread.id) if attributed is not None else None,
+                sessions=self.runtime.sessionmaker,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -953,6 +970,21 @@ class DaimonBot(commands.Bot):
                 session_id=session_id,
                 thread_id=thread.id,
                 error=str(exc)[:300],
+            )
+            guild = thread.guild
+            report_ops_event(
+                self.runtime.sessionmaker,
+                OpsEvent(
+                    "delivery.output_failed",
+                    derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+                    if guild is not None
+                    else None,
+                    reason=type(exc).__name__,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    session_id=session_id,
+                ),
+                logged=False,
             )
 
     def _confirmed_call_prefix(
@@ -2868,6 +2900,7 @@ class DaimonBot(commands.Bot):
                     channel_id=str(thread_id),
                     reason="unprompted_at_cap",
                 )
+                self._report_shed(tenant_id, thread_id, "unprompted_at_cap")
             return
         self._processing.add(thread_id)
         self._thread_stops.claim(thread_id)
@@ -3451,6 +3484,7 @@ class DaimonBot(commands.Bot):
                     channel_id=str(thread_id),
                     reason="queue_full",
                 )
+                self._report_shed(tenant_id, thread_id, "queue_full")
                 await message.channel.send(embed=build_notice_embed(GLOBAL_CAP_NOTICE))
                 return
 
@@ -4332,6 +4366,7 @@ class DaimonBot(commands.Bot):
                         status="skipped",
                         now=datetime.now(UTC),
                         skip_reason="thread_unavailable",
+                        row=row,
                     )
                 continue
             self._spawn(

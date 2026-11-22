@@ -278,6 +278,7 @@ async def test_an_owner_mints_a_token_once_and_the_list_never_holds_it(rig: Rig)
         "channels:write",
         "agents:archive",
         "promo:redeem",
+        "issues:read",
     ], "never the promo issuing scope"
     assert [(t["id"], t["label"], t["scopes"]) for t in body["tokens"]] == [
         (minted["id"], "ci", ["tenant:read"])

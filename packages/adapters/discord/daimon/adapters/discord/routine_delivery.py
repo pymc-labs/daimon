@@ -432,7 +432,11 @@ def make_discord_routine_poster(
                 routine_id=str(row.id),
                 error_type=type(err).__name__,
             )
-            return DeliveryOutcome(status="skipped", note=reason)
+            # Closed DMs or a gone member repeat on every run: a skip, not a failure that pages.
+            closed = isinstance(err, (discord.Forbidden, discord.NotFound))
+            return DeliveryOutcome(
+                status="skipped", note=reason, failed=None if closed else type(err).__name__
+            )
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
     async def _post(row: RoutineRow) -> DeliveryOutcome:
