@@ -78,7 +78,7 @@ async def list_issue_groups(
     limit: int = MAX_ISSUES,
 ) -> list[OpsIssueGroupRow]:
     """The issues with an event since `since`, newest first, with their state, if any."""
-    filters = [OpsEvent.tenant_id == tenant_id]
+    filters = [OpsEvent.tenant_id == tenant_id, OpsEvent.occurred_at >= since]
     if area is not None:
         filters.append(OpsEvent.area == area)
     if severity is not None:
@@ -91,14 +91,12 @@ async def list_issue_groups(
     grouped = await session.execute(
         select(
             OpsEvent.fingerprint,
-            func.coalesce(func.sum(OpsEvent.count).filter(OpsEvent.occurred_at >= since), 0),
-            func.count(OpsEvent.account_id.distinct()).filter(OpsEvent.occurred_at >= since),
-            func.min(OpsEvent.occurred_at),
+            func.sum(OpsEvent.count),
+            func.count(OpsEvent.account_id.distinct()),
             last_seen,
         )
         .where(*filters)
         .group_by(OpsEvent.fingerprint)
-        .having(last_seen >= since)
         .order_by(last_seen.desc(), OpsEvent.fingerprint.desc())
         .limit(limit)
     )
@@ -106,6 +104,15 @@ async def list_issue_groups(
     if not found:
         return []
     fingerprints = [row[0] for row in found]
+    # First seen is over all time, read only for the issues found.
+    first_seen: dict[str, datetime] = {
+        fp: first
+        for fp, first in await session.execute(
+            select(OpsEvent.fingerprint, func.min(OpsEvent.occurred_at))
+            .where(OpsEvent.tenant_id == tenant_id, OpsEvent.fingerprint.in_(fingerprints))
+            .group_by(OpsEvent.fingerprint)
+        )
+    }
     newest = await session.scalars(
         select(OpsEvent)
         .where(OpsEvent.tenant_id == tenant_id, OpsEvent.fingerprint.in_(fingerprints))
@@ -126,12 +133,12 @@ async def list_issue_groups(
             fingerprint=fp,
             events=int(events),
             people=int(people),
-            first_seen=first,
+            first_seen=first_seen[fp],
             last_seen=last,
             latest=latest[fp],
             state=states.get(fp),
         )
-        for fp, events, people, first, last in found
+        for fp, events, people, last in found
     ]
 
 
