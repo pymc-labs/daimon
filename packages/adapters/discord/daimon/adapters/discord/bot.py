@@ -46,6 +46,7 @@ from daimon.adapters.discord.errors import (
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import (
     HintCooldown,
+    bot_message_answerable,
     is_participation_candidate,
     is_plain_text_mention_candidate,
     should_process_message,
@@ -3266,7 +3267,14 @@ class DaimonBot(commands.Bot):
             guild_id=str(message.guild.id) if message.guild else None,
             self_user_id=str(self.user.id) if self.user is not None else None,
             qa_bot_user_ids=discord_settings.qa_bot_user_ids if discord_settings else (),
-            answer_bots=may_turn_on(self.runtime.settings, "answer_bots", "discord"),
+            answer_bots=message.author.bot
+            and bot_message_answerable(
+                typed_mention=self.user is not None and self.user.id in message.raw_mentions,
+                is_reply=isinstance(reference, discord.MessageReference)
+                and reference.type is discord.MessageReferenceType.reply,
+                reply_to_other=isinstance(resolved, discord.Message) and not resolved_is_ours,
+            )
+            and may_turn_on(self.runtime.settings, "answer_bots", "discord"),
         ):
             # Not a mention. The only other way a message starts a turn is
             # organic thread participation, which has its own gates.
@@ -4444,7 +4452,11 @@ class DaimonBot(commands.Bot):
             deliver_dm_report,
             open_report_thread,
         )
-        from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_watch
+        from daimon.core.direct_messages import (
+            DirectMessageAccessRevoked,
+            dm_watch_source,
+            run_dm_watch,
+        )
         from daimon.core.stores.watches import get_firing, get_watch, pause_watch
         from daimon.core.turn.admission import DmSource
 
@@ -4464,25 +4476,32 @@ class DaimonBot(commands.Bot):
                         is_dm=True,
                         resolver=self.membership_resolver,
                     )
-                # A watch made in a DM has no source channel, as a DM timer has none.
-                in_dm = current.thread_id.startswith(DM_SCOPE_PREFIX)
                 try:
+                    if current.thread_id.startswith(DM_SCOPE_PREFIX):
+                        # Made in a DM: the rules of the conversation it was made in.
+                        source, budget = await dm_watch_source(
+                            self.runtime.turn_deps,
+                            tenant_id=row.tenant_id,
+                            scope_id=current.thread_id,
+                            owner=current.owner_external_id,
+                        )
+                    else:
+                        source = DmSource(
+                            channel_id=current.parent_channel_id, thread_id=current.thread_id
+                        )
+                        budget = current.parent_channel_id
                     reply = await run_dm_watch(
                         self.runtime.turn_deps,
                         row,
                         requester_org=standing,
                         owner_user_id=current.owner_external_id,
                         prompt=seed,
-                        source=None
-                        if in_dm
-                        else DmSource(
-                            channel_id=current.parent_channel_id, thread_id=current.thread_id
-                        ),
-                        budget_channel_id=None if in_dm else current.parent_channel_id,
+                        source=source,
+                        budget_channel_id=budget,
                     )
                 except DirectMessageAccessRevoked as error:
                     log.info("watch_report.dm_refused", reason=error.reason)
-                    if error.reason in ("dm_disabled", "source_sealed"):
+                    if error.reason in ("dm_disabled", "source_sealed", "dm_gone"):
                         async with self.runtime.sessionmaker.begin() as db:
                             await pause_watch(
                                 db,
@@ -5982,6 +6001,7 @@ class DaimonBot(commands.Bot):
                 card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 model_marks=marks_to_show,
+                conversation_id=str(thread.id),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,

@@ -257,6 +257,18 @@ def test_the_fallback_post_names_the_agent_unless_the_post_carries_its_identity(
     ), "the agent's own header says who it is from; the schedule stays"
 
 
+def test_a_fallback_post_without_the_header_is_the_result_alone() -> None:
+    """Off drops the "Result from" line only: the requester line stays, a failure notice is unchanged."""
+    row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
+    assert render_fallback_post(row, header=False) == "All green."
+    assert render_fallback_post(row, header=False, as_agent=True) == "All green."
+    assert render_fallback_post(row, header=False, platform="discord").endswith(
+        "All green.\n-# requested by <@U1>"
+    ), "the attribution line is not the header"
+    failed = _row(delivery_note="failure_notice")
+    assert render_fallback_post(failed, header=False) == render_fallback_post(failed)
+
+
 def test_the_fallback_texts_name_the_agent_by_its_display_name() -> None:
     row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
     assert render_fallback_post(row, agent_name="Ada").startswith(

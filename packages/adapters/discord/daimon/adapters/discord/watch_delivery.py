@@ -141,33 +141,35 @@ async def deliver_dm_report(
     await still_open()
     text = await run_turn(watch)
     guild = await still_open()
-    sent = 0
+    posted: list[str] = []
     try:
         dm = await open_dm(guild, int(owner))
         for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
-            if sent:
+            if posted:
                 await still_open()
             await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
-            sent += 1
+            posted.append(chunk)
     except discord.Forbidden:
         # The owner closed their DMs to Daimon: every later report would fail the same way.
         raise await _pause(
             sessionmaker, watch, "Watch paused: Discord does not let Daimon DM you."
         ) from None
-    if watch.thread_id.startswith(DM_SCOPE_PREFIX):
-        try:
-            async with sessionmaker.begin() as db:
-                await record_agent_notices(
-                    db,
-                    tenant_id=watch.tenant_id,
-                    platform=watch.platform,
-                    thread_id=watch.thread_id,
-                    agent_id=watch.agent_id,
-                    texts=[dm_report_notice(text)],
-                )
-        except SQLAlchemyError as error:  # the report is sent; a lost notice must not re-run it
-            log.warning("watch_report.notice_failed", error=type(error).__name__)
-    return sent
+    finally:
+        # Whatever reached the DM, even a cut-off report, is told to the conversation.
+        if posted and watch.thread_id.startswith(DM_SCOPE_PREFIX):
+            try:
+                async with sessionmaker.begin() as db:
+                    await record_agent_notices(
+                        db,
+                        tenant_id=watch.tenant_id,
+                        platform=watch.platform,
+                        thread_id=watch.thread_id,
+                        agent_id=watch.agent_id,
+                        texts=[dm_report_notice("\n".join(posted))],
+                    )
+            except SQLAlchemyError as error:  # a lost notice must not re-run the report
+                log.warning("watch_report.notice_failed", error=type(error).__name__)
+    return len(posted)
 
 
 def report_thread_name(watch: WatchRow) -> str:

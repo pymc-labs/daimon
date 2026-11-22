@@ -175,7 +175,7 @@ async def test_a_cross_provider_pick_applies_at_once_and_says_what_is_off(
 
     sent = interaction.edit_original_response.call_args.kwargs
     assert sent["content"] == note, "the change, then what is off, as information"
-    assert "view" not in sent, "no Switch button to press"
+    assert sent.get("view") is None, "no Switch button to press"
     picked.assert_awaited_once()
 
 
@@ -197,7 +197,7 @@ async def test_a_refused_pick_says_why_and_offers_no_confirm(
     assert sent["content"] == "Ask the agent's owner or an admin to move it. Nothing changed.", (
         "the refusal and that nothing changed"
     )
-    assert "view" not in sent, "a refusal offers no button"
+    assert sent.get("view") is None, "a refusal offers no button"
     assert await _stored(db_session_factory, guild_id) is None
 
 
@@ -395,10 +395,10 @@ async def test_the_menus_switch_the_thread_and_redraw_the_emoji_the_last_turn_sh
             session, tenant_id=tenant.id, platform="discord", thread_id=str(_THREAD_ID),
             marks=("🎼", "🌓"),
         )  # fmt: skip
-    redrawn: list[tuple[int, tuple[str, ...]]] = []
+    redrawn: list[tuple[str, tuple[str, ...]]] = []
 
-    async def redraw(channel_id: int, marks: tuple[str, ...]) -> bool:
-        redrawn.append((channel_id, marks))
+    async def redraw(conversation_id: str, marks: tuple[str, ...]) -> bool:
+        redrawn.append((conversation_id, marks))
         return True
 
     monkeypatch.setattr(model_command, "redraw_model_marks", redraw)
@@ -414,7 +414,9 @@ async def test_the_menus_switch_the_thread_and_redraw_the_emoji_the_last_turn_sh
     picked.channel_id = _THREAD_ID
     await picker.chose(picked, "effort", "max")
     assert "at max effort" in picked.edit_original_response.call_args.kwargs["content"]
-    assert redrawn == [(_THREAD_ID, ("🎼", "🌕"))], "the model emoji stays, the moon is swapped"
+    assert redrawn == [(str(_THREAD_ID), ("🎼", "🌕"))], (
+        "the model emoji stays, the moon is swapped"
+    )
     async with db_session_factory() as session:
         marks = await last_model_marks(
             session, tenant_id=tenant.id, platform="discord", thread_id=str(_THREAD_ID)

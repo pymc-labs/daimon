@@ -410,6 +410,7 @@ class DiscordTurnLifecycle(OutputGate):
         answer_message_cap: int = ANSWER_MESSAGES,
         model_marks: tuple[str, ...] = (),
         model_marks_for: Callable[[], Awaitable[tuple[str, ...]]] | None = None,
+        conversation_id: str | None = None,
         status_reactions: bool = False,
         post_pre_tool_text: bool = True,
         card_timer: bool = False,
@@ -446,6 +447,7 @@ class DiscordTurnLifecycle(OutputGate):
         self._model_marks = model_marks
         # Read when the card starts, for a caller that builds the card synchronously.
         self._model_marks_for = model_marks_for
+        self._conversation_id = conversation_id
         self._model_marked = False
         self._status_reactions = status_reactions and not unprompted
         self._post_pre_tool_text = post_pre_tool_text
@@ -657,8 +659,8 @@ class DiscordTurnLifecycle(OutputGate):
                     log.warning("turn.model_reaction_failed", exc_info=True)
                     return
             self._model_marked = True
-        if self._model_marked:
-            remember_model_message(self._trigger_message)
+        if self._model_marked and self._conversation_id is not None:
+            remember_model_message(self._conversation_id, self._trigger_message)
 
     @property
     def model_marked(self) -> bool:

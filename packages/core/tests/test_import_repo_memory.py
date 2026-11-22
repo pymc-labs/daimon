@@ -123,7 +123,7 @@ async def test_a_creator_with_no_account_gets_one_in_the_tenant(
     stamp = datetime.now(UTC)
     source = importer.ExportEntry(
         id="source", repo_owner="owner", repo_name="repo", name="note", title="Note",
-        body="Fact", created_by_discord_id="newcomer", created_at=stamp, updated_at=stamp,
+        body="Fact", created_by_discord_id="4242", created_at=stamp, updated_at=stamp,
     )  # fmt: skip
     repos = {"owner/repo": importer.RepoTarget(tenant_id=tenant.id, repo_id=17)}
     engine = SimpleNamespace(dispose=AsyncMock())
@@ -139,7 +139,7 @@ async def test_a_creator_with_no_account_gets_one_in_the_tenant(
     async def newcomer() -> object:
         async with committing_sessionmaker() as session:
             return await find_platform_principal(
-                session, tenant_id=tenant.id, platform="discord", external_id="newcomer"
+                session, tenant_id=tenant.id, platform="discord", external_id="4242"
             )
 
     dry = await run(apply=False)
@@ -148,3 +148,14 @@ async def test_a_creator_with_no_account_gets_one_in_the_tenant(
     assert await newcomer() is not None, "the apply gives the creator an identity"
     with pytest.raises(ValueError, match="another tenant"):
         await run(apply=False, into=other.id)
+    elsewhere = source.model_copy(update={"id": "later", "repo_name": "other", "name": "more"})
+    repos["owner/other"] = importer.RepoTarget(tenant_id=other.id, repo_id=18)
+    with pytest.raises(ValueError, match="another tenant"):
+        await importer.run_import(
+            [source, elsewhere], {}, repos, tenant=tenant.id, database_url="-", apply=False
+        )  # the creator's later row is checked too, not only the first
+    with pytest.raises(ValueError, match="Discord user id"):
+        await importer.run_import(
+            [source.model_copy(update={"created_by_discord_id": "system"})],
+            {}, repos, tenant=tenant.id, database_url="-", apply=False,
+        )  # fmt: skip

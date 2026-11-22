@@ -7,6 +7,7 @@ from functools import partial
 import pytest
 from daimon.adapters.discord.gating import (
     HintCooldown,
+    bot_message_answerable,
     is_participation_candidate,
     is_plain_text_mention_candidate,
     should_process_message,
@@ -251,4 +252,23 @@ def test_answer_bots_lets_another_bots_mention_through_but_never_its_reply_or_ou
     assert not other(author_id=DAIMON_ID, bot_mentioned=True), "never itself"
     assert not other(author_id=OTHER_BOT_ID, bot_mentioned=True, author_is_webhook=True), (
         "never an agent posting through a webhook"
+    )
+
+
+@pytest.mark.parametrize(
+    ("typed", "is_reply", "to_other", "answered"),
+    [
+        (True, False, False, True),
+        (False, False, False, False),  # a reply-ping lists us in `mentions` but types nothing
+        (True, True, False, False),  # a reply to our own post, or one we cannot read
+        (True, True, True, True),
+        (False, True, True, False),
+    ],
+)
+def test_a_bot_is_answered_only_for_a_typed_mention_never_a_reply_to_our_post(
+    typed: bool, is_reply: bool, to_other: bool, answered: bool
+) -> None:
+    assert (
+        bot_message_answerable(typed_mention=typed, is_reply=is_reply, reply_to_other=to_other)
+        is answered
     )

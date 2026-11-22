@@ -1425,6 +1425,7 @@ class DirectMessageCog(commands.Cog):
                     tenant_id=conversation.tenant_id,
                     thread_id=conversation.scope_id,
                 ),
+                conversation_id=conversation.scope_id,
                 notify_on_completion=pings,
                 render_tables=admission.shown("table_rendering"),
                 status_reactions=admission.shown("status_reactions"),

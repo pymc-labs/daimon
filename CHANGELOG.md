@@ -23,8 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that DM, the way a DM timer runs, under the same read-and-report rules as any
   watch. The person's open DM conversation stays theirs, and its next turn is
   told what the report said, so they can reply to it. Poll watches made in a
-  Discord DM follow the same rule: they reported nowhere before. Slack refuses
-  any watch made in a DM: it has no way to run a watch's fire there.
+  Discord DM follow the same rule: they reported nowhere before, and ones
+  already saved move over on upgrade. A watch made in a DM that was moved from a
+  channel keeps that channel's seal and budget, and pauses when the conversation
+  is gone. Slack and Teams refuse any watch made in a DM, and such watches
+  already saved are paused: they have no way to run a watch's fire there.
 
 - **Discord can time the working card, pick the model from menus and answer
   bots.** With the new Working card timer setting on, the card says Working or
@@ -33,8 +36,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a pick swaps the model emoji on the message that last showed them. With the
   new Answer bots setting on (off by default; set by an admin for the server or
   one agent), a bot that mentions the agent is answered under the same access
-  rules as a person. The agent never answers itself or a bot's reply, and its
-  answers never ping a bot.
+  rules as a person. It answers only a mention the bot typed, never a reply to
+  the agent's own post, a reply's automatic ping, or itself, and its answers
+  never ping a bot.
+
+- **Routine results can post without their header.** A routine's result
+  normally starts with `Result from <agent>'s <schedule>:`. The new Routine
+  result header setting, on by default, turns that line off for a deployment,
+  a workspace, an agent, a channel or one routine, on every platform and for
+  channel, thread and direct-message results alike. The requester line and the
+  failure notice are unchanged. Set one routine's value with
+  `daimon features set routine_result_header off --routine <id>`; its value
+  beats its agent's.
 
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎

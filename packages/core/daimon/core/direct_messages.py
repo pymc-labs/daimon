@@ -55,6 +55,7 @@ from daimon.core.stores.direct_messages import (
     fence_held,
     finish_message,
     get_conversation,
+    get_conversation_in_scope,
     get_dm_agent_name,
     holds_claim,
     lock_route,
@@ -473,6 +474,37 @@ def _source_is_sealed(policy: TenantAccessPolicy, conversation: DirectMessageRow
         source_thread_id=conversation.source_thread_id,
         source_thread_keys=tuple(conversation.source_thread_keys or ()),
     )
+
+
+def dm_source_of(conversation: DirectMessageRow) -> DmSource | None:
+    """The place a conversation was moved from, which its turns stay bound to; None if cold."""
+    if conversation.is_cold:
+        return None
+    return DmSource(
+        channel_id=conversation.source_channel_id,
+        thread_id=conversation.source_thread_id,
+        thread_keys=tuple(conversation.source_thread_keys or ()),
+    )
+
+
+async def dm_watch_source(
+    deps: TurnDeps, *, tenant_id: uuid.UUID, scope_id: str, owner: str
+) -> tuple[DmSource | None, str | None]:
+    """The source and budget channel a watch made in the DM `scope_id` reports under.
+
+    The same rules as the conversation's own turns (seal, hold, budget). Raises
+    `DirectMessageAccessRevoked("dm_gone")` when the conversation is no longer the owner's.
+    """
+    async with deps.sessionmaker() as session:
+        conversation = await get_conversation_in_scope(
+            session, tenant_id=tenant_id, scope_id=scope_id
+        )
+    if conversation is None or conversation.external_user_id != owner:
+        raise DirectMessageAccessRevoked(
+            "dm_gone", message="The DM conversation this watch was made in is gone."
+        )
+    source = dm_source_of(conversation)
+    return source, None if source is None else conversation.source_channel_id
 
 
 async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
@@ -1134,13 +1166,7 @@ async def reply_to_dm_result(
                 # Re-asked by `reauthorize` right before the DM's session is built.
                 grant=replace(
                     admission.grant,
-                    dm_source=None
-                    if conversation.is_cold
-                    else DmSource(
-                        channel_id=conversation.source_channel_id,
-                        thread_id=conversation.source_thread_id,
-                        thread_keys=tuple(conversation.source_thread_keys or ()),
-                    ),
+                    dm_source=dm_source_of(conversation),
                 )
                 if admission.grant is not None
                 else None,

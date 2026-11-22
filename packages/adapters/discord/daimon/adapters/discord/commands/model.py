@@ -215,7 +215,7 @@ _PICKER_TIMEOUT_S = 14 * 60
 _SELECT_MAX = 25
 
 
-async def _redraw_marks(runtime: DiscordRuntime, channel_id: int, place: _Place) -> None:
+async def _redraw_marks(runtime: DiscordRuntime, place: _Place) -> None:
     """Show the conversation's new model and effort emoji where the last turn showed them."""
     tenant_id, thread_id = place.tenant_id, place.conversation_id
     async with runtime.sessionmaker() as session:
@@ -233,7 +233,7 @@ async def _redraw_marks(runtime: DiscordRuntime, channel_id: int, place: _Place)
     if shown is None or off_claude or (choice is None and effort is None):
         return
     marks = swapped_marks(shown, choice.id if choice is not None else None, effort)
-    if marks != shown and await redraw_model_marks(channel_id, marks):
+    if marks != shown and await redraw_model_marks(thread_id, marks):
         async with runtime.sessionmaker.begin() as session:
             await record_model_marks(
                 session, tenant_id=tenant_id, platform="discord", thread_id=thread_id, marks=marks
@@ -382,11 +382,10 @@ class ModelCog(commands.Cog):
         ):
             raise UserFacingError(_NOT_ALLOWED)
         text = await self._pick(interaction, place, choice, effort)
-        if interaction.channel_id is not None:
-            try:
-                await _redraw_marks(_runtime_of(interaction), interaction.channel_id, place)
-            except SQLAlchemyError:  # cosmetic: the pick is kept, the emoji catch up next turn
-                log.warning("discord.model_marks_redraw_failed", exc_info=True)
+        try:
+            await _redraw_marks(_runtime_of(interaction), place)
+        except SQLAlchemyError:  # cosmetic: the pick is kept, the emoji catch up next turn
+            log.warning("discord.model_marks_redraw_failed", exc_info=True)
         return text
 
     async def _pick(

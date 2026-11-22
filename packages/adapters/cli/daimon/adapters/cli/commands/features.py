@@ -44,13 +44,15 @@ from daimon.core.features.service import (
 )
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import source_text, view_json
+from daimon.core.routine_sandbox import routine_place
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
 from rich.console import Console
 from rich.table import Table
 
-features_app = typer.Typer(help="Features at a workspace, agent, channel or thread.")
+features_app = typer.Typer(help="Features at a workspace, agent, channel, thread or routine.")
 
 _AGENT = typer.Option(
     "--agent",
@@ -59,6 +61,9 @@ _AGENT = typer.Option(
 )
 _CHANNEL = typer.Option("--channel", help="Channel id.")
 _THREAD = typer.Option("--thread", help="Thread id (needs --channel).")
+_ROUTINE = typer.Option(
+    "--routine", help="Routine id: its own settings, with its agent and destination channel."
+)
 
 
 @features_app.callback()
@@ -129,6 +134,31 @@ async def _agent_id(rt: CliRuntime, target: _Target, name: str, *, stale_ok: boo
     raise StoreError(f"no agent named {name!r} in this workspace")
 
 
+async def _place(
+    rt: CliRuntime,
+    target: _Target,
+    *,
+    agent_id: str | None,
+    channel: str | None,
+    thread: str | None,
+    routine: uuid.UUID | None,
+) -> FeaturePlace:
+    """The place the options name; a routine's carries its own agent and channel."""
+    if routine is None:
+        if thread and not channel:
+            raise StoreError("--thread needs --channel")
+        return FeaturePlace.of(
+            target.tenant_id, target.platform, channel, thread, agent_id=agent_id
+        )
+    if agent_id or channel or thread:
+        raise StoreError("--routine takes no --agent, --channel or --thread")
+    async with rt.sessionmaker() as session:
+        row = await get_routine(session, routine, tenant_id=target.tenant_id)
+    if row is None:
+        raise StoreError(f"no routine {routine} in this workspace")
+    return routine_place(row, target.platform)
+
+
 async def _read(
     rt: CliRuntime,
     target: _Target,
@@ -136,11 +166,12 @@ async def _read(
     agent_id: str | None,
     channel: str | None,
     thread: str | None,
+    routine: uuid.UUID | None = None,
     keys: list[str] | None = None,
 ) -> tuple[FeatureView, ...]:
-    if thread and not channel:
-        raise StoreError("--thread needs --channel")
-    place = FeaturePlace.of(target.tenant_id, target.platform, channel, thread, agent_id=agent_id)
+    place = await _place(
+        rt, target, agent_id=agent_id, channel=channel, thread=thread, routine=routine
+    )
     builtins = (
         await builtin_reader(_edit_deps(rt), actor=_agent_actor(target), ma_agent_id=agent_id)()
         if agent_id
@@ -181,18 +212,35 @@ async def features_list(
     agent: str | None,
     channel: str | None,
     thread: str | None,
+    routine: uuid.UUID | None = None,
     keys: list[str] | None = None,
     as_json: bool = False,
 ) -> None:
     target = await _target(rt, selector)
     agent_id = await _agent_id(rt, target, agent) if agent else None
-    views = await _read(rt, target, agent_id=agent_id, channel=channel, thread=thread, keys=keys)
+    views = await _read(
+        rt,
+        target,
+        agent_id=agent_id,
+        channel=channel,
+        thread=thread,
+        routine=routine,
+        keys=keys,
+    )
     _emit(console, views, target.platform, as_json=as_json)
 
 
-def _tier_of(agent: str | None, channel: str | None, thread: str | None, tier: Tier | None) -> Tier:
+def _tier_of(
+    agent: str | None,
+    channel: str | None,
+    thread: str | None,
+    tier: Tier | None,
+    routine: uuid.UUID | None = None,
+) -> Tier:
     if tier is not None:
         return tier
+    if routine is not None:
+        return "routine"
     return "thread" if thread else "channel" if channel else "agent" if agent else "workspace"
 
 
@@ -207,6 +255,7 @@ async def features_set(
     agent: str | None,
     channel: str | None,
     thread: str | None,
+    routine: uuid.UUID | None = None,
     locked: bool = False,
     expected: str | None = None,
     reason: str | None = None,
@@ -224,9 +273,9 @@ async def features_set(
         raise StoreError(f"{spec.name} needs cli.local_user, the operator's name, to be set.")
     target = await _target(rt, selector)
     agent_id = await _agent_id(rt, target, agent, stale_ok=spec.authority.native) if agent else None
-    if thread and not channel:
-        raise StoreError("--thread needs --channel")
-    place = FeaturePlace.of(target.tenant_id, target.platform, channel, thread, agent_id=agent_id)
+    place = await _place(
+        rt, target, agent_id=agent_id, channel=channel, thread=thread, routine=routine
+    )
     edit, agent_actor = _edit_deps(rt), _agent_actor(target)
     builtin = agent_id is not None and key.startswith("tool.")
 
@@ -255,7 +304,7 @@ async def features_set(
             rt.settings,
             actor,
             key=key,
-            tier=_tier_of(agent, channel, thread, tier),
+            tier=_tier_of(agent, channel, thread, tier, routine),
             value=value,
             locked=locked,
             place=place,
@@ -326,6 +375,7 @@ def features_list_command(
     agent: Annotated[str | None, _AGENT] = None,
     channel: Annotated[str | None, _CHANNEL] = None,
     thread: Annotated[str | None, _THREAD] = None,
+    routine: Annotated[uuid.UUID | None, _ROUTINE] = None,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
     """Every feature at a place, what is in effect and where it is set."""
@@ -340,6 +390,7 @@ def features_list_command(
                 agent=agent,
                 channel=channel,
                 thread=thread,
+                routine=routine,
                 as_json=as_json,
             )
 
@@ -353,6 +404,7 @@ def features_get_command(
     agent: Annotated[str | None, _AGENT] = None,
     channel: Annotated[str | None, _CHANNEL] = None,
     thread: Annotated[str | None, _THREAD] = None,
+    routine: Annotated[uuid.UUID | None, _ROUTINE] = None,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
     """One feature at a place."""
@@ -368,6 +420,7 @@ def features_get_command(
                 agent=agent,
                 channel=channel,
                 thread=thread,
+                routine=routine,
                 keys=[key],
                 as_json=as_json,
             )
@@ -382,11 +435,14 @@ def features_set_command(
     value: Annotated[str, typer.Argument(help="A value, or `default` to clear it.")],
     tier: Annotated[
         str | None,
-        typer.Option("--tier", help="workspace, agent, channel or thread (from the place)."),
+        typer.Option(
+            "--tier", help="workspace, agent, channel, thread or routine (from the place)."
+        ),
     ] = None,
     agent: Annotated[str | None, _AGENT] = None,
     channel: Annotated[str | None, _CHANNEL] = None,
     thread: Annotated[str | None, _THREAD] = None,
+    routine: Annotated[uuid.UUID | None, _ROUTINE] = None,
     lock: Annotated[bool, typer.Option("--lock", help="Lower tiers cannot change it.")] = False,
     expected: Annotated[
         str | None,
@@ -407,8 +463,8 @@ def features_set_command(
 ) -> None:
     """Set (or clear) one feature at one tier."""
     _check_key(key)
-    if tier is not None and tier not in ("workspace", "agent", "channel", "thread"):
-        raise typer.BadParameter("tier is workspace, agent, channel or thread")
+    if tier is not None and tier not in ("workspace", "agent", "channel", "thread", "routine"):
+        raise typer.BadParameter("tier is workspace, agent, channel, thread or routine")
     console = Console(highlight=False)
 
     async def run() -> None:
@@ -423,6 +479,7 @@ def features_set_command(
                 agent=agent,
                 channel=channel,
                 thread=thread,
+                routine=routine,
                 locked=lock,
                 expected=expected,
                 reason=reason,

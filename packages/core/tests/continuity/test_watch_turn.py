@@ -847,6 +847,40 @@ async def test_dm_watch_refuses_a_thread_wake_or_another_recipient(row):
         )
 
 
+async def test_a_watch_made_in_a_dm_reports_under_that_conversations_source_rules(
+    db_session_factory,
+):
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.direct_messages import DirectMessageAccessRevoked, dm_watch_source
+    from daimon.core.permissions import dm_source_limited
+    from daimon.core.stores.identity import get_or_create_platform_principal
+    from daimon.testing.factories import make_dm_conversation, make_tenant
+    from daimon.testing.turn_fakes import deps_for
+
+    deps = deps_for(None, db_session_factory)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id="555"
+        )
+        await make_dm_conversation(
+            session, tenant=tenant, account_id=principal.account_id,
+            external_user_id="555", scope_id="dm:moved", source_channel_id="chan-1",
+        )  # fmt: skip
+    source, budget = await dm_watch_source(
+        deps, tenant_id=tenant.id, scope_id="dm:moved", owner="555"
+    )
+    assert source is not None and (source.channel_id, budget) == ("chan-1", "chan-1")
+    sealed = TenantAccessPolicy(channel_rules={"chan-1": ChannelRule(readers="inside")})
+    assert dm_source_limited(
+        sealed, source_channel_id=source.channel_id, source_thread_id=source.thread_id
+    ), "the source it runs under is the one a seal refuses"
+    for scope, owner in (("dm:gone", "555"), ("dm:moved", "777")):
+        with pytest.raises(DirectMessageAccessRevoked) as refused:
+            await dm_watch_source(deps, tenant_id=tenant.id, scope_id=scope, owner=owner)
+        assert refused.value.reason == "dm_gone", "a missing or another person's DM pauses it"
+
+
 async def test_dm_watch_waits_for_its_owner_rather_than_skipping(db_session_factory):
     from daimon.core.direct_messages import owner_dm_turn, run_dm_watch
     from daimon.core.turn.admission import DmSource

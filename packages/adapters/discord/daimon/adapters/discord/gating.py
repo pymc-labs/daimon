@@ -40,6 +40,16 @@ def should_process_message(
     return guild_id is not None
 
 
+def bot_message_answerable(*, typed_mention: bool, is_reply: bool, reply_to_other: bool) -> bool:
+    """Whether another bot's message may reach the `answer_bots` check.
+
+    Only a mention the bot typed: Discord also lists the author of a replied-to post
+    among `message.mentions`, and replies ping by default, so that list says nothing.
+    Never a reply to our own post, nor one whose target cannot be read.
+    """
+    return typed_mention and (not is_reply or reply_to_other)
+
+
 def _is_allowed_bot_author(
     *,
     author_id: str,

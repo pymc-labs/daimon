@@ -16,7 +16,8 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import FeatureTarget, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.core.stores.routines import create_routine
@@ -111,6 +112,25 @@ async def test_posts_into_a_thread_without_broadcasting(
     client.conversations_replies.assert_awaited_once_with(channel="C1", ts="1717.5", limit=1)
     assert "<!channel>" not in kwargs["text"], "a routine never broadcasts"
     assert "<@U7>" in kwargs["text"], "mentions of people survive"
+
+
+async def test_with_the_header_off_the_result_posts_without_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    async with db_session_factory.begin() as session:
+        await set_feature_value(
+            session, tenant_id=row.tenant_id, target=FeatureTarget("workspace"),
+            key="routine_result_header", value="off", set_by=None, surface="cli",
+        )  # fmt: skip
+    post, client = _poster(db_session_factory, monkeypatch)
+
+    assert (await post(row)).status == "delivered"
+
+    text = client.chat_postMessage.await_args.kwargs["text"]
+    assert text.startswith("Done") and "Result from" not in text, text
 
 
 def _with_identity(monkeypatch: pytest.MonkeyPatch, identity: AgentIdentity) -> None:

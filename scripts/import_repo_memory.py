@@ -132,15 +132,20 @@ async def add_people(
     canonical = {key.casefold(): value for key, value in repos.items()}
     found = dict(accounts)
     for row in export:
-        if row.created_by_discord_id in found:
+        creator = row.created_by_discord_id
+        if creator in accounts:
             continue
+        # Every row of an unmapped creator is checked, not only the first.
         target = canonical.get(f"{row.repo_owner}/{row.repo_name}".casefold())
         if target is not None and target.tenant_id != tenant:
             raise ValueError("A creator without an account writes to another tenant; map them.")
-        principal = await get_or_create_platform_principal(
-            session, tenant_id=tenant, platform="discord", external_id=row.created_by_discord_id
-        )
-        found[row.created_by_discord_id] = principal.account_id
+        if not (creator.isascii() and creator.isdigit()):
+            raise ValueError("A creator without an account needs a Discord user id; map them.")
+        if creator not in found:
+            principal = await get_or_create_platform_principal(
+                session, tenant_id=tenant, platform="discord", external_id=creator
+            )
+            found[creator] = principal.account_id
     return found
 
 
@@ -153,8 +158,13 @@ def manifest_for(
     for entry in entries:
         key = f"{entry.tenant_id}/{entry.repo_id}"
         row = entry.model_dump(mode="json")
-        if owners and entry.created_by_account_id in owners:
-            row["created_by_account_id"] = owners[entry.created_by_account_id]
+        owner = (
+            owners.get(entry.created_by_account_id)
+            if owners and entry.created_by_account_id
+            else None
+        )
+        if owner is not None:
+            row["created_by_account_id"] = owner
         pools[key].append(json.dumps(row, sort_keys=True, ensure_ascii=False))
     return {
         key: {

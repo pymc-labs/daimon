@@ -56,9 +56,10 @@ async def test_a_pick_redraws_the_model_emoji_on_the_message_that_last_showed_th
         id=9, channel=SimpleNamespace(id=90), guild=SimpleNamespace(me="bot"),
         fetch=AsyncMock(return_value=fetched),
     )  # fmt: skip
-    assert await redraw_model_marks(90, ("🪶", "🌓")) is False, "nothing shown there yet"
-    remember_model_message(message)
-    assert await redraw_model_marks(90, ("🪶", "🌓")) is True
+    assert await redraw_model_marks("55", ("🪶", "🌓")) is False, "nothing shown there yet"
+    # The trigger sits in the parent channel (90); the conversation is its thread (55).
+    remember_model_message("55", message)
+    assert await redraw_model_marks("55", ("🪶", "🌓")) is True
     assert [c.args[0] for c in fetched.add_reaction.await_args_list] == ["🪶", "🌓"], (
         "the status stays first; the new model and effort follow it"
     )
