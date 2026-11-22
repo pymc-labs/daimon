@@ -15,6 +15,7 @@ from daimon.adapters.mcp.tools import watches as tools
 from daimon.adapters.mcp.watch_polling import PollAccessRevoked, read_page_data
 from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.documents import DocumentWrite
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.membership import Membership
 from daimon.core.stores import artifact_pages as store
@@ -84,6 +85,7 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
             origin=None,
             new_link=False,
             now=datetime.now(UTC),
+            limits=ArtifactPagesSettings(),
         )
     web = SimpleNamespace(
         platform="web",
@@ -192,6 +194,7 @@ async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
             origin=None,
             new_link=False,
             now=datetime.now(UTC),
+            limits=ArtifactPagesSettings(),
         )
         await store.write_doc(
             db,
@@ -201,9 +204,17 @@ async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
             DocumentWrite(data={"vote": "yes"}),
             by="agent",
             account_id=owner.id,
+            rule=None,
             now=datetime.now(UTC),
+            limits=ArtifactPagesSettings(),
         )
-    runtime = cast(Any, SimpleNamespace(session_factory=db_session_factory))
+    runtime = cast(
+        Any,
+        SimpleNamespace(
+            session_factory=db_session_factory,
+            settings=SimpleNamespace(artifact_pages=ArtifactPagesSettings()),
+        ),
+    )
     state = {"tool": "artifact_db_query", "arguments": {"slug": "votes", "collection": "ballots"}}
 
     def watch(account: Any) -> Any:
