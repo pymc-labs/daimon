@@ -98,6 +98,9 @@ def test_format_headline_bolds_the_state_word_with_the_adapter_markup() -> None:
     assert format_headline(is_working=True, elapsed_seconds=None, bold=lambda s: f"*{s}*") == (
         "*Working on it…*"
     ), "without a clock the headline is the word alone"
+    assert format_headline(is_working=True, elapsed_seconds=None, bold=str, timed=True) == (
+        "Working"
+    ), "timed without a clock is the state word alone"
 
 
 def test_format_draft_flattens_whitespace_and_clips() -> None:

@@ -1287,3 +1287,35 @@ async def test_a_member_without_read_history_gets_no_messages(
             await _get_message_impl(
                 _runtime_with_discord_token(), _auth(), channel_id="222", message_id="1000"
             )
+
+
+async def test_list_channels_skips_a_channel_type_discord_py_does_not_know(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unknown type must not fail the whole list: it is left out, and the log names only
+    the count and the type, never the channel."""
+    from structlog.testing import capture_logs
+
+    async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
+        if route.path == "/guilds/{guild_id}":
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _READ_MESSAGE_HISTORY)],
+            }
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/guilds/{guild_id}/channels":
+            return [
+                _text_channel_payload(channel_id="222"),
+                {**_text_channel_payload(channel_id="555"), "type": 20, "name": "never logged"},
+            ]
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with capture_logs() as logs:
+        rows = await _list_channels_impl(_runtime_with_discord_token(), _auth())
+
+    assert {r.id for r in rows} == {"222"}
+    [skipped] = [e for e in logs if e["event"] == "discord.channel_type_skipped"]
+    assert skipped["count"] == 1 and skipped["types"] == [20]
+    assert "never logged" not in str(logs)

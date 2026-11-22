@@ -38,6 +38,7 @@ from daimon.core.agent_convert import (
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
+from daimon.core.agent_rename import AgentRenamePlan, rename_user_agent
 from daimon.core.authz import Subject
 from daimon.core.config import load_settings, load_turn_settings
 from daimon.core.defaults.ma_index import (
@@ -757,7 +758,7 @@ async def agents_update(
     if spec.name != name:
         raise SpecError(
             f"cannot rename {name!r} -> {spec.name!r} via update; agent names are identity. "
-            "Fork under the new name instead."
+            "Use `daimon agents rename` to rename it, or fork under the new name."
         )
     if model is not None and model.provider == DEFAULT_BACKEND:
         spec.model = resolve_model(model.id)
@@ -807,6 +808,132 @@ async def agents_update(
         yes=yes,
         selector=selector,
     )
+
+
+@agents_app.command("rename")
+def agents_rename_command(
+    ctx: typer.Context,
+    old: str,
+    new: str,
+    tenant: Annotated[str | None, TENANT_OPTION] = None,
+    guild: Annotated[str | None, GUILD_OPTION] = None,
+    replace_seeded: Annotated[
+        bool,
+        typer.Option(
+            "--replace-seeded",
+            help="Retire the built-in agent that holds NEW in this tenant, then take its name.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change; write nothing.")
+    ] = False,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Rename a tenant's own agent OLD to NEW, keeping its id.
+
+    The agent keeps its id, so its stored MCP credentials, memory and sessions
+    stay. Every live name reference moves with it: channel and tenant defaults,
+    rules, routines, bindings, avatars, access-policy rules, and the provider
+    agent's name with its report readers. History and audit rows keep the old
+    name. Refuses when OLD is missing or built-in, or when NEW is held by one
+    of the tenant's own agents.
+
+    `--replace-seeded` is for a tenant that wants its own agent under a built-in
+    name, such as `default`: the seeded agent and its readers are renamed to
+    `NEW-seeded-retired-<date>` and archived, only in this tenant, and later
+    `defaults apply` runs leave the renamed agent alone. The scope rows that
+    named the seeded agent now name the renamed one. Use `--dry-run` first.
+
+    Select the tenant with `--tenant` or `--guild` (also accepted before `rename`).
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+    selector = TenantSelector(tenant_id=tenant, guild_id=guild) if tenant or guild else ctx.obj
+
+    async def _with_defaults() -> None:
+        async with build_runtime(settings) as rt:
+            await agents_rename(
+                rt=rt,
+                console=console,
+                old=old,
+                new=new,
+                selector=selector,
+                replace_seeded=replace_seeded,
+                dry_run=dry_run,
+                yes=yes,
+            )
+
+    run_cli(_with_defaults(), console=console)
+
+
+def _print_rename_plan(console: Console, plan: AgentRenamePlan, *, tenant_label: str) -> None:
+
+    def out(line: str) -> None:
+        console.print(line, markup=False)
+
+    out(f"Tenant: {tenant_label}")
+    out(f"Rename {plan.old!r} -> {plan.new!r}; agent id {plan.agent.id} stays.")
+    for agent in plan.readers:
+        out(f"  provider reader {agent.id} moves with it")
+    if plan.retired_name is not None:
+        out(f"Retire the built-in {plan.new!r} as {plan.retired_name!r}, then archive it:")
+        for agent in plan.seeded:
+            out(f"  provider agent {agent.id} ({agent.name})")
+        for agent in plan.seeded_readers:
+            out(f"  its reader {agent.id} ({agent.name}) is renamed and kept, not archived")
+    moved = {label: n for label, n in plan.references.items() if n}
+    out(f"Database rows to move: {sum(moved.values())}")
+    for label, count in moved.items():
+        out(f"  {label}: {count}")
+    if plan.policy_keys:
+        out(f"Access policy keys to move: {', '.join(plan.policy_keys)}")
+
+
+async def agents_rename(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    old: str,
+    new: str,
+    selector: TenantSelector | None = None,
+    replace_seeded: bool = False,
+    dry_run: bool = False,
+    yes: bool = False,
+) -> None:
+    """Plan and run `daimon.core.agent_rename.rename_user_agent` for the selected tenant."""
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        tenant_label = await resolve_tenant_display(session, tenant_id)
+    preview = await rename_user_agent(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        old=old,
+        new=new,
+        replace_seeded=replace_seeded,
+        dry_run=True,
+    )
+    _print_rename_plan(console, preview.plan, tenant_label=tenant_label)
+    if dry_run:
+        console.print("Dry run: nothing was written.", markup=False)
+        return
+    confirm_or_abort(console, f"rename {old!r} -> {new!r} in {tenant_label}?", yes=yes)
+    result = await rename_user_agent(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        old=old,
+        new=new,
+        replace_seeded=replace_seeded,
+    )
+    console.print(f"[green]✓ renamed agent {old!r} -> {new!r}[/green]")
+    if result.unarchived:
+        console.print(
+            "Could not archive the retired built-in agent(s) "
+            f"{', '.join(result.unarchived)}; the next `daimon defaults apply` archives them.",
+            markup=False,
+        )
 
 
 @backend_app.command("set")

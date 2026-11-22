@@ -22,6 +22,7 @@ from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_messag
 from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.agent_identity import (
     AgentIdentity,
+    agent_display_name,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
@@ -486,6 +487,12 @@ def _answerer(
                     session,
                     tenant_id=conversation.tenant_id,
                     agent_name=name,
+                    display_name=await agent_display_name(
+                        runtime.sessionmaker,
+                        tenant_id=conversation.tenant_id,
+                        agent_id=agent.id if agent is not None else None,
+                        fallback=name,
+                    ),
                     is_builtin=is_builtin_agent(
                         name=name,
                         metadata=agent.metadata if agent is not None else None,

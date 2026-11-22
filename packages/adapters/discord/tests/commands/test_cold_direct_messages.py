@@ -113,6 +113,8 @@ async def setup(db_session_factory, monkeypatch, count=1):
     fetch = AsyncMock(return_value=Membership(is_member=True, role_ids=("123",)))
     resolver = CachedMembershipResolver(fetch)
     bot = MagicMock()
+    bot.working_mark = AsyncMock(return_value="👀")
+    bot.turn_model_marks = AsyncMock(return_value=())
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.settings = SimpleNamespace(
@@ -889,6 +891,7 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
         grant=row_reply.grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -907,6 +910,114 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     assert delivery.await_count == 2, "a proved refusal closes the card for the rest of the turn"
 
 
+@pytest.mark.parametrize(
+    ("dm_pings", "pings", "expected"),
+    [(False, True, False), (True, False, False), (True, True, True)],
+    ids=["dm-off", "pings-off", "both-on"],
+)
+async def test_dm_answer_pings_only_where_dm_completion_pings_and_completion_pings_are_on(
+    db_session_factory, monkeypatch, dm_pings, pings, expected
+):
+    """On, the answer is a new message, which notifies by itself, and the card is deleted;
+    off, the answer edits the card in place. A DM answer never mentions the asker."""
+    from daimon.core.turn.state import TextBlock, TurnState
+
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    posted: list[SimpleNamespace] = []
+
+    async def send(*_args, **kwargs):
+        sent = SimpleNamespace(
+            id=900 + len(posted), kwargs=kwargs, edit=AsyncMock(), delete=AsyncMock()
+        )
+        posted.append(sent)
+        return sent
+
+    await cog.on_message(message())
+    asked = message(102)
+    asked.channel.send = send
+    shown = {"dm_completion_pings": dm_pings, "completion_pings": pings}
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        shown=lambda key, *_args: shown.get(key, False),
+        display_name=lambda fallback: fallback,
+        answer_message_cap=5,
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, asked, reply, admission)
+    await card.post_initial()
+    card_message = posted[-1]
+    await card.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="The answer")]))
+    fresh = posted[posted.index(card_message) + 1 :]
+    assert bool(fresh) is expected, "a ping is a new answer message, only when on"
+    assert not any("<@999>" in str(m.kwargs.get("content", "")) for m in posted)
+    assert (card_message.delete.await_count == 1) is expected, (
+        "the card is deleted behind a pinged answer and kept otherwise"
+    )
+
+
+async def _new_in_thread(db_session_factory, monkeypatch, *, enabled: bool, owner_id: int):
+    """Run /new in a thread of the first server, with the caller's live session there."""
+    from daimon.core.features.service import set_workspace_feature
+    from daimon.core.stores.thread_sessions import get_thread_session_by_id
+    from daimon.testing.factories import make_platform_principal, make_thread_session
+
+    cog, tenants, *_ = await setup(db_session_factory, monkeypatch)
+    async with db_session_factory.begin() as session:
+        principal = await make_platform_principal(
+            session, platform="discord", external_id="999", tenant=tenants[0]
+        )
+        row = await make_thread_session(
+            session,
+            tenant=tenants[0],
+            account=SimpleNamespace(id=principal.account_id),
+            thread_id="4242",
+        )
+        if enabled:
+            await set_workspace_feature(
+                session,
+                None,
+                tenant_id=tenants[0].id,
+                platform="discord",
+                key="thread_new",
+                value="on",
+                account_id=None,
+                surface="cli",
+            )
+    cog.bot.user = SimpleNamespace(id=1)
+    thread = MagicMock(spec=discord.Thread)
+    thread.owner_id, thread.parent_id = owner_id, 77
+    thread.guild = SimpleNamespace(id=int(tenants[0].external_id))
+    asked = interaction(route=4242, channel=thread)
+    await cog.new.callback(cog, asked)
+    async with db_session_factory() as session:
+        after = await get_thread_session_by_id(session, id=row.id)
+    await cog.cog_unload()
+    return asked.response.send_message.await_args, after
+
+
+async def test_new_in_a_thread_daimon_started_starts_fresh_when_thread_new_is_on(
+    db_session_factory, monkeypatch
+):
+    sent, row = await _new_in_thread(db_session_factory, monkeypatch, enabled=True, owner_id=1)
+    assert row is not None and row.fresh_start_requested_at is not None, (
+        "the caller's session in the thread is marked to start fresh"
+    )
+    assert "Starting fresh" in sent.kwargs["embed"].description, "the fresh-start notice"
+
+
+@pytest.mark.parametrize(("enabled", "owner_id"), [(False, 1), (True, 2)], ids=["off", "not-own"])
+async def test_new_in_a_thread_is_refused_when_off_or_not_daimons_thread(
+    db_session_factory, monkeypatch, enabled, owner_id
+):
+    sent, row = await _new_in_thread(
+        db_session_factory, monkeypatch, enabled=enabled, owner_id=owner_id
+    )
+    assert row is not None and row.fresh_start_requested_at is None, "nothing is reset"
+    assert "in your DMs" in sent.args[0], "the DM-only refusal, as before"
+
+
 async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_factory, monkeypatch):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     await cog.on_message(message())
@@ -914,6 +1025,7 @@ async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_fac
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -956,6 +1068,7 @@ async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -981,6 +1094,7 @@ async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -1003,6 +1117,7 @@ async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monk
         grant=grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        display_name=lambda fallback: fallback,
         answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
@@ -1021,6 +1136,7 @@ class _AnsweredCard:
     def __init__(self, *, answered: bool, ended: bool) -> None:
         self.was_answered = answered
         self.ended = ended
+        self.model_marked = False
 
     def set_output_authorization(self, authorization) -> None:
         self.authorization = authorization
@@ -1048,6 +1164,7 @@ async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                display_name=lambda fallback: fallback,
                 answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
@@ -1080,6 +1197,7 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                display_name=lambda fallback: fallback,
                 answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
@@ -1154,6 +1272,7 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                display_name=lambda fallback: fallback,
                 answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
@@ -1283,11 +1402,19 @@ async def test_a_reply_to_an_earlier_message_carries_that_message(db_session_fac
     await cog.cog_unload()
 
 
-@pytest.mark.parametrize("kind", ["nothing", "voice"])
-async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch, kind):
+async def test_a_dm_voice_message_reaches_the_turn_as_an_attachment(
+    db_session_factory, monkeypatch
+):
     cog, _, _, reply = await setup(db_session_factory, monkeypatch)
-    files = [attachment("voice.ogg", voice=True)] if kind == "voice" else []
-    msg = dm_message(content="", attachments=files)
+    monkeypatch.setattr(module, "prepare_attachments", AsyncMock(return_value=("voice", None)))
+    await cog.on_message(dm_message(content="", attachments=[attachment("voice.ogg", voice=True)]))
+    assert reply.await_args.kwargs["history_notes"] == ["[attachment: voice.ogg]"]
+    await cog.cog_unload()
+
+
+async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    msg = dm_message(content="", attachments=[])
     await cog.on_message(msg)
     assert [sent_text(call) for call in msg.channel.send.await_args_list][
         -1

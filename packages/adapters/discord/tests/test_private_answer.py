@@ -244,6 +244,7 @@ async def test_a_follow_up_without_a_mention_gets_the_offer(
             audience_mode="on",
             agent=SimpleNamespace(name="helper", metadata={}),
             config=SimpleNamespace(agent_name="helper"),
+            display_name=lambda fallback: fallback,
         ),
     )
     follow_up = MagicMock(spec=discord.Message)
@@ -353,7 +354,9 @@ def _admitted(monkeypatch: pytest.MonkeyPatch, cog: DirectMessageCog) -> dict[st
     fakes = {
         "get_conversation": AsyncMock(return_value=SimpleNamespace(scope_id="dm:existing")),
         "admit_cold_dm": AsyncMock(
-            return_value=SimpleNamespace(config=SimpleNamespace(agent_name="helper"))
+            return_value=SimpleNamespace(
+                config=SimpleNamespace(agent_name="helper"), display_name=lambda fallback: fallback
+            )
         ),
         "start_cold_dm": AsyncMock(return_value=SimpleNamespace(scope_id="dm:private")),
     }

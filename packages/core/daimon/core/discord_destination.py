@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 import httpx
+from daimon.core.bot_access import is_missing_access
 from daimon.core.channel_visibility import (
     DISCORD_ADMINISTRATOR,
     DISCORD_MANAGE_THREADS,
@@ -72,7 +73,12 @@ def _timed_out(member: _Json) -> bool:
 
 
 class DiscordRestDestinationResolver:
-    """A `DestinationResolver` for one guild and one owner, over the bot's REST credential."""
+    """A `DestinationResolver` for one guild and one owner, over the bot's REST credential.
+
+    With `defer_bot_access`, a channel Discord says the bot has no access to (403 Missing
+    Access) is accepted unchecked: its guild and the owner's rights are re-read when it
+    first runs. A channel that does not exist is still refused.
+    """
 
     def __init__(
         self,
@@ -81,7 +87,9 @@ class DiscordRestDestinationResolver:
         guild_id: str,
         owner_id: str,
         transport: httpx.AsyncBaseTransport | None = None,
+        defer_bot_access: bool = False,
     ):
+        self._defer = defer_bot_access
         self._bot_token = bot_token
         self._guild_id = guild_id
         self._owner_id = owner_id
@@ -104,11 +112,25 @@ class DiscordRestDestinationResolver:
             raise ValueError("unexpected response")
         return cast("_Json", raw)
 
+    async def _bot_locked_out(self, client: httpx.AsyncClient, channel_id: str) -> bool:
+        """Whether the bot's own read of the channel is a 403 Missing Access (not a 404)."""
+        response = await discord_get(client, f"channels/{channel_id}")
+        body: object = response.json() if response.status_code == 403 else None
+        return isinstance(body, dict) and is_missing_access(403, cast("_Json", body).get("code"))
+
     async def _resolve(
         self, client: httpx.AsyncClient, kind: RoutineDestinationKind, destination_id: str
     ) -> Placement:
         guild = self._guild_id
         channel = await self._get(client, f"channels/{destination_id}")
+        if (
+            channel is None
+            and self._defer
+            and kind == "channel"
+            and _snowflake(destination_id)
+            and await self._bot_locked_out(client, destination_id)
+        ):
+            return Placement(channel_id=destination_id)
         if channel is None or channel.get("id") != destination_id:
             raise _unverifiable(destination_id)
         if channel.get("guild_id") != guild:

@@ -89,6 +89,7 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "report_publish": frozenset({"publish_report", "delete_report"}),
+    "secret_sharing": frozenset({"share_secret_with"}),
     "media": frozenset({"fetch_youtube_transcript"}),
     "microsoft_365": frozenset(
         {

@@ -34,6 +34,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from daimon.adapters.discord.member_sync import tenant_of
@@ -52,6 +53,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
+from discord.channel import _guild_channel_factory  # pyright: ignore[reportPrivateUsage]
 
 log = structlog.get_logger(__name__)
 
@@ -71,6 +73,38 @@ CHUNK_TIMEOUT_S = 300.0
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+async def _fetch_known_channels(guild: discord.Guild) -> list[discord.abc.GuildChannel]:
+    """The server's channels by REST, leaving out any type discord.py does not know.
+
+    `Guild.fetch_channels` raises `InvalidData` for one unknown type (a server can hold a
+    type newer than the library), which would fail every reconcile and publish nothing.
+    On that error the raw list is read again and built with the library's own factory,
+    skipping the unknown. A skipped channel gets no fact, so it reads unknown and fails
+    closed; discord.py cannot host a turn there either. Only the count and the types are
+    logged, never a name.
+    """
+    try:
+        return list(await guild.fetch_channels())
+    except discord.InvalidData:
+        pass
+    raw: list[Any] = await guild._state.http.get_all_guild_channels(guild.id)  # pyright: ignore[reportPrivateUsage]
+    channels: list[discord.abc.GuildChannel] = []
+    skipped: list[int] = []
+    for data in raw:
+        factory, _ = _guild_channel_factory(data["type"])
+        if factory is None:
+            skipped.append(data["type"])
+            continue
+        channels.append(factory(guild=guild, state=guild._state, data=data))  # pyright: ignore[reportPrivateUsage]
+    log.warning(
+        "discord.audience.channel_type_skipped",
+        guild_id=str(guild.id),
+        count=len(skipped),
+        types=sorted(set(skipped)),
+    )
+    return channels
 
 
 @dataclass(frozen=True)
@@ -269,7 +303,7 @@ class AudienceSync:
         epoch = self._epoch
         try:
             roles = await guild.fetch_roles()
-            channels = await guild.fetch_channels()
+            channels = await _fetch_known_channels(guild)
             # The chunk is the full member list: a member whose leave event was missed
             # is not in it, while the cache would keep them.
             members = await asyncio.wait_for(guild.chunk(cache=True), self._chunk_timeout_s)

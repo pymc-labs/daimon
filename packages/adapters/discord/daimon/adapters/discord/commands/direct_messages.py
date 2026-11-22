@@ -34,9 +34,11 @@ from daimon.adapters.discord.context import (
     forwarded_names,
     input_context,
 )
+from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.private_answer import PrivateOffers
+from daimon.adapters.discord.reactions import remove_own_reaction
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
@@ -49,6 +51,7 @@ from daimon.core.channel_audience import (
 )
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, env_admits, env_dm_policy
+from daimon.core.continuity.messages import render_fresh_start
 from daimon.core.direct_messages import (
     ColdDmNotices,
     DirectMessageAccessRevoked,
@@ -67,12 +70,17 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
-from daimon.core.dm_access import decide_dm, list_dm_agents, list_routable_dm_agents
+from daimon.core.dm_access import (
+    decide_dm,
+    dm_agent_display_name,
+    list_dm_agents,
+    list_routable_dm_agents,
+)
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
-from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -89,6 +97,8 @@ from daimon.core.stores.direct_messages import (
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
+from daimon.core.stores.thread_session_lineage import request_fresh_start
+from daimon.core.stores.thread_sessions import get_live_thread_session, record_model_marks
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
@@ -146,12 +156,8 @@ class _DmRequest:
 
 
 def _attachments(message: discord.Message | _DmRequest) -> list[discord.Attachment]:
-    """The files a message carries that an agent can use; a voice message is not one."""
-    return [
-        a
-        for a in getattr(message, "attachments", None) or ()
-        if not (isinstance(a, discord.Attachment) and a.is_voice_message())
-    ]
+    """The files a message carries; a voice message is one, as in a thread."""
+    return list(getattr(message, "attachments", None) or ())
 
 
 @dataclass
@@ -594,10 +600,11 @@ class DirectMessageCog(commands.Cog):
             return None
         guild = self.bot.get_guild(int(tenant.external_id))
         server_name = guild.name if guild else tenant.external_id
+        name = admission.display_name(admission.config.agent_name or admission.agent.name)
 
         # The only message that carries the controls; /dm-settings shows them again.
         await message.channel.send(
-            f"Private conversation with {admission.config.agent_name} in {server_name}.\n"
+            f"Private conversation with {name} in {server_name}.\n"
             "Run `/dm-settings` to switch server or start a new conversation.",
             view=self._switch_control(
                 user_id=message.author.id,
@@ -837,11 +844,12 @@ class DirectMessageCog(commands.Cog):
                     return "failed"
                 guild = self.bot.get_guild(int(tenant.external_id))
                 server_name = guild.name if guild else tenant.external_id
+                shown = admission.display_name(admission.config.agent_name or admission.agent.name)
                 try:
                     # First, so a closed DM makes no conversation.
                     await channel.send(
                         embed=build_notice_embed(
-                            f"Private answer from {admission.config.agent_name} in "
+                            f"Private answer from {shown} in "
                             f"{server_name}.\n\nReply here to follow up.",
                             neutral=True,
                         ),
@@ -874,11 +882,54 @@ class DirectMessageCog(commands.Cog):
         return "started"
 
     @app_commands.command(name="new", description=DESCRIPTIONS["new"])
-    # Contexts apply to the global registration production uses; a lane's
-    # per-guild copy also shows /new in channels, where the handler refuses it.
-    @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
+    # Listed in servers too, for threads where `thread_new` is on; elsewhere in a
+    # server the handler refuses it.
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
     async def new(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        channel = interaction.channel
+        if isinstance(channel, discord.Thread) and await self._fresh_thread(interaction, channel):
+            return
         await self._new_conversation(interaction, scope_id=None)
+
+    async def _fresh_thread(
+        self, interaction: discord.Interaction[commands.Bot], thread: discord.Thread
+    ) -> bool:
+        """Start the caller's conversation in a thread Daimon started afresh, as Teams'
+        `new` does; False where `thread_new` is off or the thread is someone else's."""
+        runtime, me = self.bot.runtime, self.bot.user
+        if me is None or thread.owner_id != me.id:
+            return False
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+        place = FeaturePlace.of(tenant_id, "discord", str(thread.parent_id), str(thread.id))
+        if not (
+            await place_feature(runtime.sessionmaker, runtime.settings, place, "thread_new")
+        ).on:
+            return False
+        async with runtime.sessionmaker.begin() as session:
+            principal = await find_platform_principal(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                external_id=str(interaction.user.id),
+            )
+            live = (
+                await get_live_thread_session(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    account_id=principal.account_id,
+                )
+                if principal is not None
+                else None
+            )
+            if live is not None:
+                await request_fresh_start(session, id=live.id, at=datetime.now(UTC))
+        await interaction.response.send_message(
+            embed=build_notice_embed(render_fresh_start("the agent"), neutral=True),
+            ephemeral=True,
+        )
+        return True
 
     @app_commands.command(name="dm-settings", description=DESCRIPTIONS["dm_settings"])
     @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
@@ -902,6 +953,14 @@ class DirectMessageCog(commands.Cog):
                 if current is not None
                 else None
             )
+            if agent and current is not None:
+                agent = await dm_agent_display_name(
+                    session,
+                    tenant_id=current.tenant_id,
+                    anthropic=self.bot.runtime.turn_deps.anthropic,
+                    records=self.bot.runtime.sessionmaker,
+                    name=agent,
+                )
         if current is None:
             await interaction.response.send_message(
                 "There is no conversation yet. Send a message to start one.", ephemeral=True
@@ -1283,6 +1342,7 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         conversation: DirectMessageRow,
         cards: list[DiscordTurnLifecycle],
+        feedback: list[DiscordTurnLifecycle],
     ) -> DmTurnCard:
         """Build the same progress card a thread gets, gated like a DM answer.
 
@@ -1337,17 +1397,40 @@ class DirectMessageCog(commands.Cog):
                 kwargs.pop("_allow_replacement", None)
                 return await sent.edit(**kwargs)
 
+            async def delete(sent: discord.Message) -> None:
+                # A pinged answer is posted below its card, which then goes.
+                await sent.delete()
+
+            pings = admission.shown("dm_completion_pings") and admission.shown("completion_pings")
+            trigger = message if isinstance(message, discord.Message) else None
             card = DiscordTurnLifecycle(
                 send=channel.send,
                 edit=edit,
-                agent_name=admission.agent.name,
+                # With no delete a late replacement edits the card, as before the toggle.
+                delete=delete if pings else None,
+                agent_name=admission.display_name(admission.agent.name),
                 model_id=admission.agent.model.id,
                 markup=runtime.turn_deps.markup,
                 cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel),
                 requester_id=message.author.id,
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
+                # The same reactions as a thread turn: this turn's own working mark, ✅ and
+                # the model and effort emoji on the message it answers.
+                trigger_message=trigger,
+                acknowledgment_managed=True,
+                model_marks_for=partial(
+                    self.bot.turn_model_marks,
+                    admission,
+                    tenant_id=conversation.tenant_id,
+                    thread_id=conversation.scope_id,
+                ),
+                conversation_id=conversation.scope_id,
+                notify_on_completion=pings,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
@@ -1356,6 +1439,8 @@ class DirectMessageCog(commands.Cog):
             )
             card.set_output_authorization(OutputAuthorization(still_allowed))
             cards.append(card)
+            if admission.shown("message_feedback"):
+                feedback.append(card)
             return card
 
         return build
@@ -1421,6 +1506,7 @@ class DirectMessageCog(commands.Cog):
         assert isinstance(message.channel, discord.DMChannel), "a DM turn runs in a DM"
         runtime = self.bot.runtime
         cards: list[DiscordTurnLifecycle] = []
+        feedback: list[DiscordTurnLifecycle] = []
         try:
             subject = await self._subject(conversation.tenant_id, message.author.id)
             async with runtime.sessionmaker() as session:
@@ -1473,6 +1559,15 @@ class DirectMessageCog(commands.Cog):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
+            working: str | None = None
+            if isinstance(message, discord.Message):
+                working = await self.bot.working_mark(message, conversation.tenant_id)
+                if working == _SEEN_REACTION:
+                    # A held message already shows 👀 while it is answered (DmBurst).
+                    working = None
+                else:
+                    with contextlib.suppress(discord.HTTPException):
+                        await message.add_reaction(working)
             try:
                 async with message.channel.typing():
                     if await ticket.wait(asyncio.Event()) != "started":
@@ -1546,11 +1641,28 @@ class DirectMessageCog(commands.Cog):
                             account_id=admission.account_id,
                             admission=admission,
                         ),
-                        card_for=lambda claimed: self._turn_card(message, claimed, cards),
+                        card_for=lambda claimed: self._turn_card(message, claimed, cards, feedback),
                         platform_channel_id=str(message.channel.id),
                     )
             finally:
                 ticket.release()
+                if working is not None and isinstance(message, discord.Message):
+                    # With status reactions the card has put ✅ in its place.
+                    await remove_own_reaction(message, working)
+            if cards and cards[-1].model_marked:
+                async with runtime.sessionmaker.begin() as session:
+                    await record_model_marks(
+                        session,
+                        tenant_id=conversation.tenant_id,
+                        platform="discord",
+                        thread_id=conversation.scope_id,
+                        marks=cards[-1].model_marks,
+                    )
+            last = cards[-1] if cards else None
+            if last in feedback and last.was_answered and last.feedback_message_id is not None:
+                await seed_feedback_reactions(
+                    message.channel, message_id=last.feedback_message_id, escalate=False
+                )
             if reply is not None and not (cards and (cards[-1].was_answered or cards[-1].ended)):
                 # The card shows the outcome unless a recovery replaced it; then the text goes here.
                 answer = reply.text

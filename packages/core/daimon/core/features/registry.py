@@ -99,6 +99,25 @@ class Authority:
     agent_owner: bool = True
 
 
+_MARKUP = frozenset("<>@#*_~|`[]\\:")
+"""Mention and markdown marks on any platform, and the `:` the tier text and choice use."""
+_PLATFORM_RESERVED = ("discord", "clyde")
+"""Words Discord refuses in a webhook name."""
+
+
+def is_feature_text(value: str, max_length: int) -> bool:
+    """A free-text value: one trimmed printable line of plain words, never `default`."""
+    folded = value.casefold()
+    return (
+        0 < len(value) <= max_length
+        and value == value.strip()
+        and value.isprintable()
+        and not _MARKUP.intersection(value)
+        and not any(word in folded for word in _PLATFORM_RESERVED)
+        and value != DEFAULT
+    )
+
+
 @dataclass(frozen=True)
 class FeatureSpec:
     """One feature. `values` maps each stored value to its label, the permissive or
@@ -138,6 +157,9 @@ class FeatureSpec:
     pinned: bool = False
     """An On at the agent or routine tier holds only for the agent and environment in the
     `pin` kept with it; a write without one is refused, and no other tier takes On."""
+    max_length: int = 0
+    """Above 0, the feature also takes any one-line text up to this many characters (a name),
+    besides its listed values."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""
@@ -163,6 +185,8 @@ class FeatureSpec:
         choose from the listed steps."""
         if value in self.values:
             return True
+        if self.max_length:
+            return is_feature_text(value, self.max_length)
         if self.effect == "limit" and tier == "deployment":
             try:
                 number = float(value)
@@ -224,7 +248,7 @@ def _builtin(tool: str) -> FeatureSpec:
         binds="session_mutable",
         doc=(
             f"The agent can {does}. Off removes it here; On never gives more than the "
-            "agent's own tool settings allow. Applies from the next message in a conversation."
+            "agent's own tool settings allow. Applies from the next message."
             + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
         backend_tiers=_PROVIDER_ONLY,
@@ -264,7 +288,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "The agent knows about the web app: messages, routine runs and tool results carry "
             "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+            "and Daimon's cards show buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -314,7 +338,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         binds="session_mutable",
         doc=(
             "The agent's saved keys as a .env file in its working files. Off leaves the file "
-            "out; the keys stay saved. Applies from the next message in a conversation. "
+            "out; the keys stay saved. Applies from the next message. "
             "Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
@@ -468,6 +492,8 @@ _TIME_LIMITS: Final[Mapping[str, str]] = {
 }
 """Choices of both time limits, loosest first: the one set keeps them in step."""
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
+_AGENT_CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
+"""A Discord display choice an agent may differ in from the others in its server."""
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
@@ -519,6 +545,85 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         authority=_ADMIN,
         legacy_env=("DAIMON_THREAD_NAMING__ENABLED",),
     ),
+    FeatureSpec(
+        key="display_name",
+        name="Display name",
+        category="chat",
+        effect="display",
+        values={"id": "The agent's id"},
+        default="id",
+        tiers=("agent",),
+        binds="turn",
+        doc="The name people see for an agent: up to 40 plain characters, never another agent's.",
+        max_length=40,
+    ),
+    FeatureSpec(
+        key="thread_title_style",
+        name="Thread title style",
+        category="chat",
+        effect="display",
+        values={"sentence": "Sentence case", "title": "Title Case"},
+        default="sentence",
+        tiers=_AGENT_CHANNELS,
+        binds="turn",
+        doc="Sentence case up to 50 characters, or Title Case up to 100, for a thread opened "
+        "to answer a mention.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="thread_auto_archive",
+        name="Thread archive time",
+        category="chat",
+        effect="display",
+        values={"10080": "1 week", "1440": "1 day"},
+        default="10080",
+        tiers=_AGENT_CHANNELS,
+        binds="turn",
+        doc="How long an idle thread opened to answer a mention stays open.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "status_reactions",
+        "Status reactions",
+        "⏳ while the agent works, then ✅ first however it ended, and 📨 instead of a notice on a "
+        "queued message. Off shows 👀, and ✅ only with Completion pings.",
+        tiers=_AGENT_CHANNELS,
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "protected_notice_reaction",
+        "Lock reaction",
+        "A 🔒 on a mention the agent may not answer, besides the direct message saying why.",
+        tiers=_AGENT_CHANNELS,
+        default="on",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "pre_tool_messages",
+        "Text before tool calls",
+        "Text written before a tool call is posted as its own message. Off keeps it on the "
+        "working card.",
+        default="on",
+        platforms=_DISCORD,
+    ),
+    _shown(
+        "card_timer",
+        "Working card timer",
+        "The card shows Working or Thinking with the time, and the model in its footer.",
+        platforms=_DISCORD,
+    ),
+    _shown(
+        "answer_bots",
+        "Answer bots",
+        "Answer a bot that mentions the agent, under people's access rules; never itself.",
+        tiers=("deployment", "workspace", "agent"),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
     _shown(
         "plain_text_mentions",
         "Typed mentions",
@@ -535,12 +640,27 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="completion_pings",
     ),
     _shown(
+        "dm_completion_pings",
+        "Completion pings in direct messages",
+        "Direct messages follow Completion pings.",
+        tiers=("deployment", "workspace"),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
         "model_reactions",
         "Model reactions",
         "The first message in a thread, and the first after the model or effort changes, gets "
         "an emoji for the model and one for the effort it runs on.",
         tiers=("workspace", "agent"),
         platforms=frozenset({"discord"}),
+    ),
+    _shown(
+        "routine_result_header",
+        "Routine result header",
+        'Off drops the "Result from" line above a routine\'s result.',
+        tiers=("deployment", "workspace", "agent", "channel", "routine"),
+        default="on",
     ),
     _shown(
         "tool_server_names",
@@ -643,6 +763,32 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc="A reply in a direct message can read the agent's memory but not change it.",
         platforms=_DM_PLATFORMS | {"teams"},
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="dm_approvals",
+        name="Approvals in direct messages",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc="Direct messages follow the agent's Approvals.",
+        platforms=_DM_PLATFORMS | {"teams"},
+        authority=Authority(native=True),
+    ),
+    FeatureSpec(
+        key="thread_new",
+        name="/new in threads",
+        category="chat",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc="/new works in threads Daimon started.",
+        platforms=_DISCORD,
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -806,10 +952,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card with the destination and duration before the agent makes "
-            "or resumes a watch. Skip makes it without the card, reporting in the same "
-            "thread for the default duration. Editing a watch, long jobs, watch key "
-            "rotation and Fly launches keep asking. Only a server admin can change it."
+            "Ask shows a card with the destination and duration before a watch is made "
+            "or resumed. Skip makes it without the card, in the same thread for the "
+            "default duration. Editing a watch, long jobs, key rotation and Fly launches "
+            "keep asking. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -862,8 +1008,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
                 "monitor_mcp",
                 "Monitor coding tools",
                 "Keeps what people ask this agent from their coding tools and what it answers, "
-                "and the name, time and outcome of each other tool they call on it, never what "
-                "the call sent or returned. People are told in the conversation or their first "
+                "plus the name, time and outcome of their other tool calls, never what they "
+                "sent or returned. People are told in the conversation or their first "
                 "tool result. Kept from when it is turned on, for the retention period.",
             ),
         )
@@ -977,6 +1123,38 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         authority=_SERVER_ADMIN,
     ),
+    FeatureSpec(
+        key="secret_sharing",
+        name="Secret sharing",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent"),
+        binds="session_mutable",
+        doc=(
+            "/share-secret sends a secret to one person's DMs; the agent sends its keys to an "
+            "admin, its owner or its setter. They reveal it once, within a day. A server admin "
+            "turns it on."
+        ),
+        platforms=_DISCORD,
+        authority=_SERVER_ADMIN,
+    ),
+    FeatureSpec(
+        key="bot_access_wait",
+        name="Wait for bot access",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace",),
+        binds="turn",
+        doc=(
+            "Work for a channel Daimon cannot reach waits, without failing, and runs once it can."
+        ),
+        platforms=_DISCORD,
+        authority=_SERVER_ADMIN,
+    ),
     _capability(
         "compute",
         "Cloud computers",
@@ -1036,9 +1214,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "Answers offer a way to ask a person for help, which posts the request in the "
-            "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "default channel and credits; an admin can set limits, a menu and their own channel."
+            "Answers offer a way to ask a person for help, posted in the "
+            "support channel. Off removes the button and the form. The operator sets the "
+            "default channel and credits; an admin sets limits, a menu and their own channel."
         ),
         requires=("support_channel", "support_credits"),
         authority=_SETTINGS,
@@ -1053,7 +1231,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "A submitted thumbs-down form (the reasons, the text, the person, the agent and a "
+            "A submitted thumbs-down form (reasons, text, person, agent and a "
             "link to the answer) is also posted where Ask a person requests go, and the form "
             "says so first. It spends no credits. Off keeps the form in the database only."
         ),
@@ -1127,10 +1305,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "turn_time_limit",
         "Answer time limit",
         (
-            "The longest one answer may take before it is stopped when someone is talking to "
-            "the agent in a chat, a direct message or the web app: the standard 45 minutes, "
-            "or shorter. The smallest setting wins. Routines and watches use "
-            "the unattended run limit."
+            "The longest an answer may take before it is stopped when someone is talking to "
+            "the agent: the standard 45 minutes, or shorter. The smallest setting wins. "
+            "Routines and watches use the unattended run limit."
         ),
         _TIME_LIMITS,
         default="45",
@@ -1226,13 +1403,12 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         effect="guardrail",
         values={"on": "Ask", "off": "Allow writes"},
         default="on",
-        tiers=("workspace", "channel", "thread"),
+        tiers=("workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
             "Ask before an agent writes to an outside service in a chat reply. Allow writes "
-            "covers chat replies only: routines and watches follow the unattended rule whoever "
-            "runs Daimon set. Only an admin of the chat app can change it, or the operator at the "
-            "command line, who gives a reason that is audited."
+            "covers chat replies only, not routines or watches. A coordinator's value decides "
+            "its callees' writes. Only a chat admin or the operator can change it."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",
