@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
@@ -33,7 +34,10 @@ FireFn = Callable[[RoutineRow], Awaitable[None]]
 OwnerNotifier = Callable[[RoutineRow, TerminationReason, bool], Awaitable[None]]
 
 
-async def tell_owner(
+_NOTICES: set[asyncio.Task[None]] = set()
+
+
+def tell_owner(
     notify: OwnerNotifier | None,
     row: RoutineRow,
     reason: TerminationReason | None,
@@ -43,10 +47,24 @@ async def tell_owner(
     """Tell the owner of a failed run, once per failing streak, as the channel notice is.
 
     `row` is the routine as claimed, so a clear `last_error` means this failure starts the
-    streak. `reason` None (a deploy cutting the run short) tells nobody. Never raises.
+    streak. `reason` None (a deploy cutting the run short) tells nobody. The notice runs as
+    its own task, in a fresh context: never inside the fire's slot, timeout, grant or
+    observation, so a slow notice stalls no routine. `drain_owner_notices` ends them.
     """
     if notify is None or reason is None or row.last_error is not None:
         return
+    task = asyncio.create_task(
+        _notify(notify, row, reason, channel_told),
+        name="routine.owner_notice",
+        context=contextvars.Context(),
+    )
+    _NOTICES.add(task)
+    task.add_done_callback(_NOTICES.discard)
+
+
+async def _notify(
+    notify: OwnerNotifier, row: RoutineRow, reason: TerminationReason, channel_told: bool
+) -> None:
     try:
         await notify(row, reason, channel_told)
     except Exception as exc:
@@ -54,6 +72,16 @@ async def tell_owner(
         log.warning(
             "routine.owner_notice_unhandled", routine_id=str(row.id), error_class=type(exc).__name__
         )
+
+
+async def drain_owner_notices(timeout_s: float) -> None:
+    """Shutdown/test barrier: let running owner notices finish, then cancel what is left."""
+    loop = asyncio.get_running_loop()
+    if tasks := [task for task in _NOTICES if task.get_loop() is loop]:
+        _, late = await asyncio.wait(tasks, timeout=timeout_s)
+        for task in late:
+            task.cancel()
+        await asyncio.gather(*late, return_exceptions=True)
 
 
 class RoutineDispatcher:
@@ -164,7 +192,7 @@ async def _record_fire_error(
     except Exception:
         log.exception("record_result(error) failed", routine_id=str(row.id))
         return
-    await tell_owner(notify_owner, row, reason, channel_told=told)
+    tell_owner(notify_owner, row, reason, channel_told=told)
 
 
 async def _release_slot(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:

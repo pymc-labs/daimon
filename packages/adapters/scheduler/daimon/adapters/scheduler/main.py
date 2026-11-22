@@ -148,6 +148,7 @@ from daimon.core.scheduler import (
     FireFn,
     OwnerNotifier,
     RoutineDispatcher,
+    drain_owner_notices,
     run_one_tick,
     tell_owner,
 )
@@ -493,7 +494,7 @@ async def _build_fire(
             told = await record_routine_failure(
                 s, row, error="channel_budget_exceeded", reason=reason
             )
-        await tell_owner(notify_owner, row, reason, channel_told=told)
+        tell_owner(notify_owner, row, reason, channel_told=told)
         return True
 
     async def _fire_dm(row: RoutineRow, owner_user_id: str, *, direct_post: DirectPost) -> None:
@@ -859,7 +860,7 @@ async def _build_fire(
             reason = TerminationReason.ADMISSION_BALANCE_DEPLETED
             async with sm() as s, s.begin():
                 told = await record_routine_failure(s, row, error="balance_depleted", reason=reason)
-            await tell_owner(notify_owner, row, reason, channel_told=told)
+            tell_owner(notify_owner, row, reason, channel_told=told)
             return
 
         if row.destination_kind == "dm":
@@ -1001,7 +1002,7 @@ async def _build_fire(
             )
             async with sm() as s, s.begin():
                 told = await record_routine_failure(s, row, error=spend_block, reason=reason)
-            await tell_owner(notify_owner, row, reason, channel_told=told)
+            tell_owner(notify_owner, row, reason, channel_told=told)
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
@@ -2400,6 +2401,7 @@ async def run(
         dm_turn_deps.running_turns.begin_shutdown()
         await long_jobs.close()
         await dispatcher.close()
+        await drain_owner_notices(timeout_s=30)
         await dm_turn_deps.context_providers.aclose()
         await dm_turn_deps.provider_clients.aclose()
         health_server.close()

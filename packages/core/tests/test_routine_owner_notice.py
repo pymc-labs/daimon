@@ -1,5 +1,6 @@
 """A routine's owner is told of a failure once per failing streak, from fixed facts only."""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -8,7 +9,8 @@ from daimon.core.routine_owner_notice import (
     owner_notice_facts,
     owner_notice_prompt,
 )
-from daimon.core.scheduler import tell_owner
+from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.scheduler import drain_owner_notices, tell_owner
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.turn.termination import TerminationReason
 
@@ -63,11 +65,31 @@ async def test_the_owner_is_told_only_when_a_failing_streak_starts() -> None:
     async def notify(row: RoutineRow, reason: TerminationReason, channel_told: bool) -> None:
         told.append((row.last_error, channel_told))
 
-    await tell_owner(notify, _row(), TerminationReason.UPSTREAM, channel_told=True)
-    await tell_owner(
-        notify, _row(last_error="earlier"), TerminationReason.UPSTREAM, channel_told=False
-    )
-    await tell_owner(notify, _row(), None, channel_told=False)
+    tell_owner(notify, _row(), TerminationReason.UPSTREAM, channel_told=True)
+    tell_owner(notify, _row(last_error="earlier"), TerminationReason.UPSTREAM, channel_told=False)
+    tell_owner(notify, _row(), None, channel_told=False)
+    await drain_owner_notices(timeout_s=5)
     assert told == [(None, True)], (
         "the first failure only; a run cut short by a deploy tells nobody"
     )
+
+
+async def test_the_notice_runs_outside_the_fire_and_shutdown_ends_it() -> None:
+    """The fire returns at once and the notice holds none of its grant; a stalled notice
+    is cancelled by the shutdown drain."""
+    seen: list[object] = []
+    started = asyncio.Event()
+
+    async def notify(row: RoutineRow, reason: TerminationReason, channel_told: bool) -> None:
+        seen.append(current_intake_execution.get())
+        started.set()
+        await asyncio.Event().wait()
+
+    token = current_intake_execution.set((uuid.uuid4(), uuid.uuid4()))
+    try:
+        tell_owner(notify, _row(), TerminationReason.UPSTREAM, channel_told=False)
+    finally:
+        current_intake_execution.reset(token)
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.wait_for(drain_owner_notices(timeout_s=0), timeout=5)
+    assert seen == [None], "the notice runs without the fire's execution grant"
