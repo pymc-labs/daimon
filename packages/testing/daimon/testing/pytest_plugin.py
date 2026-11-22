@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
+import pytest_asyncio
 import structlog
 
 if TYPE_CHECKING:
@@ -88,7 +89,7 @@ def _cancel_background_work() -> Iterator[None]:  # pyright: ignore[reportUnused
         cards.cancel_pending_card_edits()
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def _drain_ops_events() -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
     """Write a test's coalesced ops events in its own teardown: on the shared loop a pending
     write would otherwise log in, or merge with, a later test."""
