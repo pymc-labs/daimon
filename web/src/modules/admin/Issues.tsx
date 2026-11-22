@@ -198,7 +198,6 @@ function IssueBody({ issue: i, path }: { issue: IssueDetail; path: string }) {
         <LoadMore list={events} />
       </PanelSection>
       <div className="sticky bottom-0 mt-auto flex justify-end gap-2 border-t bg-popover px-5 py-3 max-sm:[&>*]:flex-1">
-        <Button variant={open || states.length ? "outline" : "default"} onClick={() => { void navigator.clipboard?.writeText(location.href); toast("Link copied") }}>Copy link</Button>
         {open && <Button variant={states.length ? "outline" : "default"} asChild><Link to={open.to}>{open.label}</Link></Button>}
         {states.map(([action, label], n) => (
           <Button key={action} variant={n === states.length - 1 ? "default" : "outline"} disabled={change.isPending} onClick={() => change.mutate(action)}>{label}</Button>

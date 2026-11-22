@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which has a link to copy. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
 
 - **A routine's owner hears about a failed run, and runs can say what blocked them.**
-  On Discord, the first failure of a routine after a success reaches its owner by
-  direct message, written by the routine's own agent from fixed facts (the routine,
+  On Discord, Slack and Teams, the first failure of a routine after a success reaches
+  its owner by direct message, written by the routine's own agent from fixed facts (the routine,
   why it stopped, when, the next run and how to pause it), never the raw error. When
   the agent cannot run, the owner gets a plain error card. The channel notice is
   unchanged. A run that could not do its task calls `report_routine_problem` with a
