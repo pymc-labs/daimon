@@ -24,7 +24,9 @@ from daimon.adapters.mcp.identity_relay import (
     build_identity_relay_route,
     build_relay_clients,
 )
+from daimon.adapters.mcp.tools import _session_gate
 from daimon.core.config import SignedIdentityServer
+from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.mcp_identity import (
@@ -33,10 +35,13 @@ from daimon.core.mcp_identity import (
     SigningKey,
     generate_signing_key,
 )
+from daimon.core.stores import watches
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -111,13 +116,26 @@ async def _person(factory: async_sessionmaker[AsyncSession]) -> _Person:
     return _Person(tenant.id, principal.account_id, agent_id)
 
 
+async def _colleague(factory: async_sessionmaker[AsyncSession], person: _Person) -> _Person:
+    """user-2, in the same guild and talking to the same agent as `person`."""
+    async with factory() as db, db.begin():
+        tenant = await get_tenant(db, person.tenant_id)
+        principal = await make_platform_principal(
+            db, platform="discord", external_id="user-2", tenant=tenant
+        )
+    return _Person(person.tenant_id, principal.account_id, person.agent_id)
+
+
 async def _token(
-    factory: async_sessionmaker[AsyncSession], person: _Person, relay: RelayBinding | None
+    factory: async_sessionmaker[AsyncSession],
+    person: _Person,
+    relay: RelayBinding | None,
+    hold: TurnHold | None = None,
 ) -> str:
     async with factory() as db, db.begin():
         token, _, _ = await mint_chat_mcp_token(
             db, account_id=person.account_id, agent_id=person.agent_id, secret=SECRET,
-            now=dt.datetime.now(dt.UTC), relay=relay,
+            now=dt.datetime.now(dt.UTC), relay=relay, hold=hold,
         )  # fmt: skip
     return token
 
@@ -131,9 +149,13 @@ async def _chat_session(
     foreign: bool = False,
     human: bool | None = True,
     dm: bool = False,
+    channel: str | None = None,
+    grant: str | None = None,
+    message: str | None = None,
 ) -> tuple[str, uuid.UUID]:
     """A person's chat session in `thread`, optionally running their turn there.
 
+    With a `grant` the session has an execution grant, which its turn holds.
     Returns the session's relay credential and its mapping row id.
     """
     now = dt.datetime.now(dt.UTC)
@@ -141,8 +163,9 @@ async def _chat_session(
     async with factory() as db, db.begin():
         await create_thread_session(
             db, id=mapping_id, tenant_id=person.tenant_id, platform="discord",
-            thread_id=thread, account_id=person.account_id, ma_session_id=f"sess_{thread}",
-            ma_agent_id="agent_a",
+            thread_id=thread, account_id=person.account_id,
+            ma_session_id=f"sess_{grant or thread}",
+            ma_agent_id="agent_a", channel_id=channel,
         )  # fmt: skip
         if turn:
             origin = await create_origin(
@@ -153,12 +176,12 @@ async def _chat_session(
                 role=Role.USER, expires_at=now + dt.timedelta(hours=1), now=now,
                 sender_foreign=foreign, shared_channel=False,
                 platform_channel_id=None if dm else thread,
-                platform_message_id=f"msg-{thread}",
+                platform_message_id=message or f"msg-{thread}",
             )  # fmt: skip
             await bind_origin_session(
-                db, origin_id=origin.id, chat_session_id=None, human_invocation=human
+                db, origin_id=origin.id, chat_session_id=grant, human_invocation=human
             )
-    token = await _token(factory, person, RelayBinding("Agent A", mapping_id))
+    token = await _token(factory, person, RelayBinding("Agent A", mapping_id, grant=grant))
     return token, mapping_id
 
 
@@ -425,6 +448,155 @@ async def test_bearer_person_turn_is_stamped_and_the_key_replaces_the_credential
     }, "the live turn's asker and place are stamped"
 
 
+WAKE_SERVER = BEARER_SERVER.model_copy(update={"wake_tools": frozenset({"send"})})
+
+
+@pytest.fixture
+def callbacks_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
+    monkeypatch.setenv("DAIMON_WATCHES__CALLBACK_BASE_URL", "https://hooks.example.com")
+
+
+async def _wake_watches(factory: async_sessionmaker[AsyncSession]) -> list[tuple[str, object]]:
+    async with factory() as db:
+        rows = await db.execute(
+            text("SELECT thread_id, expires_at FROM watches WHERE source = 'callback'")
+        )
+        return [(str(thread), expires_at) for thread, expires_at in rows]
+
+
+async def _wake_urls(
+    factory: async_sessionmaker[AsyncSession], token: str, *bodies: str
+) -> list[object]:
+    upstream = _Upstream()
+    async with _relay(factory, upstream, None, WAKE_SERVER, bearers=_BEARERS) as client:
+        for body in bodies:
+            response = await _post(client, token, body)
+            assert response.status_code == 200, "the call runs, with or without a link"
+    return [_sent_meta(sent).get("wake_url") for sent in upstream.requests]
+
+
+async def test_wake_tool_calls_get_their_own_links_to_one_watch_per_conversation(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    """Each job gets a link that still works when the next one starts; they share one watch,
+    which lasts a day after the latest call."""
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1", channel="chan-1")
+    other = json.dumps(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "read"}}
+    )
+    before = dt.datetime.now(dt.UTC)
+    first, second, third = await _wake_urls(
+        db_session_factory,
+        token,
+        _tool_call(wake_url="https://forged.example"),
+        _tool_call(),
+        other,
+    )
+    assert str(first).startswith("https://hooks.example.com/callbacks/watches/"), (
+        "a person's wake tool call carries Daimon's link, not the caller's"
+    )
+    assert isinstance(second, str) and second != first, "the next job gets its own link"
+    assert second.rsplit("/", 2)[1] == str(first).rsplit("/", 2)[1], "to the same watch"
+    assert third is None, "another tool gets no link"
+    ((thread, expires_at),) = await _wake_watches(db_session_factory)
+    assert thread == "thread-1", "one callback watch, bound to the asking thread"
+    assert isinstance(expires_at, dt.datetime)
+    assert abs(expires_at - (before + dt.timedelta(days=1))) < dt.timedelta(minutes=1), (
+        "the watch lasts a day"
+    )
+
+
+async def test_a_wake_watch_follows_the_conversation_to_its_newest_session(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    """A relay-scoped thread gets a fresh session every turn: the link made in one turn
+    must still reach the thread after the person talks again."""
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1", channel="chan-1")
+    await _wake_urls(db_session_factory, token, _tool_call())
+    async with db_session_factory() as db, db.begin():
+        await create_thread_session(
+            db, tenant_id=person.tenant_id, platform="discord", thread_id="thread-1",
+            account_id=person.account_id, ma_session_id="sess_next", ma_agent_id="agent_a",
+            channel_id="chan-1", created_at=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
+        )  # fmt: skip
+    async with db_session_factory() as db:
+        bound = (await db.execute(text("SELECT session_id FROM watches"))).scalars().all()
+    assert bound == ["sess_next"], "the wake watch moved to the thread's newest session"
+
+
+async def test_a_wake_link_made_in_a_dm_wakes_that_dm(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    """A DM's jobs get links too: each post runs a fresh private turn in the owner's DM,
+    so the watch holds no session, and a later job's link shares its one watch."""
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "dm:scope-1", channel="chan-1")
+    first, second = await _wake_urls(db_session_factory, token, _tool_call(), _tool_call())
+    assert isinstance(first, str) and isinstance(second, str), "a DM's job gets a wake link"
+    assert first.rsplit("/", 2)[1] == second.rsplit("/", 2)[1], "both jobs share one watch"
+    async with db_session_factory() as db:
+        rows = (await db.execute(text("SELECT delivery, session_id FROM watches"))).all()
+    assert [tuple(row) for row in rows] == [("dm", None)], "it reports in the owner's DM"
+
+
+@pytest.mark.parametrize("case", ["unattended", "owner limit", "helper"])
+async def test_a_wake_tool_call_that_cannot_have_a_link_still_runs_without_one(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None, case: str
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(
+        db_session_factory, person, "thread-1", channel="chan-1", human=case != "unattended"
+    )
+    if case == "owner limit":
+        await _fill_owner_watches(db_session_factory, person)
+    if case == "helper":
+        async with db_session_factory() as db, db.begin():
+            await db.execute(text("UPDATE turn_origins SET helper_of = id"))
+    (wake_url,) = await _wake_urls(db_session_factory, token, _tool_call())
+    assert wake_url is None, f"{case}: no link"
+    made = len(await _wake_watches(db_session_factory))
+    assert made == (25 if case == "owner limit" else 0), f"{case}: no wake watch is made"
+
+
+async def _fill_owner_watches(factory: async_sessionmaker[AsyncSession], person: _Person) -> None:
+    """The owner already holds the most live watches one person may."""
+    binding = ContinuationRequest(
+        tenant_id=person.tenant_id, platform="discord", parent_channel_id="chan-1",
+        thread_id="thread-1", requester_account_id=person.account_id,
+        requester_external_user_id="user-1", target_ma_agent_id="agent_a",
+        target_name="Helper", requested_work=None, reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )  # fmt: skip
+    async with factory() as db, db.begin():
+        for _ in range(25):
+            await watches.register_callback_watch(
+                db, binding, instructions="Report.", lifetime=dt.timedelta(days=1),
+                now=dt.datetime.now(dt.UTC),
+            )  # fmt: skip
+
+
+async def test_a_wake_link_is_made_without_the_approval_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    callbacks_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberate: `create_watch` needs the owner's card, a wake link does not. The person's
+    own call started the job, the link goes only to the server they called and never to a
+    channel, and it can only wake their conversation to report."""
+
+    async def no_card(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a wake link never asks for the approval card")
+
+    monkeypatch.setattr(_session_gate, "session_card_gap", no_card)
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1", channel="chan-1")
+    (wake_url,) = await _wake_urls(db_session_factory, token, _tool_call())
+    assert wake_url is not None, "the link is made with no card"
+
+
 async def test_forged_requester_fields_are_replaced_on_a_person_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -642,6 +814,66 @@ async def test_two_live_turns_and_a_replaced_session_stamp_no_requester(
     )
 
 
+async def test_concurrent_turns_by_two_people_in_one_thread_each_name_their_asker(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each call is stamped from the turn that holds its session's grant: a queued
+    turn of the same person beside it does not make the call anonymous."""
+    first = await _person(db_session_factory)
+    second = await _colleague(db_session_factory, first)
+    token_1, _ = await _chat_session(
+        db_session_factory, first, "thread-1", grant="grant-1", message="msg-1"
+    )
+    token_2, _ = await _chat_session(
+        db_session_factory, second, "thread-1", grant="grant-2", message="msg-2"
+    )
+    await _chat_session(db_session_factory, first, "thread-1", message="msg-queued")
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        await _post(client, token_2, _tool_call(requester_platform_user_id="user-1"))
+        await _post(client, token_1, _tool_call(requester_platform_user_id="user-2"))
+    stamped = [_sent_meta(r).get("requester_platform_user_id") for r in upstream.requests]
+    assert stamped == ["user-2", "user-1"], "each call names the person whose turn made it"
+    signer, key = _Upstream(), generate_signing_key()
+    async with _relay(db_session_factory, signer, key) as client:
+        await _call(client, token_1)
+    assert _identity(signer.requests[0], key)["msg"] == "msg-1", "the running turn, not the queued"
+
+
+async def test_the_turn_holding_the_grant_is_named_until_it_lets_go(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session row replaced under a running turn still names that turn; once the
+    turn releases the grant, nobody is named, and a grant never names another account."""
+    person = await _person(db_session_factory)
+    token, mapping_id = await _chat_session(db_session_factory, person, "thread-1", grant="g-1")
+    other = await _colleague(db_session_factory, person)
+    # A credential of another account naming the first person's grant.
+    borrowed = await _token(
+        db_session_factory, other, RelayBinding("Agent A", mapping_id, grant="g-1")
+    )
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        async with db_session_factory() as db, db.begin():
+            await mark_dead(db, id=mapping_id)
+        await _post(client, token, _tool_call())
+        await _post(client, borrowed, _tool_call())
+        async with db_session_factory() as db, db.begin():
+            origin_id = (
+                await db.execute(text("SELECT id FROM turn_origins WHERE chat_session_id = 'g-1'"))
+            ).scalar_one()
+            await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
+        await _post(client, token, _tool_call(requester_platform_user_id="user-1"))
+    held, borrowed_meta, released = (_sent_meta(r) for r in upstream.requests)
+    assert held["requester_platform_user_id"] == "user-1", "the turn holding the grant is named"
+    assert borrowed_meta == {}, "a grant names only its own account's turn"
+    assert released == {}, "a released grant names nobody, and a forged field is dropped"
+
+
 async def test_a_platform_the_server_does_not_understand_is_never_stamped(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -848,3 +1080,78 @@ async def test_an_allowlist_naming_the_builtin_when_its_name_changed_then_admits
         response = await _post(client, token, _tool_call())
     assert (response.status_code != 403) is relayed, "the rename keeps the seeded agent listed"
     assert bool(upstream.requests) is relayed, "a workspace's own namesake is never relayed"
+
+
+@pytest.mark.parametrize(
+    ("mode", "contained", "relay", "status"),
+    [
+        ("off", True, False, 200),
+        ("shadow", True, False, 200),
+        ("on", True, False, 403),
+        ("on", True, True, 403),
+        ("on", False, True, 200),
+        ("on", False, False, 200),
+    ],
+    ids=str,
+)
+async def test_a_held_token_is_refused_only_for_a_contained_room_in_audience_mode_on(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    contained: bool,
+    relay: bool,
+    status: int,
+) -> None:
+    """A room outsiders may read has no identity server in `on`, so a leftover held token gets
+    no answer. A relay-only hold of an internal room keeps working."""
+    from daimon.core.channel_audience import ChannelAudience
+
+    person = await _person(db_session_factory)
+    _, mapping_id = await _chat_session(db_session_factory, person, "thread-9")
+    token = await _token(
+        db_session_factory,
+        person,
+        RelayBinding("Agent A", mapping_id),
+        TurnHold("discord", "chan-1", client=False, relay=relay),
+    )
+
+    async def read(*_: object, **__: object) -> str:
+        return mode
+
+    async def audience(*_: object, **__: object) -> ChannelAudience:
+        return ChannelAudience(
+            contained=contained, known=not contained, narrow=False, source="facts"
+        )
+
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.read_audience_mode", read)
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.channel_has_outsiders", audience)
+    upstream, key = _Upstream(), generate_signing_key()
+    async with _relay(db_session_factory, upstream, key) as client:
+        response = await _call(client, token)
+    assert response.status_code == status
+    assert len(upstream.requests) == (1 if status == 200 else 0)
+
+
+async def test_a_held_token_with_an_unreadable_room_is_refused_in_mode_on(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    person = await _person(db_session_factory)
+    _, mapping_id = await _chat_session(db_session_factory, person, "thread-9")
+    token = await _token(
+        db_session_factory,
+        person,
+        RelayBinding("Agent A", mapping_id),
+        TurnHold("discord", "chan-1", client=False, relay=True),
+    )
+
+    async def read(*_: object, **__: object) -> str:
+        return "on"
+
+    async def broken(*_: object, **__: object) -> object:
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.read_audience_mode", read)
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.channel_has_outsiders", broken)
+    upstream, key = _Upstream(), generate_signing_key()
+    async with _relay(db_session_factory, upstream, key) as client:
+        assert (await _call(client, token)).status_code == 403

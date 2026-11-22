@@ -69,6 +69,51 @@ def test_the_grep_catches_a_bare_comparison():
     assert _unarmed("AND k.expires_at > t") == []
 
 
+@pytest.mark.fresh_schema
+async def test_create_and_edit_take_instructions_up_to_the_limit(permanent_watch: PermanentWatch):
+    from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT
+
+    factory, watch, binding = permanent_watch
+    now = datetime.now(UTC)
+    for size, ok in ((INSTRUCTIONS_LIMIT, True), (INSTRUCTIONS_LIMIT + 1, False)):
+        async with factory.begin() as db:
+            create = watches.register_poll_watch(
+                db,
+                binding,
+                instructions="x" * size,
+                tool="read_thread",
+                arguments={"thread_id": "4343"},
+                projection=".rows",
+                rule="change",
+                interval=60,
+                expires_at=now + timedelta(days=1),
+                now=now,
+            )
+            if ok:
+                await create
+            else:
+                with pytest.raises(ValueError, match=str(INSTRUCTIONS_LIMIT)):
+                    await create
+        async with factory.begin() as db:
+            current = await watches.get_watch(db, watch.id)
+            assert current is not None
+            edit = watches.update_watch(
+                db,
+                watch.id,
+                tenant_id=watch.tenant_id,
+                owner_account_id=watch.owner_account_id,
+                expected_revision=current.revision,
+                edit=watches.WatchEdit(instructions="y" * size),
+                now=now,
+                admin_account_id=watch.owner_account_id,
+            )
+            if ok:
+                assert len((await edit).instructions) == size
+            else:
+                with pytest.raises(ValueError, match=str(INSTRUCTIONS_LIMIT)):
+                    await edit
+
+
 def test_is_expired_treats_none_as_permanent():
     now = datetime(2026, 10, 29, tzinfo=UTC)
     assert not watches.is_expired(None, now)

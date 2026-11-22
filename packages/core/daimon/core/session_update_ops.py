@@ -86,6 +86,7 @@ from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Revision, Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -260,6 +261,7 @@ async def apply_update_ops(
     mcp_vault_ids: McpVaultIds | None = None,
     shared_owner: uuid.UUID | None = None,
     legacy_memory_servers: tuple[str, ...] = (),
+    hold: TurnHold | None = None,
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -307,6 +309,7 @@ async def apply_update_ops(
             session_factory=sessionmaker,
             scope=scope,
             relay_urls=relay_urls,
+            hold=hold,
         )
 
     for op in ops:

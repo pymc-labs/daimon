@@ -4,7 +4,8 @@
 (`daimon.core.mcp_vault.create_relay_vault`), signs who is calling
 (`daimon.core.mcp_identity`) and forwards the streamable HTTP request to the
 configured server with that token as its bearer. The response, an SSE stream
-included, is passed back unchanged.
+included, is passed back unchanged. A person's call to one of a server's `wake_tools`
+also carries a callback watch link (`_wake_link`) the server posts to when the work ends.
 """
 
 from __future__ import annotations
@@ -12,16 +13,22 @@ from __future__ import annotations
 import ssl
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import cast
 
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
-from daimon.core.config import SignedIdentityServer
+from daimon.adapters.mcp.tools.watches import callback_watch_terms
+from daimon.core.audience_gate import read_audience_mode
+from daimon.core.channel_audience import channel_has_outsiders
+from daimon.core.config import SignedIdentityServer, load_watches_settings
+from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
@@ -30,19 +37,25 @@ from daimon.core.mcp_identity import (
     RelayBinding,
     RequesterBodyError,
     RequesterKind,
+    called_tool,
     caller_claims,
     matching_turn,
     origin_turn_place,
     parse_relay_claim,
+    read_request_body,
+    relay_url,
     requester_conversation,
     routine_conversation,
-    stamp_requester,
+    stamp_parsed,
+    watch_conversation,
 )
+from daimon.core.mcp_server_url import same_ascii_mcp_url
+from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
-from daimon.core.stores.domain import RoutineRow, TurnOriginRow
+from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, WatchRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
-from daimon.core.stores.turn_origins import list_active_origins
+from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -70,6 +83,57 @@ _REQUEST_HEADERS = (
     "mcp-session-id",
 )
 _RESPONSE_HEADERS = ("content-type", "mcp-session-id", "mcp-protocol-version", "cache-control")
+#: A wake link's watch lasts this long after the latest call that asked for one, never
+#: longer than `callback_watch_lifetime` allows: one live per conversation and server,
+#: so the owner's watch limit is never filled by old jobs.
+WAKE_LIFETIME = timedelta(days=1)
+
+
+async def _wake_link(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    origin: TurnOriginRow,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    person: str,
+    server: str,
+    now: datetime,
+) -> str | None:
+    """A fresh link to the conversation's wake watch for `server` (`watches.wake_link`);
+    None when watches or callbacks are off here, or the watch cannot be made (a helper's
+    turn, a Slack DM, the owner's limit). It skips the approval card, as
+    `test_a_wake_link_is_made_without_the_approval_card` records. The link is a secret:
+    it goes only into the forwarded call, never into a log."""
+    settings = load_watches_settings()
+    if not settings.enabled or settings.callback_base_url is None:
+        return None
+    binding = ContinuationRequest(
+        tenant_id=tenant_id,
+        platform=cast(ChatPlatform, origin.platform),
+        parent_channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        requester_account_id=account_id,
+        requester_external_user_id=person,
+        target_ma_agent_id=origin.responder_ma_agent_id,
+        target_name=origin.responder_name,
+        requested_work=None,
+        reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )
+    try:
+        allowed = await callback_watch_terms(sessionmaker, None, origin)
+        async with sessionmaker.begin() as db:
+            watch_id, token = await watches.wake_link(
+                db,
+                binding,
+                server=server,
+                lifetime=WAKE_LIFETIME if allowed is None else min(allowed, WAKE_LIFETIME),
+                now=now,
+            )
+    except Exception as err:  # boundary: the call still runs, only without a wake
+        log.info("mcp_identity.wake_link_unavailable", server=server, error_type=type(err).__name__)
+        return None
+    return f"{settings.callback_base_url}/callbacks/watches/{watch_id}/{token}"
 
 
 def build_relay_clients(servers: Iterable[SignedIdentityServer]) -> dict[str, httpx.AsyncClient]:
@@ -119,23 +183,38 @@ async def _session_turn(
 ) -> TurnOriginRow | None:
     """The person's turn the calling session is running now, or None.
 
-    The binding names the session's `thread_sessions` row. Only while that row is
-    still the caller's live session in its thread does a turn there count: a
-    replaced or stopped session calling on names nobody.
+    The binding names the session's `thread_sessions` row. With the session's
+    execution grant, the turn is the one holding it now (`bind_origin_session`),
+    so each call names the turn that made it, beside a queued turn or after the
+    row was replaced. Without one (a session with no grant) a turn counts only
+    while that row is the caller's live session and runs one turn in its thread.
     """
     if binding.session_key is None:
         return None
     async with sessionmaker() as session:
         row = await get_thread_session_by_id(session, id=binding.session_key)
-        if (
-            row is None
-            or row.status != "live"
-            or (row.tenant_id, row.account_id, row.platform) != (tenant_id, account_id, platform)
+        if row is None or (row.tenant_id, row.account_id, row.platform) != (
+            tenant_id,
+            account_id,
+            platform,
         ):
             return None
-        origins = await list_active_origins(
-            session, tenant_id=tenant_id, account_id=account_id, platform=platform, now=now
-        )
+        if binding.grant is not None:
+            held = await get_session_origin(
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                platform=platform,
+                chat_session_id=binding.grant,
+                now=now,
+            )
+            origins = [] if held is None else [held]
+        elif row.status != "live":
+            return None
+        else:
+            origins = await list_active_origins(
+                session, tenant_id=tenant_id, account_id=account_id, platform=platform, now=now
+            )
     return matching_turn(origins, tenant_id=tenant_id, agent_id=agent_id, thread_id=row.thread_id)
 
 
@@ -164,6 +243,58 @@ async def _routine_run(
     ):
         return None
     return row
+
+
+async def _watch_poll(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    binding: RelayBinding,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    server: SignedIdentityServer,
+    public_url: str | None,
+) -> WatchRow | None:
+    """The active watch a poll's credential names, or None.
+
+    Only a watch of this tenant and agent, still owned by the account and user the
+    credential was minted for and still polling this relay server, counts; a paused,
+    deleted or handed-over watch names nobody.
+    """
+    if binding.watch_id is None or public_url is None:
+        return None
+    async with sessionmaker() as session:
+        row = await watches.get_watch(session, binding.watch_id)
+    if (
+        row is None
+        or row.status != "active"
+        or row.source != "mcp_poll"
+        or (row.tenant_id, row.owner_account_id) != (tenant_id, account_id)
+        or row.owner_external_id != binding.owner
+        or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+        or row.source_state.get("credential") != "relay"
+        or not same_ascii_mcp_url(
+            str(row.source_state.get("server_url")), relay_url(public_url, server.name)
+        )
+    ):
+        return None
+    return row
+
+
+def _is_poll_message(message: object, tool: str) -> bool:
+    """Whether a relayed body is part of a watch poll: the handshake, a tool listing or
+    one call of the watch's own tool. A watch's credential is for nothing else."""
+    if not isinstance(message, dict):
+        return False
+    fields = cast("dict[str, object]", message)
+    method, params = fields.get("method"), fields.get("params")
+    if method in ("initialize", "notifications/initialized", "tools/list"):
+        return True
+    return (
+        method == "tools/call"
+        and isinstance(params, dict)
+        and cast("dict[str, object]", params).get("name") == tool
+    )
 
 
 async def _listed_as_builtin(
@@ -202,6 +333,38 @@ async def _listed_as_builtin(
     )
 
 
+async def _held_in_audience_mode_on(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    raw_hold: object,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+) -> bool:
+    """Whether a held token is one of a room outsiders may read, or nobody can vouch for, in
+    mode `on`. Such a session mounts no signed-identity server there, so the token is a
+    leftover. A relay-only hold of an internal room (`relay=True`) keeps working: the room's
+    facts are read again here. An unreadable hold, mode or fact counts as yes: fail closed."""
+    try:
+        hold = parse_hold_claim(raw_hold)
+        async with sessionmaker() as session:
+            mode = await read_audience_mode(
+                sessionmaker,
+                tenant_id=tenant_id,
+                platform=hold.platform,
+                channel_id=hold.channel_id,
+                session=session,
+            )
+            if mode != "on":
+                return False
+            audience = await channel_has_outsiders(
+                session, tenant_id=tenant_id, platform=hold.platform, channel_id=hold.channel_id
+            )
+    except Exception:
+        log.warning("mcp_identity.relay_hold_unreadable", exc_info=True)
+        return True
+    return audience.contained
+
+
 def build_identity_relay_route(
     *,
     servers: Mapping[str, SignedIdentityServer],
@@ -212,6 +375,7 @@ def build_identity_relay_route(
     clock: Callable[[], datetime],
     bearers: Mapping[str, SecretStr] | None = None,
     anthropic: AsyncAnthropic | None = None,
+    public_url: str | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
     the key of each server whose auth is bearer. A server with neither is refused (503)."""
@@ -240,6 +404,12 @@ def build_identity_relay_route(
         if claims.get(TOKEN_KIND_CLAIM) != "agent":
             return Response(status_code=403)
         platform = str(claims.get("platform") or "")
+        if HOLD_CLAIM in claims and await _held_in_audience_mode_on(
+            sessionmaker, claims[HOLD_CLAIM], tenant_id=tenant_id, platform=platform
+        ):
+            # A held session is in a room outsiders may read, or nobody can vouch for: in
+            # `on` it mounts no signed-identity server, so this token is a leftover. Refused.
+            return Response(status_code=403)
         workspace = claims.get("external_id")
         workspace = workspace if isinstance(workspace, str) else None
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:
@@ -277,6 +447,29 @@ def build_identity_relay_route(
         # people: the server must not apply a member's permissions to them.
         if origin is not None and (origin.sender_foreign or FOREIGN_HOME_CLAIM in claims):
             origin = None
+        watch: WatchRow | None = None
+        if binding.watch_id is not None:
+            # A poll's credential is for its watch alone; a gone or handed-over watch
+            # names no tool to allow, so it reaches nothing.
+            watch = await _watch_poll(
+                sessionmaker,
+                binding,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_id=agent_id,
+                server=server,
+                public_url=public_url,
+            )
+            if watch is None or request.method != "POST":
+                return Response(status_code=403)
+        message: object = None
+        if watch is not None or (server.requester_meta and request.method == "POST"):
+            try:
+                message = read_request_body(body)
+            except RequesterBodyError:
+                return Response(status_code=400)
+        if watch is not None and not _is_poll_message(message, str(watch.source_state.get("tool"))):
+            return Response(status_code=403)
         headers = {
             name: value
             for name in _REQUEST_HEADERS
@@ -303,10 +496,11 @@ def build_identity_relay_route(
             body = b""
         if server.requester_meta and request.method == "POST":
             # A turn a person started names that person. An unattended run names who
-            # it acts for, as kind "routine": a routine's owner and delivery place, or
-            # the person and place of a wake (watch, timer, continuation). A foreign
-            # sender, a replaced session and two turns at once match neither and
-            # carry no requester fields.
+            # it acts for, as kind "routine": a routine's owner and delivery place, a
+            # watch poll's owner and report place, or the person and place of a wake
+            # (watch, timer, continuation). A foreign sender, or a session whose calling
+            # turn is unknown (`_session_turn`), matches none and carries no requester
+            # fields.
             named: str | None = None
             conversation: dict[str, str | None] | None = None
             kind: RequesterKind | None = None
@@ -333,8 +527,38 @@ def build_identity_relay_route(
                         routine_conversation(routine),
                         "routine",
                     )
+            elif (
+                watch is not None
+                and platform in REQUESTER_PLATFORMS
+                and FOREIGN_HOME_CLAIM not in claims
+            ):
+                named, conversation, kind = (
+                    watch.owner_external_id,
+                    watch_conversation(watch),
+                    "routine",
+                )
+            wake_url: str | None = None
+            # Only a person's call that names them and their place gets a link.
+            if (
+                kind == "person"
+                and origin is not None
+                and named is not None
+                and conversation
+                and called_tool(message) in server.wake_tools
+            ):
+                wake_url = await _wake_link(
+                    sessionmaker,
+                    origin,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    person=named,
+                    server=server.name,
+                    now=now,
+                )
             try:
-                body = stamp_requester(body, person=named, conversation=conversation, kind=kind)
+                body = stamp_parsed(
+                    message, person=named, conversation=conversation, kind=kind, wake_url=wake_url
+                )
             except RequesterBodyError:
                 return Response(status_code=400)
         http = clients[server.name]

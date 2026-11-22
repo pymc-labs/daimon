@@ -21,6 +21,7 @@ from daimon.core.anthropic_guard import (
     guard_selfhosted_channel,
     independent_wake_provider_context,
 )
+from daimon.core.bot_access import BOT_ACCESS_RETRY_DELAY, BotAccessUnavailable
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.wakes import (
     WAKE_MAX_ATTEMPTS,
@@ -114,6 +115,12 @@ async def dispatch_watch_report(
         except SessionBusyError as busy:
             # Nothing ran: the row goes back to pending with its claim refunded.
             retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
+            await release_wake(sessionmaker, claim, retry_at=retry_at)
+            return
+        except BotAccessUnavailable:
+            # The bot cannot reach the reporting channel yet: wait instead of pausing the watch.
+            log.info("watch_report.bot_access_unavailable", row_id=str(row.id))
+            retry_at = busy_retry_at(row, now=now(), delay=BOT_ACCESS_RETRY_DELAY)
             await release_wake(sessionmaker, claim, retry_at=retry_at)
             return
         except TurnNotStarted as exc:

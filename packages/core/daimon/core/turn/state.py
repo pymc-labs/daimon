@@ -181,6 +181,8 @@ class TurnState:
     """Servers that failed this turn, newest status per server name."""
     retrying_error: TurnError | None = None
     """The last `retrying` error MA reported; only surfaces if nothing follows."""
+    rate_limit_wait: bool = False
+    """MA is retrying after a rate limit or overload, and nothing has arrived since."""
     package_install_error: TurnError | None = None
     """An `exhausted` package-installation failure the session carried on past;
     only surfaces if the turn then produced no content or did not end cleanly."""

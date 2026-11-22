@@ -2,9 +2,10 @@
 
 Images the Anthropic API accepts as vision content blocks are downloaded from
 Slack's private file URL (auth'd with the workspace bot token) and forwarded
-inline on the ``user.message`` event. Everything else — unsupported types,
-oversized images, non-image files — is surfaced to the agent as a signed proxy
-URL instead (see ``attachments.py``). ``is_vision_image`` is the routing split.
+inline on the ``user.message`` event, downscaled first when over the byte cap.
+Everything else — unsupported types, images over 25 MiB, non-image files — is
+surfaced to the agent as a signed proxy URL instead (see ``attachments.py``).
+``is_vision_image`` is the routing split.
 
 Unlike Discord's public CDN URLs, Slack's ``url_private`` requires the bot
 token in an ``Authorization: Bearer`` header, so the byte fetch is authed here.
@@ -19,11 +20,12 @@ import httpx
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.media.vision import (
-    MAX_VISION_IMAGE_BYTES,
-    MAX_VISION_IMAGE_DIMENSION,
+    MAX_DOWNSCALE_SOURCE_BYTES,
     MAX_VISION_IMAGES,
+    UNFIT_REASON,
     VISION_MEDIA_TYPES,
     build_image_block,
+    fit_vision_image,
 )
 
 log = structlog.get_logger()
@@ -48,22 +50,10 @@ class SlackFile(TypedDict):
     original_h: NotRequired[int]
 
 
-def _exceeds_dimension_cap(file: SlackFile) -> bool:
-    """True when a known image edge is larger than the API's per-image cap."""
-    width = file.get("original_w")
-    height = file.get("original_h")
-    return (width is not None and width > MAX_VISION_IMAGE_DIMENSION) or (
-        height is not None and height > MAX_VISION_IMAGE_DIMENSION
-    )
-
-
 def is_vision_image(file: SlackFile) -> bool:
-    """True when the file can be sent as an API vision content block."""
-    return (
-        file["mimetype"] in VISION_MEDIA_TYPES
-        and file["size"] <= MAX_VISION_IMAGE_BYTES
-        and not _exceeds_dimension_cap(file)
-    )
+    """True when the file can be sent as an API vision content block, resized first
+    when it is over the byte or pixel cap (the bytes are checked once fetched)."""
+    return file["mimetype"] in VISION_MEDIA_TYPES and file["size"] <= MAX_DOWNSCALE_SOURCE_BYTES
 
 
 async def download_as_image_blocks(
@@ -121,12 +111,9 @@ def _static_skip_reason(file: SlackFile) -> str | None:
     if media_type not in VISION_MEDIA_TYPES:
         log.warning("slack.image.skipped.media_type", name=name, media_type=media_type)
         return f"unsupported image media type: {media_type or 'unknown'}"
-    if file["size"] > MAX_VISION_IMAGE_BYTES:
+    if file["size"] > MAX_DOWNSCALE_SOURCE_BYTES:
         log.warning("slack.image.skipped.oversize", name=name, size=file["size"])
-        return f"exceeds vision size cap ({file['size']} > {MAX_VISION_IMAGE_BYTES})"
-    if _exceeds_dimension_cap(file):
-        log.warning("slack.image.skipped.dimensions", name=name)
-        return f"image dimensions exceed {MAX_VISION_IMAGE_DIMENSION}px"
+        return f"exceeds vision size cap ({file['size']} > {MAX_DOWNSCALE_SOURCE_BYTES})"
     return None
 
 
@@ -145,7 +132,8 @@ async def _fetch_image_block(
     if not resp.is_success:
         log.warning("slack.image.skipped.fetch_error", name=name, status=resp.status_code)
         return f"private-URL fetch failed: HTTP {resp.status_code}"
-    return build_image_block(
-        resp.content,
-        file["mimetype"],  # pyright: ignore[reportArgumentType]  # gated to VISION_MEDIA_TYPES by _static_skip_reason
-    )
+    fitted = await asyncio.to_thread(fit_vision_image, resp.content)
+    if fitted is None:
+        log.warning("slack.image.skipped.unfittable", name=name, size=len(resp.content))
+        return UNFIT_REASON
+    return build_image_block(*fitted)

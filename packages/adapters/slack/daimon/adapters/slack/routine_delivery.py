@@ -45,11 +45,13 @@ from daimon.core.routine_delivery import (
     render_fallback_dm,
     render_fallback_post,
     resolve_routine_identity,
+    routine_agent_name,
     routine_requester_name,
     tenant_dm_still_open,
 )
 from daimon.core.routine_destinations import slack_may_deliver
 from daimon.core.routine_files import deliver_routine_files, payload_for
+from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
@@ -103,7 +105,7 @@ async def _dm_fallback(
                 sessionmaker,
                 tenant_id=row.tenant_id,
                 platform="slack",
-                text=render_fallback_dm(row, reason),
+                text=render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row)),
             )
         )
         for chunk in split_fenced(text, 11800, word_boundary=True):
@@ -333,6 +335,10 @@ def make_slack_routine_poster(
                         platform="slack",
                         requester_name=await routine_requester_name(
                             runtime.sessionmaker, row, "slack"
+                        ),
+                        agent_name=await routine_agent_name(runtime.sessionmaker, row),
+                        header=await routine_header_shown(
+                            runtime.sessionmaker, row, "slack", runtime.settings
                         ),
                     ),
                 )

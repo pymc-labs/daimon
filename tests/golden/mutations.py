@@ -53,7 +53,7 @@ def apply(patch: pytest.MonkeyPatch, mutation: str) -> None:
         code = replace_constant(function.__code__, "eyes", "hourglass")
     elif mutation == "discord_eyes":
         module = importlib.import_module("daimon.adapters.discord.bot")
-        function = cast(FunctionType, module.DaimonBot._handle_mention)
+        function = cast(FunctionType, module.DaimonBot.working_mark)
         code = replace_constant(function.__code__, "👀", "👁")
     else:
         if mutation == "ledger_dating":

@@ -351,17 +351,21 @@ def is_transient_denial(denied: AdmissionDenied) -> bool:
 
 
 def busy_retry_at(
-    row: TaskContinuationRow, *, now: datetime, not_before: datetime | None = None
+    row: TaskContinuationRow,
+    *,
+    now: datetime,
+    not_before: datetime | None = None,
+    delay: timedelta = WAKE_RETRY_DELAY,
 ) -> datetime | None:
     """When a row released because its thread was busy is offered again.
 
-    A wake is retried by the poller after `WAKE_RETRY_DELAY`, or at the busy
-    session's own `retry_after` (`not_before`) if that is later. A handoff (no
-    `available_at`) keeps waiting for the next turn in its thread.
+    A wake is retried by the poller after `delay` (`WAKE_RETRY_DELAY` unless the wait is
+    longer), or at the busy session's own `retry_after` (`not_before`) if that is later.
+    A handoff (no `available_at`) keeps waiting for the next turn in its thread.
     """
     if row.available_at is None:
         return None
-    retry_at = now + WAKE_RETRY_DELAY
+    retry_at = now + delay
     return retry_at if not_before is None else max(retry_at, not_before)
 
 

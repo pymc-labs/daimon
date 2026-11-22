@@ -232,6 +232,7 @@ def feature_schema() -> list[dict[str, Any]]:
             "combine": spec.combine,
             "values": [{"value": v, "label": label} for v, label in spec.values.items()],
             "default": spec.default,
+            "maxLength": spec.max_length,
             "tiers": list(spec.tiers),
             "lockable": [t for t in spec.tiers if t in LOCKABLE and not spec.authority.native],
             "backendTiers": {b: list(t) for b, t in spec.backend_tiers.items()},

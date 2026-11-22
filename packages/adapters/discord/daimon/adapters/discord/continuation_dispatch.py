@@ -11,7 +11,13 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.watch_access import require_watch_thread_access
-from daimon.core.agent_identity import AgentIdentity, is_builtin_agent, resolve_agent_identity
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    agent_display_name,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
+from daimon.core.bot_access import BotAccessUnavailable
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.continuity.dispatch import ContinuationContextUnavailable
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
@@ -106,7 +112,7 @@ async def dispatch_pending_continuations(
             authorization = OutputAuthorization(check_watch_notice)
             try:
                 await authorization.check()
-            except AdmissionDenied:
+            except (AdmissionDenied, BotAccessUnavailable):
                 log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
                 return
             allowed = True
@@ -122,6 +128,12 @@ async def dispatch_pending_continuations(
                             session,
                             tenant_id=tenant_id,
                             agent_name=row.target_name,
+                            display_name=await agent_display_name(
+                                sessionmaker,
+                                tenant_id=tenant_id,
+                                agent_id=row.target_ma_agent_id,
+                                fallback=row.target_name,
+                            ),
                             is_builtin=is_builtin_agent(
                                 name=row.target_name,
                                 metadata=None,

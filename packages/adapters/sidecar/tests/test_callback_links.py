@@ -15,6 +15,7 @@ from daimon.adapters.sidecar.main import create_app
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.watch_imports import (
+    INSTRUCTIONS_LIMIT,
     ImportedCallbackWatch,
     ImportedTimer,
     WatchExport,
@@ -98,30 +99,65 @@ async def link(db_session_factory, monkeypatch):
     return watch, token
 
 
-async def test_a_callback_watch_cannot_be_made_in_a_dm(db_session_factory, link):
+async def test_a_callback_watch_made_in_a_dm_wakes_that_dm(db_session_factory, link):
+    """A post to a watch made in a Discord DM queues a DM report, which runs a fresh
+    private turn of the owner in that DM (`_run_watch_report`), as a DM timer does."""
     watch, _token = link
     async with db_session_factory.begin() as db:
-        binding = ContinuationRequest(
+        await create_thread_session(
+            db,
             tenant_id=watch.tenant_id,
             platform="discord",
-            parent_channel_id="dm:scope",
             thread_id="dm:scope",
-            requester_account_id=watch.owner_account_id,
-            requester_external_user_id="123",
-            target_ma_agent_id="agent-bound",
-            target_name="analyst",
-            requested_work=None,
-            reason="watch_fired",
-            idempotency_key=uuid.uuid4(),
+            channel_id="5151",
+            account_id=watch.owner_account_id,
+            ma_session_id="session-dm",
+            ma_agent_id="agent-bound",
         )
-        with pytest.raises(ValueError, match="made in a DM"):
-            await watches.register_callback_watch(
-                db,
-                binding,
-                instructions="Summarize.",
-                lifetime=timedelta(days=1),
-                now=datetime.now(UTC),
-            )
+        made, token = await watches.register_callback_watch(
+            db,
+            _dm_binding(watch),
+            instructions="Summarize.",
+            lifetime=timedelta(days=1),
+            now=datetime.now(UTC),
+        )
+        polled = await watches.register_poll_watch(
+            db,
+            _dm_binding(watch),
+            instructions="Report changes.",
+            tool="read_thread",
+            arguments={"thread_id": "4343"},
+            projection=".rows",
+            rule="change",
+            interval=60,
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+            now=datetime.now(UTC),
+        )
+    assert (made.delivery, made.session_id) == ("dm", None), "it reports in the owner's DM"
+    assert polled.delivery == "dm", "as does a poll watch made there: one rule for every watch"
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, made.id, token)).status == 202, "the post is accepted"
+    async with db_session_factory() as db:
+        (evidence,) = await watches.list_evidence(db, made.id)
+        wake = await get_continuation(db, idempotency_key=evidence.wake_key)
+        assert (wake.reason, wake.thread_id) == ("watch_report", "dm:scope"), "a DM report"
+        assert await watches.watch_seed(db, wake, now=datetime.now(UTC)), "and it may run"
+
+
+def _dm_binding(watch):
+    return ContinuationRequest(
+        tenant_id=watch.tenant_id,
+        platform="discord",
+        parent_channel_id="5151",
+        thread_id="dm:scope",
+        requester_account_id=watch.owner_account_id,
+        requester_external_user_id="123",
+        target_ma_agent_id="agent-bound",
+        target_name="analyst",
+        requested_work=None,
+        reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )
 
 
 async def post(client, watch_id, token, body=b"hello", **kw):
@@ -649,7 +685,7 @@ async def test_rotate_revokes_every_link_and_returns_one_new_token(db_session_fa
             thread_id="900",
             now=datetime.now(UTC),
         )
-        fresh = await watches.rotate_callback_link(
+        fresh, _ = await watches.rotate_callback_link(
             db, item.watch.id, tenant_id=moved.id, now=datetime.now(UTC)
         )
     async with TestClient(TestServer(create_app(db_session_factory))) as client:
@@ -674,7 +710,11 @@ async def test_owner_over_the_live_cap_is_skipped_not_fatal(db_session_factory, 
 async def test_oversize_instructions_are_clipped_and_counted(db_session_factory, moved):
     item = await _import(db_session_factory, moved, instructions="  " + "x" * 5000)
     assert item.truncated and item.watch is not None
-    assert len(item.watch.instructions) == 2000, len(item.watch.instructions)
+    assert len(item.watch.instructions) == INSTRUCTIONS_LIMIT, len(item.watch.instructions)
+    full = "y" * INSTRUCTIONS_LIMIT
+    kept = await _import(db_session_factory, moved, legacy_id=str(uuid.uuid4()), instructions=full)
+    assert not kept.truncated and kept.watch is not None, "a full-length instruction is kept"
+    assert kept.watch.instructions == full, "a full-length instruction is stored whole"
 
 
 async def test_rerun_updates_an_unconfirmed_watch_and_leaves_a_confirmed_one(
@@ -925,7 +965,9 @@ async def test_a_permanent_callback_watch_and_its_link_keep_working(db_session_f
     assert renewed.expires_at is None
     assert links == [None, None], links
     async with db_session_factory.begin() as db:
-        token = await watches.rotate_callback_link(db, item.watch.id, tenant_id=moved.id, now=now)
+        token, _ = await watches.rotate_callback_link(
+            db, item.watch.id, tenant_id=moved.id, now=now
+        )
         rotated = await db.scalar(
             text("SELECT expires_at FROM watch_capabilities WHERE revoked_at IS NULL")
         )
@@ -1154,3 +1196,54 @@ async def test_a_permanent_watch_lists_as_permanent(db_session_factory, moved):
     assert lasts(week.expires_at).startswith("until ")
     shown = summary(week)
     assert not shown.permanent and shown.expires_at == week.expires_at
+
+
+async def test_a_wake_link_still_wakes_after_the_conversation_moves_to_a_new_session(
+    db_session_factory, link
+):
+    """A relay wake link made in one turn wakes the thread's newest session, and a later
+    job's link shares its one watch."""
+    watch, _ = link
+    now = datetime.now(UTC)
+    binding = ContinuationRequest(
+        tenant_id=watch.tenant_id,
+        platform="discord",
+        parent_channel_id="4241",
+        thread_id="4242",
+        requester_account_id=watch.owner_account_id,
+        requester_external_user_id="123",
+        target_ma_agent_id="agent-bound",
+        target_name="analyst",
+        requested_work=None,
+        reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )
+    async with db_session_factory.begin() as db:
+        wake_id, first = await watches.wake_link(
+            db, binding, server="jobs", lifetime=timedelta(days=1), now=now
+        )
+    async with db_session_factory.begin() as db:
+        await create_thread_session(
+            db,
+            tenant_id=watch.tenant_id,
+            platform="discord",
+            thread_id="4242",
+            channel_id="4241",
+            account_id=watch.owner_account_id,
+            ma_session_id="session-next",
+            ma_agent_id="agent-bound",
+            created_at=now + timedelta(seconds=1),
+        )
+        again, second = await watches.wake_link(
+            db, binding, server="jobs", lifetime=timedelta(days=1), now=now
+        )
+    assert again == wake_id and second != first, "a later job gets its own link to one watch"
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        for token in (first, second):
+            response = await post(client, wake_id, token, f"done {token[:4]}".encode())
+            assert response.status == 202, "each link wakes the conversation's newest session"
+    async with db_session_factory() as db:
+        bound = await db.scalar(
+            text("SELECT session_id FROM watches WHERE id = :id"), {"id": wake_id}
+        )
+    assert bound == "session-next", "the wake watch moved with the conversation"

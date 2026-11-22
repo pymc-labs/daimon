@@ -19,6 +19,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._client import (
+    _fetch_known_channels,  # pyright: ignore[reportPrivateUsage]
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
     _require_guild_channel,  # pyright: ignore[reportPrivateUsage]
@@ -227,7 +228,7 @@ async def _list_channels_impl(  # pyright: ignore[reportUnusedFunction]
 
     async with rest_client(token) as c:
         guild, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
-        channels = await guild.fetch_channels()
+        channels = await _fetch_known_channels(guild)
         result: list[ChannelRow] = []
         for ch in channels:
             if not read_policy.lists(str(ch.id)):

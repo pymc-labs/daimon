@@ -433,7 +433,12 @@ async def create_thread_session(
     session.add(orm)
     await session.flush()
     await session.refresh(orm)
-    return ThreadSessionRow.model_validate(orm)
+    row = ThreadSessionRow.model_validate(orm)
+    # Imported here: the watch store reads live sessions from this module.
+    from daimon.core.stores.watches import follow_live_session
+
+    await follow_live_session(session, row)
+    return row
 
 
 async def set_budget_channel_stamp(

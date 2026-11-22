@@ -21,6 +21,7 @@ from daimon.adapters.discord.bot import (  # pyright: ignore[reportPrivateUsage]
     DaimonBot,
 )
 from daimon.adapters.discord.context import compose_queued_content
+from daimon.adapters.discord.reactions import QUEUED
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -1489,3 +1490,21 @@ async def test_queue_notice_delayed_by_reaction_is_fenced_to_held_turn(
     await queued_bot._queue_behind_inflight_turn(789, message)
     message.channel.send.assert_not_awaited()
     message.add_reaction.assert_awaited_once_with("⌛")
+
+
+async def test_every_message_of_a_group_and_a_dropped_one_lose_their_mail_mark(queued_bot):
+    queued_bot._message_feature_on = AsyncMock(return_value=True)
+    grouped = [_make_thread_message(), _make_thread_message()]
+    for message in grouped:
+        await queued_bot._queue_behind_inflight_turn(789, message)
+        message.add_reaction.assert_awaited_with(QUEUED)
+    queued_bot._handle_mention = AsyncMock()
+    await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    assert queued_bot._handle_mention.await_count == 1, "one turn answers the group"
+    dropped = _make_thread_message(thread_id=790)
+    await queued_bot._queue_behind_inflight_turn(790, dropped)
+    queued_bot._finish_admitted_messages = AsyncMock()
+    await queued_bot._drop_queued([dropped], uuid.uuid4())
+    for message in [*grouped, dropped]:
+        message.remove_reaction.assert_awaited_with(QUEUED, queued_bot.user)
+    assert not queued_bot._queued_reactions

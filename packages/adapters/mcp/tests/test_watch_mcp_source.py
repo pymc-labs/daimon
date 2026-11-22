@@ -23,7 +23,13 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.mcp import watch_polling
-from daimon.adapters.mcp.tools.watches import create_watch_impl
+from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.adapters.mcp.identity_relay import (
+    RELAY_METHODS,
+    RELAY_ROUTE,
+    build_identity_relay_route,
+)
+from daimon.adapters.mcp.tools.watches import check_edited_mcp_arguments, create_watch_impl
 from daimon.adapters.mcp.watch_polling import (
     SourceBusy,
     UrlBudget,
@@ -32,16 +38,20 @@ from daimon.adapters.mcp.watch_polling import (
     run_poll,
 )
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.config import SignedIdentityServer
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_call import McpCallError, McpToolSession, mcp_tool_session
 from daimon.core.stores import watches
 from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_agent
 from daimon.testing.asgi import INIT_BODY, asgi_lifespan
 from daimon.testing.mcp_fixture_server import build_fixture_server
 from fastmcp.exceptions import ToolError
+from pydantic import SecretStr
 from sqlalchemy import text
+from starlette.applications import Starlette
 
 from .test_watch_polling import attended_owner, runtime_watch  # noqa: F401
 
@@ -52,6 +62,7 @@ BRIDGE = "https://fixture.example/mcp"
 OTHER = "https://elsewhere.example/mcp"
 PINNED = "93.184.216.34"
 OS_URL = "https://os.example/mcp"
+RELAY = "https://os.example/mcp-identity/internal"
 
 
 def entry(tool: str, **extra: object) -> dict[str, object]:
@@ -676,3 +687,196 @@ async def test_a_saturated_server_cannot_starve_watches_on_another(bridge, monke
             # Busy is not an error and never pauses; it only waits its turn.
             assert row.status == "active" and row.consecutive_errors == 0
             assert row.lease_owner is None
+
+
+async def through_relay(fx: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Make `fx`'s relay-credential polls go through Daimon's own relay route in process,
+    which forwards to the fixture server; returns the relay's transport and its servers."""
+    secret = "j" * 32
+    fx.runtime.settings.mcp.jwt_secret = SecretStr(secret)
+    monkeypatch.setenv(
+        "DAIMON_WATCHES__POLLABLE_TOOLS",
+        json.dumps([*NATIVE, entry("fixture_counter_read", server=RELAY, credential="relay")]),
+    )
+    async with fx.runtime.session_factory() as db:
+        tenant = await get_tenant(db, fx.native.tenant_id)
+    assert tenant is not None
+    servers = {
+        name: SignedIdentityServer(
+            name=name,
+            url=BRIDGE,
+            auth="bearer",
+            requester_meta=True,
+            workspaces=frozenset({f"discord:{tenant.external_id}"}),
+            agents=("analyst",),
+        )
+        for name in ("internal", "other")
+    }
+    app = Starlette()
+    app.add_route(
+        RELAY_ROUTE,
+        build_identity_relay_route(
+            servers=servers,
+            auth=DaimonJWTVerifier(secret=secret.encode(), sessionmaker=fx.runtime.session_factory),
+            sessionmaker=fx.runtime.session_factory,
+            tokens=None,
+            bearers={name: SecretStr(TOKEN) for name in servers},
+            clients={name: httpx.AsyncClient(transport=fx.transport) for name in servers},
+            clock=lambda: datetime.now(UTC),
+            public_url=OS_URL,
+        ),
+        methods=RELAY_METHODS,
+    )
+    relay = Recording(httpx.ASGITransport(app=app))
+
+    async def pinned_relay(host: str, port: int) -> str:
+        assert host == "os.example"
+        return PINNED
+
+    monkeypatch.setattr(
+        watch_polling,
+        "open_source",
+        partial(mcp_tool_session, resolve=pinned_relay, transport=relay),
+    )
+    fx.agent.return_value = agent_with(("internal", RELAY))
+    return SimpleNamespace(relay=relay)
+
+
+async def relay_post(
+    relay: Recording, path: str, authorization: str, message: dict[str, Any]
+) -> httpx.Response:
+    async with httpx.AsyncClient(transport=relay, base_url="https://os.example") as client:
+        return await client.post(
+            path,
+            content=json.dumps(message),
+            headers={"authorization": authorization, "content-type": "application/json"},
+        )
+
+
+async def test_a_relay_poll_reads_as_its_owner_unattended_at_the_watch_place(bridge, monkeypatch):
+    """Through Daimon's own relay the server is told who the watch reads for, marked
+    unattended, and where it reports; once the watch is paused its credential reaches nothing."""
+    fx = bridge
+    relay = (await through_relay(fx, monkeypatch)).relay
+    watch = await get(fx, (await create(fx, server="internal")).watch_id)
+    assert watch.source_state["credential"] == "relay"
+    assert await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
+    (call,) = [
+        json.loads(r.content)
+        for r in fx.transport.requests
+        if json.loads(r.content).get("method") == "tools/call"
+    ]
+    assert call["params"]["_meta"] == {
+        "requester_platform_user_id": watch.owner_external_id,
+        "requester_kind": "routine",
+        "requester_conversation": {
+            "place_type": "thread",
+            "channel_id": watch.thread_id,
+            "parent_channel_id": watch.parent_channel_id,
+        },
+    }, "the owner, unattended, at the place the watch reports to"
+    assert {r.headers["authorization"] for r in fx.transport.requests} == {f"Bearer {TOKEN}"}, (
+        "the server sees the relay's key, never the poll's own credential"
+    )
+    async with fx.runtime.session_factory.begin() as db:
+        await watches.pause_watch(db, watch.id)
+    sent = len(fx.transport.requests)
+    response = await relay_post(
+        relay, "/mcp-identity/internal", relay.requests[-1].headers["authorization"], call
+    )
+    assert response.status_code == 403, "a paused watch's credential names nobody"
+    assert len(fx.transport.requests) == sent, "and reaches no server"
+
+
+@pytest.mark.parametrize("change", ["owner", "agent", "source", "deleted", "other_server"], ids=str)
+async def test_a_relay_poll_credential_reaches_nothing_unless_its_watch_still_matches(
+    bridge, monkeypatch, change
+):
+    """The credential names one watch of one agent, owner and relay server; a watch handed
+    over, deleted, re-pointed or read through another server's route is refused."""
+    fx = bridge
+    relay = (await through_relay(fx, monkeypatch)).relay
+    watch = await get(fx, (await create(fx, server="internal")).watch_id)
+    assert await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
+    authorization = relay.requests[-1].headers["authorization"]
+    call = next(
+        json.loads(r.content)
+        for r in fx.transport.requests
+        if json.loads(r.content).get("method") == "tools/call"
+    )
+    path = "/mcp-identity/internal"
+    async with fx.runtime.session_factory.begin() as db:
+        if change == "deleted":
+            await watches.delete_watch(db, watch.id, now=datetime.now(UTC))
+        elif change == "other_server":
+            path = "/mcp-identity/other"
+        else:
+            column = {"owner": "owner_external_id", "agent": "agent_id", "source": "source"}[change]
+            value = "poll" if change == "source" else "someone-else"
+            await db.execute(
+                text(f"UPDATE watches SET {column}=:value WHERE id=:id"),
+                {"value": value, "id": watch.id},
+            )
+    sent = len(fx.transport.requests)
+    response = await relay_post(relay, path, authorization, call)
+    assert response.status_code == 403, f"a watch changed by {change} is refused"
+    assert len(fx.transport.requests) == sent, "and nothing reaches the server"
+
+
+async def test_a_relay_poll_credential_calls_only_its_watchs_tool(bridge, monkeypatch):
+    fx = bridge
+    relay = (await through_relay(fx, monkeypatch)).relay
+    watch = await get(fx, (await create(fx, server="internal")).watch_id)
+    assert await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
+    authorization = relay.requests[-1].headers["authorization"]
+    sent = len(fx.transport.requests)
+    other_tool = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "lead_fixture_submit", "arguments": {"marker": "m"}},
+    }
+    response = await relay_post(relay, "/mcp-identity/internal", authorization, other_tool)
+    assert response.status_code == 403, "another tool of the same server is refused"
+    assert len(fx.transport.requests) == sent
+    assert (await fx.journal())["write_count"] == 0, "so nothing was written"
+
+
+@pytest.mark.parametrize("contained", [True, False], ids=["contained", "internal"])
+async def test_a_relay_poll_is_refused_in_a_contained_room_in_audience_mode_on(
+    bridge, monkeypatch, contained
+):
+    """The poll's credential is held to the report room, so the relay's audience rule
+    binds it as it binds a turn there: refused when outsiders may read the room."""
+    from daimon.core.channel_audience import ChannelAudience
+
+    fx = bridge
+    await through_relay(fx, monkeypatch)
+
+    async def mode(*_: object, **__: object) -> str:
+        return "on"
+
+    async def audience(*_: object, **__: object) -> ChannelAudience:
+        return ChannelAudience(
+            contained=contained, known=not contained, narrow=False, source="facts"
+        )
+
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.read_audience_mode", mode)
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.channel_has_outsiders", audience)
+    watch = await get(fx, (await create(fx, server="internal")).watch_id)
+    sent = len(fx.transport.requests)
+    await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
+    reached = len(fx.transport.requests) > sent
+    assert reached is not contained, f"contained={contained}: the poll reached the server={reached}"
+
+
+async def test_checking_an_edit_through_the_relay_only_lists_tools(bridge, monkeypatch):
+    fx = bridge
+    await through_relay(fx, monkeypatch)
+    watch = await get(fx, (await create(fx, server="internal")).watch_id)
+    sent = len(fx.transport.requests)
+    await check_edited_mcp_arguments(fx.runtime, watch, {})
+    methods = [json.loads(r.content).get("method") for r in fx.transport.requests[sent:]]
+    assert "tools/list" in methods and "tools/call" not in methods, (
+        f"an unbound relay credential read the listing only, saw {methods}"
+    )

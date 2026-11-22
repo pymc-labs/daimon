@@ -156,6 +156,11 @@ class GitHubConnectButton(
                 followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
                 requester_manages_agent=manages,
             )
+            target = (
+                await connect_intent_agent(session, intent_id=self.intent_id)
+                if link is not None
+                else None
+            )
             if link is not None and str(interaction.user.id) != self.requester_id:
                 # Someone other than the requester was shown the requester's link.
                 await append_event(
@@ -186,6 +191,7 @@ class GitHubConnectButton(
             platform="discord",
             workspace_id=str(interaction.guild_id),
             agent_name=agent_name,
+            agent_id=target[1] if target is not None else None,
         )
         await interaction.followup.send(
             embed=connect_embed(card),
