@@ -60,7 +60,7 @@ export function AppShell() {
           </SheetContent>
         </Sheet>
         <div key={loc.pathname.split("/").slice(1, 3).join("/")} className="flex min-w-0 flex-1">
-          <Crashed className="h-auto flex-1"><Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense></Crashed>
+          <Crashed className="h-auto flex-1" resetKey={loc.pathname}><Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense></Crashed>
         </div>
       </div>
       <CommandPalette open={palette} onOpenChange={setPalette} />
