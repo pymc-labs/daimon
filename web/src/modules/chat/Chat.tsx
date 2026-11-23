@@ -203,7 +203,7 @@ export function ChatView() {
             <AgentAvatar src={session.agent.avatar} name={session.agent.name} className="size-4 rounded" />
             <span>{session.agent.name}</span>
           </span>
-          <ThreadModel sid={session.id} model={session.agent.model ?? ""} onChanged={() => void detail.refetch()} />
+          <ThreadModel sid={session.id} model={session.agent.model ?? ""} />
           {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}
           <DropdownMenu>
