@@ -1,6 +1,7 @@
 import { Suspense, useState } from "react"
 import { Outlet, useLocation, useNavigate } from "react-router"
 
+import { Crashed } from "@/components/Crashed"
 import { Rows } from "@/components/QueryState"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useKey, useMe } from "@/lib/hooks"
@@ -53,7 +54,7 @@ export function AppShell() {
           </SheetContent>
         </Sheet>
         <div key={loc.pathname.split("/").slice(1, 3).join("/")} className="flex min-w-0 flex-1">
-          <Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense>
+          <Crashed className="h-auto flex-1"><Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense></Crashed>
         </div>
       </div>
       <CommandPalette open={palette} onOpenChange={setPalette} />
