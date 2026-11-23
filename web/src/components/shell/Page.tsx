@@ -39,7 +39,7 @@ export function Page({ crumbs: given, actions, tabs, children, className, flush 
             </Fragment>
           ))}
         </nav>
-        <div className="ml-auto flex min-w-0 items-center gap-2">{actions}</div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">{actions}</div>
       </header>
       {tabs && (
         <div ref={bar} className="flex shrink-0 gap-4 overflow-x-auto overflow-y-hidden px-4 shadow-[inset_0_-1px_0_var(--border)] [scrollbar-width:none] lg:px-6">
