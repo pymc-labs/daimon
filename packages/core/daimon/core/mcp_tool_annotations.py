@@ -118,6 +118,7 @@ def relay_catalogues(
     public_url: str | None,
     workspace: str | None,
     agent_name: str,
+    agent_id: uuid.UUID | None,
 ) -> RelayCatalogues:
     """Each identity relay server's upstream URL, with its bearer key when its auth is
     bearer. A signed server is read with no credential: only the relay signs callers.
@@ -133,7 +134,7 @@ def relay_catalogues(
         )
         for server in identity.servers
         if (server.workspaces is None or workspace in server.workspaces)
-        and (not server.agents or agent_name in server.agents)
+        and server.allows_agent(name=agent_name, agent_id=agent_id)
     }
 
 
@@ -144,6 +145,7 @@ async def tenant_relay_catalogues(
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     agent_name: str,
+    agent_id: uuid.UUID | None,
 ) -> RelayCatalogues:
     """`relay_catalogues` for a tenant's workspace, read only when a relay server exists."""
     if not identity.servers:
@@ -152,7 +154,11 @@ async def tenant_relay_catalogues(
         tenant = await get_tenant(db, tenant_id)
     workspace = f"{tenant.platform}:{tenant.external_id}" if tenant is not None else None
     return relay_catalogues(
-        identity, public_url=public_url, workspace=workspace, agent_name=agent_name
+        identity,
+        public_url=public_url,
+        workspace=workspace,
+        agent_name=agent_name,
+        agent_id=agent_id,
     )
 
 

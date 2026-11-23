@@ -14,6 +14,7 @@ from anthropic import APIStatusError, AsyncAnthropic
 from daimon.core import agent_rename
 from daimon.core._models import TenantAccessPolicyRecord
 from daimon.core.agent_rename import AgentRenameRefused, AgentRenameResult, rename_user_agent
+from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults import _reconcile, apply_defaults
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
@@ -27,7 +28,7 @@ from daimon.core.defaults.rename_agents import (
     rename_seeded_agent,
 )
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
-from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.agent_avatars import get_or_create_avatar
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.testing.factories import make_account, make_routine, make_tenant
@@ -598,6 +599,7 @@ async def _rename_own(
     requests: list[str] | None = None,
     archived: dict[str, dict[str, object]] | None = None,
     fail_after_apply: str | None = None,
+    relay_servers: tuple[SignedIdentityServer, ...] = (),
 ) -> AgentRenameResult:
     return await rename_user_agent(
         _fake_client(
@@ -614,6 +616,7 @@ async def _rename_own(
         replace_seeded=replace_seeded,
         dry_run=dry_run,
         today=dt.date(2026, 11, 21),
+        relay_servers=relay_servers,
     )
 
 
@@ -865,3 +868,63 @@ async def test_rename_user_agent_when_both_names_have_entries_then_refuses_namin
     assert not [r for r in requests if r.startswith("POST")], "nothing was written"
     names = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert names == [_OWN], "the database is unchanged"
+
+
+def _relay(*agents: str, workspaces: frozenset[str] | None = None) -> SignedIdentityServer:
+    return SignedIdentityServer(
+        name="tools",
+        url="https://tools.example.com/mcp",
+        auth="bearer",
+        workspaces=workspaces or frozenset({"cli:local"}),
+        agents=agents,
+    )
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real"])
+async def test_rename_user_agent_when_a_relay_list_names_only_the_old_name_then_refuses(
+    dry_run: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _tenant_with_routines(db_session, _OWN)
+    state = FakeMAState()
+    _seed(state, _own_agent())
+    requests: list[str] = []
+    agent_id = derive_agent_uuid(tenant_id=_TENANT, ma_agent_id="ag_internal")
+
+    with pytest.raises(AgentRenameRefused, match=f"'tools'.*{agent_id}"):
+        await _rename_own(
+            db_session_factory,
+            state,
+            new="internal",
+            dry_run=dry_run,
+            requests=requests,
+            relay_servers=(_relay(_OWN),),
+        )
+
+    assert not [r for r in requests if r.startswith(("POST", "DELETE"))], "no provider write"
+    assert set(_live(state)) == {_OWN}, "the agent kept its name"
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        _relay(_OWN, "internal"),
+        _relay(_OWN, str(derive_agent_uuid(tenant_id=_TENANT, ma_agent_id="ag_internal"))),
+        _relay("someone-else"),
+        _relay(_OWN, workspaces=frozenset({"discord:other"})),
+    ],
+    ids=["new-name-listed", "id-listed", "old-name-not-listed", "other-workspace"],
+)
+async def test_rename_user_agent_when_a_relay_list_survives_the_rename_then_renames(
+    server: SignedIdentityServer,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _tenant_with_routines(db_session, _OWN)
+    state = FakeMAState()
+    _seed(state, _own_agent())
+
+    await _rename_own(db_session_factory, state, new="internal", relay_servers=(server,))
+
+    assert _live(state)["internal"]["id"] == "ag_internal"

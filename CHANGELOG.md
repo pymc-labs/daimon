@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A relay allow-list survives an agent rename.** An entry in the `agents` of a
+  `DAIMON_MCP_IDENTITY__SERVERS` server may be an agent id as well as a name, and an id keeps
+  working after `daimon agents rename`. The rename now refuses, and names the id to add, when
+  a server lists only the old name.
 - **An agent can follow its whole GitHub org.** An admin of the org ticks "Also give
   <agent> new repos added to <org>" on the agent's GitHub connect page. The agent then holds
   every repo of the org, new ones within an hour, except repos taken off it.

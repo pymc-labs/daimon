@@ -46,7 +46,7 @@ from daimon.core import agent_identity
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.agent_rename import AgentRenameRefused
-from daimon.core.config import Settings
+from daimon.core.config import Settings, SignedIdentityServer
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError, SpecError, StoreError
 from daimon.core.github_credentials import build_multifernet
@@ -87,6 +87,7 @@ class _FakeSettings:
     cli = _FakeCli()
     mcp = _FakeMcp()
     tool_safety = SimpleNamespace(agent_rules=True)
+    mcp_identity = SimpleNamespace(servers=())
 
 
 def _agent_json(
@@ -1784,6 +1785,31 @@ async def test_agents_rename_when_seeded_holds_name_without_flag_then_refuses(
 
     with pytest.raises(AgentRenameRefused, match="--replace-seeded"):
         await agents_rename(rt=rt, console=console, old="own", new="default", yes=True)
+
+    assert updates == [], "nothing was written"
+
+
+async def test_agents_rename_when_a_relay_server_lists_only_the_old_name_then_refuses(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, updates, _ = await _rename_setup(db_session_factory, with_seeded=False)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    settings = _FakeSettings()
+    settings.mcp_identity = SimpleNamespace(
+        servers=(
+            SignedIdentityServer(
+                name="tools",
+                url="https://tools.example.com/mcp",
+                issuer="daimon",
+                audience="https://tools.example.com",
+                agents=("own",),
+            ),
+        )
+    )
+    rt = build_cli_runtime(db_session_factory, router=router, settings=settings)
+
+    with pytest.raises(AgentRenameRefused, match="'tools'"):
+        await agents_rename(rt=rt, console=console, old="own", new="renamed", yes=True)
 
     assert updates == [], "nothing was written"
 

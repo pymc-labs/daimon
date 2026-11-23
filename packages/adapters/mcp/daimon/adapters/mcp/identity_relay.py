@@ -499,12 +499,10 @@ def build_identity_relay_route(
                 sessions=sessionmaker,
             )
         # An allowlist names the agents that may use a server (a bearer server always has one).
-        if (
-            server.agents
-            and binding.agent_name not in server.agents
-            and not await _listed_as_builtin(
-                anthropic, sessionmaker, server, binding, tenant_id=tenant_id, agent_id=agent_id
-            )
+        if not server.allows_agent(
+            name=binding.agent_name, agent_id=agent_id
+        ) and not await _listed_as_builtin(
+            anthropic, sessionmaker, server, binding, tenant_id=tenant_id, agent_id=agent_id
         ):
             return _refused(
                 403, "agent_not_allowed", server=server, tenant_id=tenant_id, sessions=sessionmaker

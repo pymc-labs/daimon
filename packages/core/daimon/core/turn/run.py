@@ -2260,6 +2260,9 @@ async def run_prepared_turn_impl(
                     sessionmaker=deps.sessionmaker,
                     tenant_id=tenant_id,
                     agent_name=prepared.admission.agent.name,
+                    agent_id=derive_agent_uuid(
+                        tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
+                    ),
                 )
                 if deps.settings is not None
                 else None,

@@ -913,6 +913,7 @@ async def agents_rename(
         new=new,
         replace_seeded=replace_seeded,
         dry_run=True,
+        relay_servers=rt.settings.mcp_identity.servers,
     )
     _print_rename_plan(console, preview.plan, tenant_label=tenant_label)
     if dry_run:
@@ -926,6 +927,7 @@ async def agents_rename(
         old=old,
         new=new,
         replace_seeded=replace_seeded,
+        relay_servers=rt.settings.mcp_identity.servers,
     )
     console.print(f"[green]✓ renamed agent {old!r} -> {new!r}[/green]")
     if result.unarchived:

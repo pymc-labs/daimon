@@ -1047,6 +1047,36 @@ async def test_an_agent_outside_the_allowlist_is_refused(
     assert upstream.requests == [], "the key is never sent for it"
 
 
+async def test_an_agent_listed_by_id_passes_under_any_name_it_signs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A rename moves the name a new session signs, never the agent's id."""
+    person = await _person(db_session_factory)
+    old_token, mapping_id = await _chat_session(db_session_factory, person, "thread-1")
+    new_token = await _token(db_session_factory, person, RelayBinding("Renamed", mapping_id))
+    server = BEARER_SERVER.model_copy(update={"agents": (str(person.agent_id).upper(),)})
+    upstream = _Upstream()
+    async with _relay(db_session_factory, upstream, None, server, bearers=_BEARERS) as client:
+        old = await _post(client, old_token, _tool_call())
+        new = await _post(client, new_token, _tool_call())
+    assert (old.status_code, new.status_code) == (200, 200), "an id entry covers either name"
+    assert len(upstream.requests) == 2, "both calls reached the server"
+
+
+async def test_a_name_only_entry_refuses_the_agent_under_its_new_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    _, mapping_id = await _chat_session(db_session_factory, person, "thread-1")
+    token = await _token(db_session_factory, person, RelayBinding("Renamed", mapping_id))
+    server = BEARER_SERVER.model_copy(update={"agents": ("Agent A",)})
+    upstream = _Upstream()
+    async with _relay(db_session_factory, upstream, None, server, bearers=_BEARERS) as client:
+        refused = await _post(client, token, _tool_call())
+    assert refused.status_code == 403, "the old name no longer matches the signed name"
+    assert upstream.requests == [], "the key is never sent for it"
+
+
 async def test_a_bearer_server_without_its_key_fails_closed(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -38,6 +38,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_PRIVATE_DM,
 )
 from daimon.core.headless_runner import unattended_ceiling_s
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import relay_catalogues
 from daimon.core.stores import session_settle_state
 from daimon.core.turn.approvals import (
@@ -210,6 +211,7 @@ def _annotations_for(
             public_url=_public_url(runtime),
             workspace=f"{auth.platform}:{auth.external_id}",
             agent_name=session.agent.name,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=session.agent.id),
         ),
     )
 
