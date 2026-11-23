@@ -20,7 +20,7 @@ function ChangeRow({ c, showEffect }: { c: Change; showEffect: boolean }) {
   const Icon = KIND[c.kind]
   return (
     <div>
-      <div className={cn("flex min-h-8 items-center gap-2 text-sm", c.text && "cursor-pointer")} onClick={() => c.text && setOpen(!open)}>
+      <div className="flex min-h-8 items-center gap-2 text-sm">
         <span className={cn("flex size-4 shrink-0 items-center justify-center rounded", c.kind === "add" ? "text-success" : c.kind === "remove" ? "text-destructive" : "text-muted-foreground")}>
           <Icon className="size-3.5" />
         </span>
@@ -32,7 +32,7 @@ function ChangeRow({ c, showEffect }: { c: Change; showEffect: boolean }) {
             {c.after && <span className="truncate text-foreground/80">{c.after}</span>}
           </span>
         )}
-        {c.text && <span className="flex items-center gap-0.5 text-xs text-link">Diff<ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} /></span>}
+        {c.text && <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="flex items-center gap-0.5 text-xs text-link">Diff<ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} /></button>}
         {showEffect && <EffectTag effect={c.effect} className="ml-auto" />}
       </div>
       {open && c.before != null && c.after != null && <Diff before={c.before} after={c.after} className="mt-1 mb-2 max-h-72 overflow-y-auto" />}
