@@ -73,7 +73,7 @@ export function NewChat() {
       navigate(`/chat/${s.id}`)
     },
   })
-  const go = (text: string, files: File[]) => { if (agent) start.mutate({ agentId: agent.id, text, files }) }
+  const go = (text: string, files: File[]) => agent && start.mutateAsync({ agentId: agent.id, text, files })
   const pick = (a: AgentRef) => setParams({ agent: a.id }, { replace: true })
 
   return (
@@ -95,14 +95,14 @@ export function NewChat() {
               </div>
               {out && <div className="mb-3">{card}</div>}
               <Composer
-                key={agent.id} onSend={go} onStop={() => {}} busy={start.isPending} disabled={out} canAttach={can("files.attach")} autoFocus
+                key={agent.id} onSend={go} busy={start.isPending} disabled={out} canAttach={can("files.attach")} autoFocus
                 placeholder={out ? "Out of credit" : `Message ${agent.name}`}
                 picker={<AgentPicker agents={list} value={agent} onChange={pick} />}
               />
               {!out && !!agent.starters?.length && (
                 <div className="mt-3 flex flex-wrap justify-center gap-2">
                   {agent.starters.map((s) => (
-                    <button key={s} disabled={start.isPending} onClick={() => go(s, [])} className="h-8 rounded-md border px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">{s}</button>
+                    <button key={s} disabled={start.isPending} onClick={() => go(s, [])?.catch(() => {})} className="h-8 rounded-md border px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">{s}</button>
                   ))}
                 </div>
               )}
