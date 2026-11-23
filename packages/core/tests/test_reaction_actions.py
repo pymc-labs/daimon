@@ -308,10 +308,9 @@ def test_two_bindings_in_a_workspace_may_not_share_an_emoji(second: dict[str, An
 def test_a_binding_needs_three_distinct_emoji() -> None:
     with pytest.raises(ValidationError):
         _action(confirm_emoji="done:111")
-    # A warning that equals a mark or confirm id is refused across bindings too.
-    fields: dict[str, Any] = {**_action().model_dump(), "warning_emoji": "111"}
-    clash = ReactionAction.model_construct(**fields)
-    assert overlap_error([_action(), clash]) is not None
+    # The warning is a unicode emoji, so it can never equal a custom emoji's id.
+    with pytest.raises(ValidationError, match="unicode emoji"):
+        _action(warning_emoji="111")
 
 
 def test_distinct_emoji_or_distinct_workspaces_are_accepted() -> None:
