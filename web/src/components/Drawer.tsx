@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Link2, X } from "lucide-react"
-import { toast } from "sonner"
+import { copy } from "@/lib/copy"
 
 import { useParam } from "@/lib/filters"
 import { Button } from "@/components/ui/button"
@@ -33,7 +33,7 @@ export function Drawer({ param, title, children, ids, wide }: {
               <Button variant="ghost" size="icon-sm" aria-label="Next" disabled={i >= ids.length - 1} onClick={() => step(1)}><ChevronDown /></Button>
             </>
           )}
-          <Button variant="ghost" size="icon-sm" aria-label="Copy link" onClick={() => { navigator.clipboard.writeText(location.href); toast("Link copied") }}><Link2 /></Button>
+          <Button variant="ghost" size="icon-sm" aria-label="Copy link" onClick={() => { void copy(location.href, "Link copied") }}><Link2 /></Button>
           <SheetClose asChild><Button variant="ghost" size="icon-sm" aria-label="Close"><X /></Button></SheetClose>
         </div>
         {id && children(id)}

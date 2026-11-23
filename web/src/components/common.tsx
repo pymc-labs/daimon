@@ -6,6 +6,7 @@ import remarkBreaks from "remark-breaks"
 import remarkGfm from "remark-gfm"
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { copy } from "@/lib/copy"
 import { absolute, ago, usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
@@ -40,9 +41,9 @@ export function CopyButton({ text, className, label }: { text: string; className
       type="button"
       aria-label={label ?? "Copy"}
       className={cn("inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground", className)}
-      onClick={(e) => {
+      onClick={async (e) => {
         e.stopPropagation()
-        navigator.clipboard?.writeText(text)
+        if (!(await copy(text))) return
         setDone(true)
         setTimeout(() => setDone(false), 2000)
       }}
