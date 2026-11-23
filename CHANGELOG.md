@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent can follow its whole GitHub org.** An admin of the org ticks "Also give
+  <agent> new repos added to <org>" on the agent's GitHub connect page. The agent then holds
+  every repo of the org, new ones within an hour, except repos taken off it.
 - **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
   an earlier Managed Agents limit; the provider now accepts far more. 50 fits every
   backend, including OpenAI agents whose skills are pinned by content digest: a list

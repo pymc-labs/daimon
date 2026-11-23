@@ -3221,6 +3221,23 @@ class AgentGitHubGrant(Base):
     version: Mapped[int] = mapped_column(server_default="1")
 
 
+class AgentGitHubGrantRemoval(Base):
+    """A repo an admin took off an agent, so an agent that follows its org is not given it back.
+
+    Written when a grant is removed; cleared when the grant is staged again.
+    """
+
+    __tablename__ = "agent_github_grant_removals"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+    )
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[uuid.UUID]
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    removed_at: Mapped[TsNow]
+
+
 class AgentGitHubGrantDraft(Base):
     __tablename__ = "agent_github_grant_drafts"
     __table_args__ = (

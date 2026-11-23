@@ -32,6 +32,7 @@ OpsCode = Literal[
     "bridge.tool_errors",
     "connector.call_failed",
     "connector.reconnect_needed",
+    "github.follow_limit",
 ]
 OpsArea = Literal["turn", "dm", "routine", "delivery", "watch", "wake", "bridge"]
 OpsSeverity = Literal["error", "warning"]
@@ -88,6 +89,9 @@ CATALOG: Final[Mapping[OpsCode, CodeSpec]] = {
     "connector.call_failed": CodeSpec("bridge", "warning", "Connector call failed", "connector"),
     "connector.reconnect_needed": CodeSpec(
         "bridge", "warning", "Connector needs reconnecting", "connector", by_person=True
+    ),
+    "github.follow_limit": CodeSpec(
+        "delivery", "warning", "Agent has no room for new GitHub repos", "agent"
     ),
 }
 
