@@ -77,7 +77,7 @@ export function NewChat() {
 
   return (
     <Page crumbs={[{ label: "Chat" }, { label: "New thread" }]} flush>
-      <div className="mx-auto flex h-full max-w-[720px] flex-col justify-center px-4 pb-[10vh]">
+      <div className="mx-auto flex min-h-full max-w-[720px] flex-col justify-center px-4 pb-[10vh]">
         <QueryState
           query={agents} empty="No agent is available to you. Ask an admin."
           skeleton={<Skeleton className="mx-auto mb-7 h-28 w-48" />}
