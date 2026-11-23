@@ -32,11 +32,6 @@ ALLOWED_READS: dict[tuple[str, str, str], str] = {
         "_listed_as_builtin",
         "server.agents",
     ): "the seeded built-in's own rename, by name; it runs after the rule refused",
-    (
-        "core/daimon/core/agent_rename.py",
-        "_refuse_relay_lockout",
-        "server.agents",
-    ): "asks whether the OLD name is listed, to guard a rename; not an access decision",
     **{
         (
             "adapters/web/daimon/adapters/web/nodes/data_server.py",

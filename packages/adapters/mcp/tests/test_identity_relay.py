@@ -1063,6 +1063,21 @@ async def test_an_agent_listed_by_id_passes_under_any_name_it_signs(
     assert len(upstream.requests) == 2, "both calls reached the server"
 
 
+async def test_an_agent_named_like_a_listed_id_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    _, mapping_id = await _chat_session(db_session_factory, person, "thread-1")
+    other_id = str(uuid.uuid4())
+    token = await _token(db_session_factory, person, RelayBinding(other_id, mapping_id))
+    server = BEARER_SERVER.model_copy(update={"agents": (other_id,)})
+    upstream = _Upstream()
+    async with _relay(db_session_factory, upstream, None, server, bearers=_BEARERS) as client:
+        refused = await _post(client, token, _tool_call())
+    assert refused.status_code == 403, "an id entry never matches a name; this agent's id differs"
+    assert upstream.requests == [], "the key is never sent for it"
+
+
 async def test_a_name_only_entry_refuses_the_agent_under_its_new_name(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

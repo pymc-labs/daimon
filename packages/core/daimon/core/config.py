@@ -2394,15 +2394,20 @@ class SignedIdentityServer(BaseModel):
     def allows_agent(self, *, name: str, agent_id: uuid.UUID | None) -> bool:
         """Whether an agent may use this server. The one rule: the relay route and the tool
         catalogues both call it. No list allows every agent; otherwise an entry must equal
-        the agent's name or its id (a uuid, compared in canonical form, so case never matters)."""
+        the agent's name or its id. An entry that parses as a uuid is an id and matches only ids
+        (in canonical form, so case never matters); any other entry is a name and matches only
+        names, so an agent named like a listed id gains nothing."""
         if not self.agents:
             return True
-        if name in self.agents:
-            return True
-        if agent_id is None:
-            return False
-        wanted = str(agent_id)
-        return any(_agent_entry_id(entry) == wanted for entry in self.agents)
+        wanted = str(agent_id) if agent_id is not None else None
+        for entry in self.agents:
+            entry_id = _agent_entry_id(entry)
+            if entry_id is None:
+                if entry == name:
+                    return True
+            elif entry_id == wanted:
+                return True
+        return False
 
     @field_validator("url")
     @classmethod

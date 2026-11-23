@@ -600,6 +600,7 @@ async def _rename_own(
     archived: dict[str, dict[str, object]] | None = None,
     fail_after_apply: str | None = None,
     relay_servers: tuple[SignedIdentityServer, ...] = (),
+    old: str = _OWN,
 ) -> AgentRenameResult:
     return await rename_user_agent(
         _fake_client(
@@ -611,7 +612,7 @@ async def _rename_own(
         ),
         factory,
         tenant_id=_TENANT,
-        old=_OWN,
+        old=old,
         new=new,
         replace_seeded=replace_seeded,
         dry_run=dry_run,
@@ -928,3 +929,36 @@ async def test_rename_user_agent_when_a_relay_list_survives_the_rename_then_rena
     await _rename_own(db_session_factory, state, new="internal", relay_servers=(server,))
 
     assert _live(state)["internal"]["id"] == "ag_internal"
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real"])
+@pytest.mark.parametrize(
+    ("stored", "typed"),
+    [("Own", "own"), ("Caf\u00e9", "Cafe\u0301")],
+    ids=["case", "unicode-normalisation"],
+)
+async def test_rename_user_agent_when_the_typed_old_name_differs_from_the_stored_one_then_refuses(
+    stored: str,
+    typed: str,
+    dry_run: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The relay credential signs the stored name, so the guard reads that, not the typed one."""
+    await _tenant_with_routines(db_session)
+    state = FakeMAState()
+    _seed(state, ma_agent(id="ag_internal", name=stored, tenant_id=_TENANT))
+    requests: list[str] = []
+
+    with pytest.raises(AgentRenameRefused, match="'tools'"):
+        await _rename_own(
+            db_session_factory,
+            state,
+            old=typed,
+            new="renamed",
+            dry_run=dry_run,
+            requests=requests,
+            relay_servers=(_relay(stored),),
+        )
+
+    assert not [r for r in requests if r.startswith(("POST", "DELETE"))], "no provider write"

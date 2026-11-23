@@ -191,8 +191,8 @@ async def _refuse_relay_lockout(
     """Refuse a rename that a relay server's `agents` list would lock out.
 
     The list is deployment settings, so the rename cannot move it. A server that applies to
-    this workspace and lists the old name, but not the new name or the agent's id, would
-    refuse the agent from then on.
+    this workspace and allows the agent by its stored name (what its relay credential signs),
+    but would not allow the new name or the agent's id, would refuse it from then on.
     """
     tenant = await get_tenant(session, plan.tenant_id)
     workspace = f"{tenant.platform}:{tenant.external_id}" if tenant is not None else None
@@ -200,9 +200,12 @@ async def _refuse_relay_lockout(
     for server in servers:
         if server.workspaces is not None and workspace not in server.workspaces:
             continue
-        if plan.old in server.agents and not server.allows_agent(name=plan.new, agent_id=agent_id):
+        # Without an id only a name entry can allow it; the new name is stored as typed.
+        if server.allows_agent(name=plan.agent.name, agent_id=None):
+            if server.allows_agent(name=plan.new, agent_id=agent_id):
+                continue
             raise AgentRenameRefused(
-                f"The server {server.name!r} lists {plan.old!r} by name, so it would refuse "
+                f"The server {server.name!r} lists {plan.agent.name!r} by name, so it would refuse "
                 f"the agent after this rename. Add {str(agent_id)!r} to the agents of "
                 f"{server.name!r} in DAIMON_MCP_IDENTITY__SERVERS, then rename again."
             )
