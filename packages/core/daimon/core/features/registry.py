@@ -670,7 +670,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         tiers=("workspace",),
         binds="turn",
-        doc="An emoji marks a message; a person's emoji on it confirms.",
+        doc="A person's emoji confirms a marked message.",
         platforms=_DISCORD,
         authority=_ADMIN,
     ),

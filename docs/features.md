@@ -671,7 +671,7 @@ The first message in a thread, and the first after the model or effort changes, 
 
 ## Reaction actions
 
-An emoji marks a message; a person's emoji on it confirms.
+A person's emoji confirms a marked message.
 
 | | |
 | --- | --- |
