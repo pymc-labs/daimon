@@ -26,6 +26,7 @@ REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
         ("agent_daimon_tool_allowlists", "agent_id"),
         ("agent_files", "agent_id"),
         ("agent_github_grant_drafts", "agent_id"),
+        ("agent_github_grant_removals", "agent_id"),
         ("agent_github_grants", "agent_id"),
         ("agent_google_binding", "agent_id"),
         ("agent_helpers", "agent_id"),

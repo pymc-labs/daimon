@@ -120,6 +120,7 @@ _NARROWED: dict[str, str] = {
     "monitor_mcp": "kept per agent: an MCP call has no channel or thread",
     "routine_sandbox_tools": "an admin's opt-in for routine runs, so a workspace, agent or routine",
     "routine_result_header": "read when a routine posts, which has no thread; the routine sets its own",
+    "github_follow_org": "an admin's choice for one agent, read by the GitHub repo refresh",
     "model_reactions": "a workspace or agent display choice, read when the turn starts",
     "reaction_actions": "a workspace choice, read when a turn ends or a person reacts, with no agent",
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
