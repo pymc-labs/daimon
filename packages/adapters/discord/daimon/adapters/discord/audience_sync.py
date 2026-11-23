@@ -70,6 +70,10 @@ RECONCILE_LIMIT_S = 600.0
 #: A server's member chunks must arrive within this.
 CHUNK_TIMEOUT_S = 300.0
 
+CHUNK_FALLBACK_LIMIT_S = 6 * 3600.0
+"""How long after the last full member load a reconcile whose chunk stalls may still publish
+from the gateway member cache. Past it the facts lapse."""
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -130,6 +134,7 @@ class AudienceSync:
         reconcile_every_s: float = RECONCILE_EVERY_S,
         reconcile_limit_s: float = RECONCILE_LIMIT_S,
         chunk_timeout_s: float = CHUNK_TIMEOUT_S,
+        chunk_fallback_limit_s: float = CHUNK_FALLBACK_LIMIT_S,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._clock = clock
@@ -139,6 +144,11 @@ class AudienceSync:
         self._reconcile_every = timedelta(seconds=reconcile_every_s)
         self._reconcile_limit = timedelta(seconds=reconcile_limit_s)
         self._chunk_timeout_s = chunk_timeout_s
+        self._chunk_fallback_limit = timedelta(seconds=chunk_fallback_limit_s)
+        # When each server's members were last read in full (a chunk), and how many
+        # reconciles in a row have since used the member cache instead.
+        self._chunked: dict[uuid.UUID, datetime] = {}
+        self._fallbacks: dict[uuid.UUID, int] = {}
         # When each server was last reconciled with Discord; renewals never outlive it.
         self._reconciled: dict[uuid.UUID, datetime] = {}
         # Servers whose published facts follow events; events recompute only these.
@@ -180,14 +190,18 @@ class AudienceSync:
         reconciled: bool,
         epoch: int,
         read: _Read | None,
+        from_cache: bool = False,
     ) -> bool:
-        """Whether a full set of facts was written."""
+        """Whether a full set of facts was written. With `from_cache` the members in `read`
+        are the gateway cache's, not a fresh chunk."""
         tenant_id = tenant_of(guild.id)
         async with self._lock(tenant_id):
             if epoch != self._epoch:
                 return False
             try:
-                return await self._publish(guild, tenant_id, reconciled=reconciled, read=read)
+                return await self._publish(
+                    guild, tenant_id, reconciled=reconciled, read=read, from_cache=from_cache
+                )
             except (SQLAlchemyError, AccessPolicyUnreadable) as err:
                 self._live.discard(tenant_id)
                 log.warning(
@@ -205,6 +219,7 @@ class AudienceSync:
         *,
         reconciled: bool,
         read: _Read | None,
+        from_cache: bool = False,
     ) -> bool:
         now = self._clock()
         async with self._sessionmaker.begin() as session:
@@ -271,6 +286,9 @@ class AudienceSync:
             self._reconciled[tenant_id] = now
             self._members_loaded.add(tenant_id)
             self._baseline[tenant_id] = rooms
+            if not from_cache:
+                self._chunked[tenant_id] = now
+                self._fallbacks.pop(tenant_id, None)
         log.info(
             "discord.audience.published",
             guild_id=str(guild.id),
@@ -304,9 +322,13 @@ class AudienceSync:
         try:
             roles = await guild.fetch_roles()
             channels = await _fetch_known_channels(guild)
-            # The chunk is the full member list: a member whose leave event was missed
-            # is not in it, while the cache would keep them.
-            members = await asyncio.wait_for(guild.chunk(cache=True), self._chunk_timeout_s)
+            try:
+                # The chunk is the full member list: a member whose leave event was missed
+                # is not in it, while the cache would keep them.
+                members = await asyncio.wait_for(guild.chunk(cache=True), self._chunk_timeout_s)
+            except TimeoutError:
+                _drop_chunk_request(guild)
+                return await self._chunk_fallback(guild, epoch, roles, channels)
         except (discord.ClientException, discord.HTTPException, TimeoutError) as err:
             log.warning(
                 "discord.audience.reconcile_failed",
@@ -317,6 +339,45 @@ class AudienceSync:
         return await self._publish_guarded(
             guild, reconciled=True, epoch=epoch, read=_Read(roles, channels, members)
         )
+
+    async def _chunk_fallback(
+        self,
+        guild: discord.Guild,
+        epoch: int,
+        roles: Sequence[discord.Role],
+        channels: Sequence[discord.abc.GuildChannel],
+    ) -> bool:
+        """A chunk stalled: publish from the member cache, or let the facts run out.
+
+        Allowed only while this gateway session loaded the server's members in full (a
+        disconnect clears that) and the last full chunk is younger than the fallback limit.
+        Roles and channels are the fresh REST read; only a missed leave or role change can
+        linger, and only until the limit."""
+        tenant_id = tenant_of(guild.id)
+        last = self._chunked.get(tenant_id)
+        failed = {"guild_id": str(guild.id), "err_type": "TimeoutError"}
+        if (
+            epoch != self._epoch
+            or tenant_id not in self._members_loaded
+            or last is None
+            or self._clock() - last > self._chunk_fallback_limit
+        ):
+            log.warning("discord.audience.reconcile_failed", **failed)
+            return False
+        published = await self._publish_guarded(
+            guild,
+            reconciled=True,
+            epoch=epoch,
+            read=_Read(roles, channels, list(guild.members)),
+            from_cache=True,
+        )
+        if not published:
+            log.warning("discord.audience.reconcile_failed", **failed)
+            return False
+        count = self._fallbacks.get(tenant_id, 0) + 1
+        self._fallbacks[tenant_id] = count
+        log.warning("discord.audience.chunk_fallback", guild_id=str(guild.id), consecutive=count)
+        return True
 
     async def mark_unknown(self, guild: discord.Guild) -> None:
         """The cache can no longer be trusted (a reload starts, or fails): every room of
@@ -344,6 +405,8 @@ class AudienceSync:
         self._epoch += 1
         self._live.clear()
         self._members_loaded.clear()
+        self._chunked.clear()
+        self._fallbacks.clear()
         self._baseline.clear()
         self._reconciled.clear()
         self._dirty.clear()
@@ -451,6 +514,18 @@ class AudienceSync:
                 raise
             except Exception as err:  # one bad tick must not end renewal: facts would lapse
                 log.exception("discord.audience.tick_failed", err_type=type(err).__name__)
+
+
+def _drop_chunk_request(guild: discord.Guild) -> None:
+    """Forget the guild's pending member request after a timeout.
+
+    discord.py keeps one request per guild until its last chunk arrives
+    (`ConnectionState.chunk_guild`) and joins every later call to it without asking
+    Discord again. A lost or rate-limited reply would then stall every later chunk for
+    good. Dropping it makes the next reconcile send a new request."""
+    requests = getattr(getattr(guild, "_state", None), "_chunk_requests", None)
+    if isinstance(requests, dict):
+        requests.pop(guild.id, None)  # pyright: ignore[reportUnknownMemberType]
 
 
 async def _policy_roles(

@@ -78,7 +78,7 @@ def _server(*, chunked: bool = True) -> object:
 
 
 def _sync(
-    factory: async_sessionmaker[AsyncSession], clock: Clock
+    factory: async_sessionmaker[AsyncSession], clock: Clock, *, fallback_limit_s: float = 6 * 3600
 ) -> tuple[AudienceSync, MemberSync]:
     audience = AudienceSync(
         factory,
@@ -87,6 +87,7 @@ def _sync(
         debounce_s=0,
         reconcile_every_s=300,
         reconcile_limit_s=600,
+        chunk_fallback_limit_s=fallback_limit_s,
     )
     return audience, MemberSync(factory, clock=clock, audience=audience)
 
@@ -215,7 +216,7 @@ async def test_renewal_is_bounded_by_the_last_reconcile_and_a_stalled_owner_laps
 ) -> None:
     await _setup(db_session, db_session_factory)
     clock = Clock()
-    audience, _ = _sync(db_session_factory, clock)
+    audience, _ = _sync(db_session_factory, clock, fallback_limit_s=0)
     server = _server()
     assert await audience.reconcile(server)  # type: ignore[arg-type]
 
@@ -934,3 +935,80 @@ async def test_a_channel_type_discord_py_does_not_know_does_not_stop_the_facts(
     [skipped] = [log for log in logs if log["event"] == "discord.audience.channel_type_skipped"]
     assert skipped["count"] == 1 and skipped["types"] == [20]
     assert "never logged" not in str(logs)
+
+
+async def _stalled_after_a_full_load(
+    db_session: AsyncSession,
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    fallback_limit_s: float = 6 * 3600,
+) -> tuple[AudienceSync, Any, Clock]:
+    await _setup(db_session, factory)
+    clock = Clock()
+    audience, _ = _sync(factory, clock, fallback_limit_s=fallback_limit_s)
+    server: Any = _server()
+    assert await audience.reconcile(server)
+    server.chunk = AsyncMock(side_effect=TimeoutError)
+    # discord.py keeps the unanswered request until its last chunk arrives.
+    server._state = types.SimpleNamespace(_chunk_requests={fake.GUILD: object()})
+    return audience, server, clock
+
+
+async def test_a_stalled_chunk_publishes_from_the_member_cache_while_the_session_is_intact(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    audience, server, clock = await _stalled_after_a_full_load(db_session, db_session_factory)
+
+    with capture_logs() as logs:
+        for _ in range(4):  # far past the 600 s limit: every reconcile stalls
+            clock.now += timedelta(seconds=300)
+            await audience.tick([server])
+    assert (await _fact(db_session_factory, clock, "2")).contained, "facts stay usable"
+    assert await _fact(db_session_factory, clock, "1") == RoomFacts(False, False)
+    fallbacks = [e for e in logs if e["event"] == "discord.audience.chunk_fallback"]
+    assert [e["consecutive"] for e in fallbacks] == [1, 2, 3, 4]
+    assert fallbacks[0]["guild_id"] == str(fake.GUILD)
+    assert server._state._chunk_requests == {}, "the hung request is dropped for the next try"
+
+    server.chunk = AsyncMock(return_value=list(server.members))
+    clock.now += timedelta(seconds=300)
+    await audience.tick([server])
+    with capture_logs() as logs:
+        server.chunk = AsyncMock(side_effect=TimeoutError)
+        clock.now += timedelta(seconds=300)
+        await audience.tick([server])
+    assert [e["consecutive"] for e in logs if e["event"] == "discord.audience.chunk_fallback"] == [
+        1
+    ]
+
+
+async def test_a_stalled_chunk_after_a_disconnect_does_not_fall_back(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    audience, server, clock = await _stalled_after_a_full_load(db_session, db_session_factory)
+
+    await audience.disconnected([server])
+    await audience.resumed([server])  # the cache is not trusted until a full load
+    clock.now += timedelta(seconds=300)
+    with capture_logs() as logs:
+        assert not await audience.reconcile(server)
+    assert not [e for e in logs if e["event"] == "discord.audience.chunk_fallback"]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS
+
+
+async def test_a_stalled_chunk_past_the_fallback_age_lets_the_facts_lapse(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    audience, server, clock = await _stalled_after_a_full_load(
+        db_session, db_session_factory, fallback_limit_s=900
+    )
+
+    for _ in range(3):  # 900 s since the full chunk: still allowed
+        clock.now += timedelta(seconds=300)
+        await audience.tick([server])
+    assert (await _fact(db_session_factory, clock, "2")).contained
+    for _ in range(3):
+        clock.now += timedelta(seconds=300)
+        await audience.tick([server])
+    clock.now += timedelta(seconds=1)
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS
