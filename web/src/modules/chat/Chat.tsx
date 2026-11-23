@@ -4,7 +4,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router"
 
 import { AgentAvatar } from "@/components/common"
-import { useConfirm } from "@/lib/confirm"
 import { creditTone } from "@/lib/credit"
 import { Page } from "@/components/shell/Page"
 import { RenameDialog } from "@/components/shell/RenameDialog"
@@ -24,7 +23,7 @@ import { ThreadModel } from "./ThreadModel"
 import { Composer } from "./Composer"
 import { AssistantMessage, UserMessage } from "./Message"
 import type { SessionDetail } from "./types"
-import { answer, evict, hydrate, loadEarlier, resume, send, stop, switchBack, useThread } from "./turns"
+import { answer, hydrate, loadEarlier, resume, send, stop, switchBack, useDeleteThread, useThread } from "./turns"
 
 
 /** Credit left, and the card that replaces the composer's promise when it is gone. */
@@ -116,7 +115,6 @@ export function NewChat() {
 
 export function ChatView() {
   const { id } = useParams()
-  const navigate = useNavigate()
   const qc = useQueryClient()
   const { messages, busy, reconnecting, next, loadingEarlier, monitoring } = useThread(id)
   const { out, card, meter } = useCredit()
@@ -163,23 +161,10 @@ export function ChatView() {
   const { data: sessions } = useSessions()
   const session = sessions?.find((s) => s.id === id) ?? data?.session
   const agent = session?.agent
-  const confirm = useConfirm()
   const { data: me } = useMe()
   const can = useCan()
   const [renaming, setRenaming] = useState<ChatSession | null>(null)
-  const del = useMutation({
-    mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
-    onSuccess: (_, s) => {
-      evict(s.id)
-      qc.removeQueries({ queryKey: ["chat", "session", s.id] })
-      qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
-      navigate("/chat")
-    },
-  })
-  const remove = async () => {
-    if (!session || !(await confirm({ title: "Delete thread?", body: session.title, action: "Delete", destructive: true }))) return
-    del.mutate(session)
-  }
+  const remove = useDeleteThread()
 
   if (detail.error instanceof ApiError && detail.error.status === 404) {
     return (
@@ -210,7 +195,7 @@ export function ChatView() {
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Thread actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => setRenaming(session)}>Rename</DropdownMenuItem>
-              <DropdownMenuItem variant="destructive" onSelect={remove}>Delete</DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onSelect={() => void remove(session)}>Delete</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </>

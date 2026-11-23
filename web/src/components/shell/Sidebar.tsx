@@ -3,12 +3,10 @@ import {
   Check, ChevronsUpDown, CircleUser, Keyboard, Link2, LogOut, Monitor, Moon, MoreHorizontal, Plus, Search, Sun, UserRound,
 } from "lucide-react"
 import { useMemo, useState } from "react"
-import { Link, NavLink, useMatch, useNavigate } from "react-router"
-import { toast } from "sonner"
+import { Link, NavLink, useMatch } from "react-router"
 
 import { BrandIcon } from "@/components/brand"
 import { AgentAvatar, Avatar, Kbd } from "@/components/common"
-import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
 import { LoadMore, QueryState, Rows } from "@/components/QueryState"
 import {
@@ -20,7 +18,7 @@ import { useMe, useProviders, useSessions, useSwitchWorkspace } from "@/lib/hook
 import { useTheme } from "@/lib/theme-context"
 import type { ChatSession, Me, Person } from "@/lib/types"
 import { cn, MOD } from "@/lib/utils"
-import { evict } from "@/modules/chat/turns"
+import { useDeleteThread } from "@/modules/chat/turns"
 import { sidebarFor } from "@/modules/registry"
 import { signOut } from "./auth"
 import { ShellCtx } from "./shell-context"
@@ -132,9 +130,6 @@ function group(s: ChatSession) {
 function RecentChats() {
   const sessions = useSessions()
   const { data } = sessions
-  const id = useMatch("/chat/:id")?.params.id
-  const navigate = useNavigate()
-  const qc = useQueryClient()
   const [renaming, setRenaming] = useState<ChatSession | null>(null)
   const groups = useMemo(() => {
     const out: [string, ChatSession[]][] = []
@@ -146,16 +141,7 @@ function RecentChats() {
     }
     return out
   }, [data])
-  const confirm = useConfirm()
-  const del = useMutation({
-    mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
-    onSuccess: (_, s) => {
-      evict(s.id)
-      qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
-      if (s.id === id) navigate("/chat")
-      toast("Thread deleted")
-    },
-  })
+  const remove = useDeleteThread()
   return (
     <div className="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-3">
       {!data && <QueryState query={sessions} skeleton={<Rows n={4} />}>{() => null}</QueryState>}
@@ -184,9 +170,7 @@ function RecentChats() {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
                   <DropdownMenuItem onSelect={() => setRenaming(s)}>Rename</DropdownMenuItem>
-                  <DropdownMenuItem variant="destructive" onSelect={async () => {
-                    if (await confirm({ title: "Delete thread?", body: s.title, action: "Delete", destructive: true })) del.mutate(s)
-                  }}>Delete</DropdownMenuItem>
+                  <DropdownMenuItem variant="destructive" onSelect={() => void remove(s)}>Delete</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>

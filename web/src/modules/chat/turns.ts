@@ -1,10 +1,13 @@
 // Turn store: threads and running streams live outside React, so a turn survives route changes
 // (the shell remounts the page when a new chat gets its id) and keeps streaming while you look elsewhere.
-import type { QueryClient } from "@tanstack/react-query"
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { useSyncExternalStore } from "react"
+import { useMatch, useNavigate } from "react-router"
+import { toast } from "sonner"
 
 import { api, ApiError, qs, stream, upload } from "@/lib/api"
-import type { CreditMeter, Me } from "@/lib/types"
+import { useConfirm } from "@/lib/confirm"
+import type { ChatSession, CreditMeter, Me } from "@/lib/types"
 import type { Card, CardAnswer, Msg, Notice, SessionDetail, StreamEvent } from "./types"
 
 /** `monitoring` is set when admins began reading this chat after the page opened. */
@@ -50,6 +53,25 @@ export function evict(sid: string) {
   ctrls.delete(sid)
   threads.delete(sid)
   subs.forEach((f) => f())
+}
+
+/** Delete a thread once confirmed, leaving it if it is open. */
+export function useDeleteThread() {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const confirm = useConfirm()
+  const open = useMatch("/chat/:id")?.params.id
+  const del = useMutation({
+    mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
+    onSuccess: (_, s) => {
+      evict(s.id)
+      qc.removeQueries({ queryKey: ["chat", "session", s.id] })
+      qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
+      if (s.id === open) navigate("/chat")
+      toast("Thread deleted")
+    },
+  })
+  return async (s: ChatSession) => { if (await confirm({ title: "Delete thread?", body: s.title, action: "Delete", destructive: true })) del.mutate(s) }
 }
 
 /** Forget every chat and cut every stream: they belong to the workspace just left. */
