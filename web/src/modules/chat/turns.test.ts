@@ -99,6 +99,20 @@ describe("a refused turn", () => {
     await send(qc, sid, "hi")
     expect(result.current.messages.at(-1)?.card).toMatchObject({ kind: "refusal", body: "This agent isn't available to you. Ask an admin." })
   })
+
+  it("keeps a message that never reached the server and says the connection was lost", async () => {
+    const qc = new QueryClient()
+    const sid = "s-unsent"
+    hydrate(sid, { messages: [] })
+    server({
+      "POST /api/chat/uploads": [() => { throw new TypeError("Failed to fetch") }],
+      [`GET /api/chat/sessions/${sid}`]: [() => json(detail([]))],
+    })
+    const { result } = renderHook(() => useThread(sid))
+    await send(qc, sid, "hi", [new File(["a"], "notes.txt")])
+    expect(result.current.messages[0]).toMatchObject({ content: "hi", attachments: [{ name: "notes.txt" }] })
+    expect(result.current.messages.at(-1)?.card).toMatchObject({ kind: "refusal", body: "Connection lost." })
+  })
 })
 
 describe("monitoring begun while the page is open", () => {

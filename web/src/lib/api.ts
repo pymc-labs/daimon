@@ -82,7 +82,7 @@ export const api = {
 /** Read a server-sent event stream: calls onEvent per `data:` frame and returns the last `id:` seen. `retry` only for idempotent requests. */
 export async function stream(
   path: string, onEvent: (e: any) => void,
-  { body, signal, retry = false, lastEventId }: { body?: unknown; signal?: AbortSignal; retry?: boolean; lastEventId?: string } = {},
+  { body, signal, retry = false, lastEventId, onOpen }: { body?: unknown; signal?: AbortSignal; retry?: boolean; lastEventId?: string; onOpen?: () => void } = {},
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { ...CSRF }
   if (body !== undefined) headers["Content-Type"] = "application/json"
@@ -93,6 +93,7 @@ export async function stream(
   }, retry)
   if (!res.ok) throw await errorOf(res)
   if (!res.body) throw new ApiError(res.status, "")
+  onOpen?.()
   // An answer that starts no turn is one JSON event, not a stream.
   if (res.headers.get("content-type")?.includes("application/json")) { onEvent(await res.json()); return lastEventId }
   const reader = res.body.getReader()

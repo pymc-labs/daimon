@@ -126,6 +126,7 @@ async function run(qc: QueryClient, sid: string, path: string, { body, from, ret
   let first = true
   let done = false
   let last = from
+  let accepted = !body
   const on = (e: StreamEvent) => {
     if (threads.get(sid)?.reconnecting) set(sid, (t) => ({ ...t, reconnecting: false }))
     if (first) { first = false; qc.invalidateQueries({ queryKey: ["chat", "sessions"] }) }   // the server now says running
@@ -136,10 +137,11 @@ async function run(qc: QueryClient, sid: string, path: string, { body, from, ret
   const attach = async () => { last = await stream(`/api/chat/sessions/${sid}/stream`, on, { signal, retry: true, lastEventId: last }) }
   try {
     try {
-      last = await stream(path, on, { body: body && await body(), signal, retry: retry || !body, lastEventId: last })
+      const onOpen = () => { accepted = true }
+      last = await stream(path, on, { body: body && await body(), signal, retry: retry || !body, lastEventId: last, onOpen })
     } catch (e) {
-      // Refused or aborted before any event: no reply to re-attach to.
-      if (e instanceof ApiError || signal.aborted) throw e
+      // Refused, aborted, or never reached the server: no reply to re-attach to.
+      if (e instanceof ApiError || signal.aborted || !accepted) throw e
     }
     for (let i = 0; !done && !signal.aborted; i++) {
       set(sid, (t) => ({ ...t, reconnecting: true }))
