@@ -1364,3 +1364,153 @@ async def test_a_reconcile_asked_while_disconnected_reads_and_publishes_nothing(
     audience.connected()
     assert await audience.reconcile(world.guild)
     assert world.server.reads["guild"] == reads["guild"] + 1
+
+
+def _watched(audience: AudienceSync, world: World) -> Any:
+    """discord.py's parsers with the publisher watching them, as in the bot."""
+    state = _gateway()
+    audience_sync.watch_gateway(
+        state.parsers, lambda e, g, d: audience.gateway_event(e, g, d, world.guild)
+    )
+    return state
+
+
+def _outcomes(logs: list[Any]) -> list[str]:
+    return [
+        str(e["event"])
+        for e in logs
+        if e["event"] in ("discord.audience.published", "discord.audience.read_crossed")
+    ]
+
+
+async def test_a_suppressed_event_still_constrains_the_read_that_is_running(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    """A channel event grants the outsider a view; the next read still gets Discord's
+    older overwrites. A topic-only event with the granted overwrites then equals the
+    basis and changes nothing, but it says the read is stale: that read publishes nothing."""
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _watched(audience, world)
+    await audience.tick([world.guild])
+    await audience.settle()
+    old = list(world.server.channels[0]["permission_overwrites"])
+    granted = [*old, fake.rest_overwrite(fake.OUTSIDER, member=True, allow=fake.VIEW_BIT)]
+
+    gate = _gate(world.server)
+    state.parsers["CHANNEL_UPDATE"](
+        _raw_channel(world.server, 0, permission_overwrites=granted)
+    )  # a real change; Discord's REST has not caught up
+    await _eventually(lambda: _members_read(world, 2))
+    state.parsers["CHANNEL_UPDATE"](
+        _raw_channel(world.server, 0, permission_overwrites=granted, topic="a new topic")
+    )
+    with capture_logs() as logs:
+        gate.set()
+        await audience.settle()
+    assert _outcomes(logs) == ["discord.audience.read_crossed"]
+    assert await _fact(pooled, clock, "1") == UNKNOWN_FACTS, "the stale read published nothing"
+
+    world.server.channels[0]["permission_overwrites"] = granted
+    assert await audience.reconcile(world.guild)
+    assert (await _fact(pooled, clock, "1")).known
+    assert (await _fact(pooled, clock, "1")).contained, "the grant shows in the facts"
+
+
+async def test_an_event_that_states_the_basis_does_not_vouch_for_a_read_that_differs(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    """A change was missed, so REST differs from the basis; an event then states the
+    basis. The read and the event disagree, so the read publishes nothing."""
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _watched(audience, world)
+    await audience.tick([world.guild])
+    await audience.settle()
+    old = list(world.server.channels[0]["permission_overwrites"])
+    world.server.channels[0]["permission_overwrites"] = [
+        *old,
+        fake.rest_overwrite(fake.OUTSIDER, member=True, allow=fake.VIEW_BIT),
+    ]  # missed by the gateway
+
+    gate = _gate(world.server)
+    clock.now += timedelta(seconds=300)
+    await audience.tick([world.guild])
+    await _eventually(lambda: _members_read(world, 2))
+    state.parsers["CHANNEL_UPDATE"](
+        _raw_channel(world.server, 0, permission_overwrites=old, topic="a new topic")
+    )  # equals the basis
+    with capture_logs() as logs:
+        gate.set()
+        await audience.settle()
+    assert _outcomes(logs) == ["discord.audience.read_crossed"]
+
+    world.server.channels[0]["permission_overwrites"] = old
+    assert await audience.reconcile(world.guild)
+
+
+async def test_many_harmless_events_in_every_read_cannot_keep_a_server_without_a_basis_unknown(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _watched(audience, world)
+    gate = _gate(world.server)
+    await audience.tick([world.guild])  # no basis: nothing has been published
+    await _eventually(lambda: _members_read(world, 1))
+    for n in range(200):
+        state.parsers["GUILD_MEMBER_UPDATE"]({**_raw_member(fake.OUTSIDER), "nick": f"nick {n}"})
+    with capture_logs() as logs:
+        gate.set()
+        await audience.settle()
+    assert _outcomes(logs)[0] == "discord.audience.published"
+    assert "discord.audience.read_crossed" not in _outcomes(logs)
+    assert (await _fact(pooled, clock, "1")).known
+    assert audience._basis, "the first read set the basis"  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("last_matches", "outcome"), [(True, "published"), (False, "read_crossed")]
+)
+async def test_only_the_last_event_per_entity_decides_whether_a_read_stands(
+    pooled: async_sessionmaker[AsyncSession], last_matches: bool, outcome: str
+) -> None:
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _watched(audience, world)
+    await audience.tick([world.guild])
+    await audience.settle()
+    gained, same = _raw_member(fake.OUTSIDER, fake.FRIEND), _raw_member(fake.OUTSIDER)
+
+    gate = _gate(world.server)
+    clock.now += timedelta(seconds=300)
+    await audience.tick([world.guild])
+    await _eventually(lambda: _members_read(world, 2))
+    # The read saw the outsider with no role.
+    for data in [gained, same] if last_matches else [same, gained]:
+        state.parsers["GUILD_MEMBER_UPDATE"](data)
+    with capture_logs() as logs:
+        gate.set()
+        await audience.settle()
+    assert _outcomes(logs)[0] == f"discord.audience.{outcome}"
+
+
+async def test_an_event_that_is_not_an_update_blocks_the_read_that_is_running(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _watched(audience, world)
+    await audience.tick([world.guild])
+    await audience.settle()
+
+    gate = _gate(world.server)
+    clock.now += timedelta(seconds=300)
+    await audience.tick([world.guild])
+    await _eventually(lambda: _members_read(world, 2))
+    state.parsers["GUILD_MEMBER_UPDATE"](_raw_member(fake.OUTSIDER))  # equals the read
+    state.parsers["GUILD_MEMBER_ADD"](_raw_member(fake.OUTSIDER + 1))
+    with capture_logs() as logs:
+        gate.set()
+        await audience.settle()
+    assert _outcomes(logs)[0] == "discord.audience.read_crossed"

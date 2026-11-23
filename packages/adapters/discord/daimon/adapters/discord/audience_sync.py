@@ -21,7 +21,9 @@ as the comparison basis across a withdrawal, so harmless events cannot keep a se
 unknown. A real event is folded into the basis. Each change also advances the server's
 change count (and a disconnect the epoch). A reconcile whose read was crossed by a change
 publishes nothing, unless every event that came during the read states what the read
-itself saw. The count is checked again inside the publishing transaction, after its last
+itself saw. Every update event of a read is recorded (the last per entity), also one that
+changes nothing against the basis: the read may have fetched older data. Any other change
+blocks the read. The check is made again inside the publishing transaction, after its last
 await before the commit. Between a disconnect and the next ready or resume nothing is
 read or published. Thread events only ask for a reconcile, since a thread's facts come
 from its parent's.
@@ -42,7 +44,7 @@ import contextlib
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -109,8 +111,37 @@ AUDIENCE_EVENTS = frozenset(
 
 _Roles = tuple[tuple[str, ...], tuple[str, ...]]
 _Event = tuple[str, Mapping[str, Any]]
-#: Events kept per read to compare with it; more than this always cross it.
-MAX_LATE_EVENTS = 64
+_Key = tuple[str, str]
+#: The events that state an entity's whole audience input, and so can be compared with a read.
+UPDATE_EVENTS = frozenset(
+    {"GUILD_UPDATE", "GUILD_MEMBER_UPDATE", "GUILD_ROLE_UPDATE", "CHANNEL_UPDATE"}
+)
+#: Entities one read may record; past this the read is crossed (a safety bound only).
+MAX_SEEN_KEYS = 10_000
+
+
+@dataclass
+class _Seen:
+    """What the raw events said while one read ran."""
+
+    events: dict[_Key, _Event] = field(default_factory=dict[_Key, _Event])
+    """The last payload of each update event per (kind, entity)."""
+    blocked: bool = False
+    """Something that cannot be compared came: this read never publishes."""
+
+
+def _key(event: str, data: Mapping[str, Any]) -> _Key | None:
+    """The entity an update event is about, or None if its payload does not say."""
+    raw: object
+    if event == "GUILD_MEMBER_UPDATE":
+        user: object = data.get("user")
+        raw = cast("dict[str, object]", user).get("id") if isinstance(user, dict) else None
+    elif event == "GUILD_ROLE_UPDATE":
+        role: object = data.get("role")
+        raw = cast("dict[str, object]", role).get("id") if isinstance(role, dict) else None
+    else:  # GUILD_UPDATE, CHANNEL_UPDATE
+        raw = data.get("id")
+    return None if raw is None else (event, str(raw))
 
 
 def _utcnow() -> datetime:
@@ -292,8 +323,8 @@ class AudienceSync:
         self._published: dict[uuid.UUID, _Published] = {}
         # What each server's newest published read said, kept after a withdrawal.
         self._basis: dict[uuid.UUID, _Basis] = {}
-        # Per server, each change since its read began: (count, the raw event or None).
-        self._late: dict[uuid.UUID, list[tuple[int, _Event | None]]] = {}
+        # Per server, what the raw events said since its current read began.
+        self._seen: dict[uuid.UUID, _Seen] = {}
         # Servers with internal roles at the last pass: events reconcile only these.
         self._tracked: set[uuid.UUID] = set()
         self._slots: dict[uuid.UUID, _Slot] = {}
@@ -318,6 +349,7 @@ class AudienceSync:
         is the cached server, if any; without it the facts are still withdrawn, and the
         next tick reads."""
         tenant_id = tenant_of(guild_id)
+        benign = self._note(tenant_id, event, data)
         basis = self._basis.get(tenant_id)
         if basis is not None:
             now = self._clock()
@@ -325,7 +357,22 @@ class AudienceSync:
                 return
             if not basis.apply(event, data, now):
                 del self._basis[tenant_id]
-        self._changed(tenant_id, guild, (event, data))
+        self._changed(tenant_id, guild, benign=benign)
+
+    def _note(self, tenant_id: uuid.UUID, event: str, data: Mapping[str, Any]) -> bool:
+        """Record an event for the read that is running, even one that changes nothing
+        against the basis: the read may have seen older data. Whether the event can be
+        compared with a read; if not, that read is blocked."""
+        key = _key(event, data) if event in UPDATE_EVENTS else None
+        slot = self._slots.get(tenant_id)
+        if slot is None or not slot.reading:
+            return key is not None
+        seen = self._seen.setdefault(tenant_id, _Seen())
+        if key is None or (key not in seen.events and len(seen.events) >= MAX_SEEN_KEYS):
+            seen.blocked = True
+            return False
+        seen.events[key] = (event, data)
+        return True
 
     def refresh(self, guild: discord.Guild) -> None:
         """A thread was created or changed: reconcile soon, without withdrawing the facts.
@@ -456,9 +503,9 @@ class AudienceSync:
     # --- the scheduler ----------------------------------------------------------------
 
     def _changed(
-        self, tenant_id: uuid.UUID, guild: discord.Guild | None, event: _Event | None = None
+        self, tenant_id: uuid.UUID, guild: discord.Guild | None, *, benign: bool = False
     ) -> None:
-        self._invalidate(tenant_id, event)
+        self._invalidate(tenant_id, benign=benign)
         if guild is not None and tenant_id in self._tracked:
             self._request(guild, fresh=True, delay=self._debounce_s)
 
@@ -507,7 +554,7 @@ class AudienceSync:
         async with self._reads:
             tenant_id = tenant_of(slot.guild.id)
             slot.read_epoch, slot.read_changes = self._epoch, self._changes[tenant_id]
-            self._late.pop(tenant_id, None)
+            self._seen[tenant_id] = _Seen()
             slot.reading = True
             slot.published = await self._reconcile_once(
                 slot.guild, epoch=slot.read_epoch, changes=slot.read_changes
@@ -555,19 +602,18 @@ class AudienceSync:
         self, tenant_id: uuid.UUID, epoch: int, changes: int, fresh: _Basis | None = None
     ) -> bool:
         """No disconnect and no change since the read began. With `fresh` (the read's own
-        inputs), a change that is a raw event stating what the read saw does not count."""
+        inputs) the count does not decide: the read stands if nothing it cannot compare
+        came and every update event it saw (the last per entity, changing anything or not)
+        states what the read saw."""
         if not self._connected or epoch != self._epoch:
             return False
-        count = self._changes[tenant_id]
-        if changes == count:
-            return True
         if fresh is None:
-            return False
-        late = [event for n, event in self._late.get(tenant_id, ()) if n > changes]
-        if len(late) != count - changes:
+            return changes == self._changes[tenant_id]
+        seen = self._seen.get(tenant_id)
+        if seen is None or seen.blocked:
             return False
         now = self._clock()
-        return all(e is not None and fresh.same(e[0], e[1], now) for e in late)
+        return all(fresh.same(e, d, now) for e, d in seen.events.values())
 
     async def _publish(
         self,
@@ -671,15 +717,14 @@ class AudienceSync:
         log.warning("discord.audience.publish_stale", tenant_id=str(tenant_id), why=why)
         return False
 
-    def _invalidate(self, tenant_id: uuid.UUID, event: _Event | None = None) -> None:
-        """A change: no renewal and every room unknown; a read that began before it
-        publishes only if `event` states what that read saw."""
+    def _invalidate(self, tenant_id: uuid.UUID, *, benign: bool = False) -> None:
+        """A change: no renewal and every room unknown. A running read is blocked, unless
+        the change is an update event (`benign`), which `_note` has recorded to compare
+        with what the read saw."""
         self._changes[tenant_id] += 1
         slot = self._slots.get(tenant_id)
-        if slot is not None and slot.reading:
-            late = self._late.setdefault(tenant_id, [])
-            keep = event if len(late) < MAX_LATE_EVENTS else None
-            late.append((self._changes[tenant_id], keep))
+        if slot is not None and slot.reading and not benign:
+            self._seen.setdefault(tenant_id, _Seen()).blocked = True
         self._published.pop(tenant_id, None)
         self._unknown_due.add(tenant_id)
         self._start_writer(tenant_id)
