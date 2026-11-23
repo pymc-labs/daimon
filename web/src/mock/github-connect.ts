@@ -2,7 +2,7 @@
 //   /oauth/github/connect/<name>       redirects to the confirm step for editor and picker names
 //   /oauth/github/confirm?state=<name> shows the view; add &cancel=1 to cancel
 //   /oauth/github/callback?code=x&state=<name>, /oauth/github/setup?state=<name>
-// Names: editor editor-requested editor-error editor-fail picker picker-agent picker-requested install pending
+// Names: editor editor-follow editor-following editor-requested editor-error editor-fail picker picker-agent picker-requested install pending
 // no-repos expired error error-retry transient cancelled already already-agent saved done done-agent done-other.
 import { http, HttpResponse } from "msw"
 
@@ -51,7 +51,7 @@ const editor = (extra: Partial<Extract<ConnectView, { kind: "agent_editor" }>> =
     installations: INSTALLATIONS, grants: GRANTS, visible_repos: visible, available: visible.filter((r) => !held.has(r.id)),
     repairable_repo_ids: [shared.id], needs_write: { [shared.id]: true }, requested_repo_id: null, working_repo_id: mmm.id,
     past_cap_repo_ids: [GRANTS[4]!.repo_id], owner_order: ["acme", "maya-l", "northwind"], owner_limit: 12, github_user_id: 110,
-    pending_installation: null, selection_error: null, ...extra,
+    pending_installation: null, selection_error: null, follow_offers: [], following: false, ...extra,
   }
 }
 const picker = (extra: Partial<Extract<ConnectView, { kind: "workspace_picker" }>> = {}, state = "picker"): ConnectView => ({
@@ -61,8 +61,20 @@ const picker = (extra: Partial<Extract<ConnectView, { kind: "workspace_picker" }
   needs_write: { [shared.id]: true, [pricing.id]: false }, requested_repo_id: null, selection_error: null, ...extra,
 })
 
+// An agent that works in one whole org only, so the "new repos go to the agent too" toggle can show:
+// it appears once the agent holds every repo of Orbit Data (add the last one to see it).
+const orbit = [repo("orbit-data", 16, "etl"), repo("orbit-data", 16, "dashboards", { private: true }), repo("orbit-data", 16, "forecast-notebooks")]
+const orbitInstall = install(16, "orbit-data", orbit, { repository_selection: "all" })
+const followEditor = (extra: Partial<Extract<ConnectView, { kind: "agent_editor" }>>, state: string): ConnectView => editor({
+  installations: [orbitInstall], grants: [grant(orbit[0]!, { is_working_repo: true }), grant(orbit[1]!)], visible_repos: orbit, available: [orbit[2]!],
+  repairable_repo_ids: [], needs_write: {}, working_repo_id: orbit[0]!.id, past_cap_repo_ids: [], owner_order: ["orbit-data"],
+  follow_offers: [{ installation_id: 16, owner: "orbit-data", repo_ids: orbit.map((r) => r.id) }], ...extra,
+}, state)
+
 const SCENARIOS: Record<string, () => ConnectView> = {
   editor: () => editor(),
+  "editor-follow": () => followEditor({}, "editor-follow"),
+  "editor-following": () => followEditor({ follow_offers: [], following: true }, "editor-following"),
   "editor-requested": () => editor({ requested_repo_id: acme[7]!.id, pending_installation: { found: true, account_login: "Orbit Data" } }, "editor-requested"),
   "editor-error": () => editor({ selection_error: "Selection could not be verified." }, "editor-error"),
   "editor-fail": () => editor({}, "editor-fail"),
@@ -84,8 +96,8 @@ const SCENARIOS: Record<string, () => ConnectView> = {
   "done-agent": () => ({ kind: "done", count: 2, requester_label: "Priya Raman", same_person: true, agent_name: "MMM Analyst", back }),
   "done-other": () => ({ kind: "done", count: 4, requester_label: "Priya Raman", same_person: false, agent_name: null, back: null }),
 }
-const saved = (grants: AgentRepo[]): ConnectView => ({
-  kind: "saved_agent", agent_name: "MMM Analyst", grants, visible_repo_ids: INSTALLATIONS.flatMap((i) => i.repos).map((r) => r.id), installations: INSTALLATIONS, back,
+const saved = (grants: AgentRepo[], following = false): ConnectView => ({
+  kind: "saved_agent", agent_name: "MMM Analyst", grants, visible_repo_ids: INSTALLATIONS.flatMap((i) => i.repos).map((r) => r.id), installations: INSTALLATIONS, back, following,
 })
 
 const page = (view: ConnectView): Outcome => ({ kind: "page", view })
@@ -98,6 +110,10 @@ function save(body: Selection): Outcome {
   if (body.state === "editor-fail" && !failed) {
     failed = true
     return page({ kind: "transient_error", message: "GitHub did not answer", status: 502, retry_url: "/oauth/github/confirm", retry_selection: body })
+  }
+  if (body.state.startsWith("editor-follow")) {
+    const adds = orbit.filter((r) => body.repo.includes(String(r.id))).map((r) => grant(r))
+    return page(saved([grant(orbit[0]!, { is_working_repo: true }), grant(orbit[1]!), ...adds], !!body.follow_org?.length))
   }
   if (body.state.startsWith("picker")) return scenario(body.state.endsWith("agent") ? "done-agent" : "done")
   const view = editor() as Extract<ConnectView, { kind: "agent_editor" }>

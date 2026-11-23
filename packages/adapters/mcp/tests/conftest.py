@@ -39,12 +39,12 @@ def org_proof_on_github(monkeypatch: pytest.MonkeyPatch) -> None:
     """The connect page proves the signer may hand over a whole org before offering to follow
     it (GitHub membership, else the installation's listing). The scripted GitHubs of the route
     tests serve neither; the follow tests set their own."""
-    from daimon.adapters.mcp import oauth_github
+    from daimon.core import github_connect_flow
 
     async def proved(*_args: object, **_kwargs: object) -> str:
         return "org_admin"
 
-    monkeypatch.setattr(oauth_github, "_org_proof", proved)
+    monkeypatch.setattr(github_connect_flow, "org_proof", proved)
 
 
 @pytest_asyncio.fixture(autouse=True)

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { plural } from "@/lib/format"
 import { Card } from "../Card"
 import { connectApi, stateOf } from "./api"
-import { Actions, BackButton, Err, GithubMark, Mark, OwnerAvatar, Title } from "./parts"
+import { Actions, BackButton, Err, FollowNote, GithubMark, Mark, OwnerAvatar, Title } from "./parts"
 import type { AgentRepo, AlreadyConnectedView, CancelledView, ConnectInstallation, DoneView, ErrorView, ExpiredView, InstallView, NoReposView, Outcome, PendingView, SavedAgentView, Step, TransientErrorView } from "./types"
 
 const repos = (n: number, agent: string | null) => `${plural(n, "repo")} connected${agent ? ` to ${agent} only` : ""}`
@@ -143,6 +143,7 @@ export function SavedAgentPage({ view }: { view: SavedAgentView }) {
     <Card mark={<Mark icon={CircleCheck} tone="ok" />}>
       <Title title="Repos saved" sub={repos(view.grants.length, view.agent_name)} />
       <Owners grants={view.grants} visible={new Set(view.visible_repo_ids)} installations={view.installations} />
+      {view.following && <FollowNote agent={view.agent_name} />}
       <BackButton back={view.back} />
     </Card>
   )

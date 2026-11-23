@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils"
 import { Pill } from "@/modules/agents/bits"
 import { Card } from "../Card"
 import { connectApi } from "./api"
-import { Actions, ChoiceRow, Err, OwnerAvatar, WideHead } from "./parts"
+import { Actions, ChoiceRow, Err, FollowNote, OwnerAvatar, WideHead } from "./parts"
 import { RepoList } from "./Picker"
 import type { AgentEditorView, AgentRepo, Step } from "./types"
 
@@ -34,6 +34,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
   // The ticks of the open "Add repos" dialog; the requested repo starts ticked and opens it.
   const [draft, setDraft] = useState<Ids | null>(() => (view.requested_repo_id == null ? null : new Set([view.requested_repo_id])))
   const [choosing, setChoosing] = useState(false)
+  const [follow, setFollow] = useState(false)
 
   const rows: Row[] = [
     ...view.grants.map((g): Row => ({ id: g.repo_id, name: g.full_name, owner: ownerOf(g.full_name), installation: g.installation_id, grant: g, visible: visible.has(g.repo_id), pastCap: pastCap.has(g.repo_id) })),
@@ -45,7 +46,11 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
   const accounts = new Set(kept.map((r) => (r.installation ? `i:${r.installation}` : `o:${r.owner.toLowerCase()}`)))
   const over = accounts.size - view.owner_limit
   const workChanged = working !== view.working_repo_id
-  const changed = adds.size + fixes.size + removed.size > 0 || workChanged
+  // The core view offers an org only when the person may hand it over; it applies once the agent would hold every repo of it and none from another org.
+  const offer = kept.length === 0 ? undefined : view.follow_offers.find((o) =>
+    kept.every((r) => r.owner.toLowerCase() === o.owner.toLowerCase()) && o.repo_ids.every((id) => kept.some((r) => r.id === id)))
+  const following = follow && offer !== undefined
+  const changed = adds.size + fixes.size + removed.size > 0 || workChanged || following
   const current = rows.find((r) => r.id === working)
 
   const drop = (id: number) => { if (working === id) { setWorking(null); if (id !== view.working_repo_id) setExplicit(true) } }
@@ -54,7 +59,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
     if (r.grant) setRemoved(flip(removed, r.id, true)); else setAdds(flip(adds, r.id, false))
   }
   const undo = (id: number) => { setRemoved(flip(removed, id, false)); if (!explicit && id === view.working_repo_id) setWorking(id) }
-  const discard = () => { setAdds(new Set()); setFixes(new Set()); setRemoved(new Set()); setWorking(view.working_repo_id); setExplicit(false) }
+  const discard = () => { setFollow(false); setAdds(new Set()); setFixes(new Set()); setRemoved(new Set()); setWorking(view.working_repo_id); setExplicit(false) }
   const confirmAdds = (next: Ids) => {
     setAdds(next)
     if (working != null && !view.grants.some((g) => g.repo_id === working) && !next.has(working)) { setWorking(null); setExplicit(true) }
@@ -67,6 +72,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
     repo: [...adds, ...fixes].map(String), remove: [...removed].map(String), access: ["write"],
     working: [keepWorking ? "keep" : working == null ? "clear" : String(working)],
     repo_access: Object.fromEntries([...fixes].map((id) => [String(id), ["write"]])),
+    ...(following ? { follow_org: [String(offer.installation_id)] } : {}),
   }))
 
   const groups = view.installations.map((item) => ({
@@ -123,12 +129,22 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
         })}
       </div>
 
+      {offer && (
+        <div className="mt-4">
+          <ChoiceRow checked={follow} onChange={() => setFollow(!follow)}>
+            <span className="min-w-0 break-words">New {offer.owner} repos go to {view.agent_name} too.</span>
+          </ChoiceRow>
+        </div>
+      )}
+      {view.following && <FollowNote agent={view.agent_name} />}
+
       <div className="mt-6 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
         {changed ? (
           <>
             {adds.size > 0 && <Pill>+{adds.size} to add</Pill>}
             {fixes.size > 0 && <Pill>{fixes.size} to update</Pill>}
             {removed.size > 0 && <Pill className="text-destructive">-{removed.size} to remove</Pill>}
+            {following && <Pill>New {offer.owner} repos</Pill>}
             {workChanged && <Pill><Star className="mr-1 size-3 fill-current" />{current ? repoName(current.name) : "No working repo"}</Pill>}
             <button type="button" className="ml-auto text-xs text-link hover:underline" onClick={discard}>Discard changes</button>
           </>

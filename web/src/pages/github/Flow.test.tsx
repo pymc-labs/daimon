@@ -17,7 +17,7 @@ const editor = {
   state: "st", invitation_hash: "inv", receipt: "rc", snapshot: "sn", snapshot_sig: "ss", visibility: "vi", visibility_sig: "vs",
   installations: [{ id: 7, owner_id: 1, owner_login: "acme", repository_selection: "selected", repos: [a, b, c], owner_type: "Organization", avatar_url: null, state: "active", total: 3, truncated: false, fetch_state: "ok" }],
   grants: [grant(a, true), grant(b)], visible_repos: [a, b, c], available: [c], repairable_repo_ids: [], needs_write: {},
-  requested_repo_id: null, working_repo_id: 1, past_cap_repo_ids: [], owner_order: ["acme"], owner_limit: 12, github_user_id: null, pending_installation: null, selection_error: null,
+  requested_repo_id: null, working_repo_id: 1, past_cap_repo_ids: [], owner_order: ["acme"], owner_limit: 12, github_user_id: null, pending_installation: null, selection_error: null, follow_offers: [], following: false,
 } as unknown as AgentEditorView
 
 afterEach(() => vi.unstubAllGlobals())
@@ -49,6 +49,59 @@ describe("github connect", () => {
       repo: ["3"], remove: ["2"], access: ["write"], working: ["3"], repo_access: {},
     })
   }, 30_000)
+
+  describe("follow the org", () => {
+    // The agent holds alpha and beta; gamma is the rest of the org, so adding it covers the whole org.
+    const offered = { ...editor, follow_offers: [{ installation_id: 7, owner: "acme", repo_ids: [1, 2, 3] }] } as AgentEditorView
+    const toggle = () => screen.queryByRole("checkbox", { name: "New acme repos go to Analyst too." })
+    const addGamma = async () => {
+      await userEvent.click(screen.getByRole("button", { name: "Add repos" }))
+      await userEvent.click(await screen.findByRole("checkbox", { name: /gamma/ }))
+      await userEvent.click(screen.getByRole("button", { name: "Add 1 repo" }))
+    }
+    const saveBody = (f: ReturnType<typeof server>) => JSON.parse(f.mock.calls.find(([p]) => p === "/api/github/connect/save")![1]!.body as string)
+    const routes = (view: AgentEditorView) => ({
+      "GET /api/github/connect/view": () => json({ kind: "page", view }),
+      "POST /api/github/connect/save": () => json({ kind: "page", view: { kind: "done", count: 3, requester_label: "Maya", same_person: true, agent_name: "Analyst", back: null } }),
+    })
+
+    it("shows once the agent would hold the whole org, and hides when a repo is taken off", async () => {
+      server(routes(offered))
+      open("state=st")
+      await screen.findByRole("button", { name: "Remove acme/beta" })
+      expect(toggle()).toBeNull()
+      await addGamma()
+      const box = await screen.findByRole("checkbox", { name: "New acme repos go to Analyst too." })
+      expect(box.className).toContain("min-h-11")
+      await userEvent.click(screen.getByRole("button", { name: "Remove acme/gamma" }))
+      expect(toggle()).toBeNull()
+    })
+
+    it("sends the org with the save only when ticked", async () => {
+      const f = server(routes(offered))
+      open("state=st")
+      await screen.findByRole("button", { name: "Remove acme/beta" })
+      await addGamma()
+      await userEvent.click(await screen.findByRole("checkbox", { name: "New acme repos go to Analyst too." }))
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }))
+      await screen.findByRole("heading", { name: "Repos connected" })
+      expect(saveBody(f).follow_org).toEqual(["7"])
+    })
+
+    it("is not shown when the core view offers nothing, even with the whole org held", async () => {
+      server(routes(editor))
+      open("state=st")
+      await screen.findByRole("button", { name: "Remove acme/beta" })
+      await addGamma()
+      expect(toggle()).toBeNull()
+    })
+
+    it("says so when the agent already follows its org", async () => {
+      server(routes({ ...editor, following: true } as AgentEditorView))
+      open("state=st")
+      expect(await screen.findByText("Analyst gets new repos added to its org on its own.")).toBeInTheDocument()
+    })
+  })
 
   it("shows a status view and redirects when the step says so", async () => {
     server({ "GET /api/github/connect/view": () => json({ kind: "page", view: { kind: "expired", requester_label: "Priya" } }) })

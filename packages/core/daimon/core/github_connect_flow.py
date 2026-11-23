@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Literal, cast
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from anthropic import APIError, AsyncAnthropic
@@ -29,11 +29,14 @@ from daimon.core.agent_ownership import owns_agent
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.features.service import set_agent_feature
 from daimon.core.github_app_auth import (
     AppInstallationDetails,
     build_app_jwt,
     get_app_installation_details,
     installation_supports_write,
+    list_installation_repository_details,
+    mint_installation_listing_token,
 )
 from daimon.core.github_connect_admin import TeamsOwnerLookup, attest_native_admin
 from daimon.core.github_connect_views import (
@@ -57,6 +60,7 @@ from daimon.core.github_connect_views import (
     ConnectView,
     DoneView,
     ExpiredView,
+    FollowOffer,
     InstallView,
     NoReposView,
     PendingInstallation,
@@ -64,6 +68,8 @@ from daimon.core.github_connect_views import (
     SavedAgentView,
     agent_editor_view,
     confirm_url,
+    confirmed_follow_offer,
+    follow_offers,
     install_url,
     receipt_signature,
     redact_hidden_grants,
@@ -81,6 +87,8 @@ from daimon.core.stores import github_access, github_app_installations, github_c
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, Role
 from daimon.core.stores.github_access import list_agent_repos
+from daimon.core.stores.github_follow_org import FEATURE_KEY as FOLLOW_ORG_FEATURE
+from daimon.core.stores.github_follow_org import agent_follows
 from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
 from daimon.core.stores.github_request_actions import (
     finish_confirmed_requests,
@@ -247,6 +255,55 @@ async def has_pending_installation_request(
     if len(matching) == 1 and matching[0].account and matching[0].account.login:
         return PendingInstallation(True, matching[0].account.login)
     return PendingInstallation(bool(matching))
+
+
+type OrgProof = Literal["org_admin", "full_listing"]
+
+
+async def _org_membership(
+    client: httpx.AsyncClient, token: str, org: str
+) -> Literal["admin", "other", "unknown"]:
+    """The signer's standing in `org`, asked live: an active admin, anything else GitHub says
+    about a member, or unknown when GitHub refuses the call. An App without the org members
+    permission is refused with 403 ("Resource not accessible by integration"); a 404 may be
+    that or a person who is no member, so both leave the answer unknown."""
+    response = await client.get(
+        f"https://api.github.com/user/memberships/orgs/{quote(org, safe='')}",
+        headers=_github_headers(token),
+    )
+    if response.status_code in (403, 404):
+        return "unknown"
+    response.raise_for_status()
+    body = TypeAdapter(dict[str, object]).validate_python(response.json())
+    return "admin" if body.get("state") == "active" and body.get("role") == "admin" else "other"
+
+
+async def org_proof(
+    client: httpx.AsyncClient, token: str, offer: FollowOffer, *, app_jwt: str
+) -> OrgProof | None:
+    """Which proof shows the signer may hand over the whole org, or None.
+
+    First proof: GitHub says they are an active admin of the org. Second, when GitHub will
+    not say: the repos GitHub shows the signer are every repo the App's installation lists
+    (the listing the agent will follow), and neither listing was cut short. Someone who sees
+    every repo of the org passes; a client's admin who sees one of them does not. The offer's
+    repos are the signer's complete listing: an installation whose listing was cut short or
+    failed is never offered.
+    """
+    standing = await _org_membership(client, token, offer.owner)
+    if standing == "admin":
+        return "org_admin"
+    if standing == "other":
+        return None
+    listing_token = await mint_installation_listing_token(
+        client, jwt=app_jwt, installation_id=offer.installation_id
+    )
+    # `list_installation_repository_details` raises on any page it cannot complete.
+    everything = await list_installation_repository_details(client, token=listing_token)
+    ids = {repo.repo_id for repo in everything}
+    if None in ids or not ids <= set(offer.repo_ids):
+        return None
+    return "full_listing"
 
 
 def _page(view: ConnectView, *cookies: ConnectCookie) -> ConnectPage:
@@ -436,6 +493,21 @@ class GitHubConnectFlow:
             account_id=invitation.requester_account_id,
         )
 
+    async def _proved_offers(self, token: str, offers: Sequence[FollowOffer]) -> list[FollowOffer]:
+        """The offers the signer can prove an org for, so nobody is shown a box that would
+        refuse them. A GitHub error hides the offer; the save asks again."""
+        kept: list[FollowOffer] = []
+        if offers:
+            app_jwt = build_app_jwt(self._private_key, self._app_id, now=int(time.time()))
+            async with self._factory() as client:
+                for offer in offers:
+                    try:
+                        if await org_proof(client, token, offer, app_jwt=app_jwt) is not None:
+                            kept.append(offer)
+                    except (httpx.HTTPError, ValueError):
+                        continue
+        return kept
+
     async def _successful_view(
         self,
         state: str,
@@ -475,6 +547,18 @@ class GitHubConnectFlow:
                 if invitation.agent_id is not None
                 else []
             )
+            following = (
+                invitation.agent_id is not None
+                and invitation.agent_ma_id is not None
+                and requester is not None
+                and await agent_follows(
+                    session,
+                    self._settings,
+                    tenant_id=invitation.tenant_id,
+                    platform=requester.platform,
+                    ma_agent_id=invitation.agent_ma_id,
+                )
+            )
         if invitation.agent_id is not None:
             return SavedAgentView(
                 agent_name=invitation.agent_name or "Agent",
@@ -483,6 +567,7 @@ class GitHubConnectFlow:
                 back_to_chat=_chat_return(requester),
                 installations=list(installations),
                 back=self._back(invitation, requester),
+                following=following,
             )
         return AlreadyConnectedView(
             count=invitation.connected_repo_count,
@@ -1098,6 +1183,20 @@ class GitHubConnectFlow:
             snapshot = await github_connect.agent_repo_snapshot(
                 session, tenant_id=invitation.tenant_id, agent_id=agent_id
             )
+            following = invitation.agent_ma_id is not None and await agent_follows(
+                session,
+                self._settings,
+                tenant_id=invitation.tenant_id,
+                platform=requester.platform,
+                ma_agent_id=invitation.agent_ma_id,
+            )
+        # Following hands the agent repos on its own, so only a workspace admin is offered it.
+        offers = follow_offers(
+            installations,
+            grants,
+            may_follow=invitation.agent_ma_id is not None and current_requester.role is Role.ADMIN,
+            following=following,
+        )
         if selection is None:
             pending_installation = PendingInstallation(False)
             if not any(repo.usable for item in installations for repo in item.repos) and all(
@@ -1131,6 +1230,8 @@ class GitHubConnectFlow:
                     requested_repo=invitation.requested_repo,
                     pending_installation=pending_installation,
                     github_user_id=github_user_id,
+                    follow=await self._proved_offers(token, offers),
+                    following=following,
                 )
             )
         posted_snapshot = selection.snapshot
@@ -1187,7 +1288,6 @@ class GitHubConnectFlow:
             str(repo_id) for repo_id in repairable
         }:
             return _page(unverified(retry_confirm_url))
-        working_before = next((repo.repo_id for repo in grants if repo.is_working_repo), None)
         working_choice = working_values[0]
         if working_choice not in ("keep", "clear"):
             try:
@@ -1212,7 +1312,30 @@ class GitHubConnectFlow:
             )
         ):
             return _error(_UNVERIFIED_ACCESS, 403, retry_confirm_url)
-        if not selected_ids and not removed_ids and working_choice == "keep":
+        follow_id: int | None = None
+        chosen: FollowOffer | None = None
+        if selection.follow_org:
+            try:
+                follow_id = int(selection.follow_org[0])
+            except ValueError:
+                follow_id = None
+            if len(selection.follow_org) != 1 or follow_id is None:
+                return _page(unverified(retry_confirm_url))
+            held_after = (set(old) - set(removed_ids)) | set(selected_ids)
+            chosen = confirmed_follow_offer(
+                offers,
+                installation_id=follow_id,
+                held_after=held_after,
+                installations_after={
+                    repo.installation_id
+                    for repo in grants
+                    if repo.repo_id in held_after and repo.installation_id is not None
+                }
+                | {visible[repo_id].installation_id for repo_id in selected_ids},
+            )
+            if chosen is None:
+                return _error("Give the agent every repo of the org first.", 400, retry_confirm_url)
+        if not selected_ids and not removed_ids and working_choice == "keep" and follow_id is None:
             return _page(
                 agent_editor_view(
                     root=root,
@@ -1230,6 +1353,8 @@ class GitHubConnectFlow:
                     needed=needed,
                     requested_repo=invitation.requested_repo,
                     selection_error="Choose a change to save.",
+                    follow=await self._proved_offers(token, offers),
+                    following=following,
                 )
             )
         if posted_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
@@ -1291,13 +1416,33 @@ class GitHubConnectFlow:
             # transaction below, so a removal in between refuses the save.
             async with self._sessionmaker() as session:
                 acts_as_owner = await self._requester_owns_agent(session, invitation, live)
-            if not acts_as_owner:
+            # Following hands the agent every repo of the org, so an owner proves
+            # they are still an admin too.
+            if not acts_as_owner or follow_id is not None:
                 try:
                     still_admin = await self._attest(requester)
                 except AdminAttestationUnavailable:
                     return transient_error(ADMIN_RETRY, 503)
                 if not still_admin:
-                    return _error(_NO_LONGER_MANAGES, 403, retry_confirm_url)
+                    return _error(
+                        "Only an admin can turn this on." if acts_as_owner else _NO_LONGER_MANAGES,
+                        403,
+                        retry_confirm_url,
+                    )
+        follow_proof: OrgProof | None = None
+        if chosen is not None:
+            try:
+                async with self._factory() as client:
+                    follow_proof = await org_proof(client, token, chosen, app_jwt=app_jwt)
+            except (httpx.HTTPError, ValueError):
+                return transient_error(_UNREACHABLE, 502)
+            if follow_proof is None:
+                return _error(
+                    f"Only someone who sees every repo of {chosen.owner}, or an admin of "
+                    f"{chosen.owner} on GitHub, can turn this on.",
+                    403,
+                    retry_confirm_url,
+                )
         save_stage = "check_authority"
         try:
             async with self._sessionmaker.begin() as session:
@@ -1316,6 +1461,10 @@ class GitHubConnectFlow:
                 )
                 if not manages:
                     return _error(_NO_LONGER_MANAGES, 403)
+                if follow_id is not None and (
+                    transaction_requester is None or transaction_requester.role is not Role.ADMIN
+                ):
+                    return _error("Ask an admin to turn this on.", 403)
                 save_stage = "lock_requests"
                 prelocked_request_ids = await lock_confirmed_request_repos(
                     session,
@@ -1389,7 +1538,9 @@ class GitHubConnectFlow:
                             account_id=invitation.requester_account_id,
                             agent_name=invitation.agent_name,
                         )
-                    elif repos and (working_before is None or working_before in removed_ids):
+                    elif repos and not old:
+                        # Only an agent's first repos pick a working repo; later saves keep
+                        # its choice, none included, so none is ever picked by chance.
                         await github_access.set_working_repo(
                             session,
                             tenant_id=invitation.tenant_id,
@@ -1410,6 +1561,32 @@ class GitHubConnectFlow:
                             await github_connect.queue_connect_followup(
                                 session, invitation=invitation, repos=repos
                             )
+                    if follow_id is not None and invitation.agent_ma_id is not None:
+                        save_stage = "follow_org"
+                        await set_agent_feature(
+                            session,
+                            self._settings,
+                            tenant_id=invitation.tenant_id,
+                            platform=requester.platform,
+                            ma_agent_id=invitation.agent_ma_id,
+                            key=FOLLOW_ORG_FEATURE,
+                            value="on",
+                            account_id=invitation.requester_account_id,
+                            surface="web",
+                        )
+                        _log.info(
+                            "github_connect.follow_turned_on",
+                            extra={"proof": follow_proof, "installation_id": follow_id},
+                        )
+                        # Read the org now, so the gap is filled without waiting an hour.
+                        await enqueue_reconciliation(
+                            session,
+                            installation_id=follow_id,
+                            delivery_id=f"follow:{uuid.uuid4()}",
+                            event="follow",
+                            deleted=False,
+                            now=datetime.now(UTC),
+                        )
                     save_stage = "audit"
                     await append_event(
                         session,
@@ -1421,7 +1598,8 @@ class GitHubConnectFlow:
                         tool_name="github_connect",
                         operation="github_connect",
                         outcome="allowed",
-                        reason="agent repos saved",
+                        reason="agent repos saved"
+                        + (f"; followed the org, proved by {follow_proof}" if follow_proof else ""),
                         github_repo_ids=selected_ids + removed_ids,
                     )
         except (

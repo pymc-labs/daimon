@@ -23,12 +23,17 @@ export type AgentRepo = {
   is_working_repo: boolean; grant_version: number; authorization_version: number; installation_id: number | null
 }
 
+/** An offer to give the agent every new repo of one org. Allowed only once the agent would hold all of `repo_ids` and nothing from another org. */
+export type FollowOffer = { installation_id: number; owner: string; repo_ids: number[] }
+
 /** One save, as the editor or picker posts it; the strings come back verbatim from the view. */
 export type Selection = {
   state: string; invitation: string; receipt: string
   snapshot: string; snapshot_sig: string; visibility: string; visibility_sig: string
   repo: string[]; remove: string[]; access: string[]; working: string[]
   repo_access: Record<string, string[]>
+  /** The installation of an org offered in `follow_offers`; set to turn on "new repos go to the agent". */
+  follow_org?: string[]
 }
 
 export type ErrorView = { kind: "error"; message: string; status: number; retry_url: string | null; action: string | null }
@@ -58,6 +63,10 @@ export type AgentEditorView = {
   owner_order: string[]; owner_limit: number; github_user_id: number | null
   pending_installation: { found: boolean; account_login: string | null } | null
   selection_error: string | null
+  /** Orgs the person may hand over whole; empty when the core rule does not allow it. */
+  follow_offers: FollowOffer[]
+  /** The agent already gets the new repos of its org. */
+  following: boolean
 }
 export type WorkspacePickerView = {
   kind: "workspace_picker"; agent_name: string | null; workspace_label: string; platform: string
@@ -68,7 +77,7 @@ export type WorkspacePickerView = {
 }
 export type SavedAgentView = {
   kind: "saved_agent"; agent_name: string; grants: AgentRepo[]; visible_repo_ids: number[]
-  installations: ConnectInstallation[]; back: Back
+  installations: ConnectInstallation[]; back: Back; following: boolean
 }
 export type DoneView = { kind: "done"; count: number; requester_label: string; same_person: boolean; agent_name: string | null; back: Back }
 

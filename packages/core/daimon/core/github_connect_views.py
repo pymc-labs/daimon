@@ -48,6 +48,7 @@ SELECTION_FIELDS = frozenset(
         "remove",
         "access",
         "working",
+        "follow_org",
     }
 )
 _SCOPED_ACCESS = re.compile(r"access_(\d+)")
@@ -131,6 +132,7 @@ class ConnectSelection(BaseModel):
     remove: _Values = ()
     access: _Values = ()
     working: _Values = ()
+    follow_org: _Values = ()
     repo_access: Annotated[dict[str, _Values], Field(max_length=MAX_CONFIRM_FIELDS)] = Field(
         default_factory=dict[str, tuple[str, ...]]
     )
@@ -143,6 +145,8 @@ class ConnectSelection(BaseModel):
         fields.update({name: list(values) for name, values in lists if values})
         if self.working:
             fields["working"] = list(self.working)
+        if self.follow_org:
+            fields["follow_org"] = list(self.follow_org)
         fields.update({f"access_{key}": list(values) for key, values in self.repo_access.items()})
         return fields
 
@@ -156,6 +160,7 @@ def selection_from_fields(fields: Mapping[str, Sequence[str]]) -> ConnectSelecti
         remove=tuple(fields.get("remove", ())),
         access=tuple(fields.get("access", ())),
         working=tuple(fields.get("working", ())),
+        follow_org=tuple(fields.get("follow_org", ())),
         repo_access={
             match.group(1): tuple(values)
             for name, values in fields.items()
@@ -262,6 +267,18 @@ class NoReposView(_View):
     install_url: str
 
 
+class FollowOffer(_View):
+    """An offer to give the agent every new repo of one org, as the editor may show it.
+
+    `repo_ids` are all the repos of the org the person can see and connect; the offer
+    applies once the agent would hold every one of them and none from another org.
+    """
+
+    installation_id: int
+    owner: str
+    repo_ids: tuple[int, ...]
+
+
 class AgentEditorView(_View):
     """One agent's repos with what can be added, repaired, removed or made working.
 
@@ -301,6 +318,10 @@ class AgentEditorView(_View):
     github_user_id: int | None
     pending_installation: PendingInstallation | None
     selection_error: str | None
+    # Orgs the person has proved they may hand over whole; empty when the offer is not allowed.
+    follow_offers: list[FollowOffer] = Field(default_factory=list[FollowOffer])
+    # The agent already gets the new repos of its org.
+    following: bool = False
 
 
 class WorkspacePickerView(_View):
@@ -337,6 +358,7 @@ class SavedAgentView(_View):
     back_to_chat: ChatReturn | None
     installations: list[ConnectInstallation]
     back: BackLink | None = None
+    following: bool = False
 
 
 class DoneView(_View):
@@ -526,6 +548,67 @@ def install_url(app_slug: str, state: str) -> str:
     return f"https://github.com/apps/{app_slug}/installations/new?{urlencode({'state': state})}"
 
 
+def follow_offers(
+    installations: Sequence[ConnectInstallation],
+    grants: Collection[AgentRepo],
+    *,
+    may_follow: bool,
+    following: bool,
+) -> tuple[FollowOffer, ...]:
+    """The orgs this save may offer to follow: whole-org installations only.
+
+    An agent follows every whole-org installation it works in, so the offer is for an
+    agent whose repos are all in one org. A list GitHub cut short cannot show that the
+    agent holds every repo, so it gets no offer.
+    """
+    if not may_follow or following:
+        return ()
+    held = {repo.installation_id for repo in grants if repo.installation_id is not None}
+    offers: list[FollowOffer] = []
+    for installation in installations:
+        if (
+            installation.repository_selection != "all"
+            or installation.owner_type.lower() != "organization"
+            or installation.state != "active"
+            or installation.fetch_state != "ok"
+            or installation.truncated
+            or held - {installation.id}
+        ):
+            continue
+        ids = sorted(repo.id for repo in installation.repos if repo.usable)
+        if ids:
+            offers.append(
+                FollowOffer(
+                    installation_id=installation.id,
+                    owner=installation.owner_login,
+                    repo_ids=tuple(ids),
+                )
+            )
+    return tuple(offers)
+
+
+def confirmed_follow_offer(
+    offers: Sequence[FollowOffer],
+    *,
+    installation_id: int,
+    held_after: Collection[int],
+    installations_after: Collection[int],
+) -> FollowOffer | None:
+    """The offer the person ticked, if the save leaves the agent holding the whole org.
+
+    `held_after` is the agent's repo ids after the save; `installations_after` the
+    installations those repos sit in.
+    """
+    for offer in offers:
+        if (
+            offer.installation_id == installation_id
+            and set(offer.repo_ids) <= set(held_after)
+            and set(installations_after) <= {installation_id}
+        ):
+            return offer
+    return None
+
+
 def _usable(installations: Sequence[ConnectInstallation]) -> dict[int, ConnectRepo]:
     return {repo.id: repo for item in installations for repo in item.repos if repo.usable}
 
@@ -570,6 +653,8 @@ def agent_editor_view(
     selection_error: str | None = None,
     pending_installation: PendingInstallation | None = None,
     github_user_id: int | None = None,
+    follow: Sequence[FollowOffer] = (),
+    following: bool = False,
 ) -> AgentEditorView:
     """One agent's grants, what the person may add, and the signed form fields."""
     snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
@@ -648,6 +733,8 @@ def agent_editor_view(
         github_user_id=github_user_id,
         pending_installation=pending_installation,
         selection_error=selection_error,
+        follow_offers=list(follow),
+        following=following,
     )
 
 

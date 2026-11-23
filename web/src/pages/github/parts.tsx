@@ -76,6 +76,9 @@ export function ChoiceRow({ checked, disabled, onChange, radio, children }: {
   )
 }
 
+/** The plain line shown once an agent already gets the new repos of its org. */
+export const FollowNote = ({ agent }: { agent: string }) => <p className="mt-4 text-sm text-muted-foreground">{agent} gets new repos added to its org on its own.</p>
+
 const PLATFORM_PLACE: Record<string, string> = { discord: "Server", teams: "Organisation" }
 
 /** The page head of a wide page: the GitHub mark, a title, and where the request came from. */
