@@ -239,3 +239,36 @@ async def test_a_failed_reload_leaves_the_room_facts_alone(
     assert await _usable(db_session_factory), "a failed member reload withdraws nothing"
     gate.set()
     await audience.settle()
+
+
+async def test_a_reload_that_crosses_a_disconnect_reads_nothing_until_the_next_ready(
+    db_clean: None, db_committing_engine: AsyncEngine
+) -> None:
+    """`reload_all` goes on to its next server after the gateway closed. That server's
+    reconcile must not publish: events are lost until the next ready or resume."""
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with db_session_factory() as db_session:
+        audience, sync, gate = await _with_room_facts(db_session, db_session_factory)
+    gate.set()
+    chunking = asyncio.Event()
+    first = _guild()
+
+    async def slow_chunk(**_kwargs: Any) -> None:
+        await chunking.wait()
+
+    first.chunk = AsyncMock(side_effect=slow_chunk)
+    reloading = asyncio.create_task(sync.reload_all([first, _guild()]))
+    while not first.chunk.await_count:  # the first reload asked for its read and chunks
+        await asyncio.sleep(0)
+    await audience.settle()
+    assert await _usable(db_session_factory), "the first server's read published"
+
+    await audience.disconnected([first])
+    chunking.set()
+    await reloading  # the second server's reload asks for a reconcile now
+    await audience.settle()
+    assert not await _usable(db_session_factory), "nothing published while disconnected"
+    assert not await audience.reconcile(_guild())
+
+    audience.connected()
+    assert await audience.reconcile(_guild())

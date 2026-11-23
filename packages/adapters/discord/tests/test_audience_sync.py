@@ -8,9 +8,10 @@ import asyncio
 import types
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import httpx
 import pytest
 from daimon.adapters.discord import audience_sync
@@ -19,7 +20,7 @@ from daimon.adapters.discord.member_sync import tenant_of
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.stores import audience_facts as store
-from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.testing.factories import make_tenant
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -302,36 +303,52 @@ async def test_events_during_a_read_cross_it_and_one_more_read_follows(
     assert world.server.reads["guild"] == 3, "the crossed read, then one more for three events"
 
 
-async def test_a_publish_crossed_by_an_event_is_retired(
+@pytest.mark.parametrize(
+    ("where", "name"),
+    [
+        (audience_sync, "get_tenant"),
+        (audience_sync, "load_access_policy"),
+        (audience_sync, "lock_policy_writes_shared"),
+        (audience_sync, "_policy_roles"),
+        (store, "publish_facts"),
+    ],
+)
+async def test_a_change_during_any_await_of_the_publish_rolls_it_back(
     pooled: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    where: object,
+    name: str,
 ) -> None:
-    """An event that lands while the facts are being written retires them right after."""
+    """An event that lands while the facts are being written stops them before the
+    commit: right after the publishing transaction, no reader sees the crossed read."""
     clock, world = Clock(), World()
     audience = world.sync(pooled, clock)
-    await audience.tick([world.guild])
-    await audience.settle()
-    real = store.publish_facts
-    gate: list[asyncio.Event] = []
+    await audience.tick([world.guild])  # the read is asked for; the policy was read
+    real = getattr(where, name)
+    armed = [True]
+    seen: list[RoomFacts] = []
 
-    async def publish_then_event(*args: Any, **kwargs: Any) -> int:
-        generation = await real(*args, **kwargs)
-        if not gate:
-            gate.append(_gate(world.server))
+    async def event_then_real(*args: Any, **kwargs: Any) -> Any:
+        if armed[0]:
+            armed[0] = False
             audience.schedule(world.guild)
-        return generation
+        return await real(*args, **kwargs)
 
-    monkeypatch.setattr(store, "publish_facts", publish_then_event)
-    clock.now += timedelta(seconds=300)
-    await audience.tick([world.guild])
+    real_retire = store.retire_facts
 
-    async def withdrawn() -> bool:
-        return bool(gate) and await _fact(pooled, clock, "1") == UNKNOWN_FACTS
+    async def look_then_retire(*args: Any, **kwargs: Any) -> None:
+        seen.append(await _fact(pooled, clock, "1"))  # what a reader sees between the two
+        await real_retire(*args, **kwargs)
 
-    await _eventually(withdrawn)
-    gate[0].set()
-    await audience.settle()
-    assert await _fact(pooled, clock, "1") == RoomFacts(False, False), "read again"
+    monkeypatch.setattr(where, name, event_then_real)
+    monkeypatch.setattr(store, "retire_facts", look_then_retire)
+    with capture_logs() as logs:
+        await audience.settle()
+
+    assert not armed[0], "the event fired inside the publish"
+    assert seen and all(f == UNKNOWN_FACTS for f in seen), "the crossed write never showed"
+    assert "discord.audience.read_crossed" in [e["event"] for e in logs]
+    assert await _fact(pooled, clock, "1") == RoomFacts(False, False), "the next read lands"
 
 
 async def test_an_unavailable_server_stays_unknown_and_a_late_read_never_lands(
@@ -731,13 +748,151 @@ async def test_a_channel_type_the_rule_does_not_know_does_not_stop_the_facts(
     assert "never logged" not in str(logs)
 
 
+async def test_one_unreadable_policy_holds_back_no_other_servers_reconcile(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _setup(db_session)
+    await _setup(db_session, guild_id=4001)
+    clock, world = Clock(), World(fake.GUILD, 4001)
+    audience = world.sync(db_session_factory, clock)
+    real = audience_sync._policy_roles  # pyright: ignore[reportPrivateUsage]
+
+    async def broken_for_one(session: AsyncSession, tenant_id: Any) -> Any:
+        if tenant_id == TENANT:
+            raise AccessPolicyUnreadable(tenant_id=tenant_id)
+        return await real(session, tenant_id)
+
+    monkeypatch.setattr(audience_sync, "_policy_roles", broken_for_one)
+    with capture_logs() as logs:
+        await audience.tick(world.guilds)
+        await audience.settle()
+
+    assert (await _fact(db_session_factory, clock, "2", guild_id=4001)).contained
+    assert await _status(db_session_factory, clock) is None, "the unreadable one: nothing"
+    failed = [e for e in logs if e["event"] == "discord.audience.policy_read_failed"]
+    assert [e["tenant_id"] for e in failed] == [str(TENANT)]
+
+
+def _gateway(guild_id: int = fake.GUILD) -> Any:
+    """discord.py's own connection state and parsers, with one cached server and no
+    cached members."""
+    client = discord.Client(intents=discord.Intents(guilds=True, members=True))
+    state = client._connection  # pyright: ignore[reportPrivateUsage]
+    guild = discord.Guild(
+        state=state,
+        data=cast(
+            "Any",
+            {"id": str(guild_id), "name": "Sim", "owner_id": str(fake.OWNER), "roles": []},
+        ),
+    )
+    state._add_guild(guild)  # pyright: ignore[reportPrivateUsage]
+    return state
+
+
+def _raw_member(user_id: int, *roles: int) -> dict[str, Any]:
+    return {
+        "guild_id": str(fake.GUILD),
+        "user": {"id": str(user_id), "username": "someone", "discriminator": "0", "avatar": None},
+        "roles": [str(r) for r in roles],
+        "joined_at": "2026-04-01T00:00:00+00:00",
+        "deaf": False,
+        "mute": False,
+        "flags": 0,
+    }
+
+
+def _raw_guild(owner_id: int) -> dict[str, Any]:
+    return {"id": str(fake.GUILD), "name": "Sim", "owner_id": str(owner_id), "roles": []}
+
+
+def _raw_role(role_id: int, permissions: int) -> dict[str, Any]:
+    role = {"id": str(role_id), "name": "r", "permissions": str(permissions), "position": 1}
+    return {"guild_id": str(fake.GUILD), "role": {**role, "color": 0, "hoist": False}}
+
+
+def _raw_channel(server: fake.RestServer, index: int, **changes: Any) -> dict[str, Any]:
+    return {**server.channels[index], "guild_id": str(fake.GUILD), "position": 0, **changes}
+
+
+async def test_raw_gateway_events_withdraw_the_facts_even_for_a_member_not_in_the_cache(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    """discord.py's real parsers, watched before they run. A member that is not cached
+    dispatches no member update, yet gaining a role withdraws the facts. An event that
+    leaves every input of the last read as it was withdraws nothing."""
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _gateway()
+    audience_sync.watch_gateway(
+        state.parsers, lambda e, g, d: audience.gateway_event(e, g, d, world.guild)
+    )
+    await audience.tick([world.guild])
+    await audience.settle()
+    reads = world.server.reads["guild"]
+
+    unchanged: list[tuple[str, dict[str, Any]]] = [
+        ("GUILD_MEMBER_UPDATE", {**_raw_member(fake.OUTSIDER), "nick": "a new nickname"}),
+        ("GUILD_ROLE_UPDATE", _raw_role(fake.CORE, fake.VIEW_BIT | fake.READ_BIT)),
+        ("CHANNEL_UPDATE", _raw_channel(world.server, 0, topic="a new topic")),
+        ("GUILD_UPDATE", _raw_guild(fake.OWNER)),
+        ("CHANNEL_CREATE", {"id": "77", "type": 1, "recipients": []}),  # a DM: no room's
+    ]
+    for event, data in unchanged:
+        state.parsers[event](data)
+        await asyncio.sleep(0.005)
+        assert (await _fact(pooled, clock, "1")).known, event
+    assert world.server.reads["guild"] == reads, "nothing moved, nothing read"
+
+    changed: list[tuple[str, dict[str, Any]]] = [
+        ("GUILD_MEMBER_UPDATE", _raw_member(fake.OUTSIDER, fake.FRIEND)),  # not cached
+        ("GUILD_MEMBER_ADD", _raw_member(50)),
+        ("GUILD_MEMBER_REMOVE", {"guild_id": str(fake.GUILD), "user": _raw_member(20)["user"]}),
+        ("GUILD_ROLE_UPDATE", _raw_role(fake.FRIEND, fake.VIEW_BIT)),
+        ("GUILD_ROLE_CREATE", _raw_role(60, 0)),
+        ("GUILD_ROLE_DELETE", {"guild_id": str(fake.GUILD), "role_id": "60"}),
+        (
+            "CHANNEL_UPDATE",
+            _raw_channel(world.server, 0, permission_overwrites=[]),
+        ),
+        ("CHANNEL_CREATE", _raw_channel(world.server, 1, id="8", name="new")),
+        ("CHANNEL_DELETE", _raw_channel(world.server, 1, id="8", name="new")),
+        ("GUILD_UPDATE", _raw_guild(20)),
+    ]
+
+    async def withdrawn() -> bool:
+        return await _fact(pooled, clock, "1") == UNKNOWN_FACTS
+
+    for event, data in changed:
+        gate = _gate(world.server)
+        state.parsers[event](data)
+        await _eventually(withdrawn)
+        gate.set()
+        await audience.settle()
+        assert (await _fact(pooled, clock, "1")).known, f"{event}: read again"
+    assert state._get_guild(fake.GUILD).get_member(fake.OUTSIDER) is not None, (  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
+        "the parser still ran"
+    )
+
+    def broken(_event: str, _guild_id: int, _data: object) -> None:
+        raise RuntimeError("a broken watcher")
+
+    other = _gateway()
+    audience_sync.watch_gateway(other.parsers, broken)
+    other.parsers["GUILD_MEMBER_UPDATE"](_raw_member(fake.OUTSIDER, fake.FRIEND))
+    assert other._get_guild(fake.GUILD).get_member(fake.OUTSIDER) is not None, (  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]
+        "a failing watcher never stops discord.py"
+    )
+
+
 # --- the bot's handlers -----------------------------------------------------------------
 
 
 class _Recorder:
     """Stands in for AudienceSync or MemberSync on a bot stub and records each call."""
 
-    _SYNC = frozenset({"schedule", "refresh", "request_reconcile"})
+    _SYNC = frozenset({"schedule", "refresh", "request_reconcile", "gateway_event", "connected"})
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -783,6 +938,7 @@ def _bot(
         guild=guild,
     )
     bot._start_audience_renewal = types.MethodType(DaimonBot._start_audience_renewal, bot)
+    bot._audience_event = types.MethodType(DaimonBot._audience_event, bot)
     return bot
 
 
@@ -832,11 +988,42 @@ async def test_a_resume_restarts_the_renewal_first_and_reconciles_with_the_membe
     bot = _bot()
     bot._audience_sync.run = run
     await DaimonBot.on_resumed(bot)
-    assert bot._audience_sync.calls == [("resumed", ([bot.guild],))]
+    assert bot._audience_sync.calls == [("connected", ()), ("resumed", ([bot.guild],))]
     no_intent = _bot(members_intent=False)
     no_intent._audience_sync.run = run
     await DaimonBot.on_resumed(no_intent)
-    assert no_intent._audience_sync.calls == [], "no members intent, no facts"
+    assert no_intent._audience_sync.calls == [("connected", ())], "no members intent, no read"
+
+
+async def test_a_ready_marks_the_gateway_connected_and_renews_before_any_slower_step() -> None:
+    DaimonBot = _bot_class()
+    bot = _bot()
+    bot.runtime = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            environment=types.SimpleNamespace(name="test"),
+            discord=types.SimpleNamespace(command_guild_ids=[]),
+        ),
+        sessionmaker=None,
+    )
+    bot._non_production = False
+    renewing = asyncio.Event()
+
+    async def run(_guilds: object) -> None:
+        renewing.set()
+
+    class Reached(Exception):
+        pass
+
+    async def retire_orphaned_turns() -> None:
+        await asyncio.sleep(0)  # the renewal task gets its first turn
+        assert renewing.is_set(), "renewal runs before the first slower step of the ready"
+        raise Reached
+
+    bot._audience_sync.run = run
+    bot._retire_orphaned_turns = retire_orphaned_turns
+    with pytest.raises(Reached):
+        await DaimonBot.on_ready(bot)
+    assert bot._audience_sync.calls == [("connected", ())]
 
 
 async def test_a_returning_server_reloads_and_an_unavailable_one_becomes_unknown() -> None:
@@ -857,14 +1044,14 @@ async def test_a_returning_server_reloads_and_an_unavailable_one_becomes_unknown
     bot.membership_resolver.invalidate_guild.assert_called_once_with("1")
 
 
-async def test_audience_events_withdraw_the_facts_and_thread_events_only_refresh() -> None:
+async def test_handlers_leave_withdrawal_to_the_raw_events_and_threads_only_refresh() -> None:
+    """Role, member, channel and owner handlers still keep the member list, but never
+    touch the room facts: the raw gateway event did that before they ran. Thread events
+    only ask for a read."""
     DaimonBot = _bot_class()
 
-    def roles(count: int) -> list[object]:
-        return [object() for _ in range(count)]
-
-    def member(bot: types.SimpleNamespace, role_list: list[object]) -> Any:
-        return types.SimpleNamespace(guild=bot.guild, id=5, roles=role_list)
+    def member(bot: types.SimpleNamespace, role_count: int) -> Any:
+        return types.SimpleNamespace(guild=bot.guild, id=5, roles=[object()] * role_count)
 
     def channel(bot: types.SimpleNamespace, **kw: Any) -> Any:
         base: dict[str, Any] = {"guild": bot.guild, "overwrites": {}, "name": "a", "type": 0}
@@ -875,87 +1062,49 @@ async def test_audience_events_withdraw_the_facts_and_thread_events_only_refresh
 
     bot = _bot()
     bot.runtime = types.SimpleNamespace(sessionmaker=MagicMock(return_value=AsyncMock()))
-    r1 = roles(1)
     new_owner = types.SimpleNamespace(**{**vars(bot.guild), "owner_id": 8})
+    leaves = types.SimpleNamespace(guild_id=1, user=types.SimpleNamespace(id=5))
+    for handler in [
+        DaimonBot.on_guild_role_update(bot, role(bot, 0), role(bot, 8)),
+        DaimonBot.on_guild_role_delete(bot, role(bot)),
+        DaimonBot.on_member_join(bot, member(bot, 1)),
+        DaimonBot.on_member_update(bot, member(bot, 1), member(bot, 2)),
+        DaimonBot.on_raw_member_remove(bot, leaves),
+        DaimonBot.on_guild_channel_update(bot, channel(bot), channel(bot, overwrites={1: 1})),
+        DaimonBot.on_guild_update(bot, bot.guild, new_owner),
+    ]:
+        await handler
+    assert bot._audience_sync.calls == []
+    assert {"admins_changed", "joined", "left"} <= set(bot._member_sync.names())
+
     thread_update = types.SimpleNamespace(
         guild_id=1, parent_id=2, thread_id=3, data={"thread_metadata": {"archived": False}}
     )
-    cases: list[tuple[str, str, Callable[[], Any]]] = [
-        ("role create", "schedule", lambda: DaimonBot.on_guild_role_create(bot, role(bot))),
-        (
-            "role update",
-            "schedule",
-            lambda: DaimonBot.on_guild_role_update(bot, role(bot, 0), role(bot, 8)),
-        ),
-        ("role delete", "schedule", lambda: DaimonBot.on_guild_role_delete(bot, role(bot))),
-        ("member join", "schedule", lambda: DaimonBot.on_member_join(bot, member(bot, r1))),
-        (
-            "member roles",
-            "schedule",
-            lambda: DaimonBot.on_member_update(bot, member(bot, r1), member(bot, roles(2))),
-        ),
-        (
-            "member leaves",
-            "schedule",
-            lambda: DaimonBot.on_raw_member_remove(
-                bot, types.SimpleNamespace(guild_id=1, user=types.SimpleNamespace(id=5))
-            ),
-        ),
-        (
-            "channel create",
-            "schedule",
-            lambda: DaimonBot.on_guild_channel_create(bot, channel(bot)),
-        ),
-        (
-            "channel delete",
-            "schedule",
-            lambda: DaimonBot.on_guild_channel_delete(bot, channel(bot)),
-        ),
-        (
-            "channel overwrites",
-            "schedule",
-            lambda: DaimonBot.on_guild_channel_update(
-                bot, channel(bot), channel(bot, overwrites={1: 1})
-            ),
-        ),
-        (
-            "channel renamed",
-            "schedule",
-            lambda: DaimonBot.on_guild_channel_update(bot, channel(bot), channel(bot, name="b")),
-        ),
-        ("owner change", "schedule", lambda: DaimonBot.on_guild_update(bot, bot.guild, new_owner)),
-        (
-            "thread create",
-            "refresh",
-            lambda: DaimonBot.on_thread_create(bot, types.SimpleNamespace(guild=bot.guild)),
-        ),
-        ("thread update", "refresh", lambda: DaimonBot.on_raw_thread_update(bot, thread_update)),
-    ]
-    for label, call, event in cases:
-        before = len(bot._audience_sync.calls)
-        await event()
-        expected = bot.guild if label != "owner change" else new_owner
-        assert bot._audience_sync.calls[before:] == [(call, (expected,))], label
+    await DaimonBot.on_thread_create(bot, types.SimpleNamespace(guild=bot.guild))
+    await DaimonBot.on_raw_thread_update(bot, thread_update)
+    assert bot._audience_sync.calls == [("refresh", (bot.guild,)), ("refresh", (bot.guild,))]
 
-    # An event that changes no one's access schedules nothing.
-    for label, quiet in [
-        (
-            "same roles",
-            lambda: DaimonBot.on_member_update(bot, member(bot, r1), member(bot, r1)),
-        ),
-        (
-            "same channel",
-            lambda: DaimonBot.on_guild_channel_update(bot, channel(bot), channel(bot)),
-        ),
-        ("same permissions", lambda: DaimonBot.on_guild_role_update(bot, role(bot), role(bot))),
-        ("same owner", lambda: DaimonBot.on_guild_update(bot, bot.guild, bot.guild)),
-    ]:
-        before = len(bot._audience_sync.calls)
-        await quiet()
-        assert bot._audience_sync.calls[before:] == [], label
+    data = {"guild_id": "1"}
+    bot._audience_event("GUILD_ROLE_CREATE", 1, data)
+    assert bot._audience_sync.calls[-1] == (
+        "gateway_event",
+        ("GUILD_ROLE_CREATE", 1, data, bot.guild),
+    )
 
-    # Role and member events also reload the admin flags in the member list.
-    assert {"admins_changed", "joined", "left"} <= set(bot._member_sync.names())
+
+async def test_a_built_bot_watches_the_raw_gateway_events() -> None:
+    from daimon.testing.discord_builders import discord_runtime
+    from daimon.testing.settings_mock import mock_settings
+
+    runtime = discord_runtime(
+        settings=mock_settings(), anthropic=AsyncMock(), sessionmaker=MagicMock()
+    )
+    bot = _bot_class()(runtime=runtime, intents=discord.Intents.default())
+    bot._audience_sync = recorder = _Recorder()
+    bot._allows_guild = MagicMock(return_value=True)
+    data = {"guild_id": str(fake.GUILD), "role_id": "60"}
+    bot._connection.parsers["GUILD_ROLE_DELETE"](data)  # pyright: ignore[reportPrivateUsage]
+    assert recorder.calls == [("gateway_event", ("GUILD_ROLE_DELETE", fake.GUILD, data, None))]
 
 
 async def test_events_of_a_server_the_bot_does_not_serve_are_ignored() -> None:
@@ -963,18 +1112,17 @@ async def test_events_of_a_server_the_bot_does_not_serve_are_ignored() -> None:
 
     bot = _bot(allowed=False)
     guild = bot.guild
-    await DaimonBot.on_guild_channel_create(bot, types.SimpleNamespace(guild=guild))
+    bot._audience_event("CHANNEL_CREATE", 1, {"guild_id": "1"})
     await DaimonBot.on_thread_create(bot, types.SimpleNamespace(guild=guild))
-    await DaimonBot.on_guild_role_create(bot, types.SimpleNamespace(guild=guild))
     await DaimonBot.on_guild_unavailable(bot, guild)
     assert bot._audience_sync.calls == []
 
 
-async def test_a_channel_event_on_the_bot_withdraws_and_rereads_the_real_facts(
+async def test_a_raw_event_on_the_bot_withdraws_and_rereads_the_real_facts(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A real AudienceSync behind the handlers: an event withdraws a room's facts until a
-    read publishes the change, and a disconnect withdraws them again."""
+    """A real AudienceSync behind the bot: an event withdraws a room's facts until a read
+    publishes the change, and a disconnect withdraws them again."""
     DaimonBot = _bot_class()
 
     await _setup(db_session)
@@ -985,9 +1133,10 @@ async def test_a_channel_event_on_the_bot_withdraws_and_rereads_the_real_facts(
     bot = _bot()
     bot._audience_sync = audience
     bot.guilds = [world.guild]
+    bot.get_guild = MagicMock(return_value=world.guild)
     _open_room_one(world.server)
 
-    await DaimonBot.on_guild_channel_create(bot, types.SimpleNamespace(guild=world.guild))
+    bot._audience_event("CHANNEL_UPDATE", fake.GUILD, _raw_channel(world.server, 0))
     await audience.settle()
     assert (await _fact(db_session_factory, clock, "1")).contained
 

@@ -252,6 +252,27 @@ async def test_429_cooldowns_are_shared_kept_between_reads_and_survive_a_cancel(
     assert failed.value.reason == "rate_limited" and loop.time() - started < 0.5
 
 
+async def test_a_waiting_request_honours_a_cooldown_that_grew_while_it_slept() -> None:
+    """Another server's global 429 can lengthen the cooldown while a request waits out the
+    old one: it waits again instead of going early."""
+    server = fake.RestServer()
+    reader = fake.RestDiscord(server).reader()
+    loop = asyncio.get_running_loop()
+    sent: list[float] = []
+
+    async def record(_request: httpx.Request) -> None:
+        sent.append(loop.time())
+
+    for route in ("guild", "channels", "threads", "members"):
+        server.hooks[route] = record
+    reader.limits.global_until = loop.time() + 0.02
+    reading = asyncio.create_task(reader.read(fake.GUILD, now=NOW))
+    await asyncio.sleep(0.01)
+    extended = reader.limits.global_until = loop.time() + 0.04  # a 429 elsewhere, meanwhile
+    await reading
+    assert len(sent) == 4 and min(sent) >= extended, "no request before the longer cooldown"
+
+
 async def test_an_exhausted_bucket_cools_its_route_before_the_next_request() -> None:
     server = fake.RestServer()
     server.members = [fake.rest_member(1000 + n, fake.CORE) for n in range(MEMBER_PAGE)]

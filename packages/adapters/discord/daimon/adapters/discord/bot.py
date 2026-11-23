@@ -8,7 +8,7 @@ import functools
 import io
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -24,7 +24,7 @@ from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.audience_rest import reader_from_settings
-from daimon.adapters.discord.audience_sync import AudienceSync
+from daimon.adapters.discord.audience_sync import AudienceSync, watch_gateway
 from daimon.adapters.discord.budget_notice import discord_budget_alerter, with_budget_notifier
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.channel_agent import channel_agent_id
@@ -865,6 +865,9 @@ class DaimonBot(commands.Bot):
         self._audience_sync = AudienceSync(
             self.runtime.sessionmaker, reader=reader_from_settings(self.runtime.settings)
         )
+        # Room-fact withdrawals come from the raw gateway events, before discord.py's
+        # cache and before any handler (see `watch_gateway`).
+        watch_gateway(self._connection.parsers, self._audience_event)  # pyright: ignore[reportPrivateUsage]
         self._audience_renewal: asyncio.Task[None] | None = None
         self._member_sync = MemberSync(self.runtime.sessionmaker, audience=self._audience_sync)
         self._member_reload: asyncio.Task[None] | None = None
@@ -2325,6 +2328,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker, guild_id=guild.id, channels=guild.channels
                 )
         # First, so no slower step of the ready holds up the room facts.
+        self._audience_sync.connected()
         self._start_audience_renewal()
         await self._retire_orphaned_turns()
         # Every ready: events missed while disconnected are not replayed. Without the
@@ -5237,10 +5241,6 @@ class DaimonBot(commands.Bot):
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
 
-    async def on_guild_role_create(self, role: discord.Role) -> None:
-        if self._allows_guild(role.guild.id):
-            self._audience_sync.schedule(role.guild)
-
     async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
         self.membership_resolver.invalidate_guild(str(after.guild.id))
         if not self._allows_guild(after.guild.id):
@@ -5248,13 +5248,11 @@ class DaimonBot(commands.Bot):
         if before.permissions != after.permissions:
             clear_webhook_backoff(after.guild)
             await self._member_sync.admins_changed(after.guild, after.members)
-            self._audience_sync.schedule(after.guild)
 
     async def on_guild_role_delete(self, role: discord.Role) -> None:
         # A new role has no members, so only a delete and an update move admin flags.
         if self._allows_guild(role.guild.id):
             await self._member_sync.admins_changed(role.guild, role.guild.members)
-            self._audience_sync.schedule(role.guild)
 
     async def on_disconnect(self) -> None:
         # Events are lost until the gateway resumes: no room fact can be trusted.
@@ -5265,6 +5263,7 @@ class DaimonBot(commands.Bot):
     async def on_resumed(self) -> None:
         # A resume fires no on_ready, so the renewal that on_disconnect stopped starts
         # here too, first; each server's reconcile runs in its own task.
+        self._audience_sync.connected()
         self._start_audience_renewal()
         if self.intents.members:
             await self._audience_sync.resumed([g for g in self.guilds if self._allows_guild(g.id)])
@@ -5274,6 +5273,10 @@ class DaimonBot(commands.Bot):
         # published. At startup on_ready's full reload covers every server.
         if self.is_ready() and self.intents.members and self._allows_guild(guild.id):
             self._spawn(self._member_sync.reload_all([guild]))
+
+    def _audience_event(self, event: str, guild_id: int, data: Mapping[str, Any]) -> None:
+        if self._allows_guild(guild_id):
+            self._audience_sync.gateway_event(event, guild_id, data, self.get_guild(guild_id))
 
     def _start_audience_renewal(self) -> None:
         if self._audience_renewal is not None and not self._audience_renewal.done():
@@ -5289,13 +5292,11 @@ class DaimonBot(commands.Bot):
         if not self._allows_guild(after.id) or before.owner_id == after.owner_id:
             return
         owners = {before.owner_id, after.owner_id}
-        self._audience_sync.schedule(after)  # an owner sees every room
         await self._member_sync.admins_changed(after, [m for m in after.members if m.id in owners])
 
     async def on_member_join(self, member: discord.Member) -> None:
         if self._allows_guild(member.guild.id):
             await self._member_sync.joined(member)
-            self._audience_sync.schedule(member.guild)
 
     async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
         guild_id = str(payload.guild_id)
@@ -5304,8 +5305,6 @@ class DaimonBot(commands.Bot):
         # Raw, so a member missing from the cache still leaves the list.
         if self._allows_guild(payload.guild_id):
             await self._member_sync.left(payload.guild_id, payload.user.id)
-            if (guild := self.get_guild(payload.guild_id)) is not None:
-                self._audience_sync.schedule(guild)
 
     async def on_member_remove(self, member: discord.Member) -> None:
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(member.guild.id))
@@ -5328,7 +5327,6 @@ class DaimonBot(commands.Bot):
             clear_webhook_backoff(after.guild)
         if before.roles != after.roles:
             await self._member_sync.joined(after)
-            self._audience_sync.schedule(after.guild)
 
     async def on_guild_channel_update(
         self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
@@ -5340,21 +5338,6 @@ class DaimonBot(commands.Bot):
         )
         if before.overwrites != after.overwrites:
             clear_webhook_backoff(after.guild)
-        if (
-            before.overwrites != after.overwrites
-            or before.name != after.name
-            or before.type != after.type
-            or getattr(before, "category_id", None) != getattr(after, "category_id", None)
-        ):
-            self._audience_sync.schedule(after.guild)
-
-    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel) -> None:
-        if self._allows_guild(channel.guild.id):
-            self._audience_sync.schedule(channel.guild)
-
-    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
-        if self._allows_guild(channel.guild.id):
-            self._audience_sync.schedule(channel.guild)
 
     async def on_thread_create(self, thread: discord.Thread) -> None:
         if self._allows_guild(thread.guild.id):

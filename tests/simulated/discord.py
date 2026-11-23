@@ -15,6 +15,7 @@ from daimon.adapters.discord.tool_confirmation import confirmation_requester
 from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.discord_ingress import IngressHTTP
 from daimon.testing.discord_surface import OfflineDiscordGateway
+from daimon.testing.sim.discord import HOST, DiscordAPI
 from discord.http import HTTPClient
 from discord.webhook.async_ import async_context
 
@@ -85,7 +86,20 @@ class Discord:
         self.world = world
         self.http = _HTTP(evidence_id="sim", parent_channel_id=CHANNEL)
         self._next_id = 5000
+        self._serve_rest()
         self._boot()
+
+    def _serve_rest(self) -> None:
+        """Discord's REST side of the same guild, for the bot's room-fact reader: the
+        channel, the threads the bot made and the members the gateway shows."""
+        fakes = self.world.network.fakes
+        api = fakes.get(HOST)
+        if not isinstance(api, DiscordAPI):
+            api = DiscordAPI(guild=GUILD, owner=PERSON)
+            fakes[HOST] = api
+        api.channels = [{**_channel(), "permission_overwrites": []}]
+        api.threads = lambda: [json.loads(made.response_json) for made in self.http.creations]
+        api.members = {str(PERSON): False, str(BOT): True}
 
     def _boot(self) -> None:
         world = self.world

@@ -193,8 +193,8 @@ class DiscordRestReader:
         deadline: float,
     ) -> object:
         for _attempt in range(self._attempts):
-            wait = self.limits.until(route) - self._now()
-            if wait > 0:
+            # Checked again after every wake: another read may have met a 429 meanwhile.
+            while (wait := self.limits.until(route) - self._now()) > 0:
                 if self._now() + wait > deadline:
                     raise ReadFailed("rate_limited")
                 await asyncio.sleep(wait)
@@ -316,7 +316,7 @@ def snapshot_from_payloads(
     if guild_id not in role_permissions:
         raise ReadFailed("everyone_role_missing")
 
-    rooms = [_channel(raw) for raw in _list(channels, "channels")]
+    rooms = [channel_from_payload(raw) for raw in _list(channels, "channels")]
     thread_body = _dict(threads, "threads")
     rooms += [_thread(raw) for raw in _list(thread_body.get("threads"), "threads")]
 
@@ -330,7 +330,7 @@ def snapshot_from_payloads(
         if number < len(member_pages) - 1 and len(listed) < MEMBER_PAGE:
             raise ReadFailed("member_page_short")
         for raw in listed:
-            member = _member(raw, role_permissions, owner_id=owner_id, now=now)
+            member = member_from_payload(raw, role_permissions, owner_id=owner_id, now=now)
             if int(member.user_id) <= after or member.user_id in seen:
                 raise ReadFailed("member_order")
             after = int(member.user_id)
@@ -372,7 +372,8 @@ def rooms_from_snapshot(
     return {cid: StoredRoom(room, parents.get(cid)) for cid, room in facts.items()}
 
 
-def _channel(raw: object) -> AudienceChannel:
+def channel_from_payload(raw: object) -> AudienceChannel:
+    """A channel as the room rule sees it, from Discord's JSON, or `ReadFailed`."""
     channel = _dict(raw, "channel")
     channel_type = _int(channel.get("type"), "channel_type")
     overwrites = tuple(
@@ -412,9 +413,10 @@ def _overwrite(raw: object) -> DiscordOverwrite:
     )
 
 
-def _member(
+def member_from_payload(
     raw: object, role_permissions: Mapping[str, int], *, owner_id: str, now: datetime
 ) -> AudienceMember:
+    """A member as the room rule sees it, from Discord's JSON, or `ReadFailed`."""
     member = _dict(raw, "member")
     user = _dict(member.get("user"), "member_user")
     user_id = _snowflake(user.get("id"), "member_id")
@@ -474,6 +476,11 @@ def _snowflake(value: object, what: str) -> str:
     if not isinstance(value, str) or not value.isdigit():
         raise ReadFailed(f"{what}_missing")
     return value
+
+
+def permissions_from_payload(value: object) -> int:
+    """A role's permission bits from Discord's JSON, or `ReadFailed`."""
+    return _bits(value, "role_permissions")
 
 
 def _bits(value: object, what: str) -> int:
