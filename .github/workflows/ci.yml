@@ -287,8 +287,8 @@ jobs:
       - name: pytest (journeys, ${{ matrix.leg }} leg)
         if: contains(fromJSON(needs.changes.outputs.suites), 'journeys')
         env:
-          # mux runs the code defaults (both backends on); stop pins both off, as production
-          # does. Branch protection requires both legs by these names.
+          # mux runs the code defaults (both backends on); stop pins both off, the emergency
+          # stop. Branch protection requires both legs by these names.
           DAIMON_TURN__CHANNEL_BACKENDS: ${{ matrix.backends }}
           DAIMON_TURN__AGENT_BACKENDS: ${{ matrix.backends }}
         run: |
