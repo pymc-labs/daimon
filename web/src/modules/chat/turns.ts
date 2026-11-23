@@ -169,7 +169,7 @@ async function run(qc: QueryClient, sid: string, path: string, { body, from, ret
       if (e instanceof ApiError || signal.aborted) throw e
       if (!accepted) {
         const d = await api.get<SessionDetail>(`/api/chat/sessions/${sid}`).catch(() => undefined)
-        if (!d || (d.resume_from === undefined && !sent?.(d))) throw e
+        if (!d || (sent ? !sent(d) : d.resume_from === undefined)) throw e
         if (d.resume_from === undefined) { set(sid, (t) => withDetail(t, d)); done = true }
       }
     }
