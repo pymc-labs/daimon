@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The check for outside people in a room reads Discord itself.** On Discord, who can
+  see each room now comes from the server's roles, channels and members as Discord
+  lists them, read about every 5 minutes, and no longer from the bot's own member
+  list, which could miss people and roles. A role, member, channel or owner change
+  makes the server's rooms unknown until the next read, about 2 seconds later. One
+  slow server no longer keeps the others' room facts from staying current.
 - **An agent can follow its whole GitHub org.** An admin of the org ticks "Also give
   <agent> new repos added to <org>" on the agent's GitHub connect page. The agent then holds
   every repo of the org, new ones within an hour, except repos taken off it.

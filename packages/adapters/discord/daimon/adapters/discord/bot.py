@@ -23,6 +23,7 @@ import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import prepare_attachments
+from daimon.adapters.discord.audience_rest import reader_from_settings
 from daimon.adapters.discord.audience_sync import AudienceSync
 from daimon.adapters.discord.budget_notice import discord_budget_alerter, with_budget_notifier
 from daimon.adapters.discord.button_message import ButtonMessage
@@ -861,7 +862,9 @@ class DaimonBot(commands.Bot):
         # cleanup DB await while the completed turn still owns its thread.
         self._committed_message_ids: set[str] = set()
         self._orphans_retired: bool = False
-        self._audience_sync = AudienceSync(self.runtime.sessionmaker)
+        self._audience_sync = AudienceSync(
+            self.runtime.sessionmaker, reader=reader_from_settings(self.runtime.settings)
+        )
         self._audience_renewal: asyncio.Task[None] | None = None
         self._member_sync = MemberSync(self.runtime.sessionmaker, audience=self._audience_sync)
         self._member_reload: asyncio.Task[None] | None = None
@@ -2321,6 +2324,8 @@ class DaimonBot(commands.Bot):
                 remember_guild_channels(
                     self.runtime.sessionmaker, guild_id=guild.id, channels=guild.channels
                 )
+        # First, so no slower step of the ready holds up the room facts.
+        self._start_audience_renewal()
         await self._retire_orphaned_turns()
         # Every ready: events missed while disconnected are not replayed. Without the
         # members intent there is no list to load.
@@ -2328,7 +2333,6 @@ class DaimonBot(commands.Bot):
             self._member_reload = self._spawn(
                 self._member_sync.reload_all([g for g in self.guilds if self._allows_guild(g.id)])
             )
-        self._start_audience_renewal()
         if not self._startup_replay_started:
             self._startup_replay_started = True
             self._spawn(self._replay_missed_messages())
@@ -5259,11 +5263,11 @@ class DaimonBot(commands.Bot):
         await self._audience_sync.disconnected([g for g in self.guilds if self._allows_guild(g.id)])
 
     async def on_resumed(self) -> None:
-        # The gateway replayed what it missed, so the cache is current again. A resume
-        # fires no on_ready, so the renewal that on_disconnect stopped starts here too.
+        # A resume fires no on_ready, so the renewal that on_disconnect stopped starts
+        # here too, first; each server's reconcile runs in its own task.
+        self._start_audience_renewal()
         if self.intents.members:
             await self._audience_sync.resumed([g for g in self.guilds if self._allows_guild(g.id)])
-        self._start_audience_renewal()
 
     async def on_guild_available(self, guild: discord.Guild) -> None:
         # After an outage the server's members must load again before its facts are
@@ -5285,6 +5289,7 @@ class DaimonBot(commands.Bot):
         if not self._allows_guild(after.id) or before.owner_id == after.owner_id:
             return
         owners = {before.owner_id, after.owner_id}
+        self._audience_sync.schedule(after)  # an owner sees every room
         await self._member_sync.admins_changed(after, [m for m in after.members if m.id in owners])
 
     async def on_member_join(self, member: discord.Member) -> None:
@@ -5353,13 +5358,13 @@ class DaimonBot(commands.Bot):
 
     async def on_thread_create(self, thread: discord.Thread) -> None:
         if self._allows_guild(thread.guild.id):
-            self._audience_sync.schedule(thread.guild)
+            self._audience_sync.refresh(thread.guild)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         if not self._allows_guild(payload.guild_id):
             return
         if (guild := self.get_guild(payload.guild_id)) is not None:
-            self._audience_sync.schedule(guild)
+            self._audience_sync.refresh(guild)
         metadata = payload.data["thread_metadata"]
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
         async with self.runtime.sessionmaker() as session:
