@@ -22,7 +22,7 @@ import { MonitoringNotice, Refusal } from "./Cards"
 import { ThreadModel } from "./ThreadModel"
 import { Composer } from "./Composer"
 import { AssistantMessage, UserMessage } from "./Message"
-import type { SessionDetail } from "./types"
+import type { Notice, SessionDetail } from "./types"
 import { answer, hydrate, loadEarlier, resume, send, stop, switchBack, useDeleteThread, useThread } from "./turns"
 
 
@@ -133,13 +133,12 @@ export function ChatView() {
     retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2,
   })
   const { data } = detail
-  const [closed, setClosed] = useState<string | undefined>()
-  const notice = closed === id ? undefined : monitoring ?? data?.monitoring
   // A notice streamed after a dismiss is a re-tell (monitoring switched on again): show it.
-  useEffect(() => setClosed(undefined), [monitoring])
+  const [closed, setClosed] = useState<{ id?: string; monitoring?: Notice }>()
+  const notice = closed?.id === id && closed.monitoring === monitoring ? undefined : monitoring ?? data?.monitoring
   // Gone for this person and agent until monitoring is switched on again; the server keeps it.
   const closeNotice = () => {
-    setClosed(id)
+    setClosed({ id, monitoring })
     api.post(`/api/chat/sessions/${id}/monitoring/dismiss`).catch(() => setClosed(undefined))
   }
   useEffect(() => {
