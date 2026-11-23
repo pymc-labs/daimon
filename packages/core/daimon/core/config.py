@@ -27,7 +27,7 @@ from daimon.core.features.registry import FEATURES, deployment_key, parse_deploy
 from daimon.core.features.removed import without_removed_features, without_removed_fields
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
-from daimon.core.reaction_actions import ReactionAction
+from daimon.core.reaction_actions import ReactionAction, overlap_error
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from pydantic import (
@@ -2481,7 +2481,7 @@ class McpIdentitySettings(BaseModel):
             '"name:id"), and optionally warning_emoji (a unicode emoji, default: the '
             "warning sign). After a turn in which the agent's call of mark_tool finished "
             "without error, on the server whose relay name is server, the bot adds "
-            "mark_emoji to the asker's message. When a person "
+            "mark_emoji to the asker's message. A workspace uses each emoji once. When a person "
             "adds confirm_emoji to a message that carries it, the bot calls confirm_tool "
             "for that person with the message link, and swaps mark_emoji for confirm_emoji. "
             'An error, or a result with status "attention", puts the warning emoji on '
@@ -2531,6 +2531,8 @@ class McpIdentitySettings(BaseModel):
     def _actions_match_servers(self) -> McpIdentitySettings:
         """Each reaction action names a bearer server that stamps the requester, in its
         workspaces and with an agent it allows."""
+        if (clash := overlap_error(self.reaction_actions)) is not None:
+            raise ValueError(clash)
         by_name = {server.name: server for server in self.servers}
         for action in self.reaction_actions:
             server = by_name.get(action.server)

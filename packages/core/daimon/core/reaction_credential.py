@@ -116,9 +116,9 @@ def verify(token: str, *, secret: bytes, now: datetime) -> ReactionCall:
 class SingleUse:
     """Remembers the credentials already used, until they would have expired.
 
-    In process: a replica of the MCP service knows only what it saw itself, so a
-    credential replayed on another replica inside its fifteen seconds is not caught.
-    The credential's short life bounds that; one replica, or sticky routing, closes it.
+    The store lives in one process. A restart inside the 15 s life, more than one
+    worker or more than one replica each lose the guarantee. Sticky routing does not
+    restore it.
     """
 
     def __init__(self) -> None:

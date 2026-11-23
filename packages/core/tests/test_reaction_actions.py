@@ -19,6 +19,7 @@ from daimon.core.reaction_actions import (
     marking_actions,
     message_url,
     outcome_of,
+    overlap_error,
 )
 from daimon.core.reaction_credential import (
     CredentialError,
@@ -265,3 +266,64 @@ def test_an_action_needs_a_bearer_server_that_stamps_and_allows_it(
         McpIdentitySettings.model_validate(
             {"servers": [], "reaction_actions": [_action().model_dump()]}
         )
+
+
+def _two(first: dict[str, Any], second: dict[str, Any]) -> McpIdentitySettings:
+    server = {**SERVER, "agents": ["Helper", "Other"], "workspaces": ["discord:1", "discord:2"]}
+    return McpIdentitySettings.model_validate(
+        {
+            "servers": [server],
+            "bearers": {"tools": "key"},
+            "reaction_actions": [
+                _action(**first).model_dump(),
+                _action(
+                    **{
+                        "agent": "Other",
+                        "mark_emoji": "m2:333",
+                        "confirm_emoji": "c2:444",
+                        **second,
+                    }
+                ).model_dump(),
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        {"mark_emoji": "m2:111"},  # same mark
+        {"confirm_emoji": "c2:222"},  # same confirm: the first would win silently
+        {"mark_emoji": "m2:222"},  # Y's mark is X's confirm: confirming X would mark Y
+        {"confirm_emoji": "c2:111"},  # Y's confirm is X's mark
+    ],
+)
+def test_two_bindings_in_a_workspace_may_not_share_an_emoji(second: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError, match=r"both use the emoji") as err:
+        _two({}, second)
+    assert "tools/Helper/propose" in str(err.value)
+    assert "tools/Other/propose" in str(err.value)
+
+
+def test_a_binding_needs_three_distinct_emoji() -> None:
+    with pytest.raises(ValidationError):
+        _action(confirm_emoji="done:111")
+    # A warning that equals a mark or confirm id is refused across bindings too.
+    fields: dict[str, Any] = {**_action().model_dump(), "warning_emoji": "111"}
+    clash = ReactionAction.model_construct(**fields)
+    assert overlap_error([_action(), clash]) is not None
+
+
+def test_distinct_emoji_or_distinct_workspaces_are_accepted() -> None:
+    accepted = _two({}, {})
+    assert overlap_error(accepted.reaction_actions) is None
+    # The same emoji in another workspace is another Discord server: no clash.
+    other = _two({}, {"workspace": "discord:2", "mark_emoji": "mark:111"})
+    assert len(other.reaction_actions) == 2
+    # A confirm on X selects only X, and X's mark is not Y's.
+    x, y = accepted.reaction_actions
+    assert confirm_binding([x, y], workspace="discord:1", emoji_id_=222) is x
+    assert confirm_binding([x, y], workspace="discord:1", emoji_id_=444) is y
+    assert x.confirm_emoji_id not in (y.mark_emoji_id, y.confirm_emoji_id)
+    # Sharing the warning emoji grants nothing and is allowed.
+    assert x.warning_emoji == y.warning_emoji

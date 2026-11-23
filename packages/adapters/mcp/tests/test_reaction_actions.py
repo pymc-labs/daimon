@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -78,7 +78,11 @@ class Upstream:
         return self.result
 
 
-def _client(upstream: Upstream, now: datetime | None = None) -> httpx.AsyncClient:
+def _client(
+    upstream: Upstream,
+    now: datetime | None = None,
+    enabled: Callable[[str], Awaitable[bool]] | None = None,
+) -> httpx.AsyncClient:
     app = Starlette()
     app.add_route(
         ROUTE,
@@ -89,6 +93,7 @@ def _client(upstream: Upstream, now: datetime | None = None) -> httpx.AsyncClien
             secret=SECRET,
             clock=lambda: now or datetime.now(UTC),
             session=upstream.session,
+            enabled=enabled,
         ),
         methods=METHODS,
     )
@@ -212,3 +217,24 @@ async def test_an_unreachable_server_is_an_error_without_its_detail() -> None:
     assert reply.status_code == 200
     assert reply.json()["status"] == "error"
     assert KEY not in reply.text
+
+
+async def test_the_route_refuses_when_the_feature_is_off_for_the_workspace() -> None:
+    upstream = Upstream()
+    asked: list[str] = []
+
+    async def off(workspace: str) -> bool:
+        asked.append(workspace)
+        return False
+
+    async with _client(upstream, enabled=off) as client:
+        reply = await _post(client, _token())
+    assert reply.status_code == 403
+    assert asked == ["discord:1"]
+    assert upstream.calls == []
+
+    async def on(_workspace: str) -> bool:
+        return True
+
+    async with _client(upstream, enabled=on) as client:
+        assert (await _post(client, _token())).status_code == 200

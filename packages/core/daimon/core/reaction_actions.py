@@ -86,6 +86,42 @@ def emoji_id(emoji: str) -> int:
     return int(match.group(1))
 
 
+def _role_emoji(action: ReactionAction) -> tuple[tuple[str, str], ...]:
+    return (
+        ("mark", str(action.mark_emoji_id)),
+        ("confirm", str(action.confirm_emoji_id)),
+        ("warning", action.warning_emoji),
+    )
+
+
+def overlap_error(actions: Iterable[ReactionAction]) -> str | None:
+    """One sentence naming two bindings in a workspace that share an emoji, else None.
+
+    The listener picks a binding by workspace and confirm emoji id, and the mark hook
+    by workspace, so the workspace (one Discord server) is the scope. Two bindings may
+    share a warning emoji, since it grants nothing; any other shared emoji lets one
+    binding's confirm add another's mark, or picks a binding by order.
+    """
+    seen: dict[tuple[str, str], tuple[ReactionAction, str]] = {}
+    for action in actions:
+        for role, key in _role_emoji(action):
+            earlier = seen.get((action.workspace, key))
+            if earlier is None:
+                seen[(action.workspace, key)] = (action, role)
+            elif earlier[0] is action or role != "warning" or earlier[1] != "warning":
+                first = earlier[0]
+                return (
+                    f"reaction actions {_label(first)} ({earlier[1]}) and {_label(action)} "
+                    f"({role}) in {action.workspace} both use the emoji {key}, "
+                    "so each emoji must be used once"
+                )
+    return None
+
+
+def _label(action: ReactionAction) -> str:
+    return f'"{action.server}/{action.agent}/{action.mark_tool}"'
+
+
 def bindings_for(actions: Iterable[ReactionAction], workspace: str) -> tuple[ReactionAction, ...]:
     return tuple(action for action in actions if action.workspace == workspace)
 

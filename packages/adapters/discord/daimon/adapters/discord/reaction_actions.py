@@ -22,6 +22,8 @@ for the server, nothing runs past a lookup in the settings.
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, cast
@@ -59,6 +61,10 @@ _FAILED_TEXT: Final = "The action could not be reached."
 #: Printed in the card under the tool's own line.
 _RETRY_ADD: Final = "Check the message, then add the emoji again."
 _RETRY_REMOVE: Final = "Check the message, then remove your emoji and add it again."
+
+#: How long, and for how many messages, a success is remembered if the mark stays.
+_DONE_SECONDS: Final = 600.0
+_DONE_MAX: Final = 512
 
 #: What a call needs: the credential's claims, and the outcome it brings back.
 Caller = Callable[[ReactionCall], Awaitable[Outcome]]
@@ -126,6 +132,7 @@ class ReactionActionCog(commands.Cog):
         )
         self._caller = caller or self._post
         self._locks: dict[int, tuple[asyncio.Lock, int]] = {}
+        self._done: OrderedDict[tuple[int, int], float] = OrderedDict()
 
     async def cog_load(self) -> None:
         global _active
@@ -166,10 +173,14 @@ class ReactionActionCog(commands.Cog):
         self._locks[payload.message_id] = (lock, waiting + 1)
         try:
             async with lock:
+                if self._was_done(payload.message_id, action):
+                    return
                 message = await self._marked_message(payload, action)
                 if message is None:
                     return
                 outcome = await self._caller(self._call(payload, action, message))
+                if outcome.status == "ok":
+                    self._remember(payload.message_id, action)
                 await self._settle(payload, action, message, outcome)
         finally:
             lock, waiting = self._locks[payload.message_id]
@@ -177,6 +188,21 @@ class ReactionActionCog(commands.Cog):
                 del self._locks[payload.message_id]
             else:
                 self._locks[payload.message_id] = (lock, waiting - 1)
+
+    def _was_done(self, message_id: int, action: ReactionAction) -> bool:
+        """Whether this message's confirm already succeeded, even if the mark stayed."""
+        at = self._done.get((message_id, action.mark_emoji_id))
+        return at is not None and time.monotonic() - at < _DONE_SECONDS
+
+    def _remember(self, message_id: int, action: ReactionAction) -> None:
+        """Keep a success in this process, for a bounded time and count. The Discord
+        write that removes the mark can fail, and the mark alone must not allow a repeat."""
+        now = time.monotonic()
+        self._done[(message_id, action.mark_emoji_id)] = now
+        while self._done and (
+            len(self._done) > _DONE_MAX or now - next(iter(self._done.values())) >= _DONE_SECONDS
+        ):
+            self._done.popitem(last=False)
 
     async def _marked_message(
         self, payload: discord.RawReactionActionEvent, action: ReactionAction

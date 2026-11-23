@@ -7,6 +7,7 @@ allows for that workspace, server and agent. The link in the arguments comes fro
 the credential, and the arguments are that link alone: the request body is never read.
 The requester is stamped from the credential's reactor, the way the identity relay
 stamps a person's turn. A credential works once.
+When `enabled` says the feature is off for the credential's workspace, the route refuses.
 """
 
 from __future__ import annotations
@@ -87,6 +88,7 @@ def build_reaction_action_route(
     clock: Callable[[], datetime],
     session: SessionFactory = _default_session,
     used: SingleUse | None = None,
+    enabled: Callable[[str], Awaitable[bool]] | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     spent = used or SingleUse()
 
@@ -104,6 +106,9 @@ def build_reaction_action_route(
         key = bearers.get(call.server)
         if action is None or server is None or key is None:
             log.warning("reaction_action.refused", reason="not_allowed", server=call.server)
+            return Response(status_code=403)
+        if enabled is not None and not await enabled(call.workspace):
+            log.info("reaction_action.refused", reason="feature_off", server=call.server)
             return Response(status_code=403)
         if not spent.claim(call.jti, now=clock()):
             log.warning("reaction_action.refused", reason="replayed", server=call.server)

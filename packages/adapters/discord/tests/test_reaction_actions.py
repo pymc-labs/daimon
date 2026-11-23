@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -612,3 +613,47 @@ async def test_the_end_of_a_turn_marks_the_trigger_message(monkeypatch: pytest.M
     )
     assert [c.args[0].id for c in message.add_reaction.await_args_list] == [_MARK]
     await cog.cog_unload()
+
+
+async def test_a_success_stays_done_when_the_mark_cannot_be_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _feature(monkeypatch)
+    bot = _bot()
+    message = _live_message()
+    message.remove_reaction.side_effect = discord.Forbidden(MagicMock(status=403), "no")
+    _with_message(bot, message)
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def caller(call: Any) -> Outcome:
+        calls.append(call.user)
+        await gate.wait()
+        return Outcome("ok")
+
+    cog = ReactionActionCog(bot, caller=caller)
+    await cog.cog_load()
+    alice = asyncio.create_task(cog.on_raw_reaction_add(_payload(user_id=1)))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    bob = asyncio.create_task(cog.on_raw_reaction_add(_payload(user_id=2)))
+    await asyncio.sleep(0)
+    gate.set()
+    await asyncio.gather(alice, bob)
+    assert [r.emoji.id for r in message.reactions if r.me] == [_MARK]  # the mark is still there
+    assert calls == ["1"]
+    await cog.on_raw_reaction_add(_payload(user_id=3))  # a later reaction does nothing either
+    assert calls == ["1"]
+    await cog.cog_unload()
+
+
+async def test_the_memory_of_successes_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    cog = ReactionActionCog(_bot())
+    for message_id in range(reaction_actions._DONE_MAX + 5):  # pyright: ignore[reportPrivateUsage]
+        cog._remember(message_id, ACTION)  # pyright: ignore[reportPrivateUsage]
+    assert len(cog._done) == reaction_actions._DONE_MAX  # pyright: ignore[reportPrivateUsage]
+    assert not cog._was_done(0, ACTION)  # pyright: ignore[reportPrivateUsage]
+    assert cog._was_done(reaction_actions._DONE_MAX + 4, ACTION)  # pyright: ignore[reportPrivateUsage]
+    later = time.monotonic() + reaction_actions._DONE_SECONDS + 1  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(reaction_actions.time, "monotonic", lambda: later)
+    assert not cog._was_done(reaction_actions._DONE_MAX + 4, ACTION)  # pyright: ignore[reportPrivateUsage]
