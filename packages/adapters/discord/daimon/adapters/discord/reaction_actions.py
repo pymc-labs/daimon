@@ -7,7 +7,7 @@ call of the binding's tool finished without error (`daimon.core.reaction_actions
 `ReactionActionCog` reads the confirm emoji. A person adds it to a message that
 carries the bot's own mark emoji, and the bot asks the MCP service to call the
 binding's confirm tool for that person. The MCP service holds the server's key;
-this process sends only a one-minute credential (`daimon.core.reaction_credential`).
+this process sends only a 15-second, single-use credential (`daimon.core.reaction_credential`).
 No model turn runs. On success the bot swaps the mark for the confirm emoji. An
 error, or a result that needs attention, puts the warning emoji on the message and
 sends the person a private card. Nothing is posted in the channel. Removing the
@@ -21,6 +21,7 @@ for the server, nothing runs past a lookup in the settings.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, cast
@@ -38,6 +39,7 @@ from daimon.core.reaction_actions import (
     bindings_for,
     confirm_binding,
     marking_actions,
+    message_url,
 )
 from daimon.core.reaction_credential import ReactionCall, mint
 
@@ -45,6 +47,7 @@ import discord
 from discord.ext import commands
 
 if TYPE_CHECKING:
+    from anthropic.types.beta import BetaManagedAgentsAgent
     from daimon.adapters.discord.bot import DaimonBot
     from daimon.core.turn.state import TurnState
 
@@ -54,7 +57,8 @@ log = structlog.get_logger()
 _CALL_TIMEOUT_S: Final = 75.0
 _FAILED_TEXT: Final = "The action could not be reached."
 #: Printed in the card under the tool's own line.
-_RETRY_LINE: Final = "Check the message, then add the emoji again."
+_RETRY_ADD: Final = "Check the message, then add the emoji again."
+_RETRY_REMOVE: Final = "Check the message, then remove your emoji and add it again."
 
 #: What a call needs: the credential's claims, and the outcome it brings back.
 Caller = Callable[[ReactionCall], Awaitable[Outcome]]
@@ -81,14 +85,30 @@ async def _enabled(cog: ReactionActionCog, guild_id: int) -> bool:
     ).on
 
 
-async def mark_trigger_message(message: discord.Message | None, state: TurnState) -> None:
-    """Add each matching binding's mark emoji to the turn's trigger message. Never raises."""
+async def mark_trigger_message(
+    message: discord.Message | None, state: TurnState, agent: BetaManagedAgentsAgent | None
+) -> None:
+    """Add each matching binding's mark emoji to the turn's trigger message. Never raises.
+
+    `agent` is the agent that ran the turn. Without it nothing is marked: a tool block
+    names its server only by a label the agent chose."""
     cog = _active
-    if cog is None or message is None or message.guild is None:
+    if cog is None or message is None or message.guild is None or agent is None:
         return
     try:
         actions = bindings_for(cog.actions, _workspace(message.guild.id))
-        marking = marking_actions(state.content, actions) if actions else ()
+        public_url = cog.bot.runtime.settings.mcp.public_url
+        marking = (
+            marking_actions(
+                state.content,
+                actions,
+                agent_name=agent.name,
+                server_urls={server.name: server.url for server in agent.mcp_servers},
+                public_url=None if public_url is None else str(public_url),
+            )
+            if actions
+            else ()
+        )
         if marking and await _enabled(cog, message.guild.id):
             for action in marking:
                 await message.add_reaction(_emoji(action.mark_emoji))
@@ -105,7 +125,7 @@ class ReactionActionCog(commands.Cog):
             bot.runtime.settings.mcp_identity.reaction_actions
         )
         self._caller = caller or self._post
-        self._busy: set[int] = set()
+        self._locks: dict[int, tuple[asyncio.Lock, int]] = {}
 
     async def cog_load(self) -> None:
         global _active
@@ -139,17 +159,24 @@ class ReactionActionCog(commands.Cog):
         )
         if action is None or not await _enabled(self, payload.guild_id):
             return
-        if payload.message_id in self._busy:
-            return
-        self._busy.add(payload.message_id)
+        # One call at a time per message. A later reaction waits, then reads the message
+        # afresh: after a success the mark is gone and it makes no call; after a failure
+        # the mark is still there and that person's call runs.
+        lock, waiting = self._locks.get(payload.message_id, (asyncio.Lock(), 0))
+        self._locks[payload.message_id] = (lock, waiting + 1)
         try:
-            message = await self._marked_message(payload, action)
-            if message is None:
-                return
-            outcome = await self._caller(self._call(payload, action, message))
-            await self._settle(payload, action, message, outcome)
+            async with lock:
+                message = await self._marked_message(payload, action)
+                if message is None:
+                    return
+                outcome = await self._caller(self._call(payload, action, message))
+                await self._settle(payload, action, message, outcome)
         finally:
-            self._busy.discard(payload.message_id)
+            lock, waiting = self._locks[payload.message_id]
+            if waiting <= 1:
+                del self._locks[payload.message_id]
+            else:
+                self._locks[payload.message_id] = (lock, waiting - 1)
 
     async def _marked_message(
         self, payload: discord.RawReactionActionEvent, action: ReactionAction
@@ -230,23 +257,47 @@ class ReactionActionCog(commands.Cog):
         if me is None:
             return
         warning = action.warning_emoji
-        try:
-            if outcome.status == "ok":
+        if outcome.status == "ok":
+            try:
                 await message.remove_reaction(_emoji(action.mark_emoji), me)
                 await message.add_reaction(_emoji(action.confirm_emoji))
                 if any(str(r.emoji) == warning and r.me for r in message.reactions):
                     await message.remove_reaction(warning, me)
-                return
-            await message.add_reaction(warning)
-        except discord.HTTPException:
-            log.warning("reaction_action.reaction_failed", exc_info=True)
-        if outcome.status != "ok":
-            await self._notify(payload.user_id, outcome)
+            except discord.HTTPException:
+                log.warning("reaction_action.reaction_failed", exc_info=True)
+            return
+        # Take the person's emoji back so they can add it again; this needs a permission
+        # the bot may lack, and the card says which it is.
+        removed = await _try(
+            message.remove_reaction(_emoji(action.confirm_emoji), discord.Object(payload.user_id))
+        )
+        warned = await _try(message.add_reaction(warning))
+        notified = await self._notify(payload.user_id, outcome, removed=removed)
+        if not warned and not notified:
+            log.warning(
+                "reaction_action.failure_unshown",
+                message_url=message_url(
+                    str(payload.guild_id), str(payload.channel_id), str(payload.message_id)
+                ),
+            )
 
-    async def _notify(self, user_id: int, outcome: Outcome) -> None:
-        text = f"{outcome.text or NO_TEXT}\n{_RETRY_LINE}"
+    async def _notify(self, user_id: int, outcome: Outcome, *, removed: bool) -> bool:
+        retry = _RETRY_ADD if removed else _RETRY_REMOVE
+        text = f"{outcome.text or NO_TEXT}\n{retry}"
         try:
             user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
             await user.send(embed=build_notice_embed(text, neutral=True))
         except discord.HTTPException:
             log.info("reaction_action.notice_failed", exc_info=True)
+            return False
+        return True
+
+
+async def _try(write: Awaitable[object]) -> bool:
+    """Run one Discord write; False when it fails. Best effort, logged."""
+    try:
+        await write
+    except discord.HTTPException:
+        log.info("reaction_action.write_failed", exc_info=True)
+        return False
+    return True

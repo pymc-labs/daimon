@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -19,7 +20,13 @@ from daimon.core.reaction_actions import (
     message_url,
     outcome_of,
 )
-from daimon.core.reaction_credential import CredentialError, ReactionCall, mint, verify
+from daimon.core.reaction_credential import (
+    CredentialError,
+    ReactionCall,
+    SingleUse,
+    mint,
+    verify,
+)
 from daimon.core.turn.state import TextBlock, ToolUseBlock
 from pydantic import ValidationError
 
@@ -65,8 +72,6 @@ def test_binding_defaults_and_ids() -> None:
     action = _action()
     assert (action.mark_emoji_id, action.confirm_emoji_id) == (111, 222)
     assert action.warning_emoji == DEFAULT_WARNING
-    assert action.attached_name == "tools"
-    assert _action(attached_as="mine").attached_name == "mine"
 
 
 @pytest.mark.parametrize(
@@ -111,16 +116,50 @@ def test_the_result_convention() -> None:
     assert len(long.text) == MAX_TEXT
 
 
+PUBLIC = "https://daimon.example"
+RELAY = f"{PUBLIC}/mcp-identity/tools"
+
+
+def _marks(blocks: list[ToolUseBlock], action: ReactionAction | None = None, **more: Any) -> Any:
+    args: dict[str, Any] = {
+        "agent_name": "Helper",
+        "server_urls": {"tools": RELAY},
+        "public_url": PUBLIC,
+    }
+    return marking_actions(blocks, [action or _action()], **{**args, **more})
+
+
 def test_the_mark_needs_a_clean_finished_call_of_the_bound_tool() -> None:
     action = _action()
-    assert marking_actions([TextBlock("text", "hi"), _block()], [action]) == (action,)
-    assert marking_actions([_block(status="failed")], [action]) == ()
-    assert marking_actions([_block(status="pending")], [action]) == ()
-    assert marking_actions([_block(is_error=True)], [action]) == ()
-    assert marking_actions([_block(mcp_server_name="other")], [action]) == ()
-    assert marking_actions([_block(name="confirm")], [action]) == ()
-    assert marking_actions([_block(mcp_server_name="mine")], [_action(attached_as="mine")]) != ()
-    assert marking_actions([_block(mcp_server_name="tools")], [_action(attached_as="mine")]) == ()
+    assert marking_actions(
+        [TextBlock("text", "hi"), _block()],
+        [action],
+        agent_name="Helper",
+        server_urls={"tools": RELAY},
+        public_url=PUBLIC,
+    ) == (action,)
+    assert _marks([_block(status="failed")]) == ()
+    assert _marks([_block(status="pending")]) == ()
+    assert _marks([_block(is_error=True)]) == ()
+    assert _marks([_block(mcp_server_name="other")]) == ()
+    assert _marks([_block(name="confirm")]) == ()
+
+
+def test_the_mark_trusts_the_agent_and_the_relay_url_not_the_label() -> None:
+    assert _marks([_block()]) != ()
+    # The agent must be the bound agent.
+    assert _marks([_block()], agent_name="Other") == ()
+    # Another agent's server labelled "tools" points at another host or relay name.
+    assert (
+        _marks([_block()], server_urls={"tools": "https://evil.example/mcp-identity/tools"}) == ()
+    )
+    assert _marks([_block()], server_urls={"tools": f"{PUBLIC}/mcp-identity/other"}) == ()
+    assert _marks([_block()], server_urls={"tools": "https://tools.example/mcp"}) == ()
+    # A label chosen freely still counts when its URL is the bound relay.
+    assert _marks([_block(mcp_server_name="mine")], server_urls={"mine": RELAY}) != ()
+    # No label for the block, or no public URL, fails closed.
+    assert _marks([_block()], server_urls={}) == ()
+    assert _marks([_block()], public_url=None) == ()
 
 
 def test_an_attention_result_is_not_marked() -> None:
@@ -130,7 +169,7 @@ def test_an_attention_result_is_not_marked() -> None:
 
     text = json.dumps({"status": "attention", "message": "Look"})
     block = _block(result_content=[BetaManagedAgentsTextBlock(type="text", text=text)])
-    assert marking_actions([block], [_action()]) == ()
+    assert _marks([block]) == ()
 
 
 def _call(**more: str) -> ReactionCall:
@@ -149,13 +188,25 @@ def _call(**more: str) -> ReactionCall:
 
 def test_a_credential_round_trips_and_names_one_call() -> None:
     token = mint(_call(parent="7"), secret=SECRET, now=NOW)
-    assert verify(token, secret=SECRET, now=NOW + timedelta(seconds=30)) == _call(parent="7")
+    got = verify(token, secret=SECRET, now=NOW + timedelta(seconds=10))
+    assert got.jti
+    assert replace(got, jti="") == _call(parent="7")
+    assert mint(_call(), secret=SECRET, now=NOW) != mint(_call(), secret=SECRET, now=NOW)
+
+
+def test_a_credential_can_be_claimed_once() -> None:
+    used = SingleUse()
+    assert used.claim("a", now=NOW)
+    assert not used.claim("a", now=NOW + timedelta(seconds=1))
+    assert used.claim("b", now=NOW)
+    # An id is forgotten only after its credential would have expired.
+    assert used.claim("a", now=NOW + timedelta(seconds=17))
 
 
 def test_a_credential_is_refused_when_expired_forged_or_not_ours() -> None:
     token = mint(_call(), secret=SECRET, now=NOW)
     with pytest.raises(CredentialError):
-        verify(token, secret=SECRET, now=NOW + timedelta(seconds=61))
+        verify(token, secret=SECRET, now=NOW + timedelta(seconds=16))
     with pytest.raises(CredentialError):
         verify(token, secret=b"t" * 32, now=NOW)
     with pytest.raises(CredentialError):

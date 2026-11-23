@@ -2,12 +2,13 @@
 
 The chat process signs it with `mcp.jwt_secret`, which it already holds, so it never
 holds the attached server's own key. It names one reactor, one message, one server
-and one tool, and lives one minute. It has no `sub` and no registry row, so no other
+and one tool, and lives fifteen seconds. It has no `sub` and no registry row, so no other
 verifier of that secret accepts it, and this verifier accepts no other token.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, cast
@@ -17,8 +18,9 @@ import jwt as pyjwt
 ISSUER: Final = "daimon-discord"
 AUDIENCE: Final = "daimon-reaction-action"
 PURPOSE: Final = "reaction_action"
-TTL: Final = timedelta(seconds=60)
-_FIELDS: Final = ("ws", "server", "tool", "agent", "user", "guild", "channel", "message")
+TTL: Final = timedelta(seconds=15)
+MAX_USED: Final = 4096
+_FIELDS: Final = ("jti", "ws", "server", "tool", "agent", "user", "guild", "channel", "message")
 
 
 class CredentialError(Exception):
@@ -38,6 +40,7 @@ class ReactionCall:
     channel: str
     message: str
     parent: str | None = None
+    jti: str = ""
 
 
 def mint(call: ReactionCall, *, secret: bytes, now: datetime) -> str:
@@ -45,6 +48,7 @@ def mint(call: ReactionCall, *, secret: bytes, now: datetime) -> str:
         "iss": ISSUER,
         "aud": AUDIENCE,
         "purpose": PURPOSE,
+        "jti": str(uuid.uuid4()),
         "iat": int(now.timestamp()),
         "exp": int((now + TTL).timestamp()),
         "ws": call.workspace,
@@ -105,4 +109,26 @@ def verify(token: str, *, secret: bytes, now: datetime) -> ReactionCall:
         channel=text["channel"],
         message=text["message"],
         parent=parent,
+        jti=text["jti"],
     )
+
+
+class SingleUse:
+    """Remembers the credentials already used, until they would have expired.
+
+    In process: a replica of the MCP service knows only what it saw itself, so a
+    credential replayed on another replica inside its fifteen seconds is not caught.
+    The credential's short life bounds that; one replica, or sticky routing, closes it.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, datetime] = {}
+
+    def claim(self, jti: str, *, now: datetime) -> bool:
+        """True the first time `jti` is claimed; False for every later claim."""
+        for key in [k for k, until in self._seen.items() if until <= now]:
+            del self._seen[key]
+        if jti in self._seen or len(self._seen) >= MAX_USED:
+            return False
+        self._seen[jti] = now + TTL + timedelta(seconds=1)
+        return True

@@ -87,7 +87,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import discord
 
 if TYPE_CHECKING:
-    pass
+    from anthropic.types.beta import BetaManagedAgentsAgent
 
 log = structlog.get_logger()
 
@@ -429,9 +429,11 @@ class DiscordTurnLifecycle(OutputGate):
         budget_channel_id: str | None = None,
         alert_webhook_url: SecretStr | None = None,
         thread_stopped: Callable[[], bool] | None = None,
+        turn_agent: BetaManagedAgentsAgent | None = None,
     ) -> None:
         # Once the turn's thread is gone or closed, nothing more is written:
         # no progress edit, no terminal card, no replacement for a missing card.
+        self._turn_agent = turn_agent
         self._thread_stopped = thread_stopped or (lambda: False)
         self._requester_id = requester_id
         # Only an admin sees the request ref on a stop or failure notice.
@@ -1355,7 +1357,7 @@ class DiscordTurnLifecycle(OutputGate):
             self._mark_ended()
             self._card_writes.queue_repair()
             await self._mark_done()
-            await mark_trigger_message(self._trigger_message, state)
+            await mark_trigger_message(self._trigger_message, state, self._turn_agent)
 
     async def _deliver_success(self, state: TurnState) -> None:
         self._state = update_activity(self._state, state)

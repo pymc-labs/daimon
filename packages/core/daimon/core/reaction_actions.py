@@ -43,7 +43,6 @@ class ReactionAction(BaseModel):
 
     workspace: str = Field(pattern=r"^[a-z]+:[0-9A-Za-z_-]+$")
     server: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
-    attached_as: str | None = None
     agent: str = Field(min_length=1)
     mark_tool: str = Field(min_length=1)
     mark_emoji: str
@@ -78,11 +77,6 @@ class ReactionAction(BaseModel):
     @property
     def confirm_emoji_id(self) -> int:
         return emoji_id(self.confirm_emoji)
-
-    @property
-    def attached_name(self) -> str:
-        """The name the agent lists the server under: what a tool block carries."""
-        return self.attached_as or self.server
 
 
 def emoji_id(emoji: str) -> int:
@@ -172,21 +166,39 @@ def blocks_text(block: ToolUseBlock) -> Mapping[str, object]:
 
 
 def marking_actions(
-    content: Sequence[ContentBlock], actions: Iterable[ReactionAction]
+    content: Sequence[ContentBlock],
+    actions: Iterable[ReactionAction],
+    *,
+    agent_name: str,
+    server_urls: Mapping[str, str],
+    public_url: str | None,
 ) -> tuple[ReactionAction, ...]:
     """The bindings whose mark tool finished without error or attention in a turn.
 
-    A block counts when its server name is the binding's attached name, its tool
-    name is the mark tool, and it completed. One mark per binding.
+    A tool block carries only the label the agent lists its server under, which any
+    agent may choose. So a block counts only when the executing agent is the binding's
+    agent, and `server_urls` (that agent's own list, label to URL) maps the block's
+    label to this deployment's relay URL for the binding's server. One mark per binding.
     """
+    from daimon.core.mcp_identity import relay_server_name
     from daimon.core.turn.state import ToolUseBlock
 
+    if public_url is None:
+        return ()
     found: list[ReactionAction] = []
     for action in actions:
+        if action.agent != agent_name:
+            continue
         for block in content:
+            url = (
+                server_urls.get(block.mcp_server_name or "")
+                if isinstance(block, ToolUseBlock)
+                else None
+            )
             if (
                 isinstance(block, ToolUseBlock)
-                and block.mcp_server_name == action.attached_name
+                and url is not None
+                and relay_server_name(url, public_url) == action.server
                 and block.name == action.mark_tool
                 and block.status == "complete"
                 and not block.is_error

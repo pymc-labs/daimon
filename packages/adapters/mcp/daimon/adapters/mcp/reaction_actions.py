@@ -4,9 +4,9 @@
 `daimon.core.reaction_credential` as its bearer. This service holds the attached
 server's key; the chat process does not. The route calls the one tool a binding
 allows for that workspace, server and agent. The link in the arguments comes from
-the credential. The requester is stamped from the credential's reactor, the way the
-identity relay stamps a person's turn, and anything the caller put under
-`requester_*` or `_meta` is dropped.
+the credential, and the arguments are that link alone: the request body is never read.
+The requester is stamped from the credential's reactor, the way the identity relay
+stamps a person's turn. A credential works once.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import cast
 
 import structlog
 from daimon.core.config import SignedIdentityServer
@@ -35,7 +34,7 @@ from daimon.core.reaction_actions import (
     message_url,
     outcome_of,
 )
-from daimon.core.reaction_credential import CredentialError, ReactionCall, verify
+from daimon.core.reaction_credential import CredentialError, ReactionCall, SingleUse, verify
 from pydantic import JsonValue, SecretStr
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -44,8 +43,6 @@ log = structlog.get_logger(__name__)
 
 ROUTE = CALL_PATH
 METHODS = ["POST"]
-#: A body is a few small fields; anything larger is refused.
-MAX_BODY_BYTES = 16 * 1024
 _UNREACHABLE = "The action could not be reached."
 
 SessionFactory = Callable[[str, str], AbstractAsyncContextManager[McpToolSession]]
@@ -53,17 +50,6 @@ SessionFactory = Callable[[str, str], AbstractAsyncContextManager[McpToolSession
 
 def _default_session(url: str, token: str) -> AbstractAsyncContextManager[McpToolSession]:
     return mcp_tool_session(url, token, limits=INTERACTIVE_LIMITS)
-
-
-def stripped_arguments(raw: object) -> dict[str, JsonValue]:
-    """Caller arguments without any requester field or `_meta`, at the top level."""
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        key: value
-        for key, value in cast("dict[str, JsonValue]", raw).items()
-        if not key.lower().startswith("requester") and key != "_meta" and key != "meta"
-    }
 
 
 def requester_meta(call: ReactionCall) -> dict[str, JsonValue]:
@@ -100,7 +86,10 @@ def build_reaction_action_route(
     secret: bytes,
     clock: Callable[[], datetime],
     session: SessionFactory = _default_session,
+    used: SingleUse | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
+    spent = used or SingleUse()
+
     async def handler(request: Request) -> Response:
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("bearer "):
@@ -116,21 +105,12 @@ def build_reaction_action_route(
         if action is None or server is None or key is None:
             log.warning("reaction_action.refused", reason="not_allowed", server=call.server)
             return Response(status_code=403)
-        declared = request.headers.get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-            return Response(status_code=413)
-        body = await request.body()
-        if len(body) > MAX_BODY_BYTES:
-            return Response(status_code=413)
-        arguments: dict[str, JsonValue] = {}
-        if body:
-            try:
-                parsed = cast("object", await request.json())
-            except ValueError:
-                return Response(status_code=400)
-            if isinstance(parsed, dict):
-                arguments = stripped_arguments(cast("dict[str, object]", parsed).get("arguments"))
-        arguments["message_url"] = message_url(call.guild, call.channel, call.message)
+        if not spent.claim(call.jti, now=clock()):
+            log.warning("reaction_action.refused", reason="replayed", server=call.server)
+            return Response(status_code=401)
+        arguments: dict[str, JsonValue] = {
+            "message_url": message_url(call.guild, call.channel, call.message)
+        }
         try:
             async with session(server.url, key.get_secret_value()) as tools:
                 result = await tools.call_tool_result(

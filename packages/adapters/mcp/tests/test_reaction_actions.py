@@ -13,7 +13,6 @@ from daimon.adapters.mcp.reaction_actions import (
     METHODS,
     ROUTE,
     build_reaction_action_route,
-    stripped_arguments,
 )
 from daimon.core.config import SignedIdentityServer
 from daimon.core.mcp_tool_call import McpCallError
@@ -138,7 +137,7 @@ async def test_a_thread_names_its_parent_channel() -> None:
     }
 
 
-async def test_caller_supplied_requester_keys_and_link_are_dropped() -> None:
+async def test_the_arguments_are_only_the_link_whatever_the_caller_sends() -> None:
     upstream = Upstream()
     hostile = {
         "requester_platform_user_id": "666",
@@ -148,15 +147,23 @@ async def test_caller_supplied_requester_keys_and_link_are_dropped() -> None:
         "extra": "kept",
     }
     async with _client(upstream) as client:
-        await _post(client, _token(), arguments=hostile)
+        await _post(client, _token(), arguments=hostile, tool="propose", extra="x" * 20000)
     (call,) = upstream.calls
-    assert call["arguments"] == {
-        "extra": "kept",
-        "message_url": "https://discord.com/channels/1/2/3",
-    }
+    assert call["name"] == "confirm"
+    assert call["arguments"] == {"message_url": "https://discord.com/channels/1/2/3"}
     assert call["meta"]["requester_platform_user_id"] == "9"
     assert call["meta"]["requester_kind"] == "person"
-    assert stripped_arguments("not an object") == {}
+
+
+async def test_a_credential_works_once() -> None:
+    upstream = Upstream()
+    token = _token()
+    async with _client(upstream) as client:
+        first = await _post(client, token)
+        second = await _post(client, token)
+        third = await _post(client, _token())
+    assert (first.status_code, second.status_code, third.status_code) == (200, 401, 200)
+    assert len(upstream.calls) == 2
 
 
 async def test_a_pair_no_binding_allows_is_refused_and_nothing_is_called() -> None:
@@ -205,11 +212,3 @@ async def test_an_unreachable_server_is_an_error_without_its_detail() -> None:
     assert reply.status_code == 200
     assert reply.json()["status"] == "error"
     assert KEY not in reply.text
-
-
-async def test_an_oversized_body_is_refused() -> None:
-    upstream = Upstream()
-    async with _client(upstream) as client:
-        reply = await _post(client, _token(), arguments={"x": "y" * 20000})
-    assert reply.status_code == 413
-    assert upstream.calls == []

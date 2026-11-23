@@ -2478,10 +2478,10 @@ class McpIdentitySettings(BaseModel):
             'entry has workspace (for example "discord:<guild id>"), server (a name in '
             "DAIMON_MCP_IDENTITY__SERVERS), agent (a name in that server's agents), "
             "mark_tool and mark_emoji, confirm_tool and confirm_emoji (emoji written "
-            '"name:id"), and optionally attached_as (the name the agent lists the server '
-            "under, default: server) and warning_emoji (a unicode emoji, default: the "
+            '"name:id"), and optionally warning_emoji (a unicode emoji, default: the '
             "warning sign). After a turn in which the agent's call of mark_tool finished "
-            "without error, the bot adds mark_emoji to the asker's message. When a person "
+            "without error, on the server whose relay name is server, the bot adds "
+            "mark_emoji to the asker's message. When a person "
             "adds confirm_emoji to a message that carries it, the bot calls confirm_tool "
             "for that person with the message link, and swaps mark_emoji for confirm_emoji. "
             'An error, or a result with status "attention", puts the warning emoji on '

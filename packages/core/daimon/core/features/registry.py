@@ -286,9 +286,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "The agent knows about the web app: messages, routine runs and tool results carry "
-            "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves it out."
+            "The agent knows the web app: messages, routine runs and tool results carry "
+            "its address and linkable pages, its invite and access tools are offered, "
+            "and cards show buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -658,8 +658,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     _shown(
         "reaction_actions",
         "Reaction actions",
-        "A set emoji marks a message after a tool call. A person's confirm emoji on it calls "
-        "a tool for them. Needs a binding in the settings.",
+        "An emoji marks a message; a person's emoji on it confirms.",
         tiers=("workspace",),
         platforms=_DISCORD,
         authority=_ADMIN,
