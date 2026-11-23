@@ -1344,7 +1344,7 @@ Keeps what people ask this agent from their coding tools and what it answers, pl
 
 ## Follow the GitHub org
 
-Gives this agent each new repo added to a GitHub org it already works in, when the GitHub App covers all repos of that org. The agent can read and change the new repo. Repos that existed when this was turned on, and repos taken off the agent, stay as they are. Only a workspace admin can change it.
+Gives this agent each new repo added to a GitHub org it already works in, when the GitHub App covers all repos of that org. The agent can read and change the new repo. Repos that existed when this was turned on, and repos taken off the agent, stay as they are. Only an admin can change it.
 
 | | |
 | --- | --- |

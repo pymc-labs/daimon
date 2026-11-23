@@ -314,6 +314,7 @@ async def _follow_in_tenant(
                         ),
                         github_user_id=follower.github_user_id,
                         account_id=follower.set_by,
+                        max_access=access,
                         now=now,
                     )
                     covered.add(repo.full_name)

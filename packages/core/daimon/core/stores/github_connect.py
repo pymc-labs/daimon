@@ -1111,6 +1111,7 @@ async def write_repo_confirmation(
     repo: RepoConfirmation,
     github_user_id: int,
     account_id: uuid.UUID,
+    max_access: Literal["read", "write"],
     now: datetime,
 ) -> TenantGitHubRepo:
     """Write or refresh one workspace repo row: the agent's own (`scope_agent_id`) or the
@@ -1137,7 +1138,7 @@ async def write_repo_confirmation(
     existing.owner_id = repo.owner_id
     existing.installation_id = repo.installation_id
     existing.repo_full_name = repo.full_name
-    existing.max_access = repo.max_access
+    existing.max_access = max_access
     existing.authorized_by_github_user_id = github_user_id
     existing.authorized_by_account_id = account_id
     existing.authorized_permission = repo.authorizer_permission
@@ -1230,6 +1231,8 @@ async def confirm(
             repo=repo,
             github_user_id=github_user_id,
             account_id=invitation.requester_account_id,
+            # The App grants write on any usable repo, whatever the person's own level.
+            max_access="write",
             now=now,
         )
     invitation.used_at = now

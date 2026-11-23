@@ -1015,7 +1015,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             "Gives this agent each new repo added to a GitHub org it already works in, "
             "when the GitHub App covers all repos of that org. The agent can read and "
             "change the new repo. Repos that existed when this was turned on, and repos "
-            "taken off the agent, stay as they are. Only a workspace admin can change it."
+            "taken off the agent, stay as they are. Only an admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN_NOT_OWNER,
