@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Production deploys no longer pin both backend switches off.** The MCP service and the workers run `DAIMON_TURN__CHANNEL_BACKENDS` and `DAIMON_TURN__AGENT_BACKENDS` at their default (on), and a production deploy clears the old pin from the MCP service.
+- **Production deploys no longer pin both backend switches off.** `DAIMON_TURN__CHANNEL_BACKENDS` and `DAIMON_TURN__AGENT_BACKENDS` come from each environment's own config, like any other setting.
 - **The web app no longer turns blank after a deploy, and works on phones in desktop mode.**
   A tab left open or restored after a deploy asked for files of the previous build and
   got the page back as HTML, which the browser refused; it now reloads into the new

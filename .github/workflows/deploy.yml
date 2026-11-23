@@ -328,8 +328,6 @@ jobs:
       - name: Deploy MCP registered minters
         if: (steps.plan.outputs.mcp == 'true') && steps.fresh.outputs.superseded != 'true'
         id: mcp_minters
-        env:
-          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           SERVICE=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" --format=json) || {
             echo "MCP service must be provisioned first; see the manual cutover runbook" >&2
@@ -358,15 +356,8 @@ jobs:
           fi
           echo "window=$LEGACY" >> "$GITHUB_OUTPUT"
           echo "MCP bounded non-internal legacy window=$LEGACY cutoff=$CUTOFF"
-          # Both backend switches run at their default (on). Production pinned
-          # them off before; clear what that pin left on the service. To stop
-          # them again, pin both to false here and in the workers step.
-          CLEAR=()
-          if [ "${DEPLOY_ENVIRONMENT:-}" = production ]; then
-            CLEAR=(--remove-env-vars DAIMON_TURN__CHANNEL_BACKENDS,DAIMON_TURN__AGENT_BACKENDS)
-          fi
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
-            --image "${{ steps.images.outputs.daimon }}" "${CLEAR[@]}" \
+            --image "${{ steps.images.outputs.daimon }}" \
             --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF"
           # Old revision requests may finish preparation and mint after traffic
           # has switched. Bound their last possible mint by the old request timeout.
