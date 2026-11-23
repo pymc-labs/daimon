@@ -23,7 +23,10 @@ export function AppShell() {
   useKey((e) => {
     const mod = e.metaKey || e.ctrlKey
     if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); setPalette((v) => !v) }
-    else if (mod && e.key.toLowerCase() === "o") { e.preventDefault(); navigate("/chat"); setTimeout(() => document.getElementById("composer")?.focus(), 50) }
+    else if (mod && e.key.toLowerCase() === "o") {
+      // A new page's composer takes focus itself; one already on /chat stays mounted, so focus it here.
+      e.preventDefault(); navigate("/chat"); document.getElementById("composer")?.focus()
+    }
   }, [navigate], true)
   useKey((e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return
