@@ -213,6 +213,11 @@ export function NewAllowance({ open, onOpenChange }: { open: boolean; onOpenChan
   const [amount, setAmount] = useState("50")
   const [window, setWindow] = useState<Window>("month")
   const [expires, setExpires] = useState("")
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) { setCap(false); setSubject(null); setAgent("any"); setAmount("50"); setWindow("month"); setExpires("") }
+  }
   const qc = useQueryClient()
   const save = useMutation({
     mutationFn: () => api.post("/api/credits/allowances", {
