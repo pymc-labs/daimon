@@ -137,13 +137,13 @@ async function refreshMeter(qc: QueryClient) {
   } catch { /* the next visit reads it */ }
 }
 
-type RunOpts = { body?: () => Promise<unknown>; from?: string; retry?: boolean }
+type RunOpts = { body?: () => Promise<unknown>; from?: string; retry?: boolean; sent?: (d: SessionDetail) => boolean }
 
 /**
  * Stream one turn into the thread. `body` posts; without it, re-attach to the running turn after event `from`.
  * A dropped stream re-attaches in a loop with backoff while the server says the turn runs.
  */
-async function run(qc: QueryClient, sid: string, path: string, { body, from, retry = false }: RunOpts) {
+async function run(qc: QueryClient, sid: string, path: string, { body, from, retry = false, sent }: RunOpts) {
   const ctrl = new AbortController()
   const { signal } = ctrl
   ctrls.set(sid, ctrl)
@@ -165,8 +165,13 @@ async function run(qc: QueryClient, sid: string, path: string, { body, from, ret
       const onOpen = () => { accepted = true }
       last = await stream(path, on, { body: body && await body(), signal, retry: retry || !body, lastEventId: last, onOpen })
     } catch (e) {
-      // Refused, aborted, or never reached the server: no reply to re-attach to.
-      if (e instanceof ApiError || signal.aborted || !accepted) throw e
+      // Refused or aborted: no reply to re-attach to. A post with no answer may still have reached the server: ask it.
+      if (e instanceof ApiError || signal.aborted) throw e
+      if (!accepted) {
+        const d = await api.get<SessionDetail>(`/api/chat/sessions/${sid}`).catch(() => undefined)
+        if (!d || (d.resume_from === undefined && !sent?.(d))) throw e
+        if (d.resume_from === undefined) { set(sid, (t) => withDetail(t, d)); done = true }
+      }
     }
     for (let i = 0; !done && !signal.aborted; i++) {
       set(sid, (t) => ({ ...t, reconnecting: true }))
@@ -211,7 +216,7 @@ export function send(qc: QueryClient, sid: string, content: string, files: File[
   }))
   // Files upload first; the message names them by id. The message id makes a retried post safe.
   const body = async () => ({ id, content, attachments: await Promise.all(files.map(upload)) })
-  return run(qc, sid, `/api/chat/sessions/${sid}/messages`, { body, retry: true })
+  return run(qc, sid, `/api/chat/sessions/${sid}/messages`, { body, retry: true, sent: (d) => d.messages.some((m) => m.id === id) })
 }
 
 export function answer(qc: QueryClient, sid: string, cardId: string, a: CardAnswer) {
@@ -219,7 +224,8 @@ export function answer(qc: QueryClient, sid: string, cardId: string, a: CardAnsw
     ...t,
     messages: [...t.messages.map((m) => (m.card?.id === cardId ? { ...m, card: settle(m.card, a) } : m)), placeholder()],
   }))
-  return run(qc, sid, `/api/chat/sessions/${sid}/cards/${cardId}`, { body: async () => a })
+  const sent = (d: SessionDetail) => d.messages.some((m) => m.card?.id === cardId && m.card.kind !== "refusal" && m.card.state !== "pending")
+  return run(qc, sid, `/api/chat/sessions/${sid}/cards/${cardId}`, { body: async () => a, sent })
 }
 
 /** The refusal card's way back: the agent answers on Claude again; says what changed. */
