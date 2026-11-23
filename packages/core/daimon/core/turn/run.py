@@ -2239,6 +2239,9 @@ async def run_prepared_turn_impl(
             )
         }
         trusted_servers = trusted_servers_for(deps.public_url, server_urls)
+        agent_uuid = derive_agent_uuid(
+            tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
+        )
         annotations_for = (
             mcp_annotation_lookup(
                 server_urls={
@@ -2250,9 +2253,7 @@ async def run_prepared_turn_impl(
                     deps.sessionmaker,
                     fernet=deps.fernet,
                     tenant_id=tenant_id,
-                    agent_id=derive_agent_uuid(
-                        tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
-                    ),
+                    agent_id=agent_uuid,
                 ),
                 relays=await tenant_relay_catalogues(
                     deps.settings.mcp_identity,
@@ -2260,6 +2261,7 @@ async def run_prepared_turn_impl(
                     sessionmaker=deps.sessionmaker,
                     tenant_id=tenant_id,
                     agent_name=prepared.admission.agent.name,
+                    agent_id=agent_uuid,
                 )
                 if deps.settings is not None
                 else None,

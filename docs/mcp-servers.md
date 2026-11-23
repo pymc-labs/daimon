@@ -128,8 +128,9 @@ to the person who asked, is listed with `"auth": "bearer"` and
 [`DAIMON_MCP_IDENTITY__BEARERS`](configuration.md#daimon_mcp_identity__bearers),
 a JSON object by server name, kept apart from the server list so it can be a
 secret. Because the key is shared, a bearer server must also list the
-`workspaces` and the `agents` (by name) allowed to use it; any other agent
-gets a 403. No signing key is needed when every server is bearer.
+`workspaces` and the `agents` (names or agent ids) allowed to use it; any other
+agent gets a 403. An id keeps working when the agent is renamed.
+No signing key is needed when every server is bearer.
 
 ```bash
 DAIMON_MCP_IDENTITY__SERVERS='[{"name": "tools", "url": "https://tools.example.com/mcp",

@@ -337,6 +337,9 @@ async def test_the_catalogue_read_keeps_annotations_and_sends_no_empty_bearer(
 _RELAY_PUBLIC_URL = "https://daimon.example/mcp"
 
 
+_AGENT_ID = uuid.UUID("abcdef01-2345-4abc-8def-0123456789ab")
+
+
 def _identity(**server: Any) -> McpIdentitySettings:
     return McpIdentitySettings.model_validate(
         {
@@ -359,7 +362,11 @@ async def test_a_relay_url_attached_under_another_name_is_not_trusted() -> None:
     """Trust is by attached name: `tracker` trusted must not read the hints of the relay
     server `billing` that an agent attached under that name."""
     relays = relay_catalogues(
-        _identity(), public_url=_RELAY_PUBLIC_URL, workspace="discord:1", agent_name="daimon"
+        _identity(),
+        public_url=_RELAY_PUBLIC_URL,
+        workspace="discord:1",
+        agent_name="daimon",
+        agent_id=_AGENT_ID,
     )
     reads: list[tuple[str, str | None]] = []
 
@@ -402,6 +409,45 @@ def test_a_relay_server_the_workspace_or_agent_may_not_use_is_not_read(
 ) -> None:
     """The relay refuses such a caller, so its catalogue is not read with the operator key."""
     relays = relay_catalogues(
-        _identity(), public_url=_RELAY_PUBLIC_URL, workspace=workspace, agent_name=agent_name
+        _identity(),
+        public_url=_RELAY_PUBLIC_URL,
+        workspace=workspace,
+        agent_name=agent_name,
+        agent_id=_AGENT_ID,
     )
     assert bool(relays) is listed, "a relay server is read only for an allowed workspace and agent"
+
+
+@pytest.mark.parametrize(
+    ("agents", "agent_name", "listed"),
+    [
+        (["daimon"], "daimon", True),
+        ([str(_AGENT_ID)], "renamed", True),
+        ([str(_AGENT_ID).upper()], "renamed", True),
+        (["daimon"], "renamed", False),
+        ([str(uuid.uuid4())], "renamed", False),
+    ],
+    ids=["name", "id", "id-upper-case", "old-name-after-rename", "another-id"],
+)
+def test_a_relay_server_listing_an_agent_by_name_or_id_is_read_for_it(
+    agents: list[str], agent_name: str, listed: bool
+) -> None:
+    relays = relay_catalogues(
+        _identity(agents=agents),
+        public_url=_RELAY_PUBLIC_URL,
+        workspace="discord:1",
+        agent_name=agent_name,
+        agent_id=_AGENT_ID,
+    )
+    assert bool(relays) is listed, "an entry matches the agent's name or its id"
+
+
+def test_an_agent_named_like_a_listed_id_is_left_out() -> None:
+    relays = relay_catalogues(
+        _identity(agents=[str(_AGENT_ID)]),
+        public_url=_RELAY_PUBLIC_URL,
+        workspace="discord:1",
+        agent_name=str(_AGENT_ID),
+        agent_id=uuid.uuid4(),
+    )
+    assert relays == {}, "an id entry never matches a name"

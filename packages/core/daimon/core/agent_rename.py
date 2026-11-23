@@ -36,13 +36,14 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults._reconcile import reconcile_lock_key
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_READER_OF
@@ -53,6 +54,7 @@ from daimon.core.defaults.rename_agents import (
     source_readers,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
 from daimon.core.stores.agent_avatars import normalize_agent_name
@@ -63,6 +65,7 @@ from daimon.core.stores.agent_rename import (
     rename_agent_references,
     rename_policy_keys,
 )
+from daimon.core.stores.tenants import get_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -180,6 +183,34 @@ async def _refuse_collisions(session: AsyncSession, plan: AgentRenamePlan) -> No
         )
 
 
+async def _refuse_relay_lockout(
+    session: AsyncSession,
+    servers: Sequence[SignedIdentityServer],
+    plan: AgentRenamePlan,
+) -> None:
+    """Refuse a rename that a relay server's `agents` list would lock out.
+
+    The list is deployment settings, so the rename cannot move it. A server that applies to
+    this workspace and allows the agent by its stored name (what its relay credential signs),
+    but would not allow the new name or the agent's id, would refuse it from then on.
+    """
+    tenant = await get_tenant(session, plan.tenant_id)
+    workspace = f"{tenant.platform}:{tenant.external_id}" if tenant is not None else None
+    agent_id = derive_agent_uuid(tenant_id=plan.tenant_id, ma_agent_id=plan.agent.id)
+    for server in servers:
+        if server.workspaces is not None and workspace not in server.workspaces:
+            continue
+        # Without an id only a name entry can allow it; the new name is stored as typed.
+        if server.allows_agent(name=plan.agent.name, agent_id=None):
+            if server.allows_agent(name=plan.new, agent_id=agent_id):
+                continue
+            raise AgentRenameRefused(
+                f"The server {server.name!r} lists {plan.agent.name!r} by name, so it would refuse "
+                f"the agent after this rename. Add {str(agent_id)!r} to the agents of "
+                f"{server.name!r} in DAIMON_MCP_IDENTITY__SERVERS, then rename again."
+            )
+
+
 async def _list(client: AsyncAnthropic, tenant_id: uuid.UUID) -> list[BetaManagedAgentsAgent]:
     return await list_agents_by_tenant(client, tenant_id=tenant_id)
 
@@ -193,6 +224,7 @@ async def plan_agent_rename(
     new: str,
     replace_seeded: bool,
     today: dt.date | None = None,
+    relay_servers: Sequence[SignedIdentityServer] = (),
 ) -> AgentRenamePlan:
     """The plan with its database counts; reads only."""
     plan = plan_from_listing(
@@ -204,6 +236,7 @@ async def plan_agent_rename(
         today=today or dt.datetime.now(dt.UTC).date(),
     )
     async with session_factory() as session:
+        await _refuse_relay_lockout(session, relay_servers, plan)
         await _refuse_collisions(session, plan)
         references = await count_agent_references(session, tenant_id=tenant_id, old=old, new=new)
         keys = await policy_keys_to_move(session, tenant_id=tenant_id, old=old, new=new)
@@ -220,6 +253,7 @@ async def rename_user_agent(
     replace_seeded: bool = False,
     dry_run: bool = False,
     today: dt.date | None = None,
+    relay_servers: Sequence[SignedIdentityServer] = (),
 ) -> AgentRenameResult:
     """Rename the tenant's own agent `old` to `new`, as the module docstring orders it.
 
@@ -236,6 +270,7 @@ async def rename_user_agent(
         new=new,
         replace_seeded=replace_seeded,
         today=day,
+        relay_servers=relay_servers,
     )
     if dry_run:
         return AgentRenameResult(plan)

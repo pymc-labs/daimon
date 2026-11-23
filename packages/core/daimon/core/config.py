@@ -2326,6 +2326,14 @@ def env_admits(
     return env_dm_policy(policies, tenant_id).allows(user_id)
 
 
+def _agent_entry_id(entry: str) -> str | None:
+    """The canonical uuid string of a list entry, or None when the entry is a plain name."""
+    try:
+        return str(uuid.UUID(entry))
+    except ValueError:
+        return None
+
+
 class SignedIdentityServer(BaseModel):
     """One remote MCP server reached through the identity relay.
 
@@ -2347,6 +2355,8 @@ class SignedIdentityServer(BaseModel):
     workspaces: frozenset[str] | None = None
     ca_certificate: str | None = None
     requester_meta: bool = False
+    # Agents that may use the server: each entry is an agent name or an agent id. An id keeps
+    # working when the agent is renamed. Empty: any agent (`allows_agent` is the one rule).
     agents: tuple[str, ...] = ()
     # True: the server answers with what the channel's readers can read, so an agent
     # using it stays in its channel (`daimon.core.relay_scope`). False: the server checks
@@ -2378,8 +2388,26 @@ class SignedIdentityServer(BaseModel):
     @classmethod
     def _agent_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if any(not name for name in value):
-            raise ValueError("agents must be non-empty names")
+            raise ValueError("agents must be agent names or agent ids, none empty")
         return value
+
+    def allows_agent(self, *, name: str, agent_id: uuid.UUID | None) -> bool:
+        """Whether an agent may use this server. The one rule: the relay route and the tool
+        catalogues both call it. No list allows every agent; otherwise an entry must equal
+        the agent's name or its id. An entry that parses as a uuid is an id and matches only ids
+        (in canonical form, so case never matters); any other entry is a name and matches only
+        names, so an agent named like a listed id gains nothing."""
+        if not self.agents:
+            return True
+        wanted = str(agent_id) if agent_id is not None else None
+        for entry in self.agents:
+            entry_id = _agent_entry_id(entry)
+            if entry_id is None:
+                if entry == name:
+                    return True
+            elif entry_id == wanted:
+                return True
+        return False
 
     @field_validator("url")
     @classmethod
@@ -2434,7 +2462,7 @@ class McpIdentitySettings(BaseModel):
             "asker only while that person's turn is live in the calling session's thread. "
             'A server may instead set auth to "bearer": Daimon then sends the key from '
             "DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, and workspaces and "
-            "agents (agent names that may use it) are required. Set requester_meta to true "
+            "agents (agent names or ids that may use it) are required. Set requester_meta to true "
             "for a server that attributes writes to the requester: Daimon removes any "
             "requester fields the caller supplied and stamps each tool call with who it is "
             "for and where: the asker while their turn is live, or the person an unattended "

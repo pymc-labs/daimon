@@ -594,6 +594,7 @@ async def dm_session_authority(
             sessionmaker=deps.sessionmaker,
             tenant_id=tenant_id,
             agent_name=actual.agent.name,
+            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=actual.agent.id),
         )
         if deps.settings is not None
         else None,
