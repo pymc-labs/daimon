@@ -217,7 +217,7 @@ export function NewAllowance({ open, onOpenChange }: { open: boolean; onOpenChan
   const save = useMutation({
     mutationFn: () => api.post("/api/credits/allowances", {
       subject, agent: cap ? null : agents?.find((a) => a.id === agent) ?? null,
-      amount_usd: Number(amount), window: cap ? "month" : window, expires_at: !cap && expires ? new Date(expires).toISOString() : null, cap,
+      amount_usd: Number(amount), window: cap ? "month" : window, expires_at: !cap && expires ? new Date(`${expires}T00:00`).toISOString() : null, cap,
     }),
     onSuccess: () => { changed(qc); onOpenChange(false); toast(cap ? "Cap added" : "Allowance added") },
   })
