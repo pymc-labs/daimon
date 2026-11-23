@@ -11,7 +11,7 @@ import type { ThreadModels } from "./types"
 const DEFAULT = "default"
 
 /** The chat's model: a pick applies to this chat at once; its note says what is off on the new provider. */
-export function ThreadModel({ sid, model, onChanged }: { sid: string; model: string; onChanged: () => void }) {
+export function ThreadModel({ sid, model }: { sid: string; model: string }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
   const models = useQuery({
@@ -24,8 +24,9 @@ export function ThreadModel({ sid, model, onChanged }: { sid: string; model: str
   const pick = async (value: string) => {
     try {
       const done = await api.put<{ note: string }>(`/api/chat/sessions/${sid}/model`, { value })
+      // The header reads the model from the thread list first, so both refetch.
       void qc.invalidateQueries({ queryKey: ["chat", "session", sid] })
-      onChanged()
+      void qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
       toast.success(done.note)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Couldn't change the model.")
@@ -35,8 +36,8 @@ export function ThreadModel({ sid, model, onChanged }: { sid: string; model: str
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="xs" className="text-faint" aria-label="Chat model">
-          {model || "Model"}<ChevronDown />
+        <Button variant="ghost" size="xs" className="max-w-28 shrink-0 text-faint" aria-label="Chat model">
+          <span className="truncate">{model || "Model"}</span><ChevronDown />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="max-h-80 overflow-y-auto">
