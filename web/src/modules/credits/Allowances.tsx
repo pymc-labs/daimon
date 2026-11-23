@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, Ticket, Users, UserRound } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { toast } from "sonner"
 import { Link } from "react-router"
 import { AgentAvatar } from "@/components/common"
@@ -21,7 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api } from "@/lib/api"
 import { ENTITY_FALLBACK, shortDate, usd } from "@/lib/format"
-import { useChatAgents, useGroups, usePeopleSearch } from "@/lib/hooks"
+import { useChatAgents, useDebounced, useGroups, usePeopleSearch } from "@/lib/hooks"
 import type { Allowance, Subject, Window } from "./types"
 import { Field } from "./shared"
 
@@ -160,11 +160,7 @@ function Detail({ a }: { a: Allowance }) {
 export function SubjectPicker({ value, onChange, everyoneOnly, peopleOnly }: { value: Subject | null; onChange: (s: Subject) => void; everyoneOnly?: boolean; peopleOnly?: boolean }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState("")
-  const [term, setTerm] = useState("")
-  useEffect(() => {
-    const t = setTimeout(() => setTerm(text.trim()), 200)
-    return () => clearTimeout(t)
-  }, [text])
+  const term = useDebounced(text.trim(), 200)
   const groups = useGroups()
   const people = usePeopleSearch(term)
   const shown = (groups.data ?? []).filter((g) => !peopleOnly && (!everyoneOnly || g.id === "everyone") && g.name.toLowerCase().includes(text.trim().toLowerCase()))

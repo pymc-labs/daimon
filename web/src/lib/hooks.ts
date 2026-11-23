@@ -1,9 +1,19 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router"
 
 import { api } from "./api"
 import type { AgentRef, Capability, ChatSession, Group, Me, Person, Provider } from "./types"
+
+/** `value` once it has held still for `ms`. */
+export function useDebounced<T>(value: T, ms: number) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return v
+}
 
 export const useMe = () => useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/me"), staleTime: 60_000, refetchOnWindowFocus: true })
 /** Move to another of the person's workspaces, then to `next` with nothing from the old one cached. */
