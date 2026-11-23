@@ -35,7 +35,8 @@ export function usePaged<T>(key: readonly unknown[], path: string, { refetchInte
     initialPageParam: null as string | null,
     queryFn: ({ pageParam }) => api.page<T>(path, pageParam),
     getNextPageParam: (last) => last.next,
-    refetchInterval,
+    // Polling refetches every loaded page, so it stops once the person has paged on.
+    refetchInterval: (q) => (refetchInterval && q.state.data?.pages.length === 1 ? refetchInterval : false),
   })
   const data = useMemo(() => q.data?.pages.flatMap((p) => p.rows), [q.data])
   return {
