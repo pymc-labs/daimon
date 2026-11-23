@@ -656,6 +656,15 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         platforms=frozenset({"discord"}),
     ),
     _shown(
+        "reaction_actions",
+        "Reaction actions",
+        "A set emoji marks a message after a tool call. A person's confirm emoji on it calls "
+        "a tool for them. Needs a binding in the settings.",
+        tiers=("workspace",),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
         "routine_result_header",
         "Routine result header",
         'Off drops the "Result from" line above a routine\'s result.',

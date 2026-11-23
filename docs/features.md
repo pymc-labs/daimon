@@ -60,6 +60,7 @@ Where each feature can be set, and its default.
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  |  | Only Discord |
+| Reaction actions | `reaction_actions` | Chat | Off |  | ✓ |  |  |  |  | Only Discord |
 | Routine result header | `routine_result_header` | Chat | On | ✓ | ✓ | ✓ | ✓ |  | ✓ |  |
 | Tool server names | `tool_server_names` | Chat | On |  | ✓ | ✓ |  |  |  |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord, Slack; Off by default on Slack |
@@ -665,6 +666,18 @@ The first message in a thread, and the first after the model or effort changes, 
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Reaction actions
+
+A set emoji marks a message after a tool call. A person's confirm emoji on it calls a tool for them. Needs a binding in the settings.
+
+| | |
+| --- | --- |
+| Key | `reaction_actions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace |
 | Combines | Most specific wins |
 
 ## Routine result header

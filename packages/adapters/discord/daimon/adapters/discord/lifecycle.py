@@ -40,6 +40,7 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import AnswerMessage
+from daimon.adapters.discord.reaction_actions import mark_trigger_message
 from daimon.adapters.discord.reactions import (
     DONE,
     WORKING,
@@ -1354,6 +1355,7 @@ class DiscordTurnLifecycle(OutputGate):
             self._mark_ended()
             self._card_writes.queue_repair()
             await self._mark_done()
+            await mark_trigger_message(self._trigger_message, state)
 
     async def _deliver_success(self, state: TurnState) -> None:
         self._state = update_activity(self._state, state)

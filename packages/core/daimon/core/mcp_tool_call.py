@@ -365,10 +365,19 @@ class McpToolSession:
         raise McpCallError("too_large")
 
     async def call_tool_result(
-        self, name: str, arguments: Mapping[str, JsonValue]
+        self,
+        name: str,
+        arguments: Mapping[str, JsonValue],
+        *,
+        meta: Mapping[str, JsonValue] | None = None,
     ) -> dict[str, JsonValue]:
-        """The `tools/call` result object as sent, for a relay to hand back unchanged."""
-        return await self._rpc("tools/call", {"name": name, "arguments": dict(arguments)})
+        """The `tools/call` result object as sent, for a relay to hand back unchanged.
+
+        `meta` is sent as `params._meta`: how Daimon names who a call is for."""
+        params: dict[str, JsonValue] = {"name": name, "arguments": dict(arguments)}
+        if meta is not None:
+            params["_meta"] = dict(meta)
+        return await self._rpc("tools/call", params)
 
     async def call_tool(self, name: str, arguments: Mapping[str, JsonValue]) -> JsonValue:
         """The tool's result: `structuredContent`, else its one text item (JSON when it parses).
