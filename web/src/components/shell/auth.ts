@@ -1,6 +1,9 @@
 import { api } from "@/lib/api"
 
 export async function signOut() {
-  await api.post("/auth/logout")
-  location.assign("/signin")
+  try {
+    await api.post("/auth/logout")
+  } finally {
+    location.assign("/signin")
+  }
 }
