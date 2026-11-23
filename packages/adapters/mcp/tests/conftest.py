@@ -35,15 +35,16 @@ from .harness import stop_confirmation_workers
 
 
 @pytest.fixture(autouse=True)
-def org_admin_on_github(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The connect page asks GitHub whether the signer administers an org (to offer following
-    it). The scripted GitHubs of the route tests do not serve that; follow tests set their own."""
+def org_proof_on_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect page proves the signer may hand over a whole org before offering to follow
+    it (GitHub membership, else the installation's listing). The scripted GitHubs of the route
+    tests serve neither; the follow tests set their own."""
     from daimon.adapters.mcp import oauth_github
 
-    async def yes(_client: object, _token: str, _org: str) -> bool:
-        return True
+    async def proved(*_args: object, **_kwargs: object) -> str:
+        return "org_admin"
 
-    monkeypatch.setattr(oauth_github, "_is_org_admin", yes)
+    monkeypatch.setattr(oauth_github, "_org_proof", proved)
 
 
 @pytest_asyncio.fixture(autouse=True)

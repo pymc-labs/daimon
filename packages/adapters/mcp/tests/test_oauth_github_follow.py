@@ -31,7 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .test_oauth_github_permissions import WRITE_INSTALLATION, _Editor, _editor, _Org
 
 # The suite stubs the module attribute for every test; these tests ask the real function.
-_REAL_IS_ORG_ADMIN = oauth_github._is_org_admin
+_REAL_ORG_PROOF = oauth_github._org_proof
+_REAL_ORG_ADMIN_OFFERS = oauth_github._org_admin_offers
 _STYLES = Path(oauth_github.__file__).parent / "static" / "web.css"
 _CHROME = Path(
     os.environ.get(
@@ -187,7 +188,7 @@ _FOLLOW = {"access": "write", "repo": "101", "follow_org": "77"}
 async def test_an_admin_of_the_org_turns_it_on_and_the_gap_is_queued(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(oauth_github, "_is_org_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG]) as editor:
         hidden, page = await editor.page()
         assert 'name="follow_org" value="77"' in page, "the whole org is offered"
@@ -219,17 +220,17 @@ async def test_a_client_workspace_admin_who_is_not_an_org_admin_cannot_turn_it_o
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The signer sees one repo of the org; the box is not offered and a forged post is refused."""
-    checked = AsyncMock(return_value=False)
-    monkeypatch.setattr(oauth_github, "_is_org_admin", checked)
+    checked = AsyncMock(return_value=None)
+    monkeypatch.setattr(oauth_github, "_org_proof", checked)
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG]) as editor:
         hidden, page = await editor.page()
         assert 'name="follow_org"' not in page
-        assert checked.await_args is not None and checked.await_args.args[2] == "alpha"
+        assert checked.await_args is not None and checked.await_args.args[2].owner == "alpha"
 
         refused = await editor.save(hidden, **_FOLLOW)
 
         assert refused.status_code == 403
-        assert "Only an admin of alpha on GitHub can turn this on." in refused.text
+        assert "Only someone who sees every repo of alpha" in refused.text
         assert await editor.grants() == {}, "nothing was saved with it"
         assert not await _follows(editor)
 
@@ -239,7 +240,7 @@ async def test_an_owner_who_is_no_longer_an_admin_cannot_turn_it_on(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The stored role still says admin; the live check does not."""
-    monkeypatch.setattr(oauth_github, "_is_org_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG], requester="owner") as editor:
         async with editor.sessionmaker.begin() as session:
             await set_role(session, editor.account_id, Role.ADMIN)
@@ -275,7 +276,7 @@ async def test_an_owner_without_the_follow_box_still_saves_without_a_live_admin_
 async def test_a_person_who_is_not_an_admin_gets_no_offer_and_no_follow(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(oauth_github, "_is_org_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG], requester="member") as editor:
         hidden, page = await editor.page()
         refused = await editor.save(hidden, **_FOLLOW)
@@ -289,7 +290,7 @@ async def test_a_person_who_is_not_an_admin_gets_no_offer_and_no_follow(
 async def test_ticking_it_without_the_whole_org_saves_nothing(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(oauth_github, "_is_org_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
     two = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin"), (102, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [two]) as editor:
         hidden, _ = await editor.page()
@@ -301,38 +302,121 @@ async def test_ticking_it_without_the_whole_org_saves_nothing(
         assert not await _follows(editor)
 
 
-def _membership(body: dict[str, object] | None, status: int = 200) -> httpx.AsyncClient:
+_OFFER = FollowOffer(77, "alpha", frozenset({101, 102}))
+
+
+def _github_org(
+    *,
+    membership: tuple[int, dict[str, object]],
+    installation_repos: list[int],
+    total: int | None = None,
+) -> httpx.AsyncClient:
+    """GitHub: what it says of the signer's membership, and the App's whole listing."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/user/memberships/orgs/alpha"
-        assert request.headers["authorization"] == "Bearer user-token"
-        return httpx.Response(status, json=body or {})
+        path = request.url.path
+        if path == "/user/memberships/orgs/alpha":
+            assert request.headers["authorization"] == "Bearer user-token"
+            return httpx.Response(membership[0], json=membership[1])
+        if path == "/app/installations/77/access_tokens":
+            return httpx.Response(201, json={"token": "listing"})
+        if path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": len(installation_repos) if total is None else total,
+                    "repositories": [
+                        {"id": n, "full_name": f"alpha/repo-{n}", "owner": {"id": 55}}
+                        for n in installation_repos
+                    ],
+                },
+            )
+        raise AssertionError(path)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
+_DENIED = (403, {"message": "Resource not accessible by integration"})
+_ADMIN = (200, {"state": "active", "role": "admin"})
+
+
+async def _proof(**github: Any) -> Any:
+    async with _github_org(**github) as client:
+        return await _REAL_ORG_PROOF(client, "user-token", _OFFER, app_jwt="app-jwt")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("body", "status", "expected"),
+    ("membership", "expected"),
     [
-        ({"state": "active", "role": "admin"}, 200, True),
-        ({"state": "active", "role": "member"}, 200, False),
-        ({"state": "pending", "role": "admin"}, 200, False),
-        (None, 404, False),
-        (None, 403, False),
+        (_ADMIN, "org_admin"),
+        ((200, {"state": "active", "role": "member"}), None),
+        ((200, {"state": "pending", "role": "admin"}), None),
     ],
 )
-async def test_only_an_active_admin_membership_counts(
-    body: dict[str, object] | None, status: int, expected: bool
+async def test_github_saying_who_the_signer_is_settles_it(
+    membership: tuple[int, dict[str, object]], expected: str | None
 ) -> None:
-    async with _membership(body, status) as client:
-        assert await _REAL_IS_ORG_ADMIN(client, "user-token", "alpha") is expected
+    assert await _proof(membership=membership, installation_repos=[101, 102, 103]) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 404])
+async def test_a_refused_membership_falls_back_to_the_full_listing(status: int) -> None:
+    refused = (status, {"message": "Resource not accessible by integration"})
+    assert await _proof(membership=refused, installation_repos=[101, 102]) == "full_listing"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_membership_with_only_part_of_the_org_visible_fails() -> None:
+    """A client workspace's admin sees 2 of the org's 3 repos."""
+    assert await _proof(membership=_DENIED, installation_repos=[101, 102, 103]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_installation_listing_proves_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="does not match total_count"):
+        await _proof(membership=_DENIED, installation_repos=[101, 102], total=3)
+    monkeypatch.setattr(oauth_github, "_org_proof", _REAL_ORG_PROOF)  # the suite stubs it
+    hidden = await _REAL_ORG_ADMIN_OFFERS(
+        lambda: _github_org(membership=_DENIED, installation_repos=[101, 102], total=3),
+        "user-token",
+        [_OFFER],
+        app_jwt="x",
+    )
+    assert hidden == (), "the offer is hidden"
 
 
 @pytest.mark.asyncio
 async def test_a_github_outage_is_not_read_as_a_no() -> None:
-    async with _membership(None, 502) as client:
-        with pytest.raises(httpx.HTTPStatusError):
-            await _REAL_IS_ORG_ADMIN(client, "user-token", "alpha")
+    with pytest.raises(httpx.HTTPStatusError):
+        await _proof(membership=(502, {}), installation_repos=[101, 102])
+
+
+@pytest.mark.asyncio
+async def test_the_save_records_which_proof_passed(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="full_listing"))
+    async with _editor(committing_sessionmaker, monkeypatch, [_ORG]) as editor:
+        hidden, _ = await editor.page()
+
+        saved = await editor.save(hidden, **_FOLLOW)
+
+        assert saved.status_code == 200, saved.text
+        async with editor.sessionmaker() as session:
+            reasons = list(
+                await session.scalars(
+                    text(
+                        "SELECT reason FROM security_audit_events "
+                        "WHERE tenant_id = :t AND tool_name = 'github_connect'"
+                    ),
+                    {"t": editor.tenant_id},
+                )
+            )
+        assert any("proved by full_listing" in reason for reason in reasons)
 
 
 @pytest.fixture

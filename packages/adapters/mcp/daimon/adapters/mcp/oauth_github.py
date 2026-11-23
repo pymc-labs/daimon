@@ -43,6 +43,8 @@ from daimon.core.github_app_auth import (
     build_app_jwt,
     get_app_installation_details,
     installation_supports_write,
+    list_installation_repository_details,
+    mint_installation_listing_token,
 )
 from daimon.core.github_connect_cards import (
     NEEDED,
@@ -1953,33 +1955,70 @@ def _confirmation_page(
     )
 
 
-async def _is_org_admin(client: httpx.AsyncClient, token: str, org: str) -> bool:
-    """Whether the signed-in person is an active admin of `org` on GitHub, asked live.
+type OrgProof = Literal["org_admin", "full_listing"]
 
-    Only an org admin sees every repo of the org, which is what following it hands over.
-    """
+
+async def _org_membership(
+    client: httpx.AsyncClient, token: str, org: str
+) -> Literal["admin", "other", "unknown"]:
+    """The signer's standing in `org`, asked live: an active admin, anything else GitHub says
+    about a member, or unknown when GitHub refuses the call. An App without the org members
+    permission is refused with 403 ("Resource not accessible by integration"); a 404 may be
+    that or a person who is no member, so both leave the answer unknown."""
     response = await client.get(
         f"https://api.github.com/user/memberships/orgs/{quote(org, safe='')}",
         headers=_github_headers(token),
     )
     if response.status_code in (403, 404):
-        return False
+        return "unknown"
     response.raise_for_status()
     body = TypeAdapter(dict[str, object]).validate_python(response.json())
-    return body.get("state") == "active" and body.get("role") == "admin"
+    return "admin" if body.get("state") == "active" and body.get("role") == "admin" else "other"
+
+
+async def _org_proof(
+    client: httpx.AsyncClient, token: str, offer: FollowOffer, *, app_jwt: str
+) -> OrgProof | None:
+    """Which proof shows the signer may hand over the whole org, or None.
+
+    First proof: GitHub says they are an active admin of the org. Second, when GitHub will
+    not say: the repos GitHub shows the signer are every repo the App's installation lists
+    (the listing the agent will follow), and neither listing was cut short. Someone who sees
+    every repo of the org passes; a client's admin who sees one of them does not. The offer's
+    repos are the signer's complete listing: an installation whose listing was cut short or
+    failed is never offered.
+    """
+    standing = await _org_membership(client, token, offer.owner)
+    if standing == "admin":
+        return "org_admin"
+    if standing == "other":
+        return None
+    listing_token = await mint_installation_listing_token(
+        client, jwt=app_jwt, installation_id=offer.installation_id
+    )
+    # `list_installation_repository_details` raises on any page it cannot complete.
+    everything = await list_installation_repository_details(client, token=listing_token)
+    ids = {repo.repo_id for repo in everything}
+    if None in ids or not ids <= offer.repo_ids:
+        return None
+    return "full_listing"
 
 
 async def _org_admin_offers(
-    factory: Callable[[], httpx.AsyncClient], token: str, offers: Sequence[FollowOffer]
+    factory: Callable[[], httpx.AsyncClient],
+    token: str,
+    offers: Sequence[FollowOffer],
+    *,
+    app_jwt: str,
 ) -> tuple[FollowOffer, ...]:
-    """The offers whose org the signed-in person administers on GitHub, so nobody is shown a
-    box that would refuse them. A GitHub error hides the offer; the save asks again."""
+    """The offers the signer can prove an org for, so nobody is shown a box that would refuse
+    them. A GitHub error hides the offer; the save asks again."""
     kept: list[FollowOffer] = []
     if offers:
         async with factory() as client:
             for offer in offers:
                 try:
-                    if await _is_org_admin(client, token, offer.owner):
+                    if await _org_proof(client, token, offer, app_jwt=app_jwt) is not None:
                         kept.append(offer)
                 except (httpx.HTTPError, ValueError):
                     continue
@@ -2645,7 +2684,12 @@ def build_oauth_github_routes(
                     missing_names=tuple(missing_names),
                     pending_installation=pending_installation,
                     github_user_id=flow.github_user_id,
-                    follow=await _org_admin_offers(factory, token, offers),
+                    follow=await _org_admin_offers(
+                        factory,
+                        token,
+                        offers,
+                        app_jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
+                    ),
                     following=following,
                 )
             posted_snapshot = fields.get("snapshot", [""])[0]
@@ -2730,6 +2774,7 @@ def build_oauth_github_routes(
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
             follow_values = fields.get("follow_org", [])
             follow_id: int | None = None
+            chosen: FollowOffer | None = None
             if follow_values:
                 try:
                     follow_id = int(follow_values[0])
@@ -2738,20 +2783,18 @@ def build_oauth_github_routes(
                 if len(follow_values) != 1 or follow_id is None:
                     return _error("Selection could not be verified.", 400, retry_confirm_url)
                 held_after = (set(old) - set(removed_ids)) | set(selected_ids)
-                if (
-                    confirmed_offer(
-                        offers,
-                        installation_id=follow_id,
-                        held_after=held_after,
-                        installations_after={
-                            repo.installation_id
-                            for repo in grants
-                            if repo.repo_id in held_after and repo.installation_id is not None
-                        }
-                        | {visible[repo_id].installation_id for repo_id in selected_ids},
-                    )
-                    is None
-                ):
+                chosen = confirmed_offer(
+                    offers,
+                    installation_id=follow_id,
+                    held_after=held_after,
+                    installations_after={
+                        repo.installation_id
+                        for repo in grants
+                        if repo.repo_id in held_after and repo.installation_id is not None
+                    }
+                    | {visible[repo_id].installation_id for repo_id in selected_ids},
+                )
+                if chosen is None:
                     return _error(
                         "Give the agent every repo of the org first.", 400, retry_confirm_url
                     )
@@ -2778,7 +2821,12 @@ def build_oauth_github_routes(
                     requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
                     selection_error="Choose a change to save.",
-                    follow=await _org_admin_offers(factory, token, offers),
+                    follow=await _org_admin_offers(
+                        factory,
+                        token,
+                        offers,
+                        app_jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
+                    ),
                     following=following,
                 )
             if posted_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
@@ -2862,16 +2910,17 @@ def build_oauth_github_routes(
                             403,
                             retry_confirm_url,
                         )
-            if follow_id is not None:
-                org = next(item.owner_login for item in installations if item.id == follow_id)
+            follow_proof: OrgProof | None = None
+            if chosen is not None:
                 try:
                     async with factory() as client:
-                        is_org_admin = await _is_org_admin(client, token, org)
+                        follow_proof = await _org_proof(client, token, chosen, app_jwt=app_jwt)
                 except (httpx.HTTPError, ValueError):
                     return transient_error("Couldn't reach GitHub", 502)
-                if not is_org_admin:
+                if follow_proof is None:
                     return _error(
-                        f"Only an admin of {org} on GitHub can turn this on.",
+                        f"Only someone who sees every repo of {chosen.owner}, or an admin of "
+                        f"{chosen.owner} on GitHub, can turn this on.",
                         403,
                         retry_confirm_url,
                     )
@@ -3034,6 +3083,10 @@ def build_oauth_github_routes(
                                 account_id=invitation.requester_account_id,
                                 surface="web",
                             )
+                            _log.info(
+                                "github_connect.follow_turned_on",
+                                extra={"proof": follow_proof, "installation_id": follow_id},
+                            )
                             # Read the org now, so the gap is filled without waiting an hour.
                             await enqueue_reconciliation(
                                 session,
@@ -3054,7 +3107,12 @@ def build_oauth_github_routes(
                             tool_name="github_connect",
                             operation="github_connect",
                             outcome="allowed",
-                            reason="agent repos saved",
+                            reason="agent repos saved"
+                            + (
+                                f"; followed the org, proved by {follow_proof}"
+                                if follow_proof
+                                else ""
+                            ),
                             github_repo_ids=selected_ids + removed_ids,
                         )
             except (
