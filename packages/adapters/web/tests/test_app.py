@@ -38,9 +38,19 @@ async def test_pages_fall_back_to_index_and_files_are_served(
         icon = await client.get("/favicon.svg")
         asset = await client.get("/assets/main-abc123.js")
     assert root.text == deep.text == "<html>app</html>", "any other path is a client-side page"
-    assert root.headers["cache-control"] == "no-cache"
+    assert root.headers["cache-control"] == "no-store", (
+        "a restored tab must fetch the current build"
+    )
     assert icon.text == "<svg/>" and icon.headers["cache-control"] == "no-cache"
     assert "immutable" in asset.headers["cache-control"], "hashed assets never change"
+
+
+async def test_an_asset_from_an_earlier_build_is_404_not_the_app(
+    web_client: WebClientFactory, built_app: Path
+) -> None:
+    async with web_client(web_settings(static_dir=built_app)) as client:
+        gone = await client.get("/assets/main-old999.js")
+    assert gone.status_code == 404 and "html" not in gone.text, "HTML for a script blanks the page"
 
 
 async def test_large_answers_are_compressed_for_clients_that_accept_it(
