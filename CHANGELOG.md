@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The web app no longer turns blank after a deploy, and works on phones in desktop mode.**
+  A tab left open or restored after a deploy asked for files of the previous build and
+  got the page back as HTML, which the browser refused; it now reloads into the new
+  build, and any other crash shows Reload instead of a white page. Phones no longer get
+  a second scroll into blank space below some pages, the sidebar shows from 768px so a
+  phone's desktop mode gets the desktop layout, and inputs no longer zoom iOS on focus.
+  A message that never reached the server, or a new thread that failed to start, keeps
+  the typed text. Thread actions show on touch screens, a workspace switch stops the old
+  workspace's chats, and an agent edit made just before leaving is saved.
 - **The check for outside people in a room reads Discord itself.** On Discord, who can
   see each room now comes from the server's roles, channels and members as Discord
   lists them, read about every 5 minutes, and no longer from the bot's own member
