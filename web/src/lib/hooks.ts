@@ -2,6 +2,7 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router"
 
+import { reset } from "@/modules/chat/turns"
 import { api } from "./api"
 import type { AgentRef, Capability, ChatSession, Group, Me, Person, Provider } from "./types"
 
@@ -22,7 +23,7 @@ export function useSwitchWorkspace(next: string, { replace = false, onError }: {
   const navigate = useNavigate()
   return useMutation({
     mutationFn: (id: string) => api.post("/api/workspaces/switch", { id }),
-    onSuccess: () => { qc.clear(); navigate(next, { replace }) },
+    onSuccess: () => { qc.clear(); reset(); navigate(next, { replace }) },
     onError,
   })
 }

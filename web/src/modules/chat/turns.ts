@@ -52,6 +52,9 @@ export function evict(sid: string) {
   subs.forEach((f) => f())
 }
 
+/** Forget every chat and cut every stream: they belong to the workspace just left. */
+export const reset = () => [...threads.keys()].forEach(evict)
+
 /** Ask the server to stop the turn; the stream then ends with the stopped reply. Cut it locally if that fails or stalls. */
 export async function stop(sid: string) {
   const ctrl = ctrls.get(sid)

@@ -16,7 +16,7 @@ import {
   DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { api } from "@/lib/api"
-import { useMe, useProviders, useSessions } from "@/lib/hooks"
+import { useMe, useProviders, useSessions, useSwitchWorkspace } from "@/lib/hooks"
 import { useTheme } from "@/lib/theme-context"
 import type { ChatSession, Me, Person } from "@/lib/types"
 import { cn, MOD } from "@/lib/utils"
@@ -77,12 +77,7 @@ function CreditLink({ me, children }: { me: Me; children: React.ReactNode }) {
 }
 
 function WorkspaceSwitcher({ me }: { me: Me }) {
-  const qc = useQueryClient()
-  const navigate = useNavigate()
-  const switchTo = useMutation({
-    mutationFn: (id: string) => api.post("/api/workspaces/switch", { id }),
-    onSuccess: () => { qc.clear(); navigate("/chat") },
-  })
+  const switchTo = useSwitchWorkspace("/chat")
   const pick = (id: string) => { if (id !== me.workspace.id) switchTo.mutate(id) }
   const label = (
     <>
