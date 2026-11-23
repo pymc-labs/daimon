@@ -36,8 +36,8 @@ export function ThreadModel({ sid, model }: { sid: string; model: string }) {
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="xs" className="text-faint" aria-label="Chat model">
-          {model || "Model"}<ChevronDown />
+        <Button variant="ghost" size="xs" className="min-w-0 shrink text-faint" aria-label="Chat model">
+          <span className="truncate">{model || "Model"}</span><ChevronDown />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="max-h-80 overflow-y-auto">

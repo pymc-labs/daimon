@@ -45,9 +45,9 @@ function HeaderMeter({ meter }: { meter: CreditMeter }) {
   const tone = creditTone(meter)
   const pct = Math.max(0, Math.min(1, meter.left_usd / meter.total_usd))
   return (
-    <span className="ml-3 flex items-center gap-2 text-xs md:hidden">
+    <span className="ml-3 flex shrink-0 items-center gap-2 text-xs whitespace-nowrap md:hidden">
       <span className={cn("font-medium tabular", tone === "out" && "text-destructive", tone === "low" && "text-warning")}>{usd(meter.left_usd)} left</span>
-      <span className="h-1 w-20 overflow-hidden rounded-full bg-foreground/10">
+      <span className="hidden h-1 w-20 overflow-hidden rounded-full bg-foreground/10 sm:block">
         <span className={cn("block h-full rounded-full", tone === "out" ? "bg-destructive" : tone === "low" ? "bg-warning" : "bg-teal")} style={{ width: `${pct * 100}%` }} />
       </span>
     </span>
@@ -188,7 +188,7 @@ export function ChatView() {
             <span>{session.agent.name}</span>
           </span>
           <ThreadModel sid={session.id} model={session.agent.model ?? ""} />
-          {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
+          {me?.role === "visitor" && <Pill className="hidden sm:inline-flex">Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Thread actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
