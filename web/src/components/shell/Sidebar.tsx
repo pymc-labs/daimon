@@ -163,7 +163,7 @@ function RecentChats() {
               </NavLink>
               <DropdownMenu>
                 <DropdownMenuTrigger
-                  className="absolute top-1 right-1 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-background focus-visible:opacity-100 data-[state=open]:opacity-100"
+                  className="absolute top-1 right-1 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-background [@media(hover:none)]:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
                   aria-label="Thread actions"
                 >
                   <MoreHorizontal className="size-4" />
