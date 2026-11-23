@@ -20,6 +20,7 @@ from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.stores import audience_facts as store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
+from discord.state import ChunkRequest, ConnectionState
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -78,7 +79,7 @@ def _server(*, chunked: bool = True) -> object:
 
 
 def _sync(
-    factory: async_sessionmaker[AsyncSession], clock: Clock, *, fallback_limit_s: float = 6 * 3600
+    factory: async_sessionmaker[AsyncSession], clock: Clock, *, chunk_timeout_s: float = 60
 ) -> tuple[AudienceSync, MemberSync]:
     audience = AudienceSync(
         factory,
@@ -87,7 +88,7 @@ def _sync(
         debounce_s=0,
         reconcile_every_s=300,
         reconcile_limit_s=600,
-        chunk_fallback_limit_s=fallback_limit_s,
+        chunk_timeout_s=chunk_timeout_s,
     )
     return audience, MemberSync(factory, clock=clock, audience=audience)
 
@@ -216,7 +217,7 @@ async def test_renewal_is_bounded_by_the_last_reconcile_and_a_stalled_owner_laps
 ) -> None:
     await _setup(db_session, db_session_factory)
     clock = Clock()
-    audience, _ = _sync(db_session_factory, clock, fallback_limit_s=0)
+    audience, _ = _sync(db_session_factory, clock)
     server = _server()
     assert await audience.reconcile(server)  # type: ignore[arg-type]
 
@@ -937,78 +938,83 @@ async def test_a_channel_type_discord_py_does_not_know_does_not_stop_the_facts(
     assert "never logged" not in str(logs)
 
 
-async def _stalled_after_a_full_load(
-    db_session: AsyncSession,
-    factory: async_sessionmaker[AsyncSession],
-    *,
-    fallback_limit_s: float = 6 * 3600,
-) -> tuple[AudienceSync, Any, Clock]:
-    await _setup(db_session, factory)
+async def test_a_timed_out_chunk_ends_the_shared_request_and_the_next_one_asks_again(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
     clock = Clock()
-    audience, _ = _sync(factory, clock, fallback_limit_s=fallback_limit_s)
+    audience, _ = _sync(db_session_factory, clock, chunk_timeout_s=0.01)
+    server: Any = _server()
+    # discord.py's own chunk_guild over its real ChunkRequest, with a recording opcode 8.
+    state = types.SimpleNamespace(
+        _chunk_requests={},
+        loop=asyncio.get_running_loop(),
+        _get_guild=MagicMock(return_value=None),
+        member_cache_flags=types.SimpleNamespace(joined=True),
+        chunker=AsyncMock(),
+    )
+    server._state = state
+    server.chunk = lambda **kw: ConnectionState.chunk_guild(state, server, **kw)  # type: ignore[arg-type]
+    other = asyncio.create_task(ConnectionState.chunk_guild(state, server, cache=True))  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    (shared,) = state._chunk_requests.values()
+    assert isinstance(shared, ChunkRequest) and len(shared.waiters) == 1
+
+    assert not await audience.reconcile(server)
+
+    with pytest.raises(TimeoutError):
+        await other
+    assert not shared.waiters, "no waiter is left pending"
+    assert state._chunk_requests == {}
+    assert state.chunker.await_count == 1
+
+    assert not await audience.reconcile(server)
+    assert state.chunker.await_count == 2, "the next call sends a new request"
+    assert state._chunk_requests == {}
+
+
+async def test_renewal_does_not_stop_while_a_chunk_is_awaited(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
     server: Any = _server()
     assert await audience.reconcile(server)
-    server.chunk = AsyncMock(side_effect=TimeoutError)
-    # discord.py keeps the unanswered request until its last chunk arrives.
-    server._state = types.SimpleNamespace(_chunk_requests={fake.GUILD: object()})
-    return audience, server, clock
+    for _ in range(4):
+        clock.now += timedelta(seconds=60)
+        await audience.tick([server])  # renewed to 420 s
+    clock.now += timedelta(seconds=60)  # 300 s: the next reconcile is due
+    seen: list[RoomFacts] = []
 
+    async def stalled(**_: object) -> list[Any]:
+        clock.now += timedelta(seconds=150)  # 450 s: past the renewal of 240 s
+        seen.append(await _fact(db_session_factory, clock, "2"))
+        raise TimeoutError
 
-async def test_a_stalled_chunk_publishes_from_the_member_cache_while_the_session_is_intact(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    audience, server, clock = await _stalled_after_a_full_load(db_session, db_session_factory)
-
-    with capture_logs() as logs:
-        for _ in range(4):  # far past the 600 s limit: every reconcile stalls
-            clock.now += timedelta(seconds=300)
-            await audience.tick([server])
-    assert (await _fact(db_session_factory, clock, "2")).contained, "facts stay usable"
-    assert await _fact(db_session_factory, clock, "1") == RoomFacts(False, False)
-    fallbacks = [e for e in logs if e["event"] == "discord.audience.chunk_fallback"]
-    assert [e["consecutive"] for e in fallbacks] == [1, 2, 3, 4]
-    assert fallbacks[0]["guild_id"] == str(fake.GUILD)
-    assert server._state._chunk_requests == {}, "the hung request is dropped for the next try"
-
-    server.chunk = AsyncMock(return_value=list(server.members))
-    clock.now += timedelta(seconds=300)
+    server.chunk = AsyncMock(side_effect=stalled)
     await audience.tick([server])
-    with capture_logs() as logs:
-        server.chunk = AsyncMock(side_effect=TimeoutError)
-        clock.now += timedelta(seconds=300)
-        await audience.tick([server])
-    assert [e["consecutive"] for e in logs if e["event"] == "discord.audience.chunk_fallback"] == [
-        1
-    ]
+    assert seen[0].contained and seen[0].known, "renewed before the wait, within the limit"
 
 
-async def test_a_stalled_chunk_after_a_disconnect_does_not_fall_back(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+async def test_a_publish_that_crosses_a_disconnect_restores_no_trust(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    audience, server, clock = await _stalled_after_a_full_load(db_session, db_session_factory)
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server: Any = _server()
+    real = store.publish_facts
 
-    await audience.disconnected([server])
-    await audience.resumed([server])  # the cache is not trusted until a full load
-    clock.now += timedelta(seconds=300)
-    with capture_logs() as logs:
-        assert not await audience.reconcile(server)
-    assert not [e for e in logs if e["event"] == "discord.audience.chunk_fallback"]
-    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS
+    async def disconnect_while_writing(*args: Any, **kwargs: Any) -> int:
+        audience._epoch += 1  # pyright: ignore[reportPrivateUsage]  # what disconnected() starts with
+        return await real(*args, **kwargs)
 
-
-async def test_a_stalled_chunk_past_the_fallback_age_lets_the_facts_lapse(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    audience, server, clock = await _stalled_after_a_full_load(
-        db_session, db_session_factory, fallback_limit_s=900
-    )
-
-    for _ in range(3):  # 900 s since the full chunk: still allowed
-        clock.now += timedelta(seconds=300)
-        await audience.tick([server])
-    assert (await _fact(db_session_factory, clock, "2")).contained
-    for _ in range(3):
-        clock.now += timedelta(seconds=300)
-        await audience.tick([server])
-    clock.now += timedelta(seconds=1)
-    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS
+    monkeypatch.setattr(store, "publish_facts", disconnect_while_writing)
+    assert not await audience.reconcile(server)
+    assert not audience._live  # pyright: ignore[reportPrivateUsage]
+    assert not audience._members_loaded  # pyright: ignore[reportPrivateUsage]
+    assert not audience._reconciled  # pyright: ignore[reportPrivateUsage]
+    assert not audience._baseline  # pyright: ignore[reportPrivateUsage]
