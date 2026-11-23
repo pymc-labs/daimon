@@ -5255,14 +5255,15 @@ class DaimonBot(commands.Bot):
             await self._member_sync.admins_changed(role.guild, role.guild.members)
 
     async def on_disconnect(self) -> None:
-        # Events are lost until the gateway resumes: no room fact can be trusted.
-        if self._audience_renewal is not None:
-            self._audience_renewal.cancel()  # on_ready starts it again
+        # Events are lost until the gateway resumes: no room fact can be trusted. The
+        # renewal loop is not cancelled: it lives for the process, so no disconnect and
+        # resume order can leave zero loops, and a tick while disconnected only retries
+        # unknown marks (nothing is published or read until `connected`).
         await self._audience_sync.disconnected([g for g in self.guilds if self._allows_guild(g.id)])
 
     async def on_resumed(self) -> None:
-        # A resume fires no on_ready, so the renewal that on_disconnect stopped starts
-        # here too, first; each server's reconcile runs in its own task.
+        # A resume fires no on_ready, so the renewal starts here too if it is not running,
+        # first; each server's reconcile runs in its own task.
         self._audience_sync.connected()
         self._start_audience_renewal()
         if self.intents.members:

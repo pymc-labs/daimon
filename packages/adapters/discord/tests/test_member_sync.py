@@ -263,10 +263,21 @@ async def test_a_reload_that_crosses_a_disconnect_reads_nothing_until_the_next_r
     await audience.settle()
     assert await _usable(db_session_factory), "the first server's read published"
 
+    reader = audience._reader  # pyright: ignore[reportPrivateUsage]
+    assert reader is not None
+    reads = [0]
+    real_read = reader.read
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        reads[0] += 1
+        return await real_read(*args, **kwargs)
+
+    reader.read = counted  # type: ignore[method-assign]
     await audience.disconnected([first])
     chunking.set()
     await reloading  # the second server's reload asks for a reconcile now
     await audience.settle()
+    assert reads == [0], "no read starts while disconnected"
     assert not await _usable(db_session_factory), "nothing published while disconnected"
     assert not await audience.reconcile(_guild())
 

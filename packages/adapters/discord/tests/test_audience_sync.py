@@ -22,8 +22,10 @@ from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.stores import audience_facts as store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.testing.factories import make_tenant
+from sqlalchemy import event as sa_event
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Session
 from structlog.testing import capture_logs
 
 from . import audience_fakes as fake
@@ -950,7 +952,7 @@ def quiet_discord_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("daimon.adapters.discord.bot.update_lifecycle", AsyncMock())
 
 
-async def test_a_disconnect_stops_the_renewal_and_marks_every_server_unknown() -> None:
+async def test_a_disconnect_keeps_the_renewal_loop_and_marks_every_server_unknown() -> None:
     DaimonBot = _bot_class()
 
     bot = _bot()
@@ -960,8 +962,50 @@ async def test_a_disconnect_stops_the_renewal_and_marks_every_server_unknown() -
     await DaimonBot.on_disconnect(bot)
     await asyncio.sleep(0)
 
-    assert renewal.cancelled()
+    assert not renewal.done(), "the loop lives for the process"
     assert bot._audience_sync.calls == [("disconnected", ([bot.guild],))]
+    renewal.cancel()
+
+
+async def test_exactly_one_renewal_loop_runs_after_any_disconnect_and_resume_order() -> None:
+    """A loop that was cancelled and is still cleaning up used to hide from the resume,
+    which then started none. No disconnect cancels it now, so one loop always runs."""
+    DaimonBot = _bot_class()
+
+    bot = _bot()
+    release = asyncio.Event()
+    starts: list[int] = []
+
+    async def run(_guilds: object) -> None:
+        starts.append(1)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()  # cleanup of a database step that has not ended yet
+            raise
+
+    bot._audience_sync.run = run
+    bot._start_audience_renewal()
+    await asyncio.sleep(0)
+    for _ in range(2):
+        await DaimonBot.on_disconnect(bot)
+        await DaimonBot.on_resumed(bot)
+    await DaimonBot.on_disconnect(bot)
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.sleep(0.01)
+    await DaimonBot.on_resumed(bot)
+    await asyncio.sleep(0)
+
+    loops = [
+        t
+        for t in asyncio.all_tasks()
+        if t.get_name() == "discord.audience_renewal" and not t.done()
+    ]
+    assert len(loops) == 1 and loops[0] is bot._audience_renewal
+    assert starts == [1]
+    loops[0].cancel()
+    release.set()
 
 
 async def test_a_resume_restarts_the_renewal_first_and_reconciles_with_the_members_intent() -> None:
@@ -1161,3 +1205,162 @@ async def test_renewal_keeps_ticking_after_a_tick_fails() -> None:
         await audience.run(lambda: [])
 
     assert ticks == [0, 1, 2], "the tick after a failure still runs; cancel still ends it"
+
+
+async def test_nickname_events_during_every_read_after_a_real_change_never_starve_the_server(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    """After a real role change the published facts are gone, but the last read's inputs
+    stay as the comparison: an event that states what they say crosses no read. Each
+    read below gets one nickname-only member event and each publishes."""
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _gateway()
+    audience_sync.watch_gateway(
+        state.parsers, lambda e, g, d: audience.gateway_event(e, g, d, world.guild)
+    )
+    await audience.tick([world.guild])
+    await audience.settle()
+    assert (await _fact(pooled, clock, "1")).known
+
+    gate = _gate(world.server)
+    world.server.roles[fake.FRIEND] = fake.VIEW_BIT  # a real change, as Discord now has it
+    state.parsers["GUILD_ROLE_UPDATE"](_raw_role(fake.FRIEND, fake.VIEW_BIT))
+    for n in range(4):
+        reading = asyncio.create_task(audience.reconcile(world.guild)) if n else None
+        await _eventually(lambda n=n: _members_read(world, n + 2))
+        nick = {**_raw_member(fake.OUTSIDER), "nick": f"nickname {n}"}
+        state.parsers["GUILD_MEMBER_UPDATE"](nick)
+        gate.set()
+        if reading is None:
+            await audience.settle()
+        else:
+            assert await reading, f"read {n} published"
+        assert (await _fact(pooled, clock, "1")).known, f"read {n} published"
+        gate = _gate(world.server)
+    assert world.server.reads["members"] == 5, "no read was crossed and read again"
+
+
+async def test_a_real_change_during_a_read_prevents_its_publication(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    """An event that differs from the basis and from what the read saw crosses the read."""
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    await audience.tick([world.guild])
+    await audience.settle()
+    state = _gateway()
+    audience_sync.watch_gateway(
+        state.parsers, lambda e, g, d: audience.gateway_event(e, g, d, world.guild)
+    )
+
+    gate = _gate(world.server)
+    clock.now += timedelta(seconds=300)
+    await audience.tick([world.guild])
+    await _eventually(lambda: _members_read(world, 2))
+    state.parsers["GUILD_MEMBER_UPDATE"](_raw_member(fake.OUTSIDER, fake.FRIEND))  # not read yet
+    with capture_logs() as logs:
+        gate.set()
+        await audience.settle()
+    assert [e["event"] for e in logs].count("discord.audience.read_crossed") == 1
+    assert world.server.reads["guild"] == 3, "the crossed read, then one more"
+
+
+async def test_an_event_that_states_what_the_read_saw_does_not_cross_it(
+    pooled: async_sessionmaker[AsyncSession],
+) -> None:
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _gateway()
+    audience_sync.watch_gateway(
+        state.parsers, lambda e, g, d: audience.gateway_event(e, g, d, world.guild)
+    )
+    await audience.tick([world.guild])
+    await audience.settle()
+
+    world.server.roles[fake.FRIEND] = fake.VIEW_BIT
+    gate = _gate(world.server)
+    clock.now += timedelta(seconds=300)
+    await audience.tick([world.guild])
+    await _eventually(lambda: _members_read(world, 2))
+    # The read already has the new bits; the event for them arrives after it began.
+    state.parsers["GUILD_ROLE_UPDATE"](_raw_role(fake.FRIEND, fake.VIEW_BIT))
+    with capture_logs() as logs:
+        gate.set()
+        await audience.settle()
+    names = [e["event"] for e in logs]
+    assert "discord.audience.read_crossed" not in names[: names.index("discord.audience.published")]
+
+
+async def test_a_change_during_the_commit_leaves_the_facts_unknown_and_nothing_renews_them(
+    pooled: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last check comes before the commit. A change during it is withdrawn the moment
+    the publisher releases its lock (one commit plus one withdrawal write is the window)
+    and the facts are not renewed."""
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    await audience.tick([world.guild])
+    await audience.settle()
+    armed = [False]
+    gates: list[asyncio.Event] = []
+    real = store.publish_facts
+
+    async def publish_then_arm(*args: Any, **kwargs: Any) -> Any:
+        result = await real(*args, **kwargs)
+        armed[0] = True
+        return result
+
+    def during_commit(_session: Any) -> None:
+        if armed[0]:
+            armed[0] = False
+            monkeypatch.setattr(store, "publish_facts", real)  # only the first publish
+            gates.append(_gate(world.server))  # the re-read the event asks for waits
+            audience.schedule(world.guild)
+
+    monkeypatch.setattr(store, "publish_facts", publish_then_arm)
+    sa_event.listen(Session, "before_commit", during_commit)
+    try:
+        clock.now += timedelta(seconds=300)
+        await audience.tick([world.guild])
+        await _eventually(lambda: _members_read(world, 3))  # the periodic read, then the re-read
+
+        async def withdrawn() -> bool:
+            return await _fact(pooled, clock, "1") == UNKNOWN_FACTS
+
+        await _eventually(withdrawn)
+        clock.now += timedelta(seconds=60)
+        await audience.tick([world.guild])
+        assert await _fact(pooled, clock, "1") == UNKNOWN_FACTS, "no renewal extends them"
+        assert gates, "the event came during the commit"
+        gates[0].set()
+        await audience.settle()
+    finally:
+        sa_event.remove(Session, "before_commit", during_commit)
+    assert (await _fact(pooled, clock, "1")).known, "the re-read lands"
+
+
+async def test_a_reconcile_asked_while_disconnected_reads_and_publishes_nothing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session)
+    clock, world = Clock(), World()
+    audience = world.sync(db_session_factory, clock)
+    await audience.tick([world.guild])
+    await audience.settle()
+    reads = dict(world.server.reads)
+
+    await audience.disconnected([world.guild])
+    audience.request_reconcile(world.guild)  # a member reload that was still running
+    audience.refresh(world.guild)
+    audience.schedule(world.guild)
+    assert not await audience.reconcile(world.guild)
+    await audience.tick([world.guild])
+    await asyncio.sleep(0.01)
+    await audience.settle()
+    assert world.server.reads == reads, "nothing was read"
+    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS
+
+    audience.connected()
+    assert await audience.reconcile(world.guild)
+    assert world.server.reads["guild"] == reads["guild"] + 1

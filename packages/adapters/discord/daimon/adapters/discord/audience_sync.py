@@ -15,13 +15,16 @@ overwrite or owner event, the server becoming unavailable, a disconnect) makes e
 of the server unknown at once and asks for an early reconcile. These changes are taken
 from the gateway's raw events (`watch_gateway`), before discord.py parses them, so a
 member missing from its cache still counts and no handler's await can come first. An
-event that leaves every input of the last read as it was (a nickname, a role's colour)
-changes nothing. Each change also advances the server's change count (and a disconnect
-the epoch), and a reconcile whose read was crossed by a change publishes nothing: the
-count is checked again inside the publishing transaction, after its last await before
-the commit. Between a disconnect and the next ready or resume nothing is read or
-published. Thread events only ask for a reconcile, since a thread's facts come from its
-parent's.
+event that leaves every input of the newest published read as it was (a nickname, a
+role's colour) changes nothing, even while nothing is published: that read's inputs stay
+as the comparison basis across a withdrawal, so harmless events cannot keep a server
+unknown. A real event is folded into the basis. Each change also advances the server's
+change count (and a disconnect the epoch). A reconcile whose read was crossed by a change
+publishes nothing, unless every event that came during the read states what the read
+itself saw. The count is checked again inside the publishing transaction, after its last
+await before the commit. Between a disconnect and the next ready or resume nothing is
+read or published. Thread events only ask for a reconcile, since a thread's facts come
+from its parent's.
 
 The process that holds the gateway renews `fresh_until` so a crashed bot cannot leave
 facts that look current. Renewal runs on its own, never waits for a reconcile, and treats
@@ -105,6 +108,9 @@ AUDIENCE_EVENTS = frozenset(
 )
 
 _Roles = tuple[tuple[str, ...], tuple[str, ...]]
+_Event = tuple[str, Mapping[str, Any]]
+#: Events kept per read to compare with it; more than this always cross it.
+MAX_LATE_EVENTS = 64
 
 
 def _utcnow() -> datetime:
@@ -120,9 +126,77 @@ class _Published:
     changes: int
     read_started: datetime
     roles: _Roles
-    snapshot: GuildSnapshot
-    members: Mapping[str, AudienceMember]
-    channels: Mapping[str, AudienceChannel]
+
+
+@dataclass
+class _Basis:
+    """The audience inputs of the newest published read, kept up to date by the raw
+    events that changed them. Events are compared with it. It is dropped when events may
+    have been lost (a disconnect, an outage) or one cannot be folded in."""
+
+    owner_id: str
+    role_permissions: dict[str, int]
+    members: dict[str, AudienceMember]
+    channels: dict[str, AudienceChannel]
+
+    @classmethod
+    def of(cls, snapshot: GuildSnapshot) -> _Basis:
+        return cls(
+            snapshot.owner_id,
+            dict(snapshot.role_permissions),
+            {m.user_id: m for m in snapshot.members},
+            {c.id: c for c in snapshot.channels},
+        )
+
+    def same(self, event: str, data: Mapping[str, Any], now: datetime) -> bool:
+        """Whether a raw event states what the basis already has. Anything unreadable, or
+        not in the basis, counts as a change."""
+        try:
+            if event == "GUILD_UPDATE":
+                return str(data.get("owner_id")) == self.owner_id
+            if event == "GUILD_MEMBER_UPDATE":
+                member = self._member(data, now)
+                return self.members.get(member.user_id) == member
+            if event == "GUILD_ROLE_UPDATE":
+                role_id, bits = self._role(data)
+                return self.role_permissions.get(role_id) == bits
+            if event == "CHANNEL_UPDATE":
+                channel = channel_from_payload(data)
+                return self.channels.get(channel.id) == channel
+        except ReadFailed:
+            return False
+        return False
+
+    def apply(self, event: str, data: Mapping[str, Any], now: datetime) -> bool:
+        """Fold a changed event in. False when it cannot be (a member or role added or
+        removed, a new owner): the basis is then no longer a true copy."""
+        try:
+            if event == "GUILD_MEMBER_UPDATE":
+                member = self._member(data, now)
+                self.members[member.user_id] = member
+                return True
+            if event == "GUILD_ROLE_UPDATE":
+                role_id, bits = self._role(data)
+                self.role_permissions[role_id] = bits
+                return True
+            if event == "CHANNEL_UPDATE":
+                channel = channel_from_payload(data)
+                self.channels[channel.id] = channel
+                return True
+        except ReadFailed:
+            return False
+        return False
+
+    def _member(self, data: Mapping[str, Any], now: datetime) -> AudienceMember:
+        return member_from_payload(data, self.role_permissions, owner_id=self.owner_id, now=now)
+
+    @staticmethod
+    def _role(data: Mapping[str, Any]) -> tuple[str, int]:
+        role: object = data.get("role")
+        if not isinstance(role, dict):
+            raise ReadFailed("role_missing")
+        fields = cast("dict[str, object]", role)
+        return str(fields.get("id")), permissions_from_payload(fields.get("permissions"))
 
 
 class _Crossed(Exception):
@@ -216,6 +290,10 @@ class AudienceSync:
         self._changes: defaultdict[uuid.UUID, int] = defaultdict(int)
         # Servers whose facts this process published and still renews.
         self._published: dict[uuid.UUID, _Published] = {}
+        # What each server's newest published read said, kept after a withdrawal.
+        self._basis: dict[uuid.UUID, _Basis] = {}
+        # Per server, each change since its read began: (count, the raw event or None).
+        self._late: dict[uuid.UUID, list[tuple[int, _Event | None]]] = {}
         # Servers with internal roles at the last pass: events reconcile only these.
         self._tracked: set[uuid.UUID] = set()
         self._slots: dict[uuid.UUID, _Slot] = {}
@@ -236,14 +314,18 @@ class AudienceSync:
         self, event: str, guild_id: int, data: Mapping[str, Any], guild: discord.Guild | None
     ) -> None:
         """One raw `AUDIENCE_EVENTS` payload (see `watch_gateway`). It withdraws the
-        server's facts unless it leaves every input of the last read as it was. `guild`
+        server's facts unless it leaves every input of the basis as it was. `guild`
         is the cached server, if any; without it the facts are still withdrawn, and the
         next tick reads."""
         tenant_id = tenant_of(guild_id)
-        published = self._published.get(tenant_id)
-        if published is not None and _unchanged(event, data, published, self._clock()):
-            return
-        self._changed(tenant_id, guild)
+        basis = self._basis.get(tenant_id)
+        if basis is not None:
+            now = self._clock()
+            if basis.same(event, data, now):
+                return
+            if not basis.apply(event, data, now):
+                del self._basis[tenant_id]
+        self._changed(tenant_id, guild, (event, data))
 
     def refresh(self, guild: discord.Guild) -> None:
         """A thread was created or changed: reconcile soon, without withdrawing the facts.
@@ -259,6 +341,7 @@ class AudienceSync:
         """The server is unavailable: every room is unknown until a reconcile after it
         returns."""
         tenant_id = tenant_of(guild.id)
+        self._basis.pop(tenant_id, None)  # events may have been lost
         self._invalidate(tenant_id)
         await self._wait_writers([tenant_id])
 
@@ -273,6 +356,7 @@ class AudienceSync:
         self._connected = False
         self._epoch += 1
         self._published.clear()
+        self._basis.clear()
         running = [slot.task for slot in self._slots.values() if slot.task is not None]
         for slot in self._slots.values():
             slot.again = False
@@ -371,8 +455,10 @@ class AudienceSync:
 
     # --- the scheduler ----------------------------------------------------------------
 
-    def _changed(self, tenant_id: uuid.UUID, guild: discord.Guild | None) -> None:
-        self._invalidate(tenant_id)
+    def _changed(
+        self, tenant_id: uuid.UUID, guild: discord.Guild | None, event: _Event | None = None
+    ) -> None:
+        self._invalidate(tenant_id, event)
         if guild is not None and tenant_id in self._tracked:
             self._request(guild, fresh=True, delay=self._debounce_s)
 
@@ -421,6 +507,7 @@ class AudienceSync:
         async with self._reads:
             tenant_id = tenant_of(slot.guild.id)
             slot.read_epoch, slot.read_changes = self._epoch, self._changes[tenant_id]
+            self._late.pop(tenant_id, None)
             slot.reading = True
             slot.published = await self._reconcile_once(
                 slot.guild, epoch=slot.read_epoch, changes=slot.read_changes
@@ -464,8 +551,23 @@ class AudienceSync:
             )
             yield session
 
-    def _current(self, tenant_id: uuid.UUID, epoch: int, changes: int) -> bool:
-        return self._connected and epoch == self._epoch and changes == self._changes[tenant_id]
+    def _current(
+        self, tenant_id: uuid.UUID, epoch: int, changes: int, fresh: _Basis | None = None
+    ) -> bool:
+        """No disconnect and no change since the read began. With `fresh` (the read's own
+        inputs), a change that is a raw event stating what the read saw does not count."""
+        if not self._connected or epoch != self._epoch:
+            return False
+        count = self._changes[tenant_id]
+        if changes == count:
+            return True
+        if fresh is None:
+            return False
+        late = [event for n, event in self._late.get(tenant_id, ()) if n > changes]
+        if len(late) != count - changes:
+            return False
+        now = self._clock()
+        return all(e is not None and fresh.same(e[0], e[1], now) for e in late)
 
     async def _publish(
         self,
@@ -483,10 +585,13 @@ class AudienceSync:
         A change can come during any await of the transaction. So the count is checked
         again after the last one, just before the commit, and a crossed write is rolled
         back: no reader ever sees it. A change during the commit itself comes after the
-        facts were decided; its unknown mark waits on this server's lock and lands next."""
+        facts were decided; its unknown mark waits on this server's lock and lands next (a
+        window of one commit plus one withdrawal write, not closed by a lock across
+        processes)."""
+        fresh = _Basis.of(snapshot)
         try:
             async with self._step(tenant_id) as session:
-                if not self._current(tenant_id, epoch, changes) or guild.unavailable:
+                if not self._current(tenant_id, epoch, changes, fresh) or guild.unavailable:
                     raise _Crossed
                 now = self._clock()
                 limit = started + self._reconcile_limit
@@ -522,7 +627,7 @@ class AudienceSync:
                     now=now,
                     fresh_until=min(now + self._fresh_for, limit),
                 )
-                if not self._current(tenant_id, epoch, changes) or guild.unavailable:
+                if not self._current(tenant_id, epoch, changes, fresh) or guild.unavailable:
                     raise _Crossed  # rolls the write back
         except _Crossed:
             log.info("discord.audience.read_crossed", guild_id=str(guild.id))
@@ -537,17 +642,15 @@ class AudienceSync:
             self._unknown_due.add(tenant_id)
             self._start_writer(tenant_id)
             return False
+        # A change during the commit comes after the last check: its withdrawal waits for
+        # this transaction's lock and runs the moment it is released, with no debounce.
+        # Nothing renews facts a change has crossed, so they are visible for at most one
+        # commit plus one withdrawal write. The read's inputs become the basis unless
+        # such an event contradicts them.
+        if self._current(tenant_id, epoch, changes, fresh):
+            self._basis[tenant_id] = fresh
         if self._current(tenant_id, epoch, changes):  # else crossed during the commit
-            self._published[tenant_id] = _Published(
-                generation,
-                epoch,
-                changes,
-                started,
-                roles,
-                snapshot,
-                {m.user_id: m for m in snapshot.members},
-                {c.id: c for c in snapshot.channels},
-            )
+            self._published[tenant_id] = _Published(generation, epoch, changes, started, roles)
         log.info(
             "discord.audience.published",
             guild_id=str(guild.id),
@@ -568,9 +671,15 @@ class AudienceSync:
         log.warning("discord.audience.publish_stale", tenant_id=str(tenant_id), why=why)
         return False
 
-    def _invalidate(self, tenant_id: uuid.UUID) -> None:
-        """A change: no read from before it publishes, no renewal, every room unknown."""
+    def _invalidate(self, tenant_id: uuid.UUID, event: _Event | None = None) -> None:
+        """A change: no renewal and every room unknown; a read that began before it
+        publishes only if `event` states what that read saw."""
         self._changes[tenant_id] += 1
+        slot = self._slots.get(tenant_id)
+        if slot is not None and slot.reading:
+            late = self._late.setdefault(tenant_id, [])
+            keep = event if len(late) < MAX_LATE_EVENTS else None
+            late.append((self._changes[tenant_id], keep))
         self._published.pop(tenant_id, None)
         self._unknown_due.add(tenant_id)
         self._start_writer(tenant_id)
@@ -650,30 +759,3 @@ class AudienceSync:
 async def _policy_roles(session: AsyncSession, tenant_id: uuid.UUID) -> _Roles:
     policy: TenantAccessPolicy = await load_access_policy(session, tenant_id=tenant_id)
     return policy.internal_role_ids, policy.team_role_ids
-
-
-def _unchanged(event: str, data: Mapping[str, Any], published: _Published, now: datetime) -> bool:
-    """Whether a raw event leaves every input the published facts came from as it was.
-    Anything unreadable, or not in the read, counts as a change."""
-    snapshot = published.snapshot
-    try:
-        if event == "GUILD_UPDATE":
-            return str(data.get("owner_id")) == snapshot.owner_id
-        if event == "GUILD_MEMBER_UPDATE":
-            member = member_from_payload(
-                data, snapshot.role_permissions, owner_id=snapshot.owner_id, now=now
-            )
-            return published.members.get(member.user_id) == member
-        if event == "GUILD_ROLE_UPDATE":
-            role: object = data.get("role")
-            if not isinstance(role, dict):
-                return False
-            fields = cast("dict[str, object]", role)
-            bits = permissions_from_payload(fields.get("permissions"))
-            return snapshot.role_permissions.get(str(fields.get("id"))) == bits
-        if event == "CHANNEL_UPDATE":
-            channel = channel_from_payload(data)
-            return published.channels.get(channel.id) == channel
-    except ReadFailed:
-        return False
-    return False
