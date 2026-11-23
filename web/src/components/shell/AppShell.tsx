@@ -43,8 +43,11 @@ export function AppShell() {
 
   return (
     <ShellCtx.Provider value={{ openNav: () => setNav(true), openPalette: () => setPalette(true), openShortcuts: () => setShortcuts(true) }}>
-      <div className="flex h-dvh overflow-hidden">
-        <aside className="hidden w-60 shrink-0 border-r bg-muted lg:flex">
+      {/* relative: hidden form inputs (Radix selects, checkboxes) are positioned absolutely; without a
+          positioned ancestor they escape the clip and stretch the page into a second, blank scroll. */}
+      <div className="relative flex h-dvh overflow-hidden">
+        {/* md, not lg: a phone in desktop mode lays the page out 980px wide. */}
+        <aside className="hidden w-60 shrink-0 border-r bg-muted md:flex">
           <Sidebar />
         </aside>
         <Sheet open={nav} onOpenChange={setNav}>
