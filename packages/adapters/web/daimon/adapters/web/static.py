@@ -39,7 +39,8 @@ def spa_router(web: WebSettings) -> APIRouter:
         # Only reads get pages; anything else, and any unknown api or auth path, is a 404.
         if request.method not in ("GET", "HEAD") or path.split("/", 1)[0] in _API_ROOTS:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
-        file = _file_inside(root, path) if path else None
+        # The page itself, even asked for by name, takes the uncached answer below.
+        file = _file_inside(root, path) if path and path != "index.html" else None
         asset = path.startswith("assets/")
         if file is not None:
             # Built assets carry a content hash in their name, so they never change.

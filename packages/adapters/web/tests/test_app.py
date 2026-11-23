@@ -35,10 +35,11 @@ async def test_pages_fall_back_to_index_and_files_are_served(
     async with web_client(web_settings(static_dir=built_app)) as client:
         root = await client.get("/")
         deep = await client.get("/chat/some-thread")
+        named = await client.get("/index.html")
         icon = await client.get("/favicon.svg")
         asset = await client.get("/assets/main-abc123.js")
     assert root.text == deep.text == "<html>app</html>", "any other path is a client-side page"
-    assert root.headers["cache-control"] == "no-store", (
+    assert root.headers["cache-control"] == named.headers["cache-control"] == "no-store", (
         "a restored tab must fetch the current build"
     )
     assert icon.text == "<svg/>" and icon.headers["cache-control"] == "no-cache"
