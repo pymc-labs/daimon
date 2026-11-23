@@ -73,7 +73,7 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
         placeholder={placeholder}
         id="composer"
         aria-label="Message"
-        className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 outline-none placeholder:text-faint disabled:cursor-not-allowed"
+        className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-base leading-6 md:text-[15px] outline-none placeholder:text-faint disabled:cursor-not-allowed"
       />
       <div className="flex items-center gap-1 px-2 pb-2">
         {picker}
