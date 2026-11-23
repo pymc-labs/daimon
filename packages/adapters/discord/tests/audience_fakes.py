@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -59,6 +60,22 @@ def internal_only() -> dict[discord.Object, discord.PermissionOverwrite]:
     }
 
 
+def fetch_members(result: list[Any] | Callable[[], list[Any]] | type[BaseException]) -> MagicMock:
+    """A `Guild.fetch_members`: yields `result` (a list, or a callable returning one); an
+    exception class is raised when the iteration starts."""
+
+    def call(**_kw: Any) -> Any:
+        async def rows() -> Any:
+            if isinstance(result, type) and issubclass(result, BaseException):
+                raise result
+            for each in result() if callable(result) else result:  # pyright: ignore[reportUnknownArgumentType]
+                yield each
+
+        return rows()
+
+    return MagicMock(side_effect=call)
+
+
 def guild(*, channels: list[Any], threads: list[Any] | None = None, chunked: bool = True) -> Any:
     """Five core members, one friend, one outsider and a bot. Roles give core and friend a
     base view; @everyone has none."""
@@ -82,6 +99,7 @@ def guild(*, channels: list[Any], threads: list[Any] | None = None, chunked: boo
         return list(fake.members)  # `chunked` is discord.py's count check: it stays as given
 
     fake.chunk = AsyncMock(side_effect=chunk)
+    fake.fetch_members = fetch_members(lambda: list(fake.members))
     for each in (*channels, *fake.threads):
         each.guild = fake
     return fake

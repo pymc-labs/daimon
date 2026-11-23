@@ -10,7 +10,7 @@ wait, in one transaction.
 The process that holds the gateway renews `fresh_until` so a crashed bot cannot leave
 facts that look current. A renewal asks Discord nothing, so it never pushes validity past
 the last full reconcile plus `RECONCILE_LIMIT_S`. A reconcile reads roles and channels by
-REST and re-chunks the members, then recomputes and publishes; it runs every
+REST and reads the members, then recomputes and publishes; it runs every
 `RECONCILE_EVERY_S` for each server with internal roles, live or not. That also recovers
 a server whose publish failed and picks up a policy change. A missed gateway event can
 therefore mislead for at most the limit, and one failed reconcile does not expire facts.
@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 import structlog
 from daimon.adapters.discord.member_sync import tenant_of
@@ -54,7 +54,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 from discord.channel import _guild_channel_factory  # pyright: ignore[reportPrivateUsage]
-from discord.state import ChunkRequest
 
 log = structlog.get_logger(__name__)
 
@@ -68,10 +67,11 @@ DEBOUNCE_S = 2.0
 RECONCILE_EVERY_S = 300.0
 #: Facts stay trusted at most this long after the last successful reconcile.
 RECONCILE_LIMIT_S = 600.0
-#: A server's member chunks must arrive within this. A server of about 1,000 members needs a
-#: few seconds (discord.py itself allows `max(5, members / 10000)` s); 60 s leaves a failed
-#: reconcile several retries inside `RECONCILE_LIMIT_S`.
-CHUNK_TIMEOUT_S = 60.0
+#: One reconcile's reads (roles, channels and members, all by REST) must finish within this.
+#: A tick renews, reconciles, renews again, then sleeps `RENEW_EVERY_S`, so two renewals are
+#: at most `RENEW_EVERY_S + RECONCILE_TIMEOUT_S` = 120 s apart, 60 s inside `FRESH_FOR_S`.
+#: A server of about 1,000 members is one members page; 60 s allows far larger ones.
+RECONCILE_TIMEOUT_S = 60.0
 
 
 def _utcnow() -> datetime:
@@ -132,7 +132,7 @@ class AudienceSync:
         debounce_s: float = DEBOUNCE_S,
         reconcile_every_s: float = RECONCILE_EVERY_S,
         reconcile_limit_s: float = RECONCILE_LIMIT_S,
-        chunk_timeout_s: float = CHUNK_TIMEOUT_S,
+        reconcile_timeout_s: float = RECONCILE_TIMEOUT_S,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._clock = clock
@@ -141,7 +141,7 @@ class AudienceSync:
         self._debounce_s = debounce_s
         self._reconcile_every = timedelta(seconds=reconcile_every_s)
         self._reconcile_limit = timedelta(seconds=reconcile_limit_s)
-        self._chunk_timeout_s = chunk_timeout_s
+        self._reconcile_timeout_s = reconcile_timeout_s
         # When each server was last reconciled with Discord; renewals never outlive it.
         self._reconciled: dict[uuid.UUID, datetime] = {}
         # Servers whose published facts follow events; events recompute only these.
@@ -306,17 +306,18 @@ class AudienceSync:
         return False
 
     async def reconcile(self, guild: discord.Guild) -> bool:
-        """Read the server's roles and channels by REST and re-chunk its members, then
+        """Read the server's roles, channels and members by REST, then
         recompute and publish. Returns whether it published from a full read.
 
         A failed read changes nothing: the facts stay until their limit and then lapse."""
         epoch = self._epoch
         try:
-            roles = await guild.fetch_roles()
-            channels = await _fetch_known_channels(guild)
-            # The chunk is the full member list: a member whose leave event was missed
-            # is not in it, while the cache would keep them.
-            members = await self._chunk(guild)
+            async with asyncio.timeout(self._reconcile_timeout_s):
+                roles = await guild.fetch_roles()
+                channels = await _fetch_known_channels(guild)
+                # The REST member list is the full list: a member whose leave event was
+                # missed is not in it, while the cache would keep them.
+                members = [m async for m in guild.fetch_members(limit=None)]
         except (discord.ClientException, discord.HTTPException, TimeoutError) as err:
             log.warning(
                 "discord.audience.reconcile_failed",
@@ -327,13 +328,6 @@ class AudienceSync:
         return await self._publish_guarded(
             guild, reconciled=True, epoch=epoch, read=_Read(roles, channels, members)
         )
-
-    async def _chunk(self, guild: discord.Guild) -> list[discord.Member]:
-        try:
-            return await asyncio.wait_for(guild.chunk(cache=True), self._chunk_timeout_s)
-        except TimeoutError:
-            _end_chunk_request(guild)
-            raise
 
     async def mark_unknown(self, guild: discord.Guild) -> None:
         """The cache can no longer be trusted (a reload starts, or fails): every room of
@@ -417,7 +411,7 @@ class AudienceSync:
         except (SQLAlchemyError, AccessPolicyUnreadable) as err:
             log.warning("discord.audience.renew_failed", err_type=type(err).__name__)
             return
-        # Renew first: a chunk wait must not stop the renewal of any server, this one
+        # Renew first: a slow reconcile must not stop the renewal of any server, this one
         # included (within its last reconcile plus the limit).
         await self._renew(by_tenant, set())
         due: list[tuple[uuid.UUID, discord.Guild]] = []
@@ -437,7 +431,7 @@ class AudienceSync:
                 or tenant_id in self._dirty
             ):
                 due.append((tenant_id, guild))
-        # Together, so the servers' chunk waits do not add up.
+        # Together, so the servers' reads do not add up.
         results = await asyncio.gather(
             *(self.reconcile(guild) for _, guild in due), return_exceptions=True
         )
@@ -487,30 +481,6 @@ class AudienceSync:
                 raise
             except Exception as err:  # one bad tick must not end renewal: facts would lapse
                 log.exception("discord.audience.tick_failed", err_type=type(err).__name__)
-
-
-def _end_chunk_request(guild: discord.Guild) -> None:
-    """Finish the guild's pending member request after a timeout.
-
-    discord.py keeps one request per guild until its last chunk arrives
-    (`ConnectionState.chunk_guild`) and joins every later call to it without asking
-    Discord again, so one lost or rate-limited reply stalls every later chunk. Fail each
-    waiter still on it, then drop it if it is still the guild's request: the next call
-    sends a new one."""
-    requests = cast(
-        "dict[int, ChunkRequest] | None",
-        getattr(getattr(guild, "_state", None), "_chunk_requests", None),
-    )
-    if requests is None:
-        return
-    request = requests.get(guild.id)
-    if request is None:
-        return
-    for waiter in list(request.waiters):
-        if not waiter.done():
-            waiter.set_exception(TimeoutError())
-    if requests.get(guild.id) is request:
-        del requests[guild.id]
 
 
 async def _policy_roles(

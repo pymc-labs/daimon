@@ -20,7 +20,6 @@ from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.stores import audience_facts as store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
-from discord.state import ChunkRequest, ConnectionState
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -79,7 +78,7 @@ def _server(*, chunked: bool = True) -> object:
 
 
 def _sync(
-    factory: async_sessionmaker[AsyncSession], clock: Clock, *, chunk_timeout_s: float = 60
+    factory: async_sessionmaker[AsyncSession], clock: Clock, *, reconcile_timeout_s: float = 60
 ) -> tuple[AudienceSync, MemberSync]:
     audience = AudienceSync(
         factory,
@@ -88,7 +87,7 @@ def _sync(
         debounce_s=0,
         reconcile_every_s=300,
         reconcile_limit_s=600,
-        chunk_timeout_s=chunk_timeout_s,
+        reconcile_timeout_s=reconcile_timeout_s,
     )
     return audience, MemberSync(factory, clock=clock, audience=audience)
 
@@ -228,7 +227,7 @@ async def test_renewal_is_bounded_by_the_last_reconcile_and_a_stalled_owner_laps
     assert server.fetch_roles.await_count == 1, "renewal asks Discord nothing"  # type: ignore[attr-defined]
 
     # Discord stops answering at the 300 s reconcile: renewals continue to the limit only.
-    server.chunk = AsyncMock(side_effect=TimeoutError)  # type: ignore[attr-defined]
+    server.fetch_members = fake.fetch_members(TimeoutError)  # type: ignore[attr-defined]
     for _ in range(5):
         clock.now += timedelta(seconds=60)
         await audience.tick([server])  # type: ignore[list-item]
@@ -240,7 +239,7 @@ async def test_renewal_is_bounded_by_the_last_reconcile_and_a_stalled_owner_laps
     clock.now += timedelta(seconds=1)
     assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "limit reached"
 
-    server.chunk = AsyncMock(side_effect=lambda **_: setattr(server, "chunked", True))  # type: ignore[attr-defined]
+    server.fetch_members = fake.fetch_members(lambda: list(server.members))  # type: ignore[attr-defined]
     await audience.tick([server])  # type: ignore[list-item]
     assert (await _fact(db_session_factory, clock, "2")).contained, "the next reconcile recovers"
 
@@ -268,10 +267,10 @@ async def test_a_reconcile_reads_discord_and_corrects_a_missed_event(
 
     assert (await _fact(db_session_factory, clock, "1")).contained
     server.fetch_roles.assert_awaited()  # type: ignore[attr-defined]
-    server.chunk.assert_awaited_with(cache=True)  # type: ignore[attr-defined]
+    server.fetch_members.assert_called_with(limit=None)  # type: ignore[attr-defined]
 
 
-async def test_a_reconcile_counts_the_chunked_members_so_a_missed_leave_does_not_linger(
+async def test_a_reconcile_reads_the_member_list_so_a_missed_leave_does_not_linger(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     await _setup(db_session, db_session_factory)
@@ -284,7 +283,7 @@ async def test_a_reconcile_counts_the_chunked_members_so_a_missed_leave_does_not
     # The outsider left and the leave event was missed: the cache still holds them, the
     # fresh member list does not.
     present = [m for m in server.members if m.id != 30]  # type: ignore[attr-defined]
-    server.chunk = AsyncMock(return_value=present)  # type: ignore[attr-defined]
+    server.fetch_members = fake.fetch_members(present)  # type: ignore[attr-defined]
     clock.now += timedelta(seconds=300)
     await audience.tick([server])  # type: ignore[list-item]
 
@@ -347,8 +346,8 @@ async def test_an_event_never_reopens_what_a_reconcile_closed_after_a_missed_rol
     assert await audience.reconcile(server)  # type: ignore[arg-type]
     assert not (await _fact(db_session_factory, clock, "1")).contained
 
-    # The role update was missed: the cache keeps the old member, the chunk has the new one.
-    server.chunk = AsyncMock(return_value=_gained_role(server))  # type: ignore[attr-defined]
+    # The role update was missed: the cache keeps the old member, the member list has the new one.
+    server.fetch_members = fake.fetch_members(_gained_role(server))  # type: ignore[attr-defined]
     clock.now += timedelta(seconds=300)
     await audience.tick([server])  # type: ignore[list-item]
     assert (await _fact(db_session_factory, clock, "1")).contained
@@ -425,7 +424,7 @@ async def test_a_disconnect_clears_the_baseline(
     clock = Clock()
     audience, _ = _sync(db_session_factory, clock)
     server = _gated_server()
-    server.chunk = AsyncMock(return_value=_gained_role(server))  # type: ignore[attr-defined]
+    server.fetch_members = fake.fetch_members(_gained_role(server))  # type: ignore[attr-defined]
     assert await audience.reconcile(server)  # type: ignore[arg-type]
     assert (await _fact(db_session_factory, clock, "1")).contained
 
@@ -938,42 +937,32 @@ async def test_a_channel_type_discord_py_does_not_know_does_not_stop_the_facts(
     assert "never logged" not in str(logs)
 
 
-async def test_a_timed_out_chunk_ends_the_shared_request_and_the_next_one_asks_again(
+async def test_a_reconcile_whose_rest_read_hangs_is_cut_and_renewal_keeps_facts_usable(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     await _setup(db_session, db_session_factory)
     clock = Clock()
-    audience, _ = _sync(db_session_factory, clock, chunk_timeout_s=0.01)
+    audience, _ = _sync(db_session_factory, clock, reconcile_timeout_s=0.01)
     server: Any = _server()
-    # discord.py's own chunk_guild over its real ChunkRequest, with a recording opcode 8.
-    state = types.SimpleNamespace(
-        _chunk_requests={},
-        loop=asyncio.get_running_loop(),
-        _get_guild=MagicMock(return_value=None),
-        member_cache_flags=types.SimpleNamespace(joined=True),
-        chunker=AsyncMock(),
-    )
-    server._state = state
-    server.chunk = lambda **kw: ConnectionState.chunk_guild(state, server, **kw)  # type: ignore[arg-type]
-    other = asyncio.create_task(ConnectionState.chunk_guild(state, server, cache=True))  # type: ignore[arg-type]
-    await asyncio.sleep(0)
-    (shared,) = state._chunk_requests.values()
-    assert isinstance(shared, ChunkRequest) and len(shared.waiters) == 1
+    assert await audience.reconcile(server)
 
-    assert not await audience.reconcile(server)
+    async def hangs(**_: object) -> Any:
+        await asyncio.Event().wait()  # never answers: only the timeout ends it
+        yield  # pragma: no cover
 
-    with pytest.raises(TimeoutError):
-        await other
-    assert not shared.waiters, "no waiter is left pending"
-    assert state._chunk_requests == {}
-    assert state.chunker.await_count == 1
-
-    assert not await audience.reconcile(server)
-    assert state.chunker.await_count == 2, "the next call sends a new request"
-    assert state._chunk_requests == {}
+    server.fetch_members = MagicMock(side_effect=hangs)
+    with capture_logs() as logs:
+        for _ in range(9):  # 540 s of simulated time; every tick from 300 s cuts a hung read
+            clock.now += timedelta(seconds=60)
+            await audience.tick([server])
+            if clock.now - START <= timedelta(seconds=540):
+                assert (await _fact(db_session_factory, clock, "2")).contained
+    failed = [e for e in logs if e["event"] == "discord.audience.reconcile_failed"]
+    assert failed and {e["err_type"] for e in failed} == {"TimeoutError"}
+    assert clock.now - START > timedelta(seconds=180), "usable past one fresh window"
 
 
-async def test_renewal_does_not_stop_while_a_chunk_is_awaited(
+async def test_renewal_does_not_stop_while_a_rest_read_is_awaited(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     await _setup(db_session, db_session_factory)
@@ -987,12 +976,13 @@ async def test_renewal_does_not_stop_while_a_chunk_is_awaited(
     clock.now += timedelta(seconds=60)  # 300 s: the next reconcile is due
     seen: list[RoomFacts] = []
 
-    async def stalled(**_: object) -> list[Any]:
+    async def slow(**_: object) -> Any:
         clock.now += timedelta(seconds=150)  # 450 s: past the renewal of 240 s
         seen.append(await _fact(db_session_factory, clock, "2"))
         raise TimeoutError
+        yield  # pragma: no cover
 
-    server.chunk = AsyncMock(side_effect=stalled)
+    server.fetch_members = MagicMock(side_effect=slow)
     await audience.tick([server])
     assert seen[0].contained and seen[0].known, "renewed before the wait, within the limit"
 
@@ -1008,13 +998,20 @@ async def test_a_publish_that_crosses_a_disconnect_restores_no_trust(
     server: Any = _server()
     real = store.publish_facts
 
+    disconnect: list[asyncio.Task[None]] = []
+
     async def disconnect_while_writing(*args: Any, **kwargs: Any) -> int:
-        audience._epoch += 1  # pyright: ignore[reportPrivateUsage]  # what disconnected() starts with
+        # The gateway closes during the write: it bumps the epoch and clears its trust at
+        # once, then waits for the lock this publish holds.
+        disconnect.append(asyncio.create_task(audience.disconnected([server])))
+        await asyncio.sleep(0)
         return await real(*args, **kwargs)
 
     monkeypatch.setattr(store, "publish_facts", disconnect_while_writing)
     assert not await audience.reconcile(server)
+    await disconnect[0]
     assert not audience._live  # pyright: ignore[reportPrivateUsage]
     assert not audience._members_loaded  # pyright: ignore[reportPrivateUsage]
     assert not audience._reconciled  # pyright: ignore[reportPrivateUsage]
     assert not audience._baseline  # pyright: ignore[reportPrivateUsage]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "the DB facts end retired"
