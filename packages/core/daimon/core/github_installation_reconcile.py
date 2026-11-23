@@ -21,7 +21,7 @@ from daimon.core.github_app_auth import (
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores import github_app_installations as installation_store
 from daimon.core.stores import github_installation_reconciliation as reconciliation_store
-from daimon.core.stores.github_follow_org import follow_new_repos
+from daimon.core.stores.github_follow_org import follow_installation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -104,6 +104,7 @@ async def drain_github_installation_reconciliations(
                 jwt=app_jwt,
                 installation_id=job.installation_id,
             )
+            listed: list[InstallationRepository] = []
             if installation_state is None:
                 repositories = None
             else:
@@ -124,14 +125,6 @@ async def drain_github_installation_reconciliations(
                         http_client, token=listing_token
                     )
                     repositories = [repo.full_name for repo in listed]
-                    if installation_state.repository_selection == "all":
-                        await _follow_new_repos(
-                            sessionmaker=sessionmaker,
-                            http_client=http_client,
-                            jwt=app_jwt,
-                            installation_id=job.installation_id,
-                            listed=listed,
-                        )
 
             finished_at = datetime.now(UTC)
             async with sessionmaker.begin() as session:
@@ -164,6 +157,14 @@ async def drain_github_installation_reconciliations(
                     and installation_state is not None
                     and installation_state.account_id is not None
                     else None
+                )
+            if completed and listed and installation_state is not None:
+                await _follow_new_repos(
+                    sessionmaker=sessionmaker,
+                    http_client=http_client,
+                    jwt=app_jwt,
+                    installation_id=job.installation_id,
+                    listed=listed,
                 )
             if owner_before is not None and installation_state is not None:
                 _log.info(
@@ -218,10 +219,10 @@ async def _follow_new_repos(
     installation_id: int,
     listed: list[InstallationRepository],
 ) -> None:
-    """Give agents that follow the org each new repo, before the snapshot moves on.
+    """Give agents that follow the org the repos they lack, after the snapshot is stored.
 
-    A failure raises, so the job retries with the snapshot still the "before" and the same
-    repos still new. An agent at its GitHub limit is reported to the workspace's admins.
+    Each workspace is its own step; if any failed, the refresh is queued again soon, and the
+    step is safe to run again. An agent at its GitHub limit is reported to the workspace's admins.
     """
 
     async def write_access() -> bool:
@@ -230,7 +231,7 @@ async def _follow_new_repos(
         )
         return installation_supports_write(details.permissions)
 
-    outcome = await follow_new_repos(
+    outcome = await follow_installation(
         sessionmaker,
         installation_id=installation_id,
         repos=listed,
@@ -247,13 +248,22 @@ async def _follow_new_repos(
                 reason=limit.reason,
             ),
         )
-    if outcome.granted or outcome.renamed or outcome.limits:
+    if outcome.failed_tenants:
+        now = datetime.now(UTC)
+        async with sessionmaker.begin() as session:
+            await reconciliation_store.requeue_done(
+                session,
+                installation_id=installation_id,
+                available_at=now + _retry_delay(1),
+                now=now,
+            )
+    if outcome.granted or outcome.limits or outcome.failed_tenants:
         _log.info(
             "github.installation_reconciliation.followed",
             installation_id=installation_id,
             granted=outcome.granted,
-            renamed=outcome.renamed,
             at_limit=len(outcome.limits),
+            failed_tenants=len(outcome.failed_tenants),
         )
 
 

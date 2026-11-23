@@ -18,7 +18,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
 import httpx
 from anthropic import APIError, AsyncAnthropic
@@ -1953,6 +1953,39 @@ def _confirmation_page(
     )
 
 
+async def _is_org_admin(client: httpx.AsyncClient, token: str, org: str) -> bool:
+    """Whether the signed-in person is an active admin of `org` on GitHub, asked live.
+
+    Only an org admin sees every repo of the org, which is what following it hands over.
+    """
+    response = await client.get(
+        f"https://api.github.com/user/memberships/orgs/{quote(org, safe='')}",
+        headers=_github_headers(token),
+    )
+    if response.status_code in (403, 404):
+        return False
+    response.raise_for_status()
+    body = TypeAdapter(dict[str, object]).validate_python(response.json())
+    return body.get("state") == "active" and body.get("role") == "admin"
+
+
+async def _org_admin_offers(
+    factory: Callable[[], httpx.AsyncClient], token: str, offers: Sequence[FollowOffer]
+) -> tuple[FollowOffer, ...]:
+    """The offers whose org the signed-in person administers on GitHub, so nobody is shown a
+    box that would refuse them. A GitHub error hides the offer; the save asks again."""
+    kept: list[FollowOffer] = []
+    if offers:
+        async with factory() as client:
+            for offer in offers:
+                try:
+                    if await _is_org_admin(client, token, offer.owner):
+                        kept.append(offer)
+                except (httpx.HTTPError, ValueError):
+                    continue
+    return tuple(kept)
+
+
 def _github_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
@@ -2612,7 +2645,7 @@ def build_oauth_github_routes(
                     missing_names=tuple(missing_names),
                     pending_installation=pending_installation,
                     github_user_id=flow.github_user_id,
-                    follow=offers,
+                    follow=await _org_admin_offers(factory, token, offers),
                     following=following,
                 )
             posted_snapshot = fields.get("snapshot", [""])[0]
@@ -2745,7 +2778,7 @@ def build_oauth_github_routes(
                     requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
                     selection_error="Choose a change to save.",
-                    follow=offers,
+                    follow=await _org_admin_offers(factory, token, offers),
                     following=following,
                 )
             if posted_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
@@ -2809,7 +2842,9 @@ def build_oauth_github_routes(
                 # transaction below, so a removal in between refuses the save.
                 async with sessionmaker() as session:
                     acts_as_owner = await requester_owns_agent(session, invitation, live)
-                if not acts_as_owner:
+                # Following hands the agent every repo of the org, so an owner proves
+                # they are still an admin too.
+                if not acts_as_owner or follow_id is not None:
                     try:
                         still_admin = await _attest_native_admin(
                             requester=requester,
@@ -2821,8 +2856,25 @@ def build_oauth_github_routes(
                         return transient_error(_ADMIN_RETRY, 503)
                     if not still_admin:
                         return _error(
-                            "You can no longer manage this agent.", 403, retry_confirm_url
+                            "Only an admin can turn this on."
+                            if acts_as_owner
+                            else "You can no longer manage this agent.",
+                            403,
+                            retry_confirm_url,
                         )
+            if follow_id is not None:
+                org = next(item.owner_login for item in installations if item.id == follow_id)
+                try:
+                    async with factory() as client:
+                        is_org_admin = await _is_org_admin(client, token, org)
+                except (httpx.HTTPError, ValueError):
+                    return transient_error("Couldn't reach GitHub", 502)
+                if not is_org_admin:
+                    return _error(
+                        f"Only an admin of {org} on GitHub can turn this on.",
+                        403,
+                        retry_confirm_url,
+                    )
             save_stage = "check_authority"
             try:
                 async with sessionmaker.begin() as session:
@@ -2981,6 +3033,15 @@ def build_oauth_github_routes(
                                 value="on",
                                 account_id=invitation.requester_account_id,
                                 surface="web",
+                            )
+                            # Read the org now, so the gap is filled without waiting an hour.
+                            await enqueue_reconciliation(
+                                session,
+                                installation_id=follow_id,
+                                delivery_id=f"follow:{uuid.uuid4()}",
+                                event="follow",
+                                deleted=False,
+                                now=datetime.now(UTC),
                             )
                         save_stage = "audit"
                         await append_event(

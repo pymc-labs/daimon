@@ -727,6 +727,8 @@ async def change_feature(
     if refusal is not None:
         raise refusal
     spec = FEATURES[key]
+    if spec.connect_only and value == "on" and not actor.operator:
+        raise _refused(CONNECT_ONLY, "connect_only", "forbidden")
     if key == "display_name" and value != DEFAULT and value not in spec.values:
         await _refuse_taken_name(sessions, actor, place, value)
     await _require_inside(sessions, actor, spec, tier, place)
@@ -754,6 +756,11 @@ async def change_feature(
     (view,) = await read_features(sessions, settings, place, keys=(key,), agent_builtins=builtins)
     return FeatureChange(key, tier, before, after, view)
 
+
+CONNECT_ONLY = (
+    "This can only be turned on from the agent's GitHub connect page, by an admin of the "
+    "org. Open that page and tick the box to follow the org."
+)
 
 NAME_TAKEN = "That name belongs to Daimon or another agent. Pick another one."
 

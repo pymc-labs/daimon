@@ -34,6 +34,18 @@ from sqlalchemy.ext.asyncio import (
 from .harness import stop_confirmation_workers
 
 
+@pytest.fixture(autouse=True)
+def org_admin_on_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect page asks GitHub whether the signer administers an org (to offer following
+    it). The scripted GitHubs of the route tests do not serve that; follow tests set their own."""
+    from daimon.adapters.mcp import oauth_github
+
+    async def yes(_client: object, _token: str, _org: str) -> bool:
+        return True
+
+    monkeypatch.setattr(oauth_github, "_is_org_admin", yes)
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def isolate_confirmation_workers() -> AsyncIterator[None]:
     """An agent-chat send starts its turn's confirmation worker; one test's

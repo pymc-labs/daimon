@@ -1,9 +1,9 @@
 """The connect page's offer to follow an org: one checkbox, its rules and its words.
 
-The offer shows only when the agent, after the save, holds every repo the person can see
-in one org whose GitHub App installation covers all repos. The page's script shows and
-hides it as repos are added and removed; `confirmed_offer` checks the same rule again on
-the server.
+The offer is for an admin of a GitHub org whose App installation covers all repos, when the
+agent would hold every repo of it the person can see and none from another org. The page's
+script shows and hides it as repos are added and removed; `confirmed_offer` checks the same
+rule again on the server, and the save asks GitHub live whether the person administers the org.
 """
 
 from __future__ import annotations
@@ -43,6 +43,8 @@ class _Installation(Protocol):
     @property
     def state(self) -> str: ...
     @property
+    def owner_type(self) -> str: ...
+    @property
     def fetch_state(self) -> str: ...
     @property
     def truncated(self) -> bool: ...
@@ -70,6 +72,7 @@ def follow_offers(
     for installation in installations:
         if (
             installation.repository_selection != "all"
+            or installation.owner_type.lower() != "organization"
             or installation.state != "active"
             or installation.fetch_state != "ok"
             or installation.truncated

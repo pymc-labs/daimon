@@ -1,19 +1,23 @@
-"""An agent that follows its GitHub org gets each repo added to the org later.
+"""An agent that follows its GitHub org holds every repo of the org, except those taken off it.
 
-An admin turns `github_follow_org` on for one agent. When the refresh of an installation
-that covers all of an org's repos finds a repo the last snapshot did not list, each
-following agent that already works in that installation gets the repo: a workspace repo
-row scoped to that agent, then the grant, written by the same functions the connect page
-uses. Other agents, and agents that do not follow, are untouched.
+An admin turns `github_follow_org` on for one agent. On each refresh of an installation that
+covers all of an org's repos, every following agent that already works in that installation is
+given each listed repo it has no grant for and was never taken off (`AgentGitHubGrantRemoval`):
+an agent-scoped workspace repo row where none exists, then the grant, written by the same
+functions the connect page uses. Other agents are untouched.
 
-An agent never follows past one GitHub token's worth of repos in the org
-(`REPOS_PER_INSTALLATION_TOKEN`): a session then keeps the one-token layout. Past that, or
-past any other grant limit, nothing more is given and the workspace's admins get an issue.
+Progress is the grants themselves, keyed on GitHub's repo id. No snapshot or baseline decides
+what is new, so a repo another agent connected first, a failed earlier try, or a repo that was
+skipped at the cap is given on the next refresh. Turning the feature on gives the gap at the
+next refresh, as ticking "Select all" would. Each workspace is its own transaction: one that
+fails does not stop the others, and each is safe to run again.
 
-The step runs before the refresh stores its snapshot, so the stored snapshot is still the
-"before" and a failed step is retried with the same difference. It is idempotent: a repo
-the agent already has a row for (granted, or taken off on purpose) is never granted again.
-Repos listed when the feature was turned on are in the snapshot, so they stay as they are.
+An agent holds at most one GitHub token's worth of repos in the org
+(`REPOS_PER_INSTALLATION_TOKEN`), so a session keeps the one-token layout. The rest wait for
+room, and the workspace's admins get an issue.
+
+Renaming is not handled here: a renamed repo keeps its id, so a following agent that has it
+keeps it, and whatever updates names on rename does so for every agent alike.
 """
 
 from __future__ import annotations
@@ -25,20 +29,22 @@ from datetime import datetime
 from typing import Final, Literal
 
 import structlog
-from daimon.core._models import AgentGitHubGrant, GitHubAppInstallation, TenantGitHubRepo
+from daimon.core._models import (
+    AgentGitHubGrant,
+    AgentGitHubGrantRemoval,
+    GitHubAppInstallation,
+    TenantGitHubRepo,
+)
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, feature_in, feature_in_or_none
 from daimon.core.github_app_auth import InstallationRepository
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import github_access
 from daimon.core.stores.feature_values import list_agent_rows_with_value
-from daimon.core.stores.github_app_installations import (
-    StaleInstallationSnapshotError,
-    lock_for_reconciliation,
-)
+from daimon.core.stores.github_app_installations import lock_for_reconciliation
 from daimon.core.stores.github_connect import RepoConfirmation, write_repo_confirmation
 from daimon.core.stores.tenants import get_tenant
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -68,8 +74,9 @@ class FollowLimit:
 @dataclass
 class FollowOutcome:
     granted: int = 0
-    renamed: int = 0
     limits: list[FollowLimit] = field(default_factory=list[FollowLimit])
+    failed_tenants: list[uuid.UUID] = field(default_factory=list[uuid.UUID])
+    """Workspaces whose step failed; the caller queues another refresh."""
 
 
 def _limit_reason(error: ValueError) -> LimitReason | None:
@@ -147,7 +154,7 @@ async def _followers(
     return found
 
 
-async def follow_new_repos(
+async def follow_installation(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     installation_id: int,
@@ -155,13 +162,11 @@ async def follow_new_repos(
     write_access: Callable[[], Awaitable[bool]],
     now: datetime,
 ) -> FollowOutcome:
-    """Give each following agent the repos GitHub lists now and the stored snapshot lacks.
+    """Give each following agent the listed repos it lacks and was not taken off.
 
-    `write_access` asks whether the GitHub App holds the write profile on this installation
-    (called only when an agent will get a repo); without it the grant is read-only, as far
-    as the App allows. Raises
-    `StaleInstallationSnapshotError` when another writer refreshed the installation
-    meanwhile; the caller's job is then retried.
+    `repos` is GitHub's complete current list. `write_access` asks whether the GitHub App
+    holds the write profile on this installation (called only when an agent has a gap);
+    without it the grant is read-only, as far as the App allows.
     """
     outcome = FollowOutcome()
     async with sessionmaker() as session:
@@ -172,51 +177,50 @@ async def follow_new_repos(
             or installation.repository_selection != "all"
             or installation.suspended_at is not None
             or installation.github_removed_at is not None
-            or installation.github_repo_full_names is None
         ):
             return outcome
-        known = set(installation.github_repo_full_names)
-        observed_refresh = installation.github_refreshed_at
-        new = sorted(
-            (
-                repo
-                for repo in repos
-                if repo.full_name not in known
-                and repo.repo_id is not None
-                and repo.owner_id is not None
-            ),
-            key=lambda repo: repo.repo_id or 0,
-        )
-        if not new:
-            return outcome
         followers = await _followers(session, installation_id=installation_id)
-    if not followers:
+    listed = sorted(
+        (repo for repo in repos if repo.repo_id is not None and repo.owner_id is not None),
+        key=lambda repo: repo.repo_id or 0,
+    )
+    if not followers or not listed:
         return outcome
-    writable = await write_access()
+    writable: bool | None = None
     for tenant_id in sorted(followers, key=str):
-        async with sessionmaker.begin() as session:
-            await _follow_in_tenant(
-                session,
-                tenant_id=tenant_id,
-                followers=sorted(followers[tenant_id], key=lambda item: str(item.agent_id)),
+        try:
+            if writable is None:
+                writable = await write_access()
+            async with sessionmaker.begin() as session:
+                await _follow_in_tenant(
+                    session,
+                    tenant_id=tenant_id,
+                    followers=sorted(followers[tenant_id], key=lambda item: str(item.agent_id)),
+                    installation_id=installation_id,
+                    listed=listed,
+                    write_access=writable,
+                    now=now,
+                    outcome=outcome,
+                )
+        except Exception:
+            # Boundary: one workspace's failure must not stop the others; the caller queues
+            # another refresh, and the step is safe to run again.
+            log.exception(
+                "github.follow_org.tenant_failed",
+                tenant_id=str(tenant_id),
                 installation_id=installation_id,
-                observed_refresh=observed_refresh,
-                new=new,
-                write_access=writable,
-                now=now,
-                outcome=outcome,
             )
+            outcome.failed_tenants.append(tenant_id)
     return outcome
 
 
 async def _held_in_installation(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, installation_id: int
-) -> int:
-    """How many repos of this installation the agent holds a grant for."""
-    return (
-        await session.scalar(
-            select(func.count())
-            .select_from(AgentGitHubGrant)
+) -> set[int]:
+    """The distinct repo ids of this installation the agent holds a grant for."""
+    return set(
+        await session.scalars(
+            select(AgentGitHubGrant.repo_id)
             .join(
                 TenantGitHubRepo,
                 (TenantGitHubRepo.tenant_id == AgentGitHubGrant.tenant_id)
@@ -230,9 +234,42 @@ async def _held_in_installation(
                 (TenantGitHubRepo.scope_agent_id.is_(None))
                 | (TenantGitHubRepo.scope_agent_id == agent_id),
             )
+            .distinct()
         )
-        or 0
     )
+
+
+async def _gaps(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    follower: _Follower,
+    installation_id: int,
+    listed: Sequence[InstallationRepository],
+) -> tuple[list[InstallationRepository], bool]:
+    """The listed repos this agent should be given now, and whether the cap cut some."""
+    held = await _held_in_installation(
+        session, tenant_id=tenant_id, agent_id=follower.agent_id, installation_id=installation_id
+    )
+    granted_any = set(
+        await session.scalars(
+            select(AgentGitHubGrant.repo_id).where(
+                AgentGitHubGrant.tenant_id == tenant_id,
+                AgentGitHubGrant.agent_id == follower.agent_id,
+            )
+        )
+    )
+    taken_off = set(
+        await session.scalars(
+            select(AgentGitHubGrantRemoval.repo_id).where(
+                AgentGitHubGrantRemoval.tenant_id == tenant_id,
+                AgentGitHubGrantRemoval.agent_id == follower.agent_id,
+            )
+        )
+    )
+    gap = [repo for repo in listed if repo.repo_id not in granted_any | taken_off]
+    room = max(github_access.REPOS_PER_INSTALLATION_TOKEN - len(held), 0)
+    return gap[:room], len(gap) > room
 
 
 async def _follow_in_tenant(
@@ -241,39 +278,49 @@ async def _follow_in_tenant(
     tenant_id: uuid.UUID,
     followers: Sequence[_Follower],
     installation_id: int,
-    observed_refresh: datetime | None,
-    new: Sequence[InstallationRepository],
+    listed: Sequence[InstallationRepository],
     write_access: bool,
     now: datetime,
     outcome: FollowOutcome,
 ) -> None:
+    gaps: dict[uuid.UUID, list[InstallationRepository]] = {}
+    for follower in followers:
+        gap, cut = await _gaps(
+            session,
+            tenant_id=tenant_id,
+            follower=follower,
+            installation_id=installation_id,
+            listed=listed,
+        )
+        if cut:
+            outcome.limits.append(FollowLimit(tenant_id, follower.ma_agent_id, "repos"))
+        if gap:
+            gaps[follower.agent_id] = gap
+    if not gaps:
+        return
     # Lock order: tenant, repository ids ascending, then the installation (as the connect
     # page's save takes them), then each agent ascending inside `stage_grant`.
     await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     await github_access.lock_repo_grants_batch(
-        session, tenant_id=tenant_id, repo_ids={repo.repo_id for repo in new if repo.repo_id}
+        session,
+        tenant_id=tenant_id,
+        repo_ids={repo.repo_id for gap in gaps.values() for repo in gap if repo.repo_id},
     )
     installation = await lock_for_reconciliation(session, installation_id=installation_id)
-    if (
-        installation is None
-        or installation.github_repo_full_names is None
-        or installation.github_refreshed_at != observed_refresh
-    ):
-        raise StaleInstallationSnapshotError(
-            "GitHub installation snapshot changed while new repos were followed"
-        )
+    if installation is None:
+        return
     access: Literal["read", "write"] = "write" if write_access else "read"
     covered = set(installation.repo_full_names)
-    listed = set(installation.github_repo_full_names)
     for follower in followers:
-        held = await _held_in_installation(
-            session,
-            tenant_id=tenant_id,
-            agent_id=follower.agent_id,
-            installation_id=installation_id,
-        )
-        for repo in new:
+        for repo in gaps.get(follower.agent_id, ()):
             assert repo.repo_id is not None and repo.owner_id is not None
+            # Another follower's step may have changed the facts since the gaps were read.
+            if await session.get(
+                AgentGitHubGrant, (tenant_id, follower.agent_id, repo.repo_id)
+            ) or await session.get(
+                AgentGitHubGrantRemoval, (tenant_id, follower.agent_id, repo.repo_id)
+            ):
+                continue
             existing = await github_access.repo_for_agent(
                 session,
                 tenant_id=tenant_id,
@@ -281,62 +328,57 @@ async def _follow_in_tenant(
                 agent_id=follower.agent_id,
                 for_update=True,
             )
-            if existing is not None:
-                # Seen before: granted already, taken off on purpose, or renamed.
-                if (
-                    existing.scope_agent_id == follower.agent_id
-                    and existing.status == "active"
-                    and existing.repo_full_name != repo.full_name
-                ):
-                    existing.repo_full_name = repo.full_name
-                    existing.version += 1
-                    covered.add(repo.full_name)
-                    listed.add(repo.full_name)
-                    outcome.renamed += 1
-                continue
-            if held >= github_access.REPOS_PER_INSTALLATION_TOKEN:
-                outcome.limits.append(FollowLimit(tenant_id, follower.ma_agent_id, "repos"))
-                break
-            covered_before, listed_before = set(covered), set(listed)
+            if existing is not None and existing.status != "active":
+                continue  # revoked or suspended: an admin's call, not ours
+            covered_before = set(covered)
             try:
                 async with session.begin_nested():
-                    await write_repo_confirmation(
-                        session,
-                        tenant_id=tenant_id,
-                        scope_agent_id=follower.agent_id,
-                        repo=RepoConfirmation(
-                            repo_id=repo.repo_id,
-                            owner_id=repo.owner_id,
-                            installation_id=installation_id,
-                            full_name=repo.full_name,
+                    if existing is None:
+                        await write_repo_confirmation(
+                            session,
+                            tenant_id=tenant_id,
+                            scope_agent_id=follower.agent_id,
+                            repo=RepoConfirmation(
+                                repo_id=repo.repo_id,
+                                owner_id=repo.owner_id,
+                                installation_id=installation_id,
+                                full_name=repo.full_name,
+                                max_access=access,
+                                authorizer_permission=None,
+                            ),
+                            github_user_id=follower.github_user_id,
+                            account_id=follower.set_by,
                             max_access=access,
-                            authorizer_permission=None,
-                        ),
-                        github_user_id=follower.github_user_id,
-                        account_id=follower.set_by,
-                        max_access=access,
-                        now=now,
+                            now=now,
+                        )
+                    grant_access: Literal["read", "write"] = (
+                        "write"
+                        if access == "write"
+                        and (existing is None or existing.max_access == "write")
+                        else "read"
                     )
                     covered.add(repo.full_name)
-                    listed.add(repo.full_name)
                     installation.repo_full_names = sorted(covered)
-                    installation.github_repo_full_names = sorted(listed)
                     await session.flush()
                     await github_access.stage_grant(
                         session,
                         tenant_id=tenant_id,
                         agent_id=follower.agent_id,
                         repo_id=repo.repo_id,
-                        baseline_access=access,
-                        ceiling_access=access,
+                        baseline_access=grant_access,
+                        ceiling_access=grant_access,
                         granted_by_account_id=follower.set_by,
                         repo_lock_held=True,
                     )
             except ValueError as error:
+                if str(error) == github_access.SERVER_WIDE_GRANT_MESSAGE:
+                    # The admin who turned it on is no longer one: leave this repo, keep going.
+                    log.warning("github.follow_org.granter_not_admin", tenant_id=str(tenant_id))
+                    continue
                 reason = _limit_reason(error)
                 if reason is None:
                     raise
-                covered, listed = covered_before, listed_before
+                covered = covered_before
                 outcome.limits.append(FollowLimit(tenant_id, follower.ma_agent_id, reason))
                 log.warning(
                     "github.follow_org.limit",
@@ -345,10 +387,8 @@ async def _follow_in_tenant(
                     reason=reason,
                 )
                 break
-            held += 1
             outcome.granted += 1
     installation.repo_full_names = sorted(covered)
-    installation.github_repo_full_names = sorted(listed)
     await session.flush()
 
 

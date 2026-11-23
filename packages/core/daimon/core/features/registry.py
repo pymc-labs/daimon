@@ -160,6 +160,10 @@ class FeatureSpec:
     max_length: int = 0
     """Above 0, the feature also takes any one-line text up to this many characters (a name),
     besides its listed values."""
+    connect_only: bool = False
+    """An On needs proof only a sign-in flow has (the GitHub connect page): chat, tools, the web
+    app, the settings panel and an agent's spec refuse it, and only the operator CLI may set it.
+    Off and clearing stay open to anyone who may change it."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""
@@ -1011,14 +1015,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("agent",),
         # Read when GitHub's repo list for the org is refreshed, at most an hour apart.
         binds="provision",
-        doc=(
-            "Gives this agent each new repo added to a GitHub org it already works in, "
-            "when the GitHub App covers all repos of that org. The agent can read and "
-            "change the new repo. Repos that existed when this was turned on, and repos "
-            "taken off the agent, stay as they are. Only an admin can change it."
-        ),
+        doc=("Follows the whole org."),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN_NOT_OWNER,
+        connect_only=True,
     ),
 )
 

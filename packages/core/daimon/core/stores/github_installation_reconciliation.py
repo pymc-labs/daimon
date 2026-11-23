@@ -225,6 +225,28 @@ async def _enqueue_candidates(
     return len((await session.execute(stmt)).all())
 
 
+async def requeue_done(
+    session: AsyncSession, *, installation_id: int, available_at: datetime, now: datetime
+) -> bool:
+    """Queue a finished refresh to run again at `available_at`; a job in flight is left alone."""
+    result = await session.execute(
+        update(GitHubInstallationReconciliation)
+        .where(
+            GitHubInstallationReconciliation.installation_id == installation_id,
+            GitHubInstallationReconciliation.state == "done",
+        )
+        .values(
+            state="pending",
+            generation=GitHubInstallationReconciliation.generation + 1,
+            attempts=0,
+            available_at=available_at,
+            updated_at=now,
+        )
+        .returning(GitHubInstallationReconciliation.installation_id)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def get(
     session: AsyncSession, *, installation_id: int
 ) -> GitHubInstallationReconciliationRow | None:
