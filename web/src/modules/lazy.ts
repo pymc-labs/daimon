@@ -4,6 +4,8 @@ const RELOADED_AT = "daimon.reloaded-at"
 
 /** Reloads to pick up a new build; false when one just happened (or storage is blocked), so a missing file cannot loop. */
 export function reloadForNewBuild(): boolean {
+  // Offline, a reload lands on the browser's offline page: show the error instead.
+  if (!navigator.onLine) return false
   try {
     if (Date.now() - Number(sessionStorage.getItem(RELOADED_AT)) < 10_000) return false
     sessionStorage.setItem(RELOADED_AT, String(Date.now()))
