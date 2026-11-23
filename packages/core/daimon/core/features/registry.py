@@ -160,6 +160,10 @@ class FeatureSpec:
     max_length: int = 0
     """Above 0, the feature also takes any one-line text up to this many characters (a name),
     besides its listed values."""
+    connect_only: bool = False
+    """An On needs proof only a sign-in flow has (the GitHub connect page): chat, tools, the web
+    app, the settings panel and an agent's spec refuse it, and only the operator CLI may set it.
+    Off and clearing stay open to anyone who may change it."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""
@@ -1001,6 +1005,21 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             ),
         )
     ),
+    FeatureSpec(
+        key="github_follow_org",
+        name="Follow the GitHub org",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("agent",),
+        # Read when GitHub's repo list for the org is refreshed, at most an hour apart.
+        binds="provision",
+        doc=("Follows the whole org."),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN_NOT_OWNER,
+        connect_only=True,
+    ),
 )
 
 
@@ -1115,6 +1134,21 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
             "/share-secret sends a secret to one person's DMs; the agent sends its keys to an "
             "admin, its owner or its setter. They reveal it once, within a day. A server admin "
             "turns it on."
+        ),
+        platforms=_DISCORD,
+        authority=_SERVER_ADMIN,
+    ),
+    FeatureSpec(
+        key="bot_access_wait",
+        name="Wait for bot access",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace",),
+        binds="turn",
+        doc=(
+            "Work for a channel Daimon cannot reach waits, without failing, and runs once it can."
         ),
         platforms=_DISCORD,
         authority=_SERVER_ADMIN,

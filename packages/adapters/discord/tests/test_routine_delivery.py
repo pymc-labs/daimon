@@ -102,11 +102,13 @@ async def _routine(
 class _Dms:
     """Records DMs opened for the creator; `fail` makes opening raise."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool | Exception = False) -> None:
         self.sent: list[tuple[int, int, str]] = []
         self.fail = fail
 
     async def open(self, guild_id: int, user_id: int) -> Any:
+        if isinstance(self.fail, Exception):
+            raise self.fail
         if self.fail:
             raise LookupError("not a member")
         dms = self
@@ -349,6 +351,36 @@ async def test_a_channel_in_a_protected_category_falls_back_to_a_dm(
     (guild_id, user_id, content) = dms.sent[0]
     assert (guild_id, user_id) == (_GUILD, 1)
     assert "posting is blocked there" in content and content.endswith("All green @everyone.")
+
+
+@pytest.mark.parametrize(
+    ("error", "failed"),
+    [
+        (discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "closed"), None),
+        (discord.HTTPException(MagicMock(status=500, reason="failed"), "down"), "HTTPException"),
+    ],
+    ids=["dms_closed", "server_error"],
+)
+async def test_a_fallback_dm_to_closed_dms_is_skipped_without_counting_a_failure(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    error: Exception,
+    failed: str | None,
+) -> None:
+    """Closed DMs repeat on every run, so they must not page; a server error still counts."""
+    row = await _routine(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=row.tenant_id,
+        policy=TenantAccessPolicy(protected_category_ids=("77",)),
+    )
+    await db_session.commit()
+
+    outcome = await _poster(
+        db_session_factory, _text_channel(category_id=77), dms=_Dms(fail=error)
+    )(row)
+
+    assert (outcome.status, outcome.failed) == ("skipped", failed)
 
 
 async def test_an_uncached_thread_parent_is_resolved_before_category_protection(

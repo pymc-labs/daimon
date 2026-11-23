@@ -58,9 +58,9 @@ async def test_a_granted_user_with_a_web_person_links_to_their_admin_page(
     runtime = _runtime(committing_sessionmaker, _WEB)
 
     result = await granted(runtime, auth, subject_id="U42", subject_kind="user")
-    assert result.web_url == (f"https://app.example.com/w/{tenant.id}/admin?person={person.id}"), (
-        "the person's own page"
-    )
+    assert result.web_url == (
+        f"https://app.example.com/w/{tenant.id}/admin/people?person={person.id}"
+    ), "the person's own page"
     stranger = await granted(runtime, auth, subject_id="U99", subject_kind="user")
     assert stranger.web_url is None, "no person on the web, no link"
     role = await granted(runtime, auth, subject_id="U42", subject_kind="role")

@@ -7,10 +7,12 @@ lease that expires after it started is settled, never re-run.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from daimon.core.continuity.continuation import (
@@ -556,3 +558,23 @@ async def test_enqueued_wake_commits_once_with_its_callers_transaction(
         assert await get_tenant(session, tenant.id) is not None
         committed = await get_continuation(session, idempotency_key=request.idempotency_key)
         assert committed == queued, "the committed wake retains its single durable identity"
+
+
+def test_every_skip_settle_names_its_row_so_a_failed_skip_is_reported() -> None:
+    """Found by AST: each `settle_wake` (and the dispatcher's `_settle`) that can skip passes
+    `row`; one that only ever delivers needs none."""
+    packages = Path(__file__).resolve().parents[3]
+    missing: list[str] = []
+    for path in [*packages.glob("*/daimon/**/*.py"), *packages.glob("adapters/*/daimon/**/*.py")]:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name != "settle_wake" and not (name == "_settle" and path.name == "dispatch.py"):
+                continue
+            keywords = {k.arg: k.value for k in node.keywords}
+            status = keywords.get("status")
+            delivers = isinstance(status, ast.Constant) and status.value == "delivered"
+            if not delivers and "row" not in keywords:
+                missing.append(f"{path.name}:{node.lineno}")
+    assert missing == [], "a skip settled without its row is never reported as wake.failed"

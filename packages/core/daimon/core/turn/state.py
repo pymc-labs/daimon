@@ -96,6 +96,20 @@ def daimon_tool_input(block: ToolUseBlock, tool: str) -> Mapping[str, object] | 
     return cast("dict[str, object]", arguments) if isinstance(arguments, dict) else None
 
 
+def tool_errors_by_server(content: list[ContentBlock]) -> dict[str, int]:
+    """Failed results per MCP server name, daimon's own excluded: its refusals are answers."""
+    counts: dict[str, int] = {}
+    for block in content:
+        if (
+            isinstance(block, ToolUseBlock)
+            and block.is_error
+            and (server := block.mcp_server_name) is not None
+            and server != DAIMON_SERVER_NAME
+        ):
+            counts[server] = counts.get(server, 0) + 1
+    return counts
+
+
 @dataclass(frozen=True, slots=True)
 class UsageTotals:
     """Per-turn token totals, folded from `span.model_request_end` events.

@@ -19,6 +19,7 @@ typo is silent — check the spelling here.
 - [Compute](#compute)
 - [Long Jobs](#long-jobs)
 - [Monitoring](#monitoring)
+- [Ops Events](#ops-events)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -255,6 +256,17 @@ Read from `daimon.core.config.MonitoringSettings`. Prefix `DAIMON_MONITORING__`.
 
 Days a monitored question, answer or tool call is kept before the scheduler deletes it,
 default 90.
+
+## Ops Events
+
+Read from `daimon.core.config.OpsEventsSettings`. Prefix `DAIMON_OPS_EVENTS__`.
+
+### `DAIMON_OPS_EVENTS__RETENTION_DAYS`
+
+`int` · optional · default `30`
+
+Days a failure or warning shown on the admin Issues page is kept before the scheduler
+deletes it, default 30.
 
 ## Database
 

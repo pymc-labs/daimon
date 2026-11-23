@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 235 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 240 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -21,6 +21,7 @@ tool is hidden by default and restored only for a matching caller.
 - **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
+- **operator tokens with issues:read** — carries the `scope:issues:read` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
 - **operator tokens with promo:redeem** — carries the `scope:promo:redeem` tag.
 - **operator tokens with tenant:read** — carries the `scope:tenant:read` tag.
@@ -448,6 +449,17 @@ Notebook MCP tools.
 | `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
 
+## `ops_issues`
+
+The workspace's failures and warnings, read from chat or by an operator token.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `change_issue_state` | admin only | Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). |
+| `get_issue` | admin only, operator tokens with issues:read | Read one issue by its ``fingerprint`` (from list_issues): what it is about, when it started, who it reached and its latest events. |
+| `get_ops_overview` | admin only, operator tokens with issues:read | Read how the workspace is doing: answers and the share that failed, direct message and routine failures, status (healthy, degraded or failing, from the last hour), failures per area, an answers chart and the issues that need attention. |
+| `list_issues` | admin only, operator tokens with issues:read | List the workspace's failures and warnings, grouped into issues, newest first. |
+
 ## `progress_plans`
 
 The `update_plan` tool: a checklist of a longer task's steps on the progress card.
@@ -516,10 +528,12 @@ Repository-scoped persistent memory, authorized by the executing turn.
 
 ## `routine_run`
 
-Run a routine now, ahead of its schedule.
+Run a routine now, ahead of its schedule; a routine run reports what kept it from its
+task.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `report_routine_problem` | all callers | Tell the admins this routine run could not do its task, and why. |
 | `run_routine` | all callers | Run a routine now, ahead of its schedule; its own schedule continues after. |
 
 ## `routines`
@@ -571,7 +585,7 @@ updates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `add_server_skill` | all callers | Only for the connected data server: list what it serves, or take one of its offers by name or URI into the library, kept current with that server. |
+| `add_server_skill` | all callers | Only for the connected data server: list the skills it offers, or take one by name or URI into the library, kept current with that server. |
 | `apply_server_skill_update` | all callers | Give an agent the server skill update its model provider check held back. |
 | `approve_server_skill_update` | admin only | Approve the update waiting on a server skill, given as its ``pending_digest``. |
 | `check_server_skill` | admin only | Check a server skill for an update now. |

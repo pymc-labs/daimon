@@ -29,6 +29,7 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
             "delete_routine",
             "set_routine_sandbox_tools",
             "run_routine",
+            "report_routine_problem",
         }
     ),
     "long_jobs": frozenset({"start_long_job", "get_long_job", "list_long_jobs", "cancel_long_job"}),

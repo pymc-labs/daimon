@@ -38,6 +38,7 @@ from typing import Final, Literal
 
 import structlog
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
@@ -246,14 +247,55 @@ async def start_wake(
         )
 
 
+#: Skips nobody is waiting on: a newer request, a changed target, save-only work.
+_NOT_FAILURES: Final = frozenset(
+    {"skip_save_only", "skip_superseded", "skip_target_changed", "skip_turn_running"}
+)
+#: Reasons a person, a policy or an operator caused rather than a fault: warnings.
+_WARNINGS: Final = ("not_started:", "admission_denied:", "provider_guard_denied", "thread_")
+
+
+def wake_failure_severity(reason: str) -> Literal["error", "warning"]:
+    """The design's severity per reason: faults are errors, refusals and stops warnings."""
+    return "warning" if reason.startswith(_WARNINGS) else "error"
+
+
+def report_wake_failed(
+    sm: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID | None,
+    kind: str | None,
+    reason: str,
+    *,
+    thread_id: str | None = None,
+    logged: bool = False,
+) -> None:
+    """Record a wake that will not run; the caller logs its own line unless `logged`."""
+    report_ops_event(
+        sm,
+        OpsEvent(
+            "wake.failed",
+            tenant_id,
+            reason=reason,
+            severity=wake_failure_severity(reason),
+            thread_id=thread_id,
+            subject_key=kind,
+        ),
+        logged=logged,
+    )
+
+
 @asynccontextmanager
 async def keep_wake(
     sessionmaker: async_sessionmaker[AsyncSession],
     claim: WakeClaim,
     *,
     now: Callable[[], datetime],
+    tenant_id: uuid.UUID | None = None,
+    kind: str | None = None,
 ) -> AsyncIterator[None]:
-    """Renew a started wake's lease while its turn runs, and stop when it ends."""
+    """Renew a started wake's lease while its turn runs, and stop when it ends.
+
+    `tenant_id` and `kind` only label the log line when the lease is lost."""
 
     async def renew() -> None:
         while True:
@@ -275,7 +317,13 @@ async def keep_wake(
                 continue
             if not held:
                 # Cancelled or settled elsewhere: this turn's settle write is refused too.
-                log.warning("wake.lease_lost", idempotency_key=str(claim.idempotency_key))
+                log.warning(
+                    "wake.lease_lost",
+                    idempotency_key=str(claim.idempotency_key),
+                    tenant_id=str(tenant_id) if tenant_id is not None else None,
+                    kind=kind,
+                )
+                report_wake_failed(sessionmaker, tenant_id, kind, "lease_lost")
                 return
 
     renewer = asyncio.create_task(renew())
@@ -297,8 +345,13 @@ async def settle_wake(
     status: Literal["delivered", "skipped"],
     now: datetime,
     skip_reason: str | None = None,
+    row: TaskContinuationRow | None = None,
+    error_class: str | None = None,
 ) -> bool:
-    """Close out a claim; False when it had already been taken over."""
+    """Close out a claim; False when it had already been taken over.
+
+    A skip of `row` that is a failure is reported as `wake.failed`, under `error_class`
+    when an exception ended it, else its skip reason."""
     async with sessionmaker.begin() as session:
         settled = await settle_wake_row(
             session,
@@ -310,6 +363,15 @@ async def settle_wake(
         )
     if not settled:
         log.warning("wake.settle_lost_claim", idempotency_key=str(claim.idempotency_key))
+    elif row is not None and status == "skipped" and skip_reason not in _NOT_FAILURES:
+        report_wake_failed(
+            sessionmaker,
+            row.tenant_id,
+            row.reason,
+            error_class or skip_reason or "skipped",
+            thread_id=row.thread_id,
+            logged=True,
+        )
     return settled
 
 
@@ -351,17 +413,21 @@ def is_transient_denial(denied: AdmissionDenied) -> bool:
 
 
 def busy_retry_at(
-    row: TaskContinuationRow, *, now: datetime, not_before: datetime | None = None
+    row: TaskContinuationRow,
+    *,
+    now: datetime,
+    not_before: datetime | None = None,
+    delay: timedelta = WAKE_RETRY_DELAY,
 ) -> datetime | None:
     """When a row released because its thread was busy is offered again.
 
-    A wake is retried by the poller after `WAKE_RETRY_DELAY`, or at the busy
-    session's own `retry_after` (`not_before`) if that is later. A handoff (no
-    `available_at`) keeps waiting for the next turn in its thread.
+    A wake is retried by the poller after `delay` (`WAKE_RETRY_DELAY` unless the wait is
+    longer), or at the busy session's own `retry_after` (`not_before`) if that is later.
+    A handoff (no `available_at`) keeps waiting for the next turn in its thread.
     """
     if row.available_at is None:
         return None
-    retry_at = now + WAKE_RETRY_DELAY
+    retry_at = now + delay
     return retry_at if not_before is None else max(retry_at, not_before)
 
 
@@ -420,7 +486,9 @@ async def skip_thread_wakes(
         claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now)
         if claim is None:
             continue
-        if await settle_wake(sessionmaker, claim, status="skipped", now=now, skip_reason=reason):
+        if await settle_wake(
+            sessionmaker, claim, status="skipped", now=now, skip_reason=reason, row=row
+        ):
             skipped += 1
     return skipped
 
@@ -440,8 +508,13 @@ async def abandon_interrupted_wakes(
         log.warning(
             "wake.abandoned",
             idempotency_key=str(row.idempotency_key),
+            tenant_id=str(row.tenant_id),
+            kind=row.reason,
             thread_id=row.thread_id,
-            reason=row.skip_reason,
+            skip_reason=row.skip_reason,
+        )
+        report_wake_failed(
+            sessionmaker, row.tenant_id, row.reason, "abandoned", thread_id=row.thread_id
         )
     return rows
 

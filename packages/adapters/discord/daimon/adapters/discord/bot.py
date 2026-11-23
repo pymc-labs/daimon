@@ -116,6 +116,7 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.audience_refusal import AUDIENCE_CONTAINED
 from daimon.core.authz import build_agent_ref
 from daimon.core.billing_panel import fmt_usd
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import drain_budget_notices, run_budget_alert_poller
@@ -153,6 +154,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.model_reactions import model_marks
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.output_runtime import OutputRuntime
@@ -889,6 +891,21 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(_log_bg_task_exception)
         return task
 
+    def _report_shed(self, tenant_id: uuid.UUID, thread_id: int, reason: str) -> None:
+        """Record a turn turned away at the process-wide cap; the caller logs its own line."""
+        report_ops_event(
+            self.runtime.sessionmaker,
+            OpsEvent(
+                "turn.shed",
+                tenant_id,
+                reason=reason,
+                platform="discord",
+                channel_id=str(thread_id),
+                thread_id=str(thread_id),
+            ),
+            logged=False,
+        )
+
     def _track_processing_task(self, thread_id: int) -> None:
         task = asyncio.current_task()
         if task is not None:
@@ -945,6 +962,7 @@ class DaimonBot(commands.Bot):
                 requester_id=attributed.requester_id if attributed is not None else None,
                 requester_label=requester_label,
                 reply_to=attributed.files_reply_to(thread.id) if attributed is not None else None,
+                sessions=self.runtime.sessionmaker,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -952,6 +970,21 @@ class DaimonBot(commands.Bot):
                 session_id=session_id,
                 thread_id=thread.id,
                 error=str(exc)[:300],
+            )
+            guild = thread.guild
+            report_ops_event(
+                self.runtime.sessionmaker,
+                OpsEvent(
+                    "delivery.output_failed",
+                    derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+                    if guild is not None
+                    else None,
+                    reason=type(exc).__name__,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    session_id=session_id,
+                ),
+                logged=False,
             )
 
     def _confirmed_call_prefix(
@@ -2860,13 +2893,14 @@ class DaimonBot(commands.Bot):
                     reason="unprompted_at_cap",
                 )
             else:
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(tenant_id),
                     guild_id=guild_id,
                     channel_id=str(thread_id),
                     reason="unprompted_at_cap",
                 )
+                self._report_shed(tenant_id, thread_id, "unprompted_at_cap")
             return
         self._processing.add(thread_id)
         self._thread_stops.claim(thread_id)
@@ -3443,13 +3477,14 @@ class DaimonBot(commands.Bot):
                     )
                     await message.channel.send(embed=build_notice_embed(TENANT_CAP_NOTICE))
                     return
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(tenant_id),
                     guild_id=guild_id,
                     channel_id=str(thread_id),
                     reason="queue_full",
                 )
+                self._report_shed(tenant_id, thread_id, "queue_full")
                 await message.channel.send(embed=build_notice_embed(GLOBAL_CAP_NOTICE))
                 return
 
@@ -4244,8 +4279,9 @@ class DaimonBot(commands.Bot):
         Goes through `dispatch_continuations_in_thread`, so a wake takes the
         same per-thread guard and the same admit -> bind -> run path as any
         continuation. A thread Discord says is gone or forbidden has its wakes
-        settled; any other failure returns False and the poller pushes the
-        thread back. While draining, the rows are left for the next process.
+        settled, unless `bot_access_wait` is on and the bot is only missing access.
+        That, and any other failure, returns False and the poller pushes the thread
+        back. While draining, the rows are left for the next process.
         """
         if self.draining:
             return True
@@ -4266,8 +4302,19 @@ class DaimonBot(commands.Bot):
             return True
         try:
             channel = self.get_channel(thread_id) or await self.fetch_channel(thread_id)
-        except (discord.NotFound, discord.Forbidden):
+        except (discord.NotFound, discord.Forbidden) as exc:
             channel = None
+            if (
+                isinstance(exc, discord.Forbidden)
+                and is_missing_access(exc.status, exc.code)
+                and await bot_access_wait_on(
+                    self.runtime.sessionmaker, tenant_id=wake.tenant_id, platform="discord"
+                )
+            ):
+                # The bot cannot see it yet: keep the wakes and look again, as for any thread
+                # that could not be opened.
+                log.info("wake.bot_access_unavailable", thread_id=wake.thread_id)
+                return False
         except discord.HTTPException as exc:
             log.warning("wake.thread_fetch_failed", thread_id=wake.thread_id, error=str(exc))
             return False
@@ -4319,6 +4366,7 @@ class DaimonBot(commands.Bot):
                         status="skipped",
                         now=datetime.now(UTC),
                         skip_reason="thread_unavailable",
+                        row=row,
                     )
                 continue
             self._spawn(
@@ -4808,7 +4856,11 @@ class DaimonBot(commands.Bot):
                     seed = await watch_seed(db, row, now=datetime.now(UTC))
                 if seed is None:
                     raise AdmissionDenied(reason="runs_elsewhere")
-            access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            try:
+                access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            except BotAccessUnavailable:
+                # Lost while the turn runs: it cannot be retried, and nothing is paused.
+                raise AdmissionDenied(reason="invoker_not_allowed") from None
             member = access.member
             live_role = (
                 Role.ADMIN

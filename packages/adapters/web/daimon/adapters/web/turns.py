@@ -551,6 +551,9 @@ class WebTurns:
                 post=post,
                 on_skip=skip,
                 max_bytes=file_uploads.MAX_UPLOAD_BYTES,
+                tenant_id=tenant_id,
+                platform="web",
+                sessions=self.sessionmaker,
             )
         except (anthropic.APIError, ProviderError, OutputPostingUnavailable) as err:
             # Files missed now stay listed; the session's next tool turn sweeps them.

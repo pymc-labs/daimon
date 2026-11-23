@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent can follow its whole GitHub org.** An admin of the org ticks "Also give
+  <agent> new repos added to <org>" on the agent's GitHub connect page. The agent then holds
+  every repo of the org, new ones within an hour, except repos taken off it.
+- **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
+  an earlier Managed Agents limit; the provider now accepts far more. 50 fits every
+  backend, including OpenAI agents whose skills are pinned by content digest: a list
+  too long for one metadata value is now stored in a compact form that holds them
+  all, and agents already stored keep reading as before. The web inspector, chat and
+  MCP skill tools, channel skills and platform skills use the new limit; an
+  over-limit list the provider still refuses is reported as before.
+- **Saving the GitHub connect page picks a working repo only for an agent's first repos.**
+  An agent that has repos keeps its working repo, or none, unless the person chooses one.
+
+- **Admins can see what is failing in a workspace.** Failed answers, direct messages,
+  routines, deliveries, watches, follow-ups and bridged-tool calls are recorded once per
+  issue, without message content, and read on the Overview and Issues pages. An issue can
+  be resolved (it returns if it happens again) or muted. `daimon issues` reads and changes
+  them from the command line, and operator tokens with the new `issues:read` scope read
+  them over MCP. Admins and owners can also resolve, mute or reopen an issue by asking
+  in chat, from the command line (`--account` names who did it) and from the issue page,
+  which has a link to copy. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
+
+- **A routine's owner hears about a failed run, and runs can say what blocked them.**
+  On Discord, Slack and Teams, the first failure of a routine after a success reaches
+  its owner by direct message, written by the routine's own agent from fixed facts (the routine,
+  why it stopped, when, the next run and how to pause it), never the raw error. When
+  the agent cannot run, the owner gets a plain error card. The channel notice is
+  unchanged. A run that could not do its task calls `report_routine_problem` with a
+  category and one short line, which admins see on the Issues page, and failed calls
+  to an attached MCP server are recorded there per server.
+
+- **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
+  With the new Wait for bot access setting on (off by default, set per
+  workspace by a server admin), a routine, timer or watch whose channel Daimon
+  cannot see or post in is held back, not failed: a routine's fire is refused
+  before any turn runs, so it costs nothing, and shows `bot_access_unavailable`
+  as its last error; a channel timer and a watch's wake are offered again
+  later; a poll watch backs off without an error. Nothing is paused or
+  reported to the owner, and all of it runs again once Daimon is given access.
+  A channel that is gone or in another server, and a person losing their own
+  permission, are handled as before. `daimon routines create
+  --defer-bot-access` saves a channel routine whose channel Daimon has no
+  access to yet.
+
 - **Moving people in is easier for repository memory and rotated links.**
   `scripts/import_repo_memory.py` takes `--tenant`: a creator with no account on
   this deployment gets a Discord identity there, so the accounts map is only for

@@ -467,6 +467,9 @@ class Routine(Base):
     source_thread_id: Mapped[str | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
+    # A failure notice for a Slack or Teams owner, until that adapter sends it (0224).
+    # Mapped before `delivery_hold`: 0221's down/up test re-adds that column last.
+    owner_notice: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # The hold the fire of that pending result ran under (`daimon.core.routine_hold`):
     # NULL for a legacy row, else `{"held": false}` or `{"held": true, "channel_id": ...}`.
     delivery_hold: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
@@ -3056,6 +3059,10 @@ class TurnOutcome(Base):
     # What the turn ran with (`daimon.core.features.eval_key.EvalKey`), for
     # grouping eval results. NULL on turns without a session snapshot.
     eval_key: Mapped[dict[str, Any] | None]
+    # A turn in a private direct message; false for every turn recorded before this column.
+    is_dm: Mapped[bool] = mapped_column(server_default=text("false"))
+    # Counted as an answer, as `turn.finished` is logged (the alert denominator); NULL before.
+    alertable: Mapped[bool | None]
 
 
 class TenantGitHubRepo(Base):
@@ -3212,6 +3219,23 @@ class AgentGitHubGrant(Base):
     granted_by_account_id: Mapped[AccountSetNull]
     granted_at: Mapped[TsNow]
     version: Mapped[int] = mapped_column(server_default="1")
+
+
+class AgentGitHubGrantRemoval(Base):
+    """A repo an admin took off an agent, so an agent that follows its org is not given it back.
+
+    Written when a grant is removed; cleared when the grant is staged again.
+    """
+
+    __tablename__ = "agent_github_grant_removals"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+    )
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[uuid.UUID]
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    removed_at: Mapped[TsNow]
 
 
 class AgentGitHubGrantDraft(Base):
@@ -5849,6 +5873,76 @@ class MonitoredEvent(Base):
     tool_name: Mapped[str | None]
     outcome: Mapped[str | None]
     created_at: Mapped[TsNow]
+
+
+class OpsEvent(Base):
+    """One failure or warning an operator watches, coalesced: `count` occurrences in one row.
+
+    Content-free: `reason` is a fixed vocabulary word, never exception text, and only
+    `note` (a routine agent's own one-line blocker, at most 300 characters) is free text.
+    Issues are these rows grouped by `fingerprint` at read time. A person's rows go with
+    their account; every row goes with its tenant and after the retention window.
+    """
+
+    __tablename__ = "ops_events"
+    __table_args__ = (
+        Index("ix_ops_events_tenant_at", "tenant_id", text("occurred_at DESC")),
+        Index("ix_ops_events_fingerprint", "tenant_id", "fingerprint", text("occurred_at DESC")),
+        Index("ix_ops_events_occurred", "occurred_at"),
+        Index(
+            "ix_ops_events_account", "account_id", postgresql_where=text("account_id IS NOT NULL")
+        ),
+        CheckConstraint("severity IN ('error', 'warning')", name="ck_ops_events_severity"),
+        CheckConstraint(
+            "area IN ('turn', 'dm', 'routine', 'delivery', 'watch', 'wake', 'bridge')",
+            name="ck_ops_events_area",
+        ),
+        CheckConstraint("count >= 1", name="ck_ops_events_count"),
+        CheckConstraint("char_length(note) <= 300", name="ck_ops_events_note"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    occurred_at: Mapped[datetime]
+    count: Mapped[int] = mapped_column(server_default="1")
+    code: Mapped[str]
+    area: Mapped[str]
+    severity: Mapped[str]
+    reason: Mapped[str | None]
+    fingerprint: Mapped[str]
+    # The agent is the MA agent id (text), as on routines and watches.
+    agent_id: Mapped[str | None]
+    routine_id: Mapped[uuid.UUID | None]
+    watch_id: Mapped[uuid.UUID | None]
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str | None]
+    channel_id: Mapped[str | None]
+    thread_id: Mapped[str | None]
+    session_id: Mapped[str | None]
+    # The bridge server, connector key or wake kind the event is about.
+    subject_key: Mapped[str | None]
+    release: Mapped[str | None]
+    note: Mapped[str | None]
+
+
+class OpsIssueState(Base):
+    """An admin's resolve or mute of one issue (a fingerprint); reopening deletes the row.
+
+    Erasing the admin's account clears `by_account_id` and keeps the state.
+    """
+
+    __tablename__ = "ops_issue_states"
+    __table_args__ = (
+        CheckConstraint("state IN ('resolved', 'muted')", name="ck_ops_issue_states_state"),
+    )
+
+    tenant_id: Mapped[TenantPk]
+    fingerprint: Mapped[str] = mapped_column(primary_key=True)
+    state: Mapped[str]
+    by_account_id: Mapped[AccountSetNull]
+    at: Mapped[datetime]
 
 
 def _install_erased_account_guards() -> None:
