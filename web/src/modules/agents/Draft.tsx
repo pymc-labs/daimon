@@ -1,5 +1,5 @@
 import { ArrowRight, ChevronRight, Minus, Pencil, Plus, TriangleAlert } from "lucide-react"
-import { useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { useApply, useDiscard } from "./api"
 import { Diff, EffectTag } from "./bits"
+import { PANEL_W } from "./Canvas"
 import { EFFECT } from "./lib"
 import { ModelPreviewPanel } from "./ModelPreviewPanel"
 import type { Agent, Change, Draft, Effect } from "./types"
@@ -48,13 +49,25 @@ export function DraftBar({ agent, draft, shift }: { agent: Agent; draft: Draft; 
   const [review, setReview] = useState(false)
   const discard = useDiscard(agent.id)
   const n = draft.changes.length
+  // Centred beside the open inspector when it fits there, else over the whole canvas and above the inspector.
+  const bar = useRef<HTMLDivElement>(null)
+  const [room, setRoom] = useState(true)
+  useLayoutEffect(() => {
+    const el = bar.current, box = el?.offsetParent
+    if (!el || !box) return
+    const ro = new ResizeObserver(() => setRoom(box.clientWidth - PANEL_W >= el.offsetWidth + 32))
+    ro.observe(el); ro.observe(box)
+    return () => ro.disconnect()
+  }, [n > 0])  // eslint-disable-line react-hooks/exhaustive-deps
   if (!n) return null
+  const beside = shift && room
   const counts = ORDER.map((e) => [e, draft.changes.filter((c) => c.effect === e).length] as const).filter(([, k]) => k)
   return (
     <>
       <div
-        className="absolute bottom-4 z-10 flex h-11 -translate-x-1/2 items-center gap-3 rounded-xl border bg-popover pr-1.5 pl-4 shadow-[0_8px_28px_rgb(12_31_64/0.12)] transition-[left]"
-        style={{ left: shift ? "calc((100% - 440px) / 2)" : "50%" }}
+        ref={bar}
+        className={cn("absolute bottom-4 flex h-11 w-max -translate-x-1/2 items-center gap-3 rounded-xl border bg-popover pr-1.5 pl-4 shadow-[0_8px_28px_rgb(12_31_64/0.12)] transition-[left]", shift && !room ? "z-30" : "z-10")}
+        style={{ left: beside ? `calc((100% - ${PANEL_W}px) / 2)` : "50%" }}
       >
         <span className="size-1.5 rounded-full bg-link" />
         <span className="text-sm font-medium whitespace-nowrap tabular">{n} {n === 1 ? "change" : "changes"}</span>
