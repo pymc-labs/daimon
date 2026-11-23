@@ -655,11 +655,18 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         platforms=frozenset({"discord"}),
     ),
-    _shown(
-        "reaction_actions",
-        "Reaction actions",
-        "An emoji marks a message; a person's emoji on it confirms.",
+    # A person's emoji confirms what the bot marked: the switch that lets an emoji act sits with
+    # the other guards. The chat and capabilities groups are full on Discord (25 options a select).
+    FeatureSpec(
+        key="reaction_actions",
+        name="Reaction actions",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
         tiers=("workspace",),
+        binds="turn",
+        doc="An emoji marks a message; a person's emoji on it confirms.",
         platforms=_DISCORD,
         authority=_ADMIN,
     ),

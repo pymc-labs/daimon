@@ -60,7 +60,6 @@ Where each feature can be set, and its default.
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  |  | Only Discord |
-| Reaction actions | `reaction_actions` | Chat | Off |  | ✓ |  |  |  |  | Only Discord |
 | Routine result header | `routine_result_header` | Chat | On | ✓ | ✓ | ✓ | ✓ |  | ✓ |  |
 | Tool server names | `tool_server_names` | Chat | On |  | ✓ | ✓ |  |  |  |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord, Slack; Off by default on Slack |
@@ -109,6 +108,7 @@ Where each feature can be set, and its default.
 | Post length elsewhere | `outbound_length` | Limit | 1500 characters | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ | ✓ | ✓ | ✓ |  |  |
+| Reaction actions | `reaction_actions` | Guardrail | Off |  | ✓ |  |  |  |  | Only Discord |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
 | Approvals in direct messages | `dm_approvals` | Guardrail | Off | ✓ | ✓ |  |  |  |  |  |
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
@@ -678,7 +678,7 @@ An emoji marks a message; a person's emoji on it confirms.
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace |
-| Combines | Most specific wins |
+| Combines | Off above is a ceiling |
 
 ## Routine result header
 
