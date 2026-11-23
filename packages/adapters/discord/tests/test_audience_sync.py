@@ -1383,6 +1383,61 @@ def _outcomes(logs: list[Any]) -> list[str]:
     ]
 
 
+async def test_an_event_during_the_commit_that_states_the_basis_withdraws_a_read_that_differs(
+    pooled: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A change was missed, so the read differs from the basis. An event that states the
+    basis comes during the commit: it changes nothing against the basis and withdraws
+    nothing by itself, so the publisher withdraws the facts and nothing renews them."""
+    clock, world = Clock(), World()
+    audience = world.sync(pooled, clock)
+    state = _watched(audience, world)
+    await audience.tick([world.guild])
+    await audience.settle()
+    old = list(world.server.channels[0]["permission_overwrites"])
+    world.server.channels[0]["permission_overwrites"] = [
+        *old,
+        fake.rest_overwrite(fake.OUTSIDER, member=True, allow=fake.VIEW_BIT),
+    ]  # missed by the gateway
+    armed = [False]
+    fired = [False]
+    real = store.publish_facts
+
+    async def publish_then_arm(*args: Any, **kwargs: Any) -> Any:
+        result = await real(*args, **kwargs)
+        armed[0] = True
+        return result
+
+    def during_commit(_session: Any) -> None:
+        if armed[0]:
+            armed[0] = False
+            fired[0] = True
+            monkeypatch.setattr(store, "publish_facts", real)  # only the first publish
+            state.parsers["CHANNEL_UPDATE"](
+                _raw_channel(world.server, 0, permission_overwrites=old, topic="a new topic")
+            )  # equals the basis
+
+    monkeypatch.setattr(store, "publish_facts", publish_then_arm)
+    sa_event.listen(Session, "before_commit", during_commit)
+    try:
+        clock.now += timedelta(seconds=300)
+        with capture_logs() as logs:
+            await audience.tick([world.guild])
+            await audience.settle()
+        assert fired[0], "the event came during the commit"
+        assert _outcomes(logs) == ["discord.audience.read_crossed"]
+        assert await _fact(pooled, clock, "1") == UNKNOWN_FACTS
+        world.server.channels[0]["permission_overwrites"] = old  # the next read agrees
+        gate = _gate(world.server)
+        clock.now += timedelta(seconds=60)
+        await audience.tick([world.guild])
+        assert await _fact(pooled, clock, "1") == UNKNOWN_FACTS, "no renewal extends them"
+        gate.set()
+        await audience.settle()
+    finally:
+        sa_event.remove(Session, "before_commit", during_commit)
+
+
 async def test_a_suppressed_event_still_constrains_the_read_that_is_running(
     pooled: async_sessionmaker[AsyncSession],
 ) -> None:

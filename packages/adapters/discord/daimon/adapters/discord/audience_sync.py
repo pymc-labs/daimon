@@ -693,8 +693,14 @@ class AudienceSync:
         # Nothing renews facts a change has crossed, so they are visible for at most one
         # commit plus one withdrawal write. The read's inputs become the basis unless
         # such an event contradicts them.
-        if self._current(tenant_id, epoch, changes, fresh):
-            self._basis[tenant_id] = fresh
+        if not self._current(tenant_id, epoch, changes, fresh):
+            # An event that changed nothing against the basis, and so withdrew nothing,
+            # can still contradict this read: withdraw here, or the facts would be renewed.
+            if self._current(tenant_id, epoch, changes):
+                self._invalidate(tenant_id)
+            log.info("discord.audience.read_crossed", guild_id=str(guild.id))
+            return False
+        self._basis[tenant_id] = fresh
         if self._current(tenant_id, epoch, changes):  # else crossed during the commit
             self._published[tenant_id] = _Published(generation, epoch, changes, started, roles)
         log.info(
