@@ -7,9 +7,11 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 
 from daimon.core._models import (
+    FeatureValue,
     GitHubAppInstallation,
     GitHubInstallationDelivery,
     GitHubInstallationReconciliation,
+    TenantGitHubRepo,
 )
 from daimon.core.stores.domain import GitHubInstallationReconciliationRow
 from daimon.core.stores.github_app_installations import lock_for_reconciliation
@@ -19,7 +21,18 @@ from daimon.core.stores.github_removal_notices import (
     confirm_removal,
     queue_removal,
 )
-from sqlalchemy import CursorResult, DateTime, and_, case, delete, literal, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    DateTime,
+    and_,
+    case,
+    delete,
+    literal,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,6 +126,65 @@ async def enqueue_never_refreshed(session: AsyncSession, *, now: datetime, limit
     so a job claimed between the select and the write is left alone.
     """
     installation = GitHubAppInstallation
+    return await _enqueue_candidates(
+        session,
+        now=now,
+        limit=limit,
+        where=(
+            installation.github_refreshed_at.is_(None),
+            installation.github_removed_at.is_(None),
+        ),
+    )
+
+
+async def enqueue_following_refreshes(
+    session: AsyncSession, *, now: datetime, older_than: timedelta, limit: int
+) -> int:
+    """Queue a refresh for each live all-repos installation an agent follows.
+
+    GitHub sends no event when a repo is created in an org the App covers whole, so the
+    refresh is the only way to see it. Only installations that some agent follows and that
+    were last read before `older_than` ago are queued; an installation already pending or
+    running counts as queued.
+    """
+    installation = GitHubAppInstallation
+    followed = (
+        select(literal(1))
+        .select_from(FeatureValue)
+        .join(TenantGitHubRepo, TenantGitHubRepo.tenant_id == FeatureValue.tenant_id)
+        .where(
+            FeatureValue.key == "github_follow_org",
+            FeatureValue.tier == "agent",
+            FeatureValue.value == "on",
+            TenantGitHubRepo.installation_id == installation.installation_id,
+            TenantGitHubRepo.status == "active",
+        )
+        .exists()
+    )
+    return await _enqueue_candidates(
+        session,
+        now=now,
+        limit=limit,
+        where=(
+            installation.repository_selection == "all",
+            installation.github_refreshed_at.is_not(None),
+            installation.github_refreshed_at < now - older_than,
+            installation.github_removed_at.is_(None),
+            installation.suspended_at.is_(None),
+            followed,
+        ),
+    )
+
+
+async def _enqueue_candidates(
+    session: AsyncSession, *, now: datetime, limit: int, where: tuple[ColumnElement[bool], ...]
+) -> int:
+    """Queue the live App installations that match `where` and have no job in flight.
+
+    The conflict clause re-checks ``done`` so a job claimed between the select and the
+    write is left alone.
+    """
+    installation = GitHubAppInstallation
     queue = GitHubInstallationReconciliation
     candidates = (
         select(
@@ -125,8 +197,7 @@ async def enqueue_never_refreshed(session: AsyncSession, *, now: datetime, limit
         .outerjoin(queue, queue.installation_id == installation.installation_id)
         .where(
             installation.app == "github_app",
-            installation.github_refreshed_at.is_(None),
-            installation.github_removed_at.is_(None),
+            *where,
             or_(queue.installation_id.is_(None), queue.state == "done"),
         )
         .order_by(installation.installation_id)

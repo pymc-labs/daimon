@@ -964,6 +964,46 @@ async def set_workspace_feature(
     )
 
 
+async def set_agent_feature(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    ma_agent_id: str,
+    key: str,
+    value: str,
+    account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+) -> TierSetting:
+    """Set `key` at the agent tier of one agent inside the caller's transaction, for a
+    surface that has already checked its admin (the GitHub connect page, the operator CLI).
+    Same refusals and records as `change_feature`; returns what it was."""
+    place = FeaturePlace(tenant_id, platform, agent_id=ma_agent_id)
+    specs = (FEATURES[key],) if key in FEATURES else ()
+    support = await support_setup(session, settings, place, specs)
+    refusal = feature_refusal(
+        key, "agent", value, locked=False, place=place, settings=settings, support=support
+    )
+    if refusal is not None:
+        raise refusal
+
+    async def _nobody(_: DelegatedAction | None) -> bool:
+        return False
+
+    actor = FeatureActor(tenant_id, account_id, surface, None, _nobody)
+    return await _write_in(
+        session,
+        settings,
+        actor,
+        FEATURES[key],
+        TierSetting("agent", value),
+        place,
+        None,
+        check_own_lock=False,
+    )
+
+
 async def clear_pinned_on(
     session: AsyncSession,
     settings: Settings | None,

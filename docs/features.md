@@ -121,6 +121,7 @@ Where each feature can be set, and its default.
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Follow the GitHub org | `github_follow_org` | Guardrail | Off |  |  | ✓ |  |  |  |  |
 
 ## Approvals
 
@@ -1339,4 +1340,16 @@ Keeps what people ask this agent from their coding tools and what it answers, pl
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
+## Follow the GitHub org
+
+Gives this agent each new repo added to a GitHub org it already works in, when the GitHub App covers all repos of that org. The agent can read and change the new repo. Repos that existed when this was turned on, and repos taken off the agent, stay as they are. Only a workspace admin can change it.
+
+| | |
+| --- | --- |
+| Key | `github_follow_org` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Agent |
 | Combines | Off above is a ceiling |

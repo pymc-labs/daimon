@@ -1103,6 +1103,50 @@ async def _require_reassignment_admission(
         raise GrantReassignmentError(" ".join(failures))
 
 
+async def write_repo_confirmation(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    scope_agent_id: uuid.UUID | None,
+    repo: RepoConfirmation,
+    github_user_id: int,
+    account_id: uuid.UUID,
+    now: datetime,
+) -> TenantGitHubRepo:
+    """Write or refresh one workspace repo row: the agent's own (`scope_agent_id`) or the
+    server-wide one (None). The one writer of confirmed rows, for the connect page and for
+    an agent that follows its org. The caller holds the tenant grant lock."""
+    existing = await session.scalar(
+        select(TenantGitHubRepo)
+        .where(
+            TenantGitHubRepo.tenant_id == tenant_id,
+            TenantGitHubRepo.repo_id == repo.repo_id,
+            TenantGitHubRepo.scope_agent_id.is_(None)
+            if scope_agent_id is None
+            else TenantGitHubRepo.scope_agent_id == scope_agent_id,
+        )
+        .with_for_update()
+    )
+    if existing is None:
+        existing = TenantGitHubRepo(
+            tenant_id=tenant_id, repo_id=repo.repo_id, scope_agent_id=scope_agent_id
+        )
+        session.add(existing)
+    else:
+        existing.version += 1
+    existing.owner_id = repo.owner_id
+    existing.installation_id = repo.installation_id
+    existing.repo_full_name = repo.full_name
+    existing.max_access = repo.max_access
+    existing.authorized_by_github_user_id = github_user_id
+    existing.authorized_by_account_id = account_id
+    existing.authorized_permission = repo.authorizer_permission
+    existing.authorized_at = now
+    existing.status = "active"
+    existing.status_reason = None
+    return existing
+
+
 async def confirm(
     session: AsyncSession,
     *,
@@ -1178,36 +1222,16 @@ async def confirm(
         if current != expected_agent_snapshot:
             raise StaleAgentReposError("The agent's repos changed. Reload and try again.")
     now = datetime.now(UTC)
-    scope = invitation.agent_id
     for repo in repos:
-        existing = await session.scalar(
-            select(TenantGitHubRepo)
-            .where(
-                TenantGitHubRepo.tenant_id == invitation.tenant_id,
-                TenantGitHubRepo.repo_id == repo.repo_id,
-                TenantGitHubRepo.scope_agent_id.is_(None)
-                if scope is None
-                else TenantGitHubRepo.scope_agent_id == scope,
-            )
-            .with_for_update()
+        await write_repo_confirmation(
+            session,
+            tenant_id=invitation.tenant_id,
+            scope_agent_id=invitation.agent_id,
+            repo=repo,
+            github_user_id=github_user_id,
+            account_id=invitation.requester_account_id,
+            now=now,
         )
-        if existing is None:
-            existing = TenantGitHubRepo(
-                tenant_id=invitation.tenant_id, repo_id=repo.repo_id, scope_agent_id=scope
-            )
-            session.add(existing)
-        else:
-            existing.version += 1
-        existing.owner_id = repo.owner_id
-        existing.installation_id = repo.installation_id
-        existing.repo_full_name = repo.full_name
-        existing.max_access = "write"
-        existing.authorized_by_github_user_id = github_user_id
-        existing.authorized_by_account_id = invitation.requester_account_id
-        existing.authorized_permission = repo.authorizer_permission
-        existing.authorized_at = now
-        existing.status = "active"
-        existing.status_reason = None
     invitation.used_at = now
     invitation.connected_repo_count = len(repos)
     if invitation.encrypted_token is not None:

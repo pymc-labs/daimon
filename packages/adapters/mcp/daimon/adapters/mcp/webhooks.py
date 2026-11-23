@@ -195,6 +195,14 @@ def build_github_webhook(
                 delivery_id=delivery_id,
             )
 
+        # --- repository: a repo made, renamed, moved or deleted ---
+        if event == "repository":
+            return await _handle_repository(
+                sessionmaker=sessionmaker,
+                payload=payload,
+                delivery_id=delivery_id,
+            )
+
         log.info(
             "github.webhook.unhandled_type",
             github_event=event,
@@ -275,10 +283,48 @@ async def _handle_installation_repositories(
     delivery_id: str,
 ) -> Response:
     """Queue a repository-set refresh; delta payloads are ordering signals only."""
+    return await _queue_repository_refresh(
+        sessionmaker=sessionmaker,
+        payload=payload,
+        delivery_id=delivery_id,
+        event="installation_repositories",
+        actions=("added", "removed"),
+    )
+
+
+async def _handle_repository(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    payload: dict[str, Any],
+    delivery_id: str,
+) -> Response:
+    """A repo made, renamed, moved or deleted in an org the App covers: queue a refresh.
+
+    The App may not be subscribed to this event, and an all-repos installation sends no
+    other event for a new repo, so the hourly refresh of a followed installation does not
+    depend on this. It only makes a followed org's new repo arrive sooner.
+    """
+    return await _queue_repository_refresh(
+        sessionmaker=sessionmaker,
+        payload=payload,
+        delivery_id=delivery_id,
+        event="repository",
+        actions=("created", "deleted", "renamed", "transferred"),
+    )
+
+
+async def _queue_repository_refresh(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    payload: dict[str, Any],
+    delivery_id: str,
+    event: str,
+    actions: tuple[str, ...],
+) -> Response:
     action = _get(payload, "action")
-    if action not in ("added", "removed"):
+    if action not in actions:
         log.info(
-            "github.webhook.installation_repositories_action_ignored",
+            f"github.webhook.{event}_action_ignored",
             action=action,
             delivery_id=delivery_id,
         )
@@ -286,7 +332,7 @@ async def _handle_installation_repositories(
 
     install_info = _get(payload, "installation")
     if not isinstance(install_info, dict):
-        log.warning("github.webhook.malformed_installation_repositories", delivery_id=delivery_id)
+        log.warning(f"github.webhook.malformed_{event}", delivery_id=delivery_id)
         return Response(status_code=200)
 
     installation_id_raw = _get(install_info, "id")  # pyright: ignore[reportUnknownArgumentType]
@@ -302,14 +348,14 @@ async def _handle_installation_repositories(
         return Response(status_code=400)
     installation_id: int = installation_id_raw
     if not delivery_id or len(delivery_id) > 255:
-        log.warning("github.webhook.malformed_delivery_id", event="installation_repositories")
+        log.warning("github.webhook.malformed_delivery_id", event=event)
         return Response(status_code=400)
     async with sessionmaker.begin() as session:
         enqueued = await github_installation_reconciliation.enqueue(
             session,
             installation_id=installation_id,
             delivery_id=delivery_id,
-            event="installation_repositories",
+            event=event,
             deleted=False,
             now=datetime.now(UTC),
         )

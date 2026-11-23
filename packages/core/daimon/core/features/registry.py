@@ -1001,6 +1001,25 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             ),
         )
     ),
+    FeatureSpec(
+        key="github_follow_org",
+        name="Follow the GitHub org",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("agent",),
+        # Read when GitHub's repo list for the org is refreshed, at most an hour apart.
+        binds="provision",
+        doc=(
+            "Gives this agent each new repo added to a GitHub org it already works in, "
+            "when the GitHub App covers all repos of that org. The agent can read and "
+            "change the new repo. Repos that existed when this was turned on, and repos "
+            "taken off the agent, stay as they are. Only a workspace admin can change it."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN_NOT_OWNER,
+    ),
 )
 
 

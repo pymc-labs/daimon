@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent can follow its whole GitHub org.** When the GitHub App covers all repos of an
+  org, an admin ticks "Also give <agent> new repos added to <org>" on the agent's GitHub
+  connect page, or runs `daimon features set github_follow_org on --agent <name>`. From
+  then on each repo added to that org goes to that agent with no `/github connect`, within
+  an hour. Repos already there stay as they are, other agents are untouched, and an agent
+  at its GitHub limit shows an issue to admins instead.
 - **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
   an earlier Managed Agents limit; the provider now accepts far more. 50 fits every
   backend, including OpenAI agents whose skills are pinned by content digest: a list
