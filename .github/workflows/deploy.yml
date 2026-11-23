@@ -358,17 +358,16 @@ jobs:
           fi
           echo "window=$LEGACY" >> "$GITHUB_OUTPUT"
           echo "MCP bounded non-internal legacy window=$LEGACY cutoff=$CUTOFF"
-          # Production runs with both backend switches off (stage 1 of the SDK
-          # cutover), pinned on every prod deploy. Backends on (stage 2): delete
-          # PROD_PIN and those pins.
-          PROD_PIN=""
+          # Both backend switches run at their default (on). Production pinned
+          # them off before; clear what that pin left on the service. To stop
+          # them again, pin both to false here and in the workers step.
+          CLEAR=()
           if [ "${DEPLOY_ENVIRONMENT:-}" = production ]; then
-            PROD_PIN=",DAIMON_TURN__CHANNEL_BACKENDS=false"
-            PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false"
+            CLEAR=(--remove-env-vars DAIMON_TURN__CHANNEL_BACKENDS,DAIMON_TURN__AGENT_BACKENDS)
           fi
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
-            --image "${{ steps.images.outputs.daimon }}" \
-            --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF$PROD_PIN"
+            --image "${{ steps.images.outputs.daimon }}" "${CLEAR[@]}" \
+            --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF"
           # Old revision requests may finish preparation and mint after traffic
           # has switched. Bound their last possible mint by the old request timeout.
           echo "$(( $(date +%s) + REQUEST_TIMEOUT ))" > "$RUNNER_TEMP/mcp-legacy-minters-until"
@@ -551,14 +550,6 @@ jobs:
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
               sudo chmod 755 /usr/local/bin/daimon-refresh-env
               sudo /usr/local/bin/daimon-refresh-env
-              # Production pins both backend switches off; the last env_file
-              # entry wins. Keep it in step with the MCP PROD_PIN and the
-              # daimon-infra pins (stage 2 notes are there).
-              if [ "${{ inputs.environment }}" = production ]; then
-                printf "%s\n" DAIMON_TURN__CHANNEL_BACKENDS=false \
-                  DAIMON_TURN__AGENT_BACKENDS=false \
-                  | sudo tee -a /etc/daimon/daimon.env >/dev/null
-              fi
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml
               # Main CI recreates only the services whose files changed; the rest
               # keep running. "all" is every service in the compose file.
