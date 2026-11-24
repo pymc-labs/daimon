@@ -35,6 +35,23 @@ PYMC = (
 )
 
 
+#: What a command might try against the server. $PPID is the server: it starts the shell.
+ATTACKS = (
+    "kill -TERM 1",
+    "kill -KILL 1",
+    "kill -TERM $PPID",
+    "kill -KILL $PPID",
+    "pkill -KILL -f compute_session",
+    "pkill -KILL -u server,root",
+    "pkill -KILL -u work",
+    "kill -9 -1",
+    "head -c 64 /proc/$PPID/environ /proc/1/environ",
+    "echo x > /proc/$PPID/mem",
+)
+#: The server and process 1 with their start times; a restart of either changes it.
+IDENTITY = "ps -o pid=,lstart=,ruser=,euser=,suser= -p 1,$PPID"
+
+
 class ToContainer(httpx.AsyncBaseTransport):
     """Sends the caller's requests for ``https://<app>.fly.dev`` to the container."""
 
@@ -95,6 +112,21 @@ class Machine:
         assert result["exit_code"] == 0 and isinstance(result["stdout"], str), result
         return result["stdout"]
 
+    async def survives_its_commands(self) -> None:
+        """Nothing a command can do as ``work`` stops the server or shows it the token."""
+        before = await self.bash(IDENTITY)
+        print(before, end="")
+        assert before.split()[-3:] == ["server", "work", "server"], (
+            "server and commands share a user"
+        )
+        for attack in ATTACKS:
+            result = await self.call("run_bash", {"command": attack + " 2>&1", "timeout_s": 20})
+            assert isinstance(result["stdout"], str)
+            print(f"$ {attack}\n  exit {result['exit_code']}: {result['stdout'].strip()[:150]}")
+            assert self.token not in result["stdout"]
+            assert await self.bash(IDENTITY) == before, f"the server did not survive: {attack}"
+        print("server and process 1 unchanged after every attempt")
+
     async def background(self, command: str, *, wait_s: float, kill: bool = False) -> scripts.Probe:
         """Start a background command the way the control plane does and wait for its end."""
         task_id = uuid.uuid4()
@@ -128,7 +160,8 @@ async def check(base: str, token: str, *, pymc: bool) -> None:
     machine = Machine(base, token)
 
     print(await machine.bash("id; pwd; python3 --version; uv --version; cat /proc/1/comm"))
-    assert (await machine.bash("id -u")).strip() == "10000", "commands must not run as root"
+    ids = await machine.bash("grep -E '^(Uid|Gid|Groups):' /proc/self/status")
+    assert ids.split() == ["Uid:", *["10000"] * 4, "Gid:", *["10000"] * 4, "Groups:"], ids
     assert (await machine.bash("echo ${MCP_AUTH_TOKEN-unset}")).strip() == "unset"
     await machine.bash(f"for tool in {TOOLS}; do command -v $tool >/dev/null || exit 1; done")
     await machine.bash("touch /tmp/probe ~/probe && rm /tmp/probe ~/probe")
@@ -145,6 +178,22 @@ async def check(base: str, token: str, *, pymc: bool) -> None:
     assert (read["content"], read["eof"]) == ("hi", True), read
     listed = await machine.call("list_files", {"path": "/home/work/a", "pattern": "*"})
     assert listed["entries"] == [{"name": "b.txt", "is_dir": False, "size": 2}], listed
+    # The file tools act as the session owner, never as the server's own user or root.
+    assert (await machine.bash("stat -c %U:%G /home/work/a /home/work/a/b.txt")).split() == [
+        "work:work",
+        "work:work",
+    ]
+    for path in ("/usr/local/denied.txt", "/opt/compute-session/denied.txt"):
+        denied = await machine.call("write_file", {"path": path, "content": "x"})
+        assert denied == {"error": f"Permission denied: {path}"}, denied
+    cut = await machine.call("run_bash", {"command": "kill -TERM $$", "timeout_s": 5})
+    assert cut["exit_code"] == 143, cut
+    # The server, under its own user, must still be able to end a command of work.
+    late = await machine.call("run_bash", {"command": "sleep 300", "timeout_s": 1})
+    assert (late["exit_code"], late["timed_out"]) == (137, True), late
+    assert (await machine.bash("pgrep -x sleep | wc -l")).strip() == "0"
+
+    await machine.survives_its_commands()
 
     # An ended command that nothing reaps would be reported as running until its deadline.
     ended = await machine.background("echo hi; sleep 1; exit 3", wait_s=20)

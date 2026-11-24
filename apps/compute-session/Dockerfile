@@ -24,13 +24,18 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.11@sha256:5aa820129de0a600924f166aec9cb5161
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash ca-certificates coreutils curl g++ gcc git make procps tini util-linux \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10000 --shell /bin/bash work
+    && useradd --create-home --uid 10000 --shell /bin/bash work \
+    && useradd --no-create-home --uid 10001 --shell /usr/sbin/nologin server
 # The server keeps its own environment, outside PATH, so that packages the
 # session owner installs can neither replace nor break its dependencies.
 COPY --from=builder /opt/compute-session /opt/compute-session
 ENV HOME=/home/work PORT=8080 PYTHONUNBUFFERED=1
-USER 10000
 WORKDIR /home/work
 EXPOSE 8080
+# No USER line: the container starts as root so that the server can put itself
+# and the commands under two different users (compute_session.__main__). Nothing
+# but tini, which is process 1, stays root. Commands run as work (uid 10000).
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
-CMD ["/opt/compute-session/bin/python", "-m", "compute_session"]
+# -I keeps the working directory and the home of work, both writable by commands,
+# off the server's import path. It also ignores PYTHONUNBUFFERED, hence -u.
+CMD ["/opt/compute-session/bin/python", "-I", "-u", "-m", "compute_session"]

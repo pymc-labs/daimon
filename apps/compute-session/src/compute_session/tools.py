@@ -9,6 +9,8 @@ sentence, so a reason reported as a failure would never reach the owner.
 from __future__ import annotations
 
 import asyncio
+import base64
+import codecs
 import contextlib
 import itertools
 import json
@@ -41,8 +43,9 @@ TOOLS: list[Json] = [
     {
         "name": "run_bash",
         "description": (
-            "Run a command with bash and wait for it to end. Returns exit_code, stdout "
-            "(stderr included), timed_out and truncated."
+            "Run a command with bash and wait for it to end. Returns exit_code (128 + "
+            "the signal number when a signal ended it), stdout (stderr included), "
+            "timed_out and truncated."
         ),
         "inputSchema": {
             "type": "object",
@@ -70,8 +73,10 @@ TOOLS: list[Json] = [
     {
         "name": "read_file",
         "description": (
-            "Read a chunk of a file as text. offset and limit are in bytes. A chunk can "
-            "be shorter than limit: continue at offset + bytes until eof is true."
+            "Read a chunk of a file. offset and limit are in bytes. A chunk ends on a "
+            "whole character and can be shorter than limit: continue at offset + bytes "
+            "until eof is true. encoding says how content holds the bytes: utf-8 text, "
+            "or base64 when the chunk is not UTF-8 text."
         ),
         "inputSchema": {
             "type": "object",
@@ -150,12 +155,27 @@ def _kill_group(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
 
 
+def _whole_characters(data: bytes, errors: str = "strict") -> tuple[str, int]:
+    """The text of ``data`` up to its last whole UTF-8 character, and its length in bytes.
+
+    Bytes are cut where a size limit falls, which can be inside a character. The
+    unfinished character stays out, so the next chunk starts with all of it.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors)
+    text = decoder.decode(data)
+    return text, len(data) - len(decoder.getstate()[0])
+
+
 async def run_bash(command: str, timeout_s: float) -> Result:
     """Run ``command`` and wait for the shell, not for what it leaves running.
 
     The command gets its own session. At the timeout that whole session is killed;
     a process the command moved out with ``setsid`` is not part of it and survives.
     """
+    # A server that holds two identities (see ``__main__``) answers as one user and
+    # runs commands as another. The command keeps only the second: with the first
+    # it could signal the server.
+    two_users = os.getuid() != os.geteuid()
     read_fd, write_fd = os.pipe()
     pipe = os.fdopen(read_fd, "rb", buffering=0)
     try:
@@ -170,6 +190,8 @@ async def run_bash(command: str, timeout_s: float) -> Result:
             stdout=write_fd,
             stderr=write_fd,
             start_new_session=True,
+            user=os.geteuid() if two_users else None,
+            group=os.getegid() if two_users else None,
         )
     except BaseException:
         pipe.close()
@@ -201,13 +223,24 @@ async def run_bash(command: str, timeout_s: float) -> Result:
         reader.cancel()
         transport.close()
     output = bytes(capture.kept)
+    ended = process.returncode
+    assert ended is not None
+    # A signal death as a shell reports it, which is what the background path records.
+    exit_code = 128 - ended if ended < 0 else ended
 
     def build(keep: int) -> Result:
+        truncated = capture.dropped or keep < len(output)
+        # Output is shown, not stored: bytes that are not UTF-8 become U+FFFD.
+        text = (
+            _whole_characters(output[:keep], "replace")[0]
+            if truncated
+            else output.decode("utf-8", "replace")
+        )
         return {
-            "exit_code": -1 if timed_out else process.returncode,
-            "stdout": output[:keep].decode("utf-8", "replace"),
+            "exit_code": exit_code,
+            "stdout": text,
             "timed_out": timed_out,
-            "truncated": capture.dropped or keep < len(output),
+            "truncated": truncated,
         }
 
     return _fit(len(output), build)
@@ -231,26 +264,45 @@ def write_file(path: str, content: str) -> Result:
     return {"path": str(target), "bytes": len(data)}
 
 
+def _chunk(piece: bytes) -> tuple[str, str, int]:
+    """How a chunk travels: its encoding, its content and the bytes that content holds.
+
+    UTF-8 text travels as text up to its last whole character. Bytes that are not
+    UTF-8 text, or that hold no whole character, travel whole as base64.
+    """
+    try:
+        text, used = _whole_characters(piece)
+    except UnicodeDecodeError:
+        text, used = "", 0
+    if used or not piece:
+        return "utf-8", text, used
+    return "base64", base64.b64encode(piece).decode("ascii"), len(piece)
+
+
 def read_file(path: str, offset: int, limit: int) -> Result:
+    """Read one chunk so that the chunks of a file, joined, are the file byte for byte."""
     target = Path(path)
     try:
         if not target.is_file():
             return {"error": f"not a file: {path}"}
-        size = target.stat().st_size
         with target.open("rb") as handle:
             handle.seek(offset)
             data = handle.read(min(limit, MAX_READ_BYTES))
+            # Read after the chunk, so a file that grows meanwhile is not cut short.
+            size = max(os.fstat(handle.fileno()).st_size, offset + len(data))
     except OSError as error:
         return _reason(error, path)
 
     def build(keep: int) -> Result:
+        encoding, content, used = _chunk(data[:keep])
         return {
             "path": str(target),
             "size": size,
             "offset": offset,
-            "bytes": keep,
-            "content": data[:keep].decode("utf-8", "replace"),
-            "eof": offset + keep >= size,
+            "bytes": used,
+            "encoding": encoding,
+            "content": content,
+            "eof": offset + used >= size,
         }
 
     return _fit(len(data), build)

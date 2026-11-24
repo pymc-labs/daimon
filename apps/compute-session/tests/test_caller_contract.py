@@ -8,6 +8,7 @@ either side that breaks the contract of `docs/compute.md` fails here.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import signal
@@ -102,6 +103,7 @@ async def test_file_tools_take_the_arguments_the_mcp_adapter_sends(
         "size": 3,
         "offset": 1,
         "bytes": 2,
+        "encoding": "utf-8",
         "content": "bc",
         "eof": True,
     }
@@ -143,6 +145,28 @@ async def test_the_largest_read_the_adapter_allows_fits_the_callers_body_limit(
     assert isinstance(result, dict) and isinstance(result["bytes"], int)
     assert 0 < result["bytes"] < tools.MAX_READ_BYTES
     assert (result["size"], result["eof"]) == (tools.MAX_READ_BYTES, False)
+
+
+async def test_a_text_file_read_in_chunks_has_the_same_hash(
+    provider: FlyComputeProvider, session: ComputeSession, tmp_path: Path
+) -> None:
+    """The adapter's read tool works in byte chunks; its default chunk is 65536 bytes."""
+    path = tmp_path / "report.txt"
+    path.write_text("naïve €uro 😀 data, 日本語\n" * 7000, encoding="utf-8")
+    assert path.stat().st_size > 3 * 65536
+    text, offset = "", 0
+    while True:
+        chunk = await provider.call(
+            session, TOKEN, "read_file", {"path": str(path), "offset": offset, "limit": 65536}
+        )
+        assert isinstance(chunk, dict) and chunk["encoding"] == "utf-8"
+        assert isinstance(chunk["content"], str) and isinstance(chunk["bytes"], int)
+        assert 65536 - 4 < chunk["bytes"] <= 65536 or chunk["eof"]
+        text, offset = text + chunk["content"], offset + chunk["bytes"]
+        if chunk["eof"]:
+            break
+    assert "\ufffd" not in text
+    assert hashlib.sha256(text.encode()).digest() == hashlib.sha256(path.read_bytes()).digest()
 
 
 async def _probe(
