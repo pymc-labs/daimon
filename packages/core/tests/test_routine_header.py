@@ -43,10 +43,10 @@ async def _set(sessions: Sessions, row: RoutineRow, target: FeatureTarget, value
         )  # fmt: skip
 
 
-def test_the_header_is_on_unless_set_and_takes_the_five_tiers() -> None:
+def test_the_header_is_on_unless_set_and_takes_every_tier() -> None:
     spec = FEATURES[KEY]
     assert spec.default == "on", "nothing changes until someone turns it off"
-    assert spec.tiers == ("deployment", "workspace", "agent", "channel", "routine")
+    assert spec.tiers == ("deployment", "workspace", "agent", "channel", "routine", "workflow")
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
