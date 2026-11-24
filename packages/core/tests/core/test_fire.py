@@ -17,6 +17,19 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
+def _subject(tenant_id: uuid.UUID) -> Subject:
+    return Subject(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        created_by_user_id="owner_1",
+        agent_id="agent_1",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone="UTC",
+        trigger_message="m",
+    )
+
+
 class RecordingStore:
     """A `FireStore` that records every call instead of writing a row."""
 
@@ -81,7 +94,7 @@ async def test_a_fire_runs_with_no_routine_row(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     store = RecordingStore()
-    subject = Subject(id=uuid.uuid4(), tenant_id=tenant.id, agent_id="agent_1")
+    subject = _subject(tenant.id)
     status, settled, ran = await _fire(db_session_factory, subject, store)
     assert (status, settled, ran) == ("ok", ["ok"], ["turn"]), "the turn runs once and settles ok"
     assert store.granted == [10], "the turn runs under the store's grant, bound to the timeout"
@@ -95,7 +108,7 @@ async def test_a_failed_turn_is_recorded_through_the_store(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     store = RecordingStore()
-    subject = Subject(id=uuid.uuid4(), tenant_id=tenant.id, agent_id="agent_1")
+    subject = _subject(tenant.id)
     status, settled, _ = await _fire(db_session_factory, subject, store, RuntimeError("boom"))
     assert (status, settled) == ("failed", ["failed"]), "a raised turn fails the fire"
     assert [error for error, _ in store.failures] == ["RuntimeError: boom"], store.failures
@@ -118,7 +131,7 @@ async def test_lead_intake_off_skips_a_bound_fire(
     )
     await db_session.commit()
     store = RecordingStore()
-    subject = Subject(id=uuid.uuid4(), tenant_id=tenant.id, agent_id="agent_1")
+    subject = _subject(tenant.id)
     status, settled, ran = await _fire(db_session_factory, subject, store, intake_bound=True)
     assert (status, settled, ran) == ("skipped", ["skipped"], []), "the turn never starts"
     assert store.failures == [("lead_intake_turned_off", None)], store.failures

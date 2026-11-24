@@ -10,23 +10,31 @@ from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 
 import structlog
+from daimon.core.config import Settings
 from daimon.core.fire.failure import record_fire_error
 from daimon.core.fire.run import Dispatch
 from daimon.core.fire.run import fire as fire_guarded
-from daimon.core.fire.store import FireStatus
+from daimon.core.fire.store import Fence, FireResult, FireStatus
 from daimon.core.fire.subject import routine_subject
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_events import OpsEvent, report_ops_event
-from daimon.core.routine_delivery import record_routine_failure
+from daimon.core.routine_delivery import (
+    lapsed_role_card,
+    record_routine_failure,
+    routine_agent_name,
+)
+from daimon.core.routine_sandbox import RoutineSandbox, routine_sandbox
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.lead_intake import configured_routines, routine_execution
 from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
+    pause_for_lapsed_role,
     record_result,
     release_claimed_slot,
     skip_slots_during_fire,
+    update_routine_agent_id,
 )
 from daimon.core.turn.termination import TerminationReason
 from sqlalchemy import event
@@ -211,11 +219,40 @@ class RoutineFireStore:
         sm: async_sessionmaker[AsyncSession],
         row: RoutineRow,
         notify_owner: OwnerNotifier | None = None,
+        *,
+        record: Callable[..., Awaitable[None]] = record_result,
+        heal: Callable[..., Awaitable[bool]] = update_routine_agent_id,
     ) -> None:
         self._sm, self._row, self._notify = sm, row, notify_owner
+        self._record, self._heal = record, heal
 
     def execution(self, lifetime_s: float) -> AbstractAsyncContextManager[None]:
         return routine_execution(self._sm, self._row.tenant_id, self._row.id, lifetime_s=lifetime_s)
+
+    async def refuse(
+        self,
+        session: AsyncSession,
+        reason: str,
+        *,
+        error: str | None = None,
+        fault: bool = False,
+        tell: bool = True,
+        fence: Fence = "claim",
+    ) -> None:
+        row = self._row
+        destination = (row.destination_kind, row.destination_id)
+        await record_refusal(
+            session,
+            self._sm,
+            row,
+            reason,
+            error=error,
+            fault=fault,
+            notify_owner=self._notify if tell else None,
+            expected_destination=None if fence == "private" else destination,
+            expected_private=row if row.destination_kind == "dm" or fence != "claim" else None,
+            expected_row=row if fence == "claim" else None,
+        )
 
     async def fail(
         self, session: AsyncSession, *, error: str, reason: TerminationReason | None
@@ -224,6 +261,56 @@ class RoutineFireStore:
 
     def tell_owner(self, reason: str | None, *, channel_told: bool) -> None:
         tell_owner(self._notify, self._row, reason, channel_told=channel_told)
+
+    async def pause_for_lapsed_role(self, session: AsyncSession, *, error: str) -> bool:
+        return await pause_for_lapsed_role(session, self._row, error=error)
+
+    async def lapsed_role_card(self) -> tuple[str, str]:
+        return lapsed_role_card(self._row, await routine_agent_name(self._sm, self._row))
+
+    async def heal_agent_id(self, agent_id: str) -> bool:
+        row = self._row
+        async with self._sm() as s, s.begin():
+            healed = await self._heal(s, row.id, agent_id, expected_updated_at=row.updated_at)
+        if healed:
+            self._row = row.model_copy(update={"agent_id": agent_id})
+        return healed
+
+    async def sandbox(self, settings: Settings, *, platform: str) -> RoutineSandbox | None:
+        return await routine_sandbox(self._sm, settings, self._row, platform=platform)
+
+    async def finish(self, result: FireResult) -> None:
+        row = self._row
+        destination = (row.destination_kind, row.destination_id)
+        async with self._sm() as s, s.begin():
+            if row.destination_kind is None:
+                await self._record(s, row.id, tail=result.tail, error=None, expected_row=row)
+            elif row.destination_kind == "dm":
+                await self._record(
+                    s,
+                    row.id,
+                    tail=result.tail,
+                    delivery_payload=result.payload,
+                    error=None,
+                    delivery="pending",
+                    producing_agent_id=result.producing_agent_id,
+                    expected_destination=destination,
+                    expected_private=row,
+                    expected_row=row,
+                )
+            else:
+                await self._record(
+                    s,
+                    row.id,
+                    tail=result.tail,
+                    delivery_payload=result.payload,
+                    delivery_hold=result.hold,
+                    error=None,
+                    delivery=result.delivery,
+                    delivery_note=result.note,
+                    expected_destination=destination,
+                    expected_row=row,
+                )
 
 
 async def _record_fire_error(

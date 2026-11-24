@@ -68,6 +68,7 @@ from daimon.core.delivery import (
     poll_once,
     run_poller,
 )
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import attribution_line, render_post
@@ -179,7 +180,7 @@ class DeliveryTarget:
     thread_ts: str | None = None
 
 
-def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
+def delivery_target(row: RoutineFacts, *, platform: str) -> DeliveryTarget | None:
     """The row's destination for `platform`, or `None` when it has none or it
     is malformed (a Slack thread without `channel:ts`)."""
     if row.destination_kind in (None, "dm") or row.destination_id is None:
@@ -213,7 +214,7 @@ DirectPost = Literal["allowed", "protected", "unverified"]
 
 
 async def routine_links(
-    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineRow, platform: str
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineFacts, platform: str
 ) -> TenantLinks | None:
     """A routine fire's web links, with a member's access, where `web_awareness` is On where
     it fires (`routine_feature_place`)."""
@@ -226,7 +227,7 @@ async def routine_links(
 
 
 def render_routine_controls(
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     platform: str,
     direct_post: DirectPost = "allowed",
@@ -318,7 +319,7 @@ def _posted_channel(block: ToolUseBlock) -> str | None:
     return channel_id if isinstance(channel_id, str) else None
 
 
-def agent_posted_to(state: TurnState, row: RoutineRow) -> bool:
+def agent_posted_to(state: TurnState, row: RoutineFacts) -> bool:
     """Whether the agent itself posted to the destination during the turn.
 
     The comparison is on the full destination as `send_message` names it: a

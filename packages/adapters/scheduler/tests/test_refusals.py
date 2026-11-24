@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 import structlog
-from daimon.adapters.scheduler import main
 from daimon.core import scheduler
+from daimon.core.fire import run
 from daimon.core.ops_events import OpsEvent
 from daimon.core.scheduler import drain_owner_notices, record_refusal
 from daimon.core.stores.domain import RoutineRow
@@ -17,7 +17,7 @@ from daimon.core.stores.routines import create_routine, get_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-_MAIN = Path(main.__file__).read_text()
+_MAIN = Path(run.__file__).read_text()
 
 
 def _calls(name: str) -> list[ast.Call]:
@@ -59,15 +59,16 @@ REFUSALS = {
     "'restricted_source' if policy_error == RESTRICTED_SOURCE_ERROR else policy_error",
     "refusal",
     "'routine_changed'",
+    "'source_provenance_unknown'",
+    "error.reason",
 }
 
 
 def test_every_refusal_site_is_listed() -> None:
-    sites = {_reason(call) for call in _calls("_refuse")}
-    direct = {ast.unparse(call.args[3]) for call in _calls("record_refusal")}
+    sites = {_reason(call) for call in _calls("refuse")}
     assert sites == REFUSALS, sites
-    # `reason` is `_refuse`'s own call.
-    assert direct == {"'source_provenance_unknown'", "error.reason", "reason"}, direct
+    # Every refusal goes through the store (`FireStore.refuse`), never around it.
+    assert _calls("record_refusal") == [], "record_refusal called outside the store"
 
 
 @pytest.mark.parametrize(

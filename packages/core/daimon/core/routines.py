@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.stores.domain import RoutineRow
 
 PANEL_CAP = 25
@@ -59,7 +60,7 @@ def can_manage_routine(row: RoutineRow, *, user_id: str | None, is_admin: bool) 
     return is_admin or (user_id is not None and row.created_by_user_id == user_id)
 
 
-def mounts_personal_memory(row: RoutineRow) -> bool:
+def mounts_personal_memory(row: RoutineFacts) -> bool:
     """Whether a headless fire mounts its owner's personal memory, read-only.
 
     Only a routine whose result reaches nobody but its owner: no destination

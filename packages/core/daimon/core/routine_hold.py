@@ -24,13 +24,16 @@ from typing import Any
 
 from daimon.core.audience_gate import audience_fact, log_shadow_refusal, read_audience_mode
 from daimon.core.channel_audience import AudienceMode, ChannelAudience, channel_has_outsiders
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-async def routine_hold(session: AsyncSession, row: RoutineRow, *, platform: str) -> TurnHold | None:
+async def routine_hold(
+    session: AsyncSession, row: RoutineFacts, *, platform: str
+) -> TurnHold | None:
     """The hold this routine's fire runs under, None when its destination is not shared."""
     channel_id = routine_destination_channel(row)
     if channel_id is None:

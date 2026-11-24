@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import structlog
-from daimon.core.fire.store import FireStore
+from daimon.core.fire.store import FireGuardStore
 from daimon.core.fire.subject import Subject
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.turn.termination import TerminationReason
@@ -22,7 +22,7 @@ BENIGN_FIRE_REASONS = frozenset(
 async def record_fire_error(
     sm: async_sessionmaker[AsyncSession],
     subject: Subject,
-    store: FireStore,
+    store: FireGuardStore,
     msg: str,
     reason: TerminationReason | None,
     *,
