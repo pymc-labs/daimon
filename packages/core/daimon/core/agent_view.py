@@ -101,8 +101,8 @@ PlaceKind = Literal["channel", "dm", "web"]
 
 _DEFAULT_EFFORT: Effort = "high"
 _EFFORTS: dict[str, Effort] = {e: e for e in ("low", "medium", "high", "xhigh", "max")}
-RunsIn = Literal["discord", "slack", "teams", "dm", "web"]
-_RUNS_IN: tuple[RunsIn, ...] = ("discord", "slack", "teams", "dm", "web")
+RunsIn = Literal["discord", "slack", "teams", "web"]
+_RUNS_IN: tuple[RunsIn, ...] = ("discord", "slack", "teams", "web")
 
 
 def _omit_none(value: object) -> bool:
