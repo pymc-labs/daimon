@@ -14,6 +14,7 @@ from daimon.adapters.web.caller import WebCaller, build_caller, signin_allowed_i
 from daimon.adapters.web.cookies import session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.artifact_pages.access import Viewer
+from daimon.core.artifact_pages.standing import outsider_accounts
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_sessions as sessions_store
@@ -35,20 +36,26 @@ class PageVisitor:
     email: str | None = None
 
 
-def _viewer(person: WebPersonRow, *, admin: bool, link: str | None) -> Viewer:
-    """Admins manage every page of their workspace."""
+async def _viewer(
+    db: AsyncSession, person: WebPersonRow, *, admin: bool, link: str | None
+) -> Viewer:
+    """Admins manage every page of their workspace; an outsider counts as a visitor, and
+    so as no admin."""
+    outsider = person.kind == "member" and bool(
+        await outsider_accounts(db, tenant_id=person.tenant_id, account_ids=[person.account_id])
+    )
     return Viewer(
         account_id=person.account_id,
         person_id=person.id,
         name=person.display_name,
-        kind=person.kind,
-        is_admin=admin,
+        kind="visitor" if outsider else person.kind,
+        is_admin=admin and not outsider,
         link=link,
     )
 
 
-def viewer_of(caller: WebCaller, link: str | None = None) -> Viewer:
-    return _viewer(caller.person, admin=is_admin(caller.role), link=link)
+async def viewer_of(db: AsyncSession, caller: WebCaller, link: str | None = None) -> Viewer:
+    return await _viewer(db, caller.person, admin=is_admin(caller.role), link=link)
 
 
 async def person_viewer(
@@ -72,7 +79,9 @@ async def person_viewer(
         return PageVisitor(Viewer(link=link))
     role = (await roles_of(db, [person], standings))[person.id]
     return PageVisitor(
-        _viewer(person, admin=is_admin(role), link=link), signed_in=True, email=person.email
+        await _viewer(db, person, admin=is_admin(role), link=link),
+        signed_in=True,
+        email=person.email,
     )
 
 
@@ -119,7 +128,9 @@ async def resolve_viewer(
     if caller is None:
         email = next((p.email for p in people if p.email), None)
         return PageVisitor(Viewer(link=link), signed_in=True, email=email)
-    return PageVisitor(viewer_of(caller, link), caller, signed_in=True, email=caller.person.email)
+    return PageVisitor(
+        await viewer_of(db, caller, link), caller, signed_in=True, email=caller.person.email
+    )
 
 
 async def page_on(runtime: WebRuntime, db: AsyncSession, artifact: ArtifactRow) -> bool:

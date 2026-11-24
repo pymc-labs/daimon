@@ -41,7 +41,8 @@ ASK_OWNER: Final = "Ask the owner or an admin."
 @dataclass(frozen=True)
 class Viewer:
     """Who opened a page: a person of the page's own workspace, or anonymous
-    (`account_id` None). `link` is the secret they gave, if any."""
+    (`account_id` None). `link` is the secret they gave, if any. `kind` is "visitor" for an
+    outsider too (`standing`), who is no admin."""
 
     account_id: uuid.UUID | None = None
     person_id: uuid.UUID | None = None

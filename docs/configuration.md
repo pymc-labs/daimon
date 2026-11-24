@@ -1245,8 +1245,10 @@ sandbox.
 `tuple[str, ...]` · optional · default unset
 
 More hosts artifact pages may load scripts, styles, fonts and images from, comma-
-separated (`https://cdn.example.com`). Never list a host that fetches or redirects to
-any URL it is given: pages could send data out through it.
+separated (`https://cdn.example.com`), or only a path of a host, ending in `/`
+(`https://img.example.com/account/upload/`). Never list a whole host that fetches or
+redirects to any URL it is given: pages could send data out through it. List only the
+path that serves your own files.
 
 ### `DAIMON_WEB__ARTIFACT_LEGACY_HOSTS`
 

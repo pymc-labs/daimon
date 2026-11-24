@@ -42,6 +42,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.artifact_pages.documents import build_list_query
+from daimon.core.artifact_pages.standing import visitor_accounts
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
 from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import load_watches_settings
@@ -513,8 +514,9 @@ async def authorize_source(
 async def _authorize_web_poll(
     runtime: McpRuntime, watch: WatchRow
 ) -> tuple[AuthIdentity, ChannelReadPolicy, str | None, str]:
-    """A web watch polls only a page's data, as its owner: a member still in the workspace.
-    The read itself checks they can still use the page (`read_page_data`)."""
+    """A web watch polls only a page's data, as its owner: a member still in the workspace,
+    not a visitor or an outsider. The read itself checks they can still use the page
+    (`read_page_data`)."""
     if watch.source != "poll" or watch.source_state.get("tool") != PAGE_DATA_TOOL:
         raise PollAccessRevoked("Web watches poll only page data")
     async with runtime.session_factory() as db:
@@ -524,13 +526,16 @@ async def _authorize_web_poll(
             db, tenant_id=watch.tenant_id, account_id=watch.owner_account_id
         )
         policy = await load_access_policy(db, tenant_id=watch.tenant_id)
+        visitor = await visitor_accounts(
+            db, tenant_id=watch.tenant_id, account_ids=[watch.owner_account_id]
+        )
     if (
         tenant is None
         or account is None
         or account.tenant_id != watch.tenant_id
         or person is None
         or person.status != "active"
-        or person.kind == "visitor"
+        or visitor
     ):
         raise PollAccessRevoked("Watch owner unavailable")
     agent = await retrieve_agent(

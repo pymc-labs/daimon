@@ -9,6 +9,7 @@ import pytest
 from daimon.core.artifact_pages.content import (
     ContentHost,
     check_thumbnail,
+    content_policy,
     legacy_location,
     route_host,
 )
@@ -92,3 +93,12 @@ def test_a_thumbnail_is_a_whole_png_of_a_thumbnails_size() -> None:
             check_thumbnail(bad)
     with pytest.raises(ArtifactError, match="200 KB"):
         check_thumbnail(_png(640, 400) + b"\0" * 200 * 1024)
+
+
+def test_a_path_source_reaches_the_policy_as_the_operator_wrote_it() -> None:
+    """The browser matches the prefix, so a page loads that path of the host and no other."""
+    source = "https://img.example.org/acct/image/upload/"
+    policy = content_policy(ancestor="https://web.example.com", asset_hosts=(source,))
+    img = next(part for part in policy.split("; ") if part.startswith("img-src"))
+    assert source in img.split(" "), img
+    assert "https://img.example.org " not in policy + " ", "never the whole host"

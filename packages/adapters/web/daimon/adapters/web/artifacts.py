@@ -41,13 +41,13 @@ from daimon.core.artifact_pages.documents import (
 )
 from daimon.core.artifact_pages.events import describe_where
 from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, page_url
+from daimon.core.artifact_pages.standing import outsider_accounts
 from daimon.core.permissions import WEB_PLACE_PREFIX
 from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import watches as watches_store
 from daimon.core.stores import web_invites
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import ArtifactDocumentRow, ArtifactRow, WebPersonRow
-from daimon.core.web_roles_rules import is_admin
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from pydantic import JsonValue, ValidationError
@@ -113,12 +113,25 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
         avatars = await avatars_of(runtime, tenant_id, listed)
         return {a.id: {"id": a.id, "name": a.name, "avatar": avatars.get(a.id)} for a in listed}
 
+    async def as_pages_see(
+        db: AsyncSession, tenant_id: uuid.UUID, found: Collection[WebPersonRow]
+    ) -> list[WebPersonRow]:
+        """The people as pages count them: an outsider is a guest, not a member."""
+        outsiders = await outsider_accounts(
+            db, tenant_id=tenant_id, account_ids={p.account_id for p in found if p.kind == "member"}
+        )
+        return [
+            p.model_copy(update={"kind": "visitor"}) if p.account_id in outsiders else p
+            for p in found
+        ]
+
     async def people_of(
         db: AsyncSession, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
     ) -> dict[uuid.UUID, WebPersonRow]:
-        return await people_store.get_people_for_accounts(
+        found = await people_store.get_people_for_accounts(
             db, tenant_id=tenant_id, account_ids=set(account_ids)
         )
+        return {p.account_id: p for p in await as_pages_see(db, tenant_id, list(found.values()))}
 
     def summary(
         artifact: ArtifactRow,
@@ -155,7 +168,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
         artifact = await artifact_store.get(db, artifact_id)
         if artifact is None or artifact.tenant_id != caller.person.tenant_id:
             raise HTTPException(status_code=404, detail=_NOT_FOUND)
-        role = _seen_as(artifact, viewer_of(caller), runtime.now())
+        role = _seen_as(artifact, await viewer_of(db, caller), runtime.now())
         if role == "none" or not await page_on(runtime, db, artifact):
             raise HTTPException(status_code=404, detail=_NOT_FOUND)
         return artifact, role
@@ -233,8 +246,9 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("")
     async def list_artifacts(caller: Caller) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
-        viewer, now, tenant_id = viewer_of(caller), runtime.now(), caller.person.tenant_id
+        now, tenant_id = runtime.now(), caller.person.tenant_id
         async with runtime.sessionmaker() as db:
+            viewer = await viewer_of(db, caller)
             found = await artifact_store.list_visible(
                 db,
                 tenant_id=tenant_id,
@@ -261,6 +275,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
             found = await people_store.list_people(
                 db, tenant_id=caller.person.tenant_id, limit=20, search=q.strip() or None
             )
+            found = await as_pages_see(db, caller.person.tenant_id, found)
         return [
             {"id": str(p.account_id), "name": p.display_name, "kind": p.kind}
             for p in found
@@ -299,7 +314,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                     role=role,
                     account_id=caller.person.account_id,
                     now=runtime.now(),
-                    is_admin=is_admin(caller.role),
+                    is_admin=(await viewer_of(db, caller)).is_admin,
                 )
             except ArtifactError as exc:
                 raise _refused(exc) from exc
@@ -384,7 +399,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                         role=role,
                         account_id=sharer,
                         now=now,
-                        is_admin=is_admin(caller.role),
+                        is_admin=(await viewer_of(db, caller)).is_admin,
                     )
                 except ArtifactError as exc:
                     raise _refused(exc) from exc

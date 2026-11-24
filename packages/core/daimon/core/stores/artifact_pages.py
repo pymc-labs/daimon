@@ -36,6 +36,7 @@ from daimon.core.artifact_pages.model import (
     new_public_id,
     page_url,
 )
+from daimon.core.artifact_pages.standing import visitor_accounts
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.poll_tools import PAGE_DATA_TOOL
 from daimon.core.github_credentials import decrypt_token, encrypt_token
@@ -147,19 +148,9 @@ async def _require_members(
     session: AsyncSession, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
 ) -> None:
     """Editors, and so owners (a page transfers only to an editor), are members: a visitor
-    managing a page would read it while `visible_outside_workspace` stayed false."""
-    if not account_ids:
-        return
-    visitor = await session.scalar(
-        select(WebPerson.account_id)
-        .where(
-            WebPerson.tenant_id == tenant_id,
-            WebPerson.kind == "visitor",
-            WebPerson.account_id.in_(list(account_ids)),
-        )
-        .limit(1)
-    )
-    if visitor is not None:
+    or an outsider managing a page would read it while `visible_outside_workspace` stayed
+    false."""
+    if await visitor_accounts(session, tenant_id=tenant_id, account_ids=account_ids):
         raise ArtifactError("invalid", "Only members can edit a page. Visitors can open it.")
 
 
@@ -204,13 +195,16 @@ async def _require_inviter_or_admin(
 async def tool_role(
     session: AsyncSession, artifact: ArtifactRow, account_id: uuid.UUID, *, chat_admin: bool
 ) -> Role:
-    """The account's role when tools may use the page now, else `none`: a suspended person
-    or a visitor never may (`access.can_use_with_tools` for the rest), and a workspace page's
-    members are its viewers. Page watches are made and fed under this one rule."""
+    """The account's role when tools may use the page now, else `none`: a suspended person,
+    a visitor or an outsider never may (`access.can_use_with_tools` for the rest), and a
+    workspace page's members are its viewers. Page watches are made and fed under this one
+    rule."""
     standing = await role_of_account(
         session, tenant_id=artifact.tenant_id, account_id=account_id, chat_admin=chat_admin
     )
     if standing is None or standing == "visitor":
+        return "none"
+    if await visitor_accounts(session, tenant_id=artifact.tenant_id, account_ids=[account_id]):
         return "none"
     role = access.role_of(artifact, account_id, is_admin=is_admin(standing))
     if not access.can_use_with_tools(artifact, role):
@@ -423,14 +417,8 @@ async def list_visible(
 
 
 async def visible_outside_workspace(session: AsyncSession, artifact: ArtifactRow) -> bool:
-    visitors = set(
-        await session.scalars(
-            select(WebPerson.account_id).where(
-                WebPerson.tenant_id == artifact.tenant_id,
-                WebPerson.kind == "visitor",
-                WebPerson.account_id.in_(access.readers(artifact)),
-            )
-        )
+    visitors = await visitor_accounts(
+        session, tenant_id=artifact.tenant_id, account_ids=access.readers(artifact)
     )
     return access.visible_outside_workspace(artifact, visitors)
 

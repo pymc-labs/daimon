@@ -1095,9 +1095,13 @@ def _split_csv(value: object) -> object:
 
 # `https://{id}.pages.example.com`: a host per page.
 _CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
-# A CSP host source an operator adds: scheme, host (a leading `*.` allowed), optional port.
 _LEGACY_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
-_ASSET_HOST = re.compile(r"https://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
+# A CSP source an operator adds: scheme, host (a leading `*.` allowed), optional port; or,
+# on an exact host, a path prefix ending in `/` (`https://img.example.com/acct/upload/`).
+_ASSET_HOST = re.compile(
+    r"https://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?"
+    r"|https://[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?(/[A-Za-z0-9._~-]+)+/"
+)
 
 
 def _site_of(host: str) -> str:
@@ -1233,8 +1237,10 @@ class WebSettings(BaseModel):
         default=(),
         description=(
             "More hosts artifact pages may load scripts, styles, fonts and images from, "
-            "comma-separated (`https://cdn.example.com`). Never list a host that fetches "
-            "or redirects to any URL it is given: pages could send data out through it."
+            "comma-separated (`https://cdn.example.com`), or only a path of a host, ending "
+            "in `/` (`https://img.example.com/account/upload/`). Never list a whole host "
+            "that fetches or redirects to any URL it is given: pages could send data out "
+            "through it. List only the path that serves your own files."
         ),
     )
     artifact_legacy_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
@@ -1273,10 +1279,13 @@ class WebSettings(BaseModel):
     @classmethod
     def _check_asset_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         for host in value:
-            if not _ASSET_HOST.fullmatch(host):
+            # Dot segments would climb out of the prefix to the host's proxy path.
+            dotted = any(part in (".", "..") for part in host.split("/")[3:])
+            if not _ASSET_HOST.fullmatch(host) or dotted:
                 raise ValueError(
                     f"DAIMON_WEB__ARTIFACT_ASSET_HOSTS: {host!r} is not an https host such as "
-                    "https://cdn.example.com"
+                    "https://cdn.example.com, or a path ending in / such as "
+                    "https://img.example.com/account/upload/"
                 )
         return value
 

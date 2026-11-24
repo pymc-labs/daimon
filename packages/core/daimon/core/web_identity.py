@@ -321,7 +321,9 @@ async def principal_of(
     visitor = person.kind == "visitor"
     org = RequesterOrg.OTHER if visitor else RequesterOrg.HOST
     if not visitor and platform == "discord":
-        org = await _linked_member_standing(session, person, external_id)
+        org = await linked_member_standing(
+            session, tenant_id=person.tenant_id, external_id=external_id
+        )
     return WebPrincipal(
         platform=platform,
         external_id=external_id,
@@ -332,19 +334,17 @@ async def principal_of(
     )
 
 
-async def _linked_member_standing(
-    session: AsyncSession, person: WebPersonRow, external_id: str
+async def linked_member_standing(
+    session: AsyncSession, *, tenant_id: uuid.UUID, external_id: str
 ) -> RequesterOrg:
     """OUTSIDER for a member linked to a Discord account with no internal role, in a server
     whose `audience_hold` is `on`; HOST otherwise. The web has no Discord client, so the
     member mirror is the only source: a member it cannot say anything about is an outsider
     here, as in `requester_standing`."""
-    mode = await audience_mode(session, FeaturePlace(person.tenant_id, "discord"))
+    mode = await audience_mode(session, FeaturePlace(tenant_id, "discord"))
     if mode != "on":
         return RequesterOrg.HOST
-    return await requester_standing(
-        session, tenant_id=person.tenant_id, user_id=external_id, mode=mode
-    )
+    return await requester_standing(session, tenant_id=tenant_id, user_id=external_id, mode=mode)
 
 
 async def with_spend_person(

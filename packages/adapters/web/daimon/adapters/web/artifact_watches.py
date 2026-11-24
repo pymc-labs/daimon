@@ -45,7 +45,7 @@ def artifact_watches_router(runtime: WebRuntime) -> APIRouter:
             or not await page_on(runtime, db, artifact)
         ):
             raise HTTPException(status_code=404, detail=_GONE)
-        viewer = viewer_of(caller)
+        viewer = await viewer_of(db, caller)
         mine = watch.owner_account_id == caller.person.account_id
         manages = can_edit(role_of(artifact, viewer.account_id, is_admin=viewer.is_admin))
         if not manages and not (mine and admit(artifact, viewer, runtime.now()) != "none"):

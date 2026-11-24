@@ -158,3 +158,37 @@ def test_a_content_host_and_asset_hosts_parse(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("DAIMON_WEB__ARTIFACT_ASSET_HOSTS", "cdn.example.org; img-src *")
     with pytest.raises(ValidationError, match="ASSET_HOSTS"):
         load_settings(_env_file=None)
+
+
+def test_an_asset_source_may_be_one_path_of_a_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv(
+        "DAIMON_WEB__ARTIFACT_ASSET_HOSTS",
+        "https://img.example.org/acct/image/upload/, https://cdn.example.org",
+    )
+    web = load_settings(_env_file=None).web
+    assert web is not None and web.artifact_asset_hosts == (
+        "https://img.example.org/acct/image/upload/",
+        "https://cdn.example.org",
+    ), "a path with its trailing slash is a CSP prefix source"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://img.example.org/acct/image/upload",  # no trailing slash: one exact URL
+        "https://img.example.org/",  # the whole host, as a path
+        "https://*.example.org/acct/",  # a path on a wildcard host
+        "https://img.example.org/acct/../fetch/",  # climbs out of the prefix
+        "https://img.example.org/%2e%2e/fetch/",
+        "https://img.example.org/acct/?q=1/",
+        "http://img.example.org/acct/",
+    ],
+)
+def test_an_asset_path_must_be_a_plain_prefix_of_an_exact_https_host(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_ASSET_HOSTS", source)
+    with pytest.raises(ValidationError, match="ASSET_HOSTS"):
+        load_settings(_env_file=None)

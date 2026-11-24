@@ -24,6 +24,7 @@ from typing import Final, Literal
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.setup_target import (
     get_web_turn_origin,
     refuse_helper,
@@ -32,9 +33,11 @@ from daimon.adapters.mcp.tools.setup_target import (
 from daimon.core.artifact_pages import access, content, documents, tickets
 from daimon.core.artifact_pages.events import MAX_WATCHES_PER_PAGE
 from daimon.core.artifact_pages.model import ArtifactError, page_url
+from daimon.core.artifact_pages.standing import outsider_accounts, visitor_accounts
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.media.filenames import display_filename_for
+from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores import artifact_pages as store
 from daimon.core.stores import identity, turn_origins, watches, web_people
 from daimon.core.stores.domain import (
@@ -54,6 +57,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# The one scope of an operator token that reaches pages: the data tools, as its admin.
+DATA_SCOPE: Final[OperatorScope] = "artifacts:data"
 NO_PAGE: Final = "No page named {slug!r} that you can use."
 NOT_A_PERSON: Final = "Not a person in the app yet. Ask an admin to invite them."
 CROSS_PAGE: Final = (
@@ -143,8 +148,16 @@ def refusals() -> Iterator[None]:
         raise ToolError(str(exc)) from exc
 
 
-async def _admit(runtime: McpRuntime, auth: AuthIdentity) -> Caller:
-    """The caller, or a refusal: no page host set up, or no standing in the workspace."""
+async def _admit(
+    runtime: McpRuntime, auth: AuthIdentity, scope: OperatorScope | None = None
+) -> Caller:
+    """The caller, or a refusal: no page host set up, or no standing in the workspace. An
+    outsider has none: they open pages as a visitor does. An operator token passes only
+    where `scope` names its own; the page tools that change a page name none."""
+    if auth.is_operator:
+        if scope is None:
+            raise ToolError("An operator token can only list pages and read and write their data.")
+        require_scope(auth, scope)
     web = runtime.settings.web
     if web is None:
         raise ToolError("Pages are unavailable: this Daimon has no page host set up.")
@@ -152,7 +165,10 @@ async def _admit(runtime: McpRuntime, auth: AuthIdentity) -> Caller:
         role = await role_of_account(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id, chat_admin=auth.is_admin
         )
-    if role is None or role == "visitor":
+        outsider = await outsider_accounts(
+            db, tenant_id=auth.tenant_id, account_ids=[auth.account_id]
+        )
+    if role is None or role == "visitor" or outsider:
         raise ToolError("Only members can use pages. Ask an admin.")
     return Caller(
         public_url=str(web.public_url).rstrip("/"),
@@ -232,7 +248,8 @@ async def _account_of(db: AsyncSession, auth: AuthIdentity, ref: str) -> uuid.UU
             db, tenant_id=auth.tenant_id, platform=auth.platform, platform_user_id=ref
         )
         if person is None:
-            # A chat member who never opened the app is a member all the same.
+            # A chat member who never opened the app is a person all the same: a member, or
+            # an outsider, who is named as a visitor is (`store` refuses them as an editor).
             principal = await identity.find_platform_principal(
                 db, tenant_id=auth.tenant_id, platform=auth.platform, external_id=ref
             )
@@ -260,7 +277,7 @@ async def _pages(
     for artifact in artifacts:
         ids.update(artifact.people, artifact.editors)
     named = await web_people.get_people_for_accounts(db, tenant_id=auth.tenant_id, account_ids=ids)
-    visitors = {i for i, p in named.items() if p.kind == "visitor"}
+    visitors = await visitor_accounts(db, tenant_id=auth.tenant_id, account_ids=ids)
 
     def person(account_id: uuid.UUID) -> Person | None:
         found = named.get(account_id)
@@ -443,7 +460,7 @@ async def _change_settings(
 
 
 async def list_impl(runtime: McpRuntime, auth: AuthIdentity) -> Pages:
-    caller = await _admit(runtime, auth)
+    caller = await _admit(runtime, auth, DATA_SCOPE)
     async with runtime.session_factory() as db:
         visible = await store.list_visible(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id, is_admin=caller.is_admin
@@ -498,7 +515,7 @@ async def query_impl(
     doc_id: str | None = None,
 ) -> str:
     """Documents in creation order unless `order_by`; one document by `doc_id`."""
-    await _admit(runtime, auth)
+    await _admit(runtime, auth, DATA_SCOPE)
     limits = runtime.settings.artifact_pages
     with refusals():
         query = documents.build_list_query(
@@ -559,7 +576,7 @@ async def write_impl(
     data: dict[str, JsonValue] | None,
     mode: WriteMode,
 ) -> Written:
-    await _admit(runtime, auth)
+    await _admit(runtime, auth, DATA_SCOPE)
     limits = runtime.settings.artifact_pages
     now = datetime.now(UTC)
     with refusals():
@@ -843,7 +860,7 @@ def register_artifact_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             rules=rules,
         )
 
-    @mcp.tool(description=_DOC["artifact_list"])
+    @mcp.tool(description=_DOC["artifact_list"], tags=scope_tags(DATA_SCOPE))
     async def artifact_list(ctx: Context) -> Pages:  # pyright: ignore[reportUnusedFunction]
         return await list_impl(runtime, await _auth(ctx))
 
@@ -855,7 +872,7 @@ def register_artifact_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         by = await person_call(runtime, auth, origin_context_id)
         return await source_impl(runtime, auth, by=by, slug=slug, version=version)
 
-    @mcp.tool(description=_DOC["artifact_db_query"])
+    @mcp.tool(description=_DOC["artifact_db_query"], tags=scope_tags(DATA_SCOPE))
     async def artifact_db_query(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         slug: str,
@@ -876,7 +893,7 @@ def register_artifact_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             doc_id=doc_id,
         )
 
-    @mcp.tool(description=_DOC["artifact_db_write"])
+    @mcp.tool(description=_DOC["artifact_db_write"], tags=scope_tags(DATA_SCOPE))
     async def artifact_db_write(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         slug: str,

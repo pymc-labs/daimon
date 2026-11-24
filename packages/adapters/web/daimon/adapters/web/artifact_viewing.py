@@ -42,7 +42,7 @@ def artifact_viewing_router(runtime: WebRuntime) -> APIRouter:
 
     async def manages(db: AsyncSession, caller: WebCaller, artifact: ArtifactRow) -> bool:
         """Whether they manage it; 404 unless they may at least open it."""
-        viewer = viewer_of(caller)
+        viewer = await viewer_of(db, caller)
         manager = can_edit(role_of(artifact, viewer.account_id, is_admin=viewer.is_admin))
         if not manager and admit(artifact, viewer, runtime.now()) == "none":
             raise HTTPException(status_code=404, detail=_NOT_FOUND)
