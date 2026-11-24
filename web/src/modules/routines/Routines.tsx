@@ -39,7 +39,7 @@ export function Routines() {
   const choices = useQuery({ queryKey: CHOICES, queryFn: () => api.get<Choices>("/api/routines/choices") })
   const add = can("routines.manage") && choices.data?.can_create
   return (
-    <Page crumbs={[{ label: "Routines" }]} actions={add ? <Button size="sm" onClick={() => setRoutine("new")}><Plus />New routine</Button> : null}>
+    <Page crumbs={[{ label: "Routines" }]} actions={<><LegacyBadge />{add && <Button size="sm" onClick={() => setRoutine("new")}><Plus />New routine</Button>}</>}>
       <QueryState query={list} empty="No routines">
         {(rows) => <RoutineTable rows={rows} choices={choices.data} />}
       </QueryState>
@@ -67,6 +67,13 @@ function Result({ r }: { r: Routine }) {
       {r.failed && <Pill className="text-destructive">Failed</Pill>}
     </span>
   )
+}
+
+/** Routines still run; workflows replace them. */
+function LegacyBadge() {
+  const can = useCan()
+  const badge = <Pill>Legacy, use Workflows</Pill>
+  return can("workflows.view") ? <Link to="/workflows">{badge}</Link> : badge
 }
 
 function RoutineTable({ rows: all, choices }: { rows: Routine[]; choices: Choices | undefined }) {
@@ -170,11 +177,11 @@ function Detail({ routine: r, choices }: { routine: Routine; choices: Choices })
           </>
         )}
         menu={manage ? [...(movable ? [{
-          label: "Move to Workflows", icon: <Workflow />, disabled: move.isPending,
+          label: "Move to a workflow", icon: <Workflow />, disabled: move.isPending,
           onSelect: async () => {
             const plan = await api.get<MovePreview>(`/api/workflows/from-routine/${r.id}`)
             const body = <>{r.title}, {r.schedule}{plan.paused && ", starts paused"}{plan.grants.map((g) => <span key={g.kind + g.detail} className="block">{GRANT[g.kind]}: {g.detail}</span>)}</>
-            if (await confirm({ title: "Move to Workflows?", body, action: "Move" })) move.mutate()
+            if (await confirm({ title: "Move to a workflow?", body, action: "Move" })) move.mutate()
           },
         }] : []), {
           label: "Delete", icon: <Trash2 />, destructive: true, disabled: del.isPending,

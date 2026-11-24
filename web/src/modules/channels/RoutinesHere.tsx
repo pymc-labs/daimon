@@ -7,7 +7,7 @@ import type { ChannelSettings } from "./types"
 export function RoutinesHere({ s }: { s: ChannelSettings }) {
   if (!s.routines.length) return null
   return (
-    <PanelSection title="Routines">
+    <PanelSection title="Routines (Legacy)">
       <Rows>
         {s.routines.map((r) => {
           const who = agentOf(s.agents, r.agent)!

@@ -55,7 +55,7 @@ const CHANNEL: SpendRow[] = [
   { id: "c3", name: "#northwind-support", kind: "discord", turns: 58, usd: 56.2 },
   { id: "c4", name: "#pricing", kind: "discord", turns: 96, usd: 47.75 },
   { id: "c5", name: "Web", kind: "web", turns: 211, usd: 41.6 },
-  { id: "c6", name: "Routines", kind: "routine", turns: 146, usd: 33.9 },
+  { id: "c6", name: "Routines (Legacy)", kind: "routine", turns: 146, usd: 33.9 },
   { id: "c7", name: "#eng-review", kind: "discord", turns: 40, usd: 22.65 },
   { id: "none", name: "No channel", turns: 6, usd: 1.1 },
 ]
