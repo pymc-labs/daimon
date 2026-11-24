@@ -728,7 +728,7 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
     platform_user_id = subject.created_by_user_id
 
     def usage_record_factory(session_id: str, model_id: str) -> Callable[..., Awaitable[object]]:
-        return functools.partial(
+        record = functools.partial(
             record_turn_usage,
             sessionmaker=sm,
             platform_user_id=platform_user_id,
@@ -739,8 +739,11 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
             pricing=MODEL_PRICING.get(model_id),
             channel_id=subject.channel_id,
             agent_id=resolved_agent_id,
-            workflow_run_id=subject.workflow_run_id,
         )
+        # A routine's binding stays exactly as before (the scheduler goldens).
+        if subject.workflow_run_id is None:
+            return record
+        return functools.partial(record, workflow_run_id=subject.workflow_run_id)
 
     # Resolve agent + environment by daimon-tag at fire time,
     # self-healing across MA archive/recreate. The environment follows the
