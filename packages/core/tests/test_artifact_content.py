@@ -43,6 +43,24 @@ def test_a_per_page_content_host_serves_only_its_own_pages_content(
 @pytest.mark.parametrize(
     ("netloc", "path", "route"),
     [
+        ("pages.example.com", PAGE, "serve"),
+        ("pages.example.com", "/a/zzzzzzzzzz/_content", "serve"),
+        ("pages.example.com", "/api/me", "not_found"),
+        ("pages.example.com", "/a/abcdefgh23/poll", "not_found"),
+        ("abcdefgh23.pages.example.com", PAGE, "redirect"),
+        (APP, PAGE, "not_found"),
+    ],
+)
+def test_a_shared_content_host_serves_only_page_content(netloc: str, path: str, route: str) -> None:
+    """Every page runs on the one host, which answers page content and nothing else."""
+    host = ContentHost.parse("https://pages.example.com")
+    assert host.origin("abcdefgh23") == "https://pages.example.com", "one origin for all pages"
+    assert route_host(netloc, path, public_netloc=APP, content=host) == route
+
+
+@pytest.mark.parametrize(
+    ("netloc", "path", "route"),
+    [
         ("old.example.org", "/a/q3-plan", "legacy"),
         ("old.example.org", "/a/q3-plan/", "not_found"),
         ("old.example.org", "/a/q3-plan/_content", "not_found"),

@@ -1254,6 +1254,15 @@ wildcard DNS record and certificate) on a domain of its own, other than the publ
 URL's. Pages can then keep storage and embed YouTube and Drive players. Unset: an opaque
 sandbox.
 
+### `DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST`
+
+`bool` · optional · default `False`
+
+Let `DAIMON_WEB__ARTIFACT_CONTENT_URL` be one host every page shares
+(`https://pages.example.com`), on the public URL's site or another. Needs
+`DAIMON_ARTIFACT_PAGES__WORKSPACES` to list exactly one workspace, whose pages then
+share browser storage and can set cookies for the parent domain.
+
 ### `DAIMON_WEB__ARTIFACT_ASSET_HOSTS`
 
 `tuple[str, ...]` · optional · default unset
@@ -2351,6 +2360,13 @@ Page asks per page and viewer each minute.
 `int` · optional · default `20`
 
 New visitors each person may invite by sharing a page.
+
+### `DAIMON_ARTIFACT_PAGES__WORKSPACES`
+
+`tuple[UUID, ...]` · optional · default unset
+
+The workspaces that have artifacts, by tenant UUID, comma-separated. Elsewhere the
+feature, its pages, tools and skill do not exist. Empty: every workspace.
 
 ## Scheduler
 

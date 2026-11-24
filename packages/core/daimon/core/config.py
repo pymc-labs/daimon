@@ -1093,8 +1093,8 @@ def _split_csv(value: object) -> object:
     return tuple(part.strip() for part in text.split(",") if part.strip())
 
 
-# `https://{id}.pages.example.com`: a host per page.
-_CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
+# `https://{id}.pages.example.com`: a host per page; `https://pages.example.com` a shared one.
+_CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
 _LEGACY_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
 # A CSP source an operator adds: scheme, host (a leading `*.` allowed), optional port; or,
 # on an exact host, a path prefix ending in `/` (`https://img.example.com/acct/upload/`).
@@ -1244,6 +1244,15 @@ class WebSettings(BaseModel):
             "embed YouTube and Drive players. Unset: an opaque sandbox."
         ),
     )
+    artifact_content_shared_host: bool = Field(
+        default=False,
+        description=(
+            "Let `DAIMON_WEB__ARTIFACT_CONTENT_URL` be one host every page shares "
+            "(`https://pages.example.com`), on the public URL's site or another. Needs "
+            "`DAIMON_ARTIFACT_PAGES__WORKSPACES` to list exactly one workspace, whose pages "
+            "then share browser storage and can set cookies for the parent domain."
+        ),
+    )
     artifact_asset_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
         default=(),
         description=(
@@ -1344,12 +1353,20 @@ class WebSettings(BaseModel):
         """Page code on the content host must never share the app's site: same-site
         requests carry the app's cookies and count as the app's own."""
         found = _CONTENT_URL.fullmatch(url)
+        shared = found is not None and found[2] is None
         if found is None or (found[1] != "https" and not self.dev):
+            raise ValueError("DAIMON_WEB__ARTIFACT_CONTENT_URL must be https://{id}.host")
+        if shared and not self.artifact_content_shared_host:
             raise ValueError(
                 "DAIMON_WEB__ARTIFACT_CONTENT_URL must be https://{id}.host, one host per page: "
-                "a single host would share storage across every page"
+                "a single host shares storage across every page "
+                "(DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST allows it)"
             )
-        if _site_of(found[3]) == _site_of((self.public_url.host or "").lower()):
+        public_host = (self.public_url.host or "").lower()
+        if shared:
+            if found[3] == public_host:
+                raise ValueError("DAIMON_WEB__ARTIFACT_CONTENT_URL must be another host")
+        elif _site_of(found[3]) == _site_of(public_host):
             raise ValueError(
                 "DAIMON_WEB__ARTIFACT_CONTENT_URL must be on another site than "
                 "DAIMON_WEB__PUBLIC_URL (another registrable domain)"
@@ -2464,6 +2481,19 @@ class ArtifactPagesSettings(BaseModel):
     shares_per_day: int = Field(
         default=20, ge=1, description="New visitors each person may invite by sharing a page."
     )
+    workspaces: Annotated[tuple[uuid.UUID, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "The workspaces that have artifacts, by tenant UUID, comma-separated. Elsewhere "
+            "the feature, its pages, tools and skill do not exist. Empty: every workspace."
+        ),
+    )
+
+    _split_workspaces = field_validator("workspaces", mode="before")(_split_csv)
+
+    def has_workspace(self, tenant_id: uuid.UUID) -> bool:
+        """Whether artifacts exist in the workspace (`DAIMON_ARTIFACT_PAGES__WORKSPACES`)."""
+        return not self.workspaces or tenant_id in self.workspaces
 
 
 class DirectMessagePolicy(BaseModel):
@@ -3546,6 +3576,21 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _shared_content_host_has_one_workspace(self) -> Settings:
+        """A shared content host shares storage and cookies across pages, so only one
+        workspace's pages may run on it."""
+        if (
+            self.web is not None
+            and self.web.artifact_content_shared_host
+            and len(set(self.artifact_pages.workspaces)) != 1
+        ):
+            raise ValueError(
+                "DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST needs "
+                "DAIMON_ARTIFACT_PAGES__WORKSPACES to list exactly one workspace"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _relay_polls_name_this_deployment(self) -> Settings:
         """A relay poll sends Daimon's own credential, so its URL must be this relay's."""
         from daimon.core.mcp_identity import relay_server_name
@@ -3618,6 +3663,20 @@ class FeatureEnvSettings(BaseSettings):
     @classmethod
     def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
         return _registered_features(value)
+
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+class ArtifactPagesEnvSettings(BaseSettings):
+    """Only `DAIMON_ARTIFACT_PAGES__*`, for a reader handed no `Settings`."""
+
+    artifact_pages: ArtifactPagesSettings = Field(default_factory=ArtifactPagesSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_",

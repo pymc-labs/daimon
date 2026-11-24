@@ -1,7 +1,7 @@
 """A page's HTML as served: runtime injected first, sandbox policy around it.
 
 Page code runs in a sandboxed frame on an origin other than the app's: a content host per
-page (`ContentHost`), else an opaque one. Either way it can never use the web
+page or one shared host (`ContentHost`), else an opaque one. Either way it can never use the web
 session cookie, call the web API or read other pages. Its only way out is the runtime's
 postMessage bridge to the shell, which the server checks on every call.
 `connect-src 'none'` keeps data from leaving; libraries, fonts and images load from
@@ -49,27 +49,33 @@ _LEGACY_PATH: Final = re.compile(r"/a/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)")
 @dataclass(frozen=True)
 class ContentHost:
     """`DAIMON_WEB__ARTIFACT_CONTENT_URL`: `https://{id}.pages.example.net`, one host per
-    page, so no two pages share an origin."""
+    page, so no two pages share an origin; or one host every page shares, where the
+    operator allows it (`DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST`)."""
 
     scheme: str
     netloc: str  # lowercase host[:port], without a default port or the `{id}.` label
+    per_page: bool = True
 
     @classmethod
     def parse(cls, url: str) -> ContentHost:
         parts = urlsplit(url.strip())
-        host = (parts.hostname or "").lower().removeprefix("{id}.")
+        host = (parts.hostname or "").lower()
         port = parts.port
         suffix = "" if port is None or port == _DEFAULT_PORTS.get(parts.scheme) else f":{port}"
-        return cls(parts.scheme, host + suffix)
+        per_page = host.startswith("{id}.")
+        return cls(parts.scheme, host.removeprefix("{id}.") + suffix, per_page)
 
     def netloc_of(self, public_id: str) -> str:
-        return f"{public_id}.{self.netloc}"
+        return f"{public_id}.{self.netloc}" if self.per_page else self.netloc
 
     def origin(self, public_id: str) -> str:
         return f"{self.scheme}://{self.netloc_of(public_id)}"
 
     def page_of(self, netloc: str) -> str | None:
-        """For a request's host: the page's id, None when the host is not a page's."""
+        """For a request's host: the page's id on a per-page host, `""` on the shared
+        host, None when the host is not a page's."""
+        if not self.per_page:
+            return "" if netloc == self.netloc else None
         label, dot, rest = netloc.partition(".")
         ok = dot and rest == self.netloc and re.fullmatch(r"[a-z2-7]{10}", label)
         return label if ok else None
@@ -106,7 +112,7 @@ def route_host(
     page = None if content is None else content.page_of(netloc)
     if page is not None:
         found = _CONTENT_PATH.fullmatch(path)
-        return "serve" if found and page == found[1] else "not_found"
+        return "serve" if found and page in ("", found[1]) else "not_found"
     if not path.startswith("/a/"):
         return "serve"
     if netloc != public_netloc:
