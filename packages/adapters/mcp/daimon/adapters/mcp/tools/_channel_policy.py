@@ -125,12 +125,12 @@ _AUDIENCE_UNREADABLE_MSG = (
 )
 _REACH_LATCH_MSG = (
     "this conversation read a room that only some people can read, so it posts and sends "
-    "only into the caller's own direct messages with Daimon for the rest of this turn. "
+    "only into the caller's own direct messages with Daimon for the rest of this reply. "
     "Tell the caller. Do not retry."
 )
 _REACH_SCHEDULE_MSG = (
     "this conversation read a room that only some people can read, so it sets up no routine "
-    "or timer for the rest of this turn: a later run would carry what it read. "
+    "or timer for the rest of this reply: a later run would carry what it read. "
     "Tell the caller to ask again in a new message. Do not retry."
 )
 _REACH_RECORD_MSG = (
