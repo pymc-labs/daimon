@@ -3,6 +3,8 @@
 How to create a routine, how the scheduler runs it, where its result goes and
 what happens when a run fails.
 
+Legacy: [workflows](workflows.md).
+
 A routine is a recurring [unattended](unattended.md) turn: a cron expression,
 a timezone, an agent and one prompt. The scheduler fires it, the agent runs
 with no human in the thread, and the tail of its final message is saved on the

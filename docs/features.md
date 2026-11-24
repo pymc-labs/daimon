@@ -81,7 +81,7 @@ Where each feature can be set, and its default.
 | Web app: routines | `web.routines` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: credits | `web.credits` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: integrations | `web.integrations` | Capability | On | ✓ | ✓ |  |  |  |  |  |
-| Web app: workflows | `web.workflows` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
+| Web app: workflows | `web.workflows` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -97,11 +97,11 @@ Where each feature can be set, and its default.
 | Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Workflows | `workflows` | Capability | Off | ✓ | ✓ | ✓ | ✓ |  |  |  |
+| Workflows | `workflows` | Capability | On | ✓ | ✓ | ✓ | ✓ |  |  |  |
 | Workflow webhooks | `workflow_webhooks` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Workflow code steps | `workflow_code` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
-| Workflow mentions | `workflow_mentions` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
-| Workflow polls | `workflow_polls` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
+| Workflow mentions | `workflow_mentions` | Capability | On | ✓ | ✓ |  |  |  |  |  |
+| Workflow polls | `workflow_polls` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Workflow scoped writes | `workflow_scoped_writes` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Workflow run budget | `workflow_run_budget` | Limit | $5 | ✓ | ✓ |  |  |  |  |  |
@@ -904,7 +904,7 @@ The workflows pages. Off hides them.
 | --- | --- |
 | Key | `web.workflows` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
@@ -1110,7 +1110,7 @@ Run workflows.
 | --- | --- |
 | Key | `workflows` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel |
 | Combines | Off above is a ceiling |
 
@@ -1146,7 +1146,7 @@ Mention runs.
 | --- | --- |
 | Key | `workflow_mentions` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
@@ -1158,7 +1158,7 @@ Poll runs.
 | --- | --- |
 | Key | `workflow_polls` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 

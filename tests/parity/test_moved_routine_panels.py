@@ -100,7 +100,7 @@ def test_discord_shows_the_move_and_links_the_workflow() -> None:
 def test_slack_shows_the_move_and_links_the_workflow() -> None:
     entry = slack_state.RoutineEntry(ROW, "Alpha", "⏸", "summarize", workflow_id=WORKFLOW)
     state = slack_state.RoutinesPanelState([entry], 0, {}, links=LINKS)
-    row = build_content_view(state)["blocks"][0]
+    row = build_content_view(state)["blocks"][1]
     assert f"<{URL}|{MOVED_TO_WORKFLOWS}>" in row["text"]["text"]
     assert [o["value"] for o in row["accessory"]["options"]] == ["output"]
 

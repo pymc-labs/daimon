@@ -239,7 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readOnlyHint` runs without a card. The chat worker needs that server's key in
   `DAIMON_MCP_IDENTITY__BEARERS`; a signed server is read without one.
 
-- **Workflows, off by default.** A workflow is a graph of steps that runs on its
+- **Workflows.** A workflow is a graph of steps that runs on its
   own: agents, conditions, code, tool calls, questions to people and waits. Build
   one on a canvas in the web app, from a starter or with Ask Daimon, then test
   and publish it. Runs start by hand, on a schedule, from a signed webhook or
@@ -251,10 +251,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from a chat mention or from new rows a tool returns. A workflow can save state
   for later runs, run every few weeks or once at a set time, wait in business
   days, and show its runs on a board or calendar. A step can make a write with
-  nobody watching when its arguments fit a stated scope. Workflows, their
-  webhooks, code steps, mentions (`workflow_mentions`), polls (`workflow_polls`)
-  and scoped writes (`workflow_scoped_writes`) each stay off until an admin turns
-  them on; see [Workflows](docs/workflows.md) and
+  nobody watching when its arguments fit a stated scope. Workflows, their pages,
+  mentions (`workflow_mentions`) and polls (`workflow_polls`) are on; webhooks, code
+  steps and scoped writes (`workflow_scoped_writes`) stay off until an admin turns
+  them on. Routines still work but are marked Legacy, and every routines list
+  offers an admin "Move to a workflow"; see [Workflows](docs/workflows.md) and
   [Advanced workflows](docs/workflows-advanced.md).
 
 - **A setting for rooms with outside people.** Server admins on Discord can set

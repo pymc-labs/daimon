@@ -9,14 +9,13 @@ numbered version. Every run keeps a tamper-evident record of its steps.
 
 ## Turn workflows on
 
-Workflows are Off by default. An admin turns on [`workflows`](features.md#workflows)
-and, for the pages, [`web.workflows`](features.md#web-app-workflows). Webhook
-triggers, code steps, mentions, polls and scoped writes are separate features,
-also Off by default.
+Workflows are On by default, with their pages ([`workflows`](features.md#workflows)
+and [`web.workflows`](features.md#web-app-workflows)), mention triggers and poll
+triggers. An admin turns on webhook triggers, code steps and scoped writes
+separately; they are Off by default.
 
 ```bash
-DAIMON_FEATURES__WORKFLOWS=on
-DAIMON_FEATURES__WEB_WORKFLOWS=on
+DAIMON_FEATURES__WORKFLOW_WEBHOOKS=on
 ```
 
 While `workflows` is Off, every path refuses: the web pages, the workflow
@@ -25,12 +24,12 @@ Runs already started stop at their next step without spending.
 
 | Feature | Key | Default |
 | --- | --- | --- |
-| Workflows | `workflows` | Off |
-| Web pages | `web.workflows` | Off |
+| Workflows | `workflows` | On |
+| Web pages | `web.workflows` | On |
 | Webhook triggers | `workflow_webhooks` | Off |
 | Code steps | `workflow_code` | Off |
-| Mention triggers | `workflow_mentions` | Off |
-| Poll triggers and waits | `workflow_polls` | Off |
+| Mention triggers | `workflow_mentions` | On |
+| Poll triggers and waits | `workflow_polls` | On |
 | Scoped writes | `workflow_scoped_writes` | Off |
 | Run budget | `workflow_run_budget` | $5 |
 | Run history | `workflow_retention_days` | 90 days |

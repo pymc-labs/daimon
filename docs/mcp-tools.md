@@ -538,7 +538,8 @@ task.
 
 ## `routines`
 
-Routines tools: create / list / get / update / delete, and an admin's sandbox opt-in.
+Legacy routines tools (prefer workflows): create / list / get / update / delete, and an
+admin's sandbox opt-in.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
