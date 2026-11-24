@@ -27,7 +27,9 @@ from pydantic import (
     model_validator,
 )
 
-_ID = Annotated[str, StringConstraints(pattern=r"[0-9]{1,20}")]
+_ID = Annotated[str, StringConstraints(pattern=r"^[0-9]{1,20}$")]
+# The source system mints `token_urlsafe(24)`; a link is a URL's query, so nothing else.
+_LINK_SECRET: Final = re.compile(r"[A-Za-z0-9_-]{22,128}")
 _PAGE_FIELD = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
 
@@ -44,9 +46,9 @@ class PersonRef(BaseModel):
     model_config = _PAGE_FIELD
 
     discord_id: _ID | None = None
-    email: Annotated[str, StringConstraints(max_length=254, pattern=r"[^@\s]+@[^@\s]+")] | None = (
-        None
-    )
+    email: (
+        Annotated[str, StringConstraints(max_length=254, pattern=r"^[^@\s]+@[^@\s]+$")] | None
+    ) = None
     google_sub: Annotated[str, StringConstraints(min_length=1, max_length=255)] | None = None
 
     @model_validator(mode="after")
@@ -110,9 +112,9 @@ class WatchIn(BaseModel):
 class PageIn(BaseModel):
     model_config = _PAGE_FIELD
 
-    legacy_url: Annotated[str, StringConstraints(pattern=r"https?://[^\s]+", max_length=2000)]
-    public_id: Annotated[str, StringConstraints(pattern=r"[a-z2-7]{10}")]
-    slug: Annotated[str, StringConstraints(pattern=r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")]
+    legacy_url: Annotated[str, StringConstraints(pattern=r"^https?://\S+$", max_length=2000)]
+    public_id: Annotated[str, StringConstraints(pattern=r"^[a-z2-7]{10}$")]
+    slug: Annotated[str, StringConstraints(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")]
     title: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_TITLE)
     ]
@@ -143,6 +145,10 @@ class PageIn(BaseModel):
             self.data == "write" or (self.data == "read" and self.events)
         ):
             raise ValueError("a public page cannot write data or both read data and send events")
+        if self.link_secret is not None and not _LINK_SECRET.fullmatch(
+            self.link_secret.get_secret_value()
+        ):
+            raise ValueError("link_secret is 22-128 letters, digits, '-' or '_'")
         return self
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import secrets
 from typing import Final, Literal
+from urllib.parse import quote
 
 from daimon.core.errors import UserFacingError
 
@@ -74,4 +75,4 @@ def new_link_secret() -> str:
 def page_url(public_url: str, public_id: str, slug: str, link: str | None = None) -> str:
     """A page's address; `link` is a public page's secret, which the address then carries."""
     url = f"{public_url.rstrip('/')}/a/{public_id}/{slug}"
-    return url if link is None else f"{url}?k={link}"
+    return url if link is None else f"{url}?k={quote(link, safe='')}"

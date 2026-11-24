@@ -10,6 +10,7 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.core._models import Artifact, ArtifactDocument, ArtifactVersion, Watch, WebIdentity
 from daimon.core.artifact_pages.importing import Bundle, PageIn, compat_warnings
+from daimon.core.artifact_pages.model import page_url
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.watch_imports import ImportedCallbackWatch
 from daimon.core.stores import artifact_pages, watches
@@ -24,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 NOW = datetime(2026, 11, 22, 12, tzinfo=UTC)
 LEGACY = "https://pages.example.org/a/q3-plan"
-SECRET = "s3cret-link-value"
+SECRET = "s3cret-link-value-0123456789"
 OWNER, EDITOR, MEMBER = "1001", "1002", "1003"
 
 
@@ -115,6 +116,30 @@ def test_a_bundle_refuses_unknown_fields_and_unsafe_public_pages() -> None:
     with pytest.raises(ValidationError) as caught:
         PageIn.model_validate({**_page().model_dump(mode="json"), "link_secret": 5})
     assert SECRET not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"public_id": "abcdefgh23x"},
+        {"slug": "Q3 plan!"},
+        {"legacy_url": "see https://pages.example.org/a/q3-plan"},
+        {"owner": {"discord_id": "10x01"}},
+        {"people": [{"email": "a b@example.com"}]},
+        {"link_secret": "too-short"},
+        {"link_secret": "s3cret-link-value-0123456789&x=1"},
+    ],
+)
+def test_a_bundle_field_must_match_its_pattern_whole(over: dict[str, Any]) -> None:
+    """A partial match is a refusal of the file, never a value the database then refuses."""
+    with pytest.raises(ValidationError) as caught:
+        _page(**over)
+    assert SECRET not in str(caught.value), "an error never repeats the secret"
+
+
+def test_a_page_address_encodes_its_link() -> None:
+    url = page_url("https://web.example.com", "abcdefgh23", "q3-plan", "a&b=c")
+    assert url.endswith("?k=a%26b%3Dc"), url
 
 
 def test_the_compat_scan_names_hosts_and_pages_never_keys() -> None:
