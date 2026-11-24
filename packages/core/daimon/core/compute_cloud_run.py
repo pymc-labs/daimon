@@ -39,6 +39,8 @@ _DEPLOYMENT_LABEL = "daimon_deployment"
 _SESSION_LABEL = "daimon_session"
 # How long one delete call waits on Google's side before it reports cleanup pending.
 _DELETE_WAIT = "20s"
+# Entries kept per process in the URL and identity caches before they start over.
+_CACHE_ENTRIES = 256
 
 
 def deployment_label(deployment_id: str) -> str:
@@ -85,7 +87,7 @@ class ApplicationDefaultTokens:
     def _id_token(self, audience: str) -> str:
         credentials = self._identity.get(audience)
         if credentials is None:
-            if len(self._identity) >= 256:
+            if len(self._identity) >= _CACHE_ENTRIES:
                 # One entry per session URL; ended sessions are never asked for again.
                 self._identity.clear()
             credentials = cast(
@@ -133,6 +135,7 @@ class _Service(BaseModel):
     uid: str = ""
     labels: dict[str, str] = Field(default_factory=dict)
     uri: str = ""
+    etag: str = ""
     delete_time: str | None = Field(default=None, alias="deleteTime")
     reconciling: bool = False
     terminal_condition: _Condition = Field(default_factory=_Condition, alias="terminalCondition")
@@ -173,6 +176,7 @@ class CloudRunComputeProvider:
         self.transport = transport
         self.tokens: GoogleTokens = tokens or ApplicationDefaultTokens()
         # A service's URL never changes; remembering it saves one Admin API read per call.
+        # The process that launches is not always the one that deletes, so `_url` bounds it.
         self._urls: dict[str, str] = {}
 
     def _regions(self) -> list[str]:
@@ -335,8 +339,13 @@ class CloudRunComputeProvider:
             if service is None:
                 continue
             self._check(resource, service)
+            # The etag limits the delete to the service whose labels were just checked.
+            # One changed since then answers 409 and waits for the next sweep.
             response = await self._request(
-                "DELETE", self._path(region, resource.app_name), tolerate=(404, 409)
+                "DELETE",
+                self._path(region, resource.app_name),
+                params={"etag": service.etag} if service.etag else None,
+                tolerate=(404, 409),
             )
             if response.status_code == 200:
                 await self._wait(response)
@@ -407,6 +416,8 @@ class CloudRunComputeProvider:
             with contextlib.suppress(httpx.InvalidURL):
                 url = httpx.URL(service.uri)
                 if url.scheme == "https" and url.host.endswith(".run.app"):
+                    if len(self._urls) >= _CACHE_ENTRIES:
+                        self._urls.clear()
                     self._urls[session.app_name] = known = f"https://{url.host}"
                     return known
         raise ComputeProviderError(

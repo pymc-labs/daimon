@@ -29,10 +29,11 @@ A profile names an image, regions, CPU kind, CPUs and memory:
          "cpu_kind": "shared", "cpus": 2, "memory_mb": 4096}}
 ```
 
-Use immutable digests and images with no baked-in credentials. The image must
-run the authenticated thin MCP server on port 8080 with `run_bash`,
-`write_file`, `read_file` and `list_files`. Background commands also need
-`sh`, `setsid`, `timeout`, `base64`, `tail` and a writable `/tmp`.
+Use immutable digests and images with no baked-in credentials. Build the image
+from `apps/compute-session` in the Daimon repository. An image built another
+way must run the same authenticated thin MCP server on port 8080. It also
+needs `bash`, `sh`, `setsid`, `nohup`, `timeout`, `base64`, `tail`, `wc`,
+`tr`, a writable `/tmp` and a process 1 that reaps ended processes.
 
 ## Choose a provider
 
@@ -60,8 +61,16 @@ and of the scheduler these roles:
 - Artifact Registry Reader (`roles/artifactregistry.reader`) on the image
   repository
 
+Cloud Run Developer on a project also covers every other Cloud Run service in
+it, so use a Google Cloud project that holds only sessions when you can. Keep
+that project's access small. Anyone who can read its Cloud Run services can
+read a session's token. Anyone who can also call them can run commands in the
+session.
+
 Give the session service account no roles, because commands in a session can
-use whatever it holds.
+use whatever it holds. The Cloud Run service agent of the session project
+pulls the image. For an image repository in another project, grant that
+service agent Artifact Registry Reader on the repository.
 
 A profile needs Google Cloud regions such as `us-central1`, and 1, 2, 4, 6 or
 8 CPUs. Memory is 512 to 32768 MB, within the range Cloud Run allows for that

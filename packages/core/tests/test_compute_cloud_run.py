@@ -98,6 +98,7 @@ def service_json(owned, *, deployment=None, state="CONDITION_SUCCEEDED", **extra
             "daimon_session": owned.id.hex,
         },
         "uri": f"https://{owned.app_name}-abc123-uc.a.run.app",
+        "etag": '"etag-1"',
         "terminalCondition": {"type": "Ready", "state": state},
         **extra,
     }
@@ -259,6 +260,28 @@ async def test_delete_waits_for_google_and_is_confirmed_only_by_a_missing_servic
         await cloud_run.delete(resource_of(owned))
 
 
+async def test_delete_is_limited_to_the_service_whose_ownership_was_checked():
+    owned = session()
+    current, deleted = '"etag-1"', False
+
+    async def handler(request):
+        nonlocal current, deleted
+        if request.method == "GET":
+            # Another actor changes the service right after its labels are read.
+            body = service_json(owned, etag=current)
+            current = '"etag-2"'
+            return httpx.Response(200, json=body)
+        assert request.method == "DELETE"
+        if request.url.params["etag"] != current:
+            return httpx.Response(409, json={"error": {"status": "ABORTED"}})
+        deleted = True
+        return httpx.Response(200, json={"done": True})
+
+    with pytest.raises(ComputeProviderError, match="pending"):
+        await provider(handler).delete(resource_of(owned))
+    assert not deleted
+
+
 async def test_delete_without_a_region_searches_every_profile_region():
     owned = session(region="europe-west4")
     exists = True
@@ -367,6 +390,19 @@ async def test_call_sends_the_google_identity_beside_the_session_token():
         # Cloud Run checks the identity token; the session checks its own bearer token.
         assert request.headers["x-serverless-authorization"] == "Bearer google-identity-token"
         assert request.headers["authorization"] == "Bearer per-session-token"
+
+
+async def test_remembered_addresses_stay_bounded_in_a_long_lived_process(monkeypatch):
+    monkeypatch.setattr(compute_cloud_run, "_CACHE_ENTRIES", 2)
+    sessions = {owned.app_name: owned for owned in (session(), session(), session())}
+
+    async def handler(request):
+        return httpx.Response(200, json=service_json(sessions[request.url.path.split("/")[-1]]))
+
+    cloud_run = provider(handler)
+    for owned in sessions.values():
+        assert await cloud_run._url(owned) == f"https://{owned.app_name}-abc123-uc.a.run.app"
+        assert len(cloud_run._urls) <= 2
 
 
 @pytest.mark.parametrize("uri", ["", "http://x.a.run.app", "https://attacker.example", "::"])

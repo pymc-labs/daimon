@@ -285,7 +285,7 @@ Native owner-only Fly sessions bound to verified, attended conversation origins.
 | `fly_list_files` | all callers | List paths and sizes on your session. |
 | `fly_list_sessions` | all callers | List your live sessions in this conversation. |
 | `fly_list_templates` | all callers | List operator image profiles, fixed CPU/RAM and allowed regions. |
-| `fly_read_file` | all callers | Read a file from your session in byte chunks. |
+| `fly_read_file` | all callers | Read a file from your session in byte chunks of at most 512 KiB. |
 | `fly_run_bash` | all callers | Run bash on your session; inline by default, returning exit code and stdout. |
 | `fly_stop_session` | all callers | Permanently delete a session and its files. |
 | `fly_task_result` | all callers | Read the end of a background command's output (last 16 KiB). |

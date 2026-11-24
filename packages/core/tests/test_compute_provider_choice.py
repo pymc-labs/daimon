@@ -81,6 +81,60 @@ def test_the_setting_selects_every_provider_and_fly_stays_the_default():
     )
 
 
+def _imported_modules(source: str, module: str, *, package: bool = False) -> set[str]:
+    """Every dotted name `source` imports, with relative imports resolved against `module`.
+
+    `from x import y` yields both `x` and `x.y`, because `y` may be a module.
+    """
+    parts = module.split(".") if package else module.split(".")[:-1]
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = parts[: len(parts) - node.level + 1] if node.level else []
+            origin = ".".join([*base, *([node.module] if node.module else [])])
+            found.add(origin)
+            found.update(f"{origin}.{alias.name}" for alias in node.names)
+    return found
+
+
+def _module_name(path: Path) -> tuple[str, bool]:
+    """The dotted name of a file under `packages/`, and whether it is a package."""
+    parts = path.with_suffix("").parts
+    dotted = list(parts[parts.index("daimon") :] if "daimon" in parts else parts[-2:])
+    package = dotted[-1] == "__init__"
+    return ".".join(dotted[:-1] if package else dotted), package
+
+
+@pytest.mark.parametrize(
+    ("source", "module", "caught"),
+    [
+        ("from daimon.core.compute_fly import FlyComputeProvider", "daimon.adapters.x.main", True),
+        ("import daimon.core.compute_fly", "daimon.adapters.x.main", True),
+        ("import daimon.core.compute_fly as fly", "daimon.adapters.x.main", True),
+        ("from daimon.core import compute_fly", "daimon.adapters.x.main", True),
+        # Relative forms, from a sibling, from the package and from a subpackage.
+        ("from .compute_fly import FlyComputeProvider", "daimon.core.compute_sessions", True),
+        ("from . import compute_fly", "daimon.core.compute_sessions", True),
+        ("from ..compute_fly import FlyComputeProvider", "daimon.core.stores.compute", True),
+        ("from .. import compute_fly", "daimon.core.stores.compute", True),
+        ("from ..core.compute_fly import FlyComputeProvider", "daimon.core.compute_tasks", True),
+        ("def late():\n    from .compute_fly import FlyComputeProvider", "daimon.core.x", True),
+        ("from .compute_provider import compute_provider_for", "daimon.core.x", False),
+        ("from .compute_fly import FlyComputeProvider", "daimon.adapters.mcp.tools.fly", False),
+        ("from daimon.core.compute_models import ComputeSession", "daimon.core.x", False),
+    ],
+)
+def test_a_provider_import_is_found_in_every_form(source, module, caught):
+    assert ("daimon.core.compute_fly" in _imported_modules(source, module)) is caught
+
+
+def test_a_relative_import_from_a_package_file_resolves_to_that_package():
+    found = _imported_modules("from . import compute_fly", "daimon.core", package=True)
+    assert "daimon.core.compute_fly" in found
+
+
 def test_only_the_factory_imports_a_provider_module():
     modules = _provider_modules()
     assert len(modules) >= 2
@@ -91,19 +145,11 @@ def test_only_the_factory_imports_a_provider_module():
         # Parse only a file that names a provider module at all.
         if path == _CORE / "compute_provider.py" or not any(stem in source for stem in stems):
             continue
-        for node in ast.walk(ast.parse(source)):
-            names = (
-                [node.module or ""]
-                if isinstance(node, ast.ImportFrom)
-                else [alias.name for alias in node.names]
-                if isinstance(node, ast.Import)
-                else []
-            )
-            if isinstance(node, ast.ImportFrom) and node.module == "daimon.core":
-                names += [f"daimon.core.{alias.name}" for alias in node.names]
-            offenders += [
-                f"{path.relative_to(_PACKAGES)} imports {name}" for name in names if name in modules
-            ]
+        name, package = _module_name(path)
+        offenders += [
+            f"{path.relative_to(_PACKAGES)} imports {imported}"
+            for imported in sorted(_imported_modules(source, name, package=package) & set(modules))
+        ]
     assert not offenders, "build the provider with compute_provider_for(settings): " + ", ".join(
         offenders
     )

@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import fly
+from daimon.core.compute_thin_mcp import MAX_READ_BYTES
+from daimon.core.config import ComputeSettings
 from daimon.core.stores.domain import Role, TurnOriginRow
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from ..harness import auth_identity
@@ -288,3 +291,26 @@ def test_task_view_withholds_output_except_from_result():
     assert status["task_id"] == str(task.id) and "output_tail" not in status
     assert not {"tenant_id", "owner_account_id", "request_key"} & set(status)
     assert fly._task_view(task, output=True)["output_tail"] == "secret output"
+
+
+async def test_read_limit_is_the_largest_chunk_the_session_answer_can_carry():
+    """The tool, its message and its description all take the limit from the transport."""
+    assert fly._read_arguments("/data/out.csv", 0, MAX_READ_BYTES)["limit"] == MAX_READ_BYTES
+    for path, offset, limit in (
+        ("/data/out.csv", 0, MAX_READ_BYTES + 1),
+        ("/data/out.csv", 0, 0),
+        ("/data/out.csv", -1, 1),
+        ("relative", 0, 1),
+        ("/nul\x00", 0, 1),
+    ):
+        with pytest.raises(ToolError, match=f"{MAX_READ_BYTES // 1024} KiB"):
+            fly._read_arguments(path, offset, limit)
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=None,
+        settings=SimpleNamespace(compute=ComputeSettings()),
+        compute_provider=None,
+    )
+    fly.register_fly_tools(mcp, runtime)
+    description = (await mcp.get_tool("fly_read_file")).description
+    assert f"at most {MAX_READ_BYTES // 1024} KiB" in description

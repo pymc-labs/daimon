@@ -15,6 +15,16 @@ from pydantic import JsonValue, TypeAdapter
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 
+#: The most response bytes read from a session before the call is refused.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+#: Response bytes one file byte can cost. A result travels twice, as structured
+#: content and as JSON text, and a control byte is `\u0001` in the first copy and
+#: `\\u0001` in the second.
+READ_BYTE_COST = 13
+#: The largest chunk one `read_file` call may ask for: its worst case still fits
+#: `MAX_RESPONSE_BYTES`, so a read is never refused for its size.
+MAX_READ_BYTES = 512 * 1024
+
 
 async def _rpc(
     client: httpx.AsyncClient,
@@ -28,7 +38,7 @@ async def _rpc(
         body = bytearray()
         async for chunk in response.aiter_bytes():
             body.extend(chunk)
-            if len(body) > 8 * 1024 * 1024:
+            if len(body) > MAX_RESPONSE_BYTES:
                 raise ComputeProviderError(
                     "Session output is too large. Read a smaller file chunk."
                 )

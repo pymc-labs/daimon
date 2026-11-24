@@ -16,6 +16,7 @@ from daimon.adapters.mcp.tools.watches import fresh_admin
 from daimon.core.compute_models import ComputeSession, ComputeStatus, ComputeTask
 from daimon.core.compute_provider import ComputeProviderError, compute_provider_for
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
+from daimon.core.compute_thin_mcp import MAX_READ_BYTES
 from daimon.core.errors import StoreError
 from daimon.core.session_seal import child_seal_ids, origin_stamp
 from daimon.core.stores.domain import TurnOriginRow
@@ -155,6 +156,16 @@ def _task_view(task: ComputeTask, *, output: bool) -> dict[str, JsonValue]:
     if output:
         view["output_tail"] = task.output_tail
     return view
+
+
+def _read_arguments(path: str, offset: int, limit: int) -> dict[str, JsonValue]:
+    """A `read_file` call the session's answer can carry, whatever the file holds."""
+    if not path.startswith("/") or "\x00" in path or offset < 0 or not 1 <= limit <= MAX_READ_BYTES:
+        raise ToolError(
+            "Use an absolute path, nonnegative offset and a limit from 1 byte to "
+            f"{MAX_READ_BYTES // 1024} KiB."
+        )
+    return {"path": path, "offset": offset, "limit": limit}
 
 
 def register_fly_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -357,22 +368,13 @@ def register_fly_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         offset: int = 0,
         limit: int = 65536,
     ) -> JsonValue:
-        """Read a file from your session in byte chunks. This does not extend its lease."""
-        if (
-            not path.startswith("/")
-            or "\x00" in path
-            or offset < 0
-            or not 1 <= limit <= 4 * 1024 * 1024
-        ):
-            raise ToolError(
-                "Use an absolute path, nonnegative offset and a limit from 1 byte to 4 MiB."
-            )
+        """Read a file from your session in byte chunks of at most 512 KiB.
+
+        Read a larger file with several calls, each from the next offset. This does
+        not extend its lease.
+        """
         return await call(
-            ctx,
-            session_id,
-            origin_context_id,
-            "read_file",
-            {"path": path, "offset": offset, "limit": limit},
+            ctx, session_id, origin_context_id, "read_file", _read_arguments(path, offset, limit)
         )
 
     @mcp.tool
