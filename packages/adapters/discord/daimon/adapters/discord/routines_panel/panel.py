@@ -31,12 +31,13 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import RoutineAction, apply_routine_action
 from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
-from daimon.core.routines import MOVED_TO_WORKFLOWS, can_read_routine_output
+from daimon.core.routines import MOVE_TO_WORKFLOW, MOVED_TO_WORKFLOWS, can_read_routine_output
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.web_links import OPEN_IN_WEB
+from daimon.core.workflows.chat_cards import Presser, move_routine
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -303,6 +304,37 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
             await _send_callback_error(interaction, exc)
 
 
+class _MoveButton(discord.ui.Button["RoutinesPanelView"]):
+    def __init__(self) -> None:
+        super().__init__(label=MOVE_TO_WORKFLOW, style=discord.ButtonStyle.primary)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.view is None or self.view.state.selected is None:
+            return
+        runtime = self.view.runtime
+        try:
+            await interaction.response.defer()
+            refusal = await move_routine(
+                runtime.sessionmaker,
+                runtime.settings,
+                Presser(
+                    derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id)),
+                    "discord",
+                    str(interaction.user.id),
+                ),
+                self.view.state.selected.routine.id,
+                client=runtime.anthropic,
+            )
+            if refusal is not None:
+                await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
+                return
+            await _rerender(interaction, self.view)
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
+            await _send_callback_error(interaction, exc)
+        except Exception as exc:  # routines-panel button-callback boundary
+            await _send_callback_error(interaction, exc)
+
+
 class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
     def __init__(self, state: RoutinesPanelState) -> None:
         disabled = state.selected is None or state.selected.routine.last_fired_at is None
@@ -408,7 +440,12 @@ class RoutinesPanelView(discord.ui.LayoutView):
         container.add_item(layout.hairline())
         container.add_item(picker_row)
         container.add_item(discord.ui.ActionRow(_DestinationPicker(state)))
-        container.add_item(discord.ui.ActionRow(NewButton(), DeleteButton(state)))
+        manage_row: discord.ui.ActionRow[RoutinesPanelView] = discord.ui.ActionRow(
+            NewButton(), DeleteButton(state)
+        )
+        if state.admin and not state.locked:
+            manage_row.add_item(_MoveButton())
+        container.add_item(manage_row)
         selected = state.selected
         web_url = (
             None
@@ -445,18 +482,20 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
             raise UserFacingError(
                 "Daimon isn't set up on this server yet.\n\nAsk an admin to set it up."
             )
+        admin = await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES)
         entries, over_cap_count, agent_name_map = await load_guild_routines(
             session,
             runtime.anthropic,
             tenant_id=tenant_id,
             viewer_user_id=str(view.allowed_user_id),
-            only_own=not await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES),
+            only_own=not admin,
         )
     new_state = RoutinesPanelState.initial(
         rows=entries,
         over_cap_count=over_cap_count,
         agent_name_map=agent_name_map,
         links=view.state.links,
+        admin=admin,
     )
     # Preserve selection across refreshes when the row still exists.
     if view.state.selected is not None:

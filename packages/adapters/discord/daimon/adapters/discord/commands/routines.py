@@ -73,6 +73,7 @@ class RoutinesCog(commands.Cog):
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
+                admin=is_admin,
                 links=await links_at(
                     runtime.sessionmaker,
                     runtime.settings,

@@ -76,6 +76,8 @@ class RoutinesPanelState:
     over_cap_count: int
     agent_name_map: dict[str, str]
     links: TenantLinks | None = None
+    #: Whether the viewer is an admin, who may move a routine to a workflow.
+    admin: bool = False
 
     @classmethod
     def initial(
@@ -85,6 +87,7 @@ class RoutinesPanelState:
         over_cap_count: int,
         agent_name_map: dict[str, str],
         links: TenantLinks | None = None,
+        admin: bool = False,
     ) -> RoutinesPanelState:
         return cls(
             rows=rows,
@@ -92,6 +95,7 @@ class RoutinesPanelState:
             over_cap_count=over_cap_count,
             agent_name_map=agent_name_map,
             links=links,
+            admin=admin,
         )
 
     @property

@@ -19,7 +19,7 @@ from daimon.adapters.discord.routines_panel.state import (
     state_label,
 )
 from daimon.core.cron_words import schedule_words
-from daimon.core.routines import MOVED_TO_WORKFLOWS
+from daimon.core.routines import LEGACY_USE_WORKFLOWS, MOVED_TO_WORKFLOWS
 
 import discord
 
@@ -85,6 +85,7 @@ def build_panel_container(
         # Empty roster branch: minimal container with a dim hint line.
         return discord.ui.Container(
             layout.header("📜 Routines"),
+            discord.ui.TextDisplay(f"-# {LEGACY_USE_WORKFLOWS}"),
             layout.hairline(),
             discord.ui.TextDisplay(_EMPTY_HINT),
         )
@@ -141,7 +142,7 @@ def build_panel_container(
     accent: int | None = color_int if color_int != theme.COLOR_BLURPLE else None
 
     return discord.ui.Container(
-        discord.ui.TextDisplay(f"## 📜 {trigger}\n\n-# {subtext}"),
+        discord.ui.TextDisplay(f"## 📜 {trigger}\n\n-# {LEGACY_USE_WORKFLOWS}\n\n-# {subtext}"),
         layout.hairline(),
         discord.ui.TextDisplay(timeline_body),
         accent_colour=accent,
