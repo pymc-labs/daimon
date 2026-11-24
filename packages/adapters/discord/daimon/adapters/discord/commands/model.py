@@ -80,10 +80,10 @@ _NOT_IN_THREAD = "Use /model inside a conversation thread or a direct message."
 _NOT_HERE = "This bot isn't set up to answer in this server."
 _NOT_ALLOWED = "Only people who can start a conversation here can change its model."
 _LEGACY = (
-    app_commands.Choice(name="Haiku", value="haiku"),
-    app_commands.Choice(name="Sonnet", value="sonnet"),
-    app_commands.Choice(name="Opus", value="opus"),
     app_commands.Choice(name="Fable", value="fable"),
+    app_commands.Choice(name="Opus", value="opus"),
+    app_commands.Choice(name="Sonnet", value="sonnet"),
+    app_commands.Choice(name="Haiku", value="haiku"),
     app_commands.Choice(name="Agent default", value="default"),
 )
 _AUTOCOMPLETE_LIMIT = 25

@@ -9,5 +9,5 @@ export function byProvider<T>(models: readonly T[], provider: (m: T) => string):
     if (list) list.push(m)
     else groups.set(p, [m])
   }
-  return [...groups].map(([p, list]) => ({ provider: p, name: p in PROVIDER ? PROVIDER[p as keyof typeof PROVIDER] : p, models: list }))
+  return [...groups].map(([p, list]) => ({ provider: p, name: Object.hasOwn(PROVIDER, p) ? PROVIDER[p as keyof typeof PROVIDER] : p, models: list }))
 }
