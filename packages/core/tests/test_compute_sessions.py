@@ -830,6 +830,22 @@ async def test_a_launch_waits_a_short_bounded_time_for_the_machine(db_engine, db
     assert clock["slept"] == [2.0, 2.0, 2.0]
 
 
+async def test_a_launch_does_not_wait_on_a_provider_that_hangs(db_engine, db_clean, monkeypatch):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+
+    async def hang(session, token):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(fake, "ensure", hang)
+    monkeypatch.setattr("daimon.core.compute_sessions._LAUNCH_WAIT", timedelta(seconds=0.05))
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert session.state == "launching", "the launch returned; a later call settles it"
+    assert await _state(sm, owner, session.id) == "launching"
+
+
 @pytest.mark.parametrize("found_by", ["launch", "call", "start_task", "status", "reconcile"])
 async def test_a_machine_that_cannot_start_ends_its_session_and_says_who_can_help(
     db_engine, db_clean, found_by
@@ -838,7 +854,7 @@ async def test_a_machine_that_cannot_start_ends_its_session_and_says_who_can_hel
     owner, _, _ = await caller(sm)
     fake = FakeComputeProvider()
     service, _ = _waiting(sm, fake)
-    told = "The machine could not start, so it was removed. Ask an admin to check the image"
+    told = "The machine could not start, so it is being removed. Ask an admin to check the image"
     if found_by == "launch":
         fake.fail_start = True
         with pytest.raises(StoreError, match=told):
@@ -861,7 +877,7 @@ async def test_a_machine_that_cannot_start_ends_its_session_and_says_who_can_hel
     if found_by == "reconcile":
         # Nobody was in the call, so the conversation is told, once.
         (wake,) = wakes
-        assert f"machine {session.id} could not start and was removed" in wake.requested_work
+        assert f"machine {session.id} could not start and is being removed" in wake.requested_work
         assert "An admin can check the image profile mmm" in wake.requested_work
     else:
         assert wakes == [], "the caller was told in the call"

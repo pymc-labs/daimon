@@ -56,7 +56,7 @@ _START_DEADLINE = timedelta(minutes=10)
 #: What a caller is told while a machine starts, and when it never will.
 STILL_STARTING = "The machine is still starting. Try again in about 10 seconds."
 START_FAILED = (
-    "The machine could not start, so it was removed. "
+    "The machine could not start, so it is being removed. "
     "Ask an admin to check the image profile it was launched from."
 )
 # A start whose inline call was lost has this long to leave its pid file.
@@ -186,17 +186,25 @@ class ComputeSessions:
         # Registration commits before any external mutation. A lost response is
         # recovered by the deterministic app name, not by launching a second app.
         waited_until = self.clock() + _LAUNCH_WAIT
+        # A provider call that hangs must not hold the launch past its wait either.
+        give_up_at = asyncio.get_running_loop().time() + _LAUNCH_WAIT.total_seconds()
+        current = session
         while True:
             failed = False
-            # One short transaction a read: no row lock is held while the launch waits.
-            async with self.sm.begin() as db:
-                current = await self._owned(db, caller, session.id)
-                if current.state == "launching" and current.expires_at <= self.clock():
-                    current = current.model_copy(update={"state": "stopping"})
-                    await store.save(db, current)
-                elif current.state == "launching":
-                    current = await self._settle(db, current, tell_owner=False)
-                    failed = current.state == "stopping"
+            try:
+                # One short transaction a read: no row lock is held while the launch waits.
+                async with asyncio.timeout_at(give_up_at), self.sm.begin() as db:
+                    current = await self._owned(db, caller, session.id)
+                    if current.state == "launching" and current.expires_at <= self.clock():
+                        current = current.model_copy(update={"state": "stopping"})
+                        await store.save(db, current)
+                    elif current.state == "launching":
+                        current = await self._settle(db, current, tell_owner=False)
+                        failed = current.state == "stopping"
+            except TimeoutError:
+                # The read rolled back. `ensure` is safe to repeat, so the next call
+                # or the scheduler moves the session on.
+                break
             if current.state != "launching" or self.clock() >= waited_until:
                 break
             await self.sleep(_START_POLL_SECONDS)
