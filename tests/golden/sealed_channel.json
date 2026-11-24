@@ -52,6 +52,7 @@
           "origin_place": {
             "channel_id": "room",
             "private_dm_id": "routine:00000000-0000-0000-0000-000000000004",
+            "reads_inside": true,
             "seal_ids": [
               "room"
             ],
