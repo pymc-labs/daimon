@@ -2,15 +2,19 @@
 
 `import_page` runs in the caller's transaction: the CLI commits each page on its own, or
 rolls the whole run back for a dry run. A page that cannot be imported is refused before
-anything is written. A rerun finds the page by `imported_from` and replaces its versions,
-data and imported watches in place, so its id, threads and settings made here stay.
+anything is written. A rerun finds the page by `imported_from` and replaces its settings,
+versions, data and imported watches in place, keeping its id and threads, but only while
+nothing changed it here since its import (`imported_state`): a rerun never reverts work
+done here.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Final, Literal
 
 from daimon.core._models import Artifact, ArtifactDocument, ArtifactVersion
@@ -217,6 +221,34 @@ async def _pin(
     return True
 
 
+def _state(orm: Artifact) -> str:
+    """A digest of what any change here moves: a new version, settings, people, the link,
+    the owner or a data write (`data_revision`). Read from the database's own values."""
+    moved = {
+        name: getattr(orm, name)
+        for name in (
+            "title",
+            "access",
+            "editors_can_share",
+            "data",
+            "events",
+            "ask",
+            "data_scale",
+            "collection_rules",
+            "current_version",
+            "data_revision",
+        )
+    } | {
+        "owner": str(orm.owner_account_id),
+        "people": [str(i) for i in orm.people],
+        "editors": [str(i) for i in orm.editors],
+        "link": None if orm.link_secret is None else orm.link_secret.hex(),
+        "expires_at": None if orm.expires_at is None else orm.expires_at.astimezone(UTC),
+        "updated_at": orm.updated_at.astimezone(UTC),
+    }
+    return hashlib.sha256(json.dumps(moved, sort_keys=True, default=str).encode()).hexdigest()
+
+
 async def _existing(
     session: AsyncSession, target: ImportTarget, page: PageIn
 ) -> tuple[Artifact | None, list[str]]:
@@ -238,6 +270,8 @@ async def _existing(
         found.append(f"the id {page.public_id} belongs to another page")
     if same is not None and (same.slug != page.slug or same.public_id != page.public_id):
         found.append("this address was imported with another name or id")
+    if same is not None and same.imported_state != _state(same):
+        found.append("changed here since import")
     return same, found
 
 
@@ -380,6 +414,9 @@ async def import_page(
                 updated_at=doc.updated_at,
             )
         )
+    await session.flush()
+    await session.refresh(orm)
+    orm.imported_state = _state(orm)
     await session.flush()
 
     imported, orphans = await _import_watches(

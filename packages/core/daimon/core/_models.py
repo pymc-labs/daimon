@@ -5820,6 +5820,8 @@ class Artifact(Base):
     link_secret: Mapped[bytes | None]
     # The address this page had before it was imported, else NULL.
     imported_from: Mapped[str | None]
+    # A digest of the page as its import left it: a re-import replaces only a page unchanged here.
+    imported_state: Mapped[str | None]
     expires_at: Mapped[datetime | None]
     current_version: Mapped[int] = mapped_column(server_default="0")
     size_bytes: Mapped[int] = mapped_column(server_default="0")

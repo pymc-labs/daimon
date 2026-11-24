@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
 from daimon.core._models import Artifact, ArtifactDocument, ArtifactVersion, Watch, WebIdentity
+from daimon.core.artifact_pages.access import PageChange
+from daimon.core.artifact_pages.documents import DocumentWrite
 from daimon.core.artifact_pages.importing import Bundle, PageIn, compat_warnings
 from daimon.core.artifact_pages.model import page_url
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.watch_imports import ImportedCallbackWatch
 from daimon.core.stores import artifact_pages, watches
 from daimon.core.stores.artifact_import import ImportTarget, import_page
-from daimon.core.stores.domain import TenantRow
+from daimon.core.stores.domain import ArtifactRow, TenantRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.outsiders import hold_audience, link_discord_member
@@ -323,6 +326,75 @@ async def test_a_rerun_replaces_the_page_in_place(
     )
     assert len(await watches.page_watches(db, tenant_id=tenant.id, page_id=after.id)) == 1
     assert after.data_revision > before.data_revision
+
+
+Change = Callable[[AsyncSession, ArtifactRow], Awaitable[object]]
+_LIMITS = ArtifactPagesSettings()
+
+
+async def _settings(db: AsyncSession, page: ArtifactRow) -> object:
+    return await artifact_pages.update_settings(
+        db, page, PageChange(title="Ours"), role="owner", account_id=page.owner_account_id, now=NOW
+    )
+
+
+async def _people(db: AsyncSession, page: ArtifactRow) -> object:
+    return await artifact_pages.update_settings(
+        db, page, PageChange(people=()), role="owner", account_id=page.owner_account_id, now=NOW
+    )
+
+
+async def _link(db: AsyncSession, page: ArtifactRow) -> object:
+    return await artifact_pages.rotate_link(db, page, role="owner", now=NOW)
+
+
+async def _transfer(db: AsyncSession, page: ArtifactRow) -> object:
+    return await artifact_pages.transfer(
+        db, page, to_account_id=page.editors[0], role="owner", now=NOW
+    )
+
+
+async def _version(db: AsyncSession, page: ArtifactRow) -> object:
+    return await artifact_pages.restore(
+        db, page, 1, role="owner", account_id=None, now=NOW, limits=_LIMITS
+    )
+
+
+async def _data(db: AsyncSession, page: ArtifactRow) -> object:
+    return await artifact_pages.write_doc(
+        db,
+        page,
+        "votes",
+        "b",
+        DocumentWrite(data={"n": 2}),
+        by="agent",
+        account_id=None,
+        rule=None,
+        now=NOW,
+        limits=_LIMITS,
+    )
+
+
+@pytest.mark.parametrize("change", [_settings, _people, _link, _transfer, _version, _data])
+async def test_a_rerun_refuses_a_page_changed_here_since_its_import(
+    db_session: AsyncSession, tenant: TenantRow, change: Change
+) -> None:
+    """A replace would revert what was done here, so only an unchanged page is replaced."""
+    db = db_session
+    target = _target(tenant, db)
+    await import_page(db, _page(people=[{"discord_id": MEMBER}]), target, now=NOW)
+    again = await import_page(db, _page(people=[{"discord_id": MEMBER}]), target, now=NOW)
+    assert again.action == "replace", "an unchanged page is replaced"
+
+    page = await artifact_pages.get_by_public_id(db, "abcdefgh23")
+    assert page is not None
+    await change(db, page)
+    report = await import_page(db, _page(title="Theirs"), target, now=NOW)
+
+    assert report.action == "refused", report
+    assert report.problems == ("changed here since import",), report.problems
+    kept = await artifact_pages.get_by_public_id(db, "abcdefgh23")
+    assert kept is not None and kept.title != "Theirs", "nothing reverted"
 
 
 async def test_a_page_in_the_way_expired_or_oversized_is_refused_or_skipped(

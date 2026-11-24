@@ -6,7 +6,8 @@ both data reads and events, no ask, and always an expiry. `web_threads.artifact_
 marks a viewer's ask thread for a page, one per person and page. A version's thumbnail
 and a viewer's consent to a page's asks are rows of their own. `artifacts.imported_from`
 is the address a page had elsewhere, unique per workspace: a re-import finds the page by
-it and a legacy host redirects by it.
+it and a legacy host redirects by it. `imported_state` is a digest of the page as its
+import left it: a re-import replaces it only while it still matches.
 
 downgrade: destructive
 """
@@ -48,6 +49,7 @@ def upgrade() -> None:
         sa.Column("data_scale", sa.Integer(), server_default="1", nullable=False),
         sa.Column("link_secret", sa.LargeBinary(), nullable=True),
         sa.Column("imported_from", sa.Text(), nullable=True),
+        sa.Column("imported_state", sa.Text(), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("current_version", sa.Integer(), server_default="0", nullable=False),
         sa.Column("size_bytes", sa.Integer(), server_default="0", nullable=False),
