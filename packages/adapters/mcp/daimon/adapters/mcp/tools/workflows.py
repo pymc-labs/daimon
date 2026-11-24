@@ -354,7 +354,7 @@ def register_workflow_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> Json:
         """Create a workflow as a private draft owned by this person.
 
-        Give a name for a blank one, a starter `template` id, or a whole `spec` (the
+        Pass a name for a blank one, a starter `template` id, or a whole `spec` (the
         daimon.workflow/v1 document). The result is the new workflow as get_workflow shows it.
         """
         return await _create_workflow_impl(
@@ -371,7 +371,7 @@ def register_workflow_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> Json:
         """Change a workflow's draft from the revision you read; nothing goes live.
 
-        Give `edits` (add_node, update_node, remove_node, connect, set_trigger, set_inputs,
+        Pass `edits` (add_node, update_node, remove_node, connect, set_trigger, set_inputs,
         set_start), applied in order, or a whole `spec`. A draft may have problems; they come
         back for you to fix. If the draft moved on, you are told its revision: read it again.
         """
