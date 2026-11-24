@@ -144,7 +144,7 @@ export type ChannelApprovals = {
   available: boolean
   own: ApprovalMode | null
   value: ApprovalMode
-  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread" | "routine"
+  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread" | "routine" | "workflow"
   editable: boolean
 }
 export type CostFooter = { shown: boolean; editable: boolean }

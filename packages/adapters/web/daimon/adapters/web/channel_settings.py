@@ -78,7 +78,9 @@ ChannelAdmin = Annotated[WebCaller, Depends(requires("channels.manage"))]
 WorkspaceAdmin = Annotated[WebCaller, Depends(requires("workspace.manage"))]
 Mode = Literal["on", "off", "disabled"]
 ApprovalMode = Literal["on", "off"]
-Source = Literal["default", "deployment", "workspace", "agent", "channel", "thread", "routine"]
+Source = Literal[
+    "default", "deployment", "workspace", "agent", "channel", "thread", "routine", "workflow"
+]
 _SPEND_DAYS = 30
 _NO_WEB = "Web chat has no such setting."
 _NO_AGENT = "Pick an agent from this workspace."
