@@ -177,7 +177,7 @@ async def test_an_import_keeps_the_id_and_link_and_resolves_people(
         people=[
             {"discord_id": MEMBER},
             {"email": "Guest@Example.com", "google_sub": "sub-1"},
-            {"email": "guest@example.com"},
+            {"email": "guest@example.com", "google_sub": "sub-2"},
         ],
         events=True,
         data="off",
@@ -239,6 +239,7 @@ async def test_an_import_keeps_the_id_and_link_and_resolves_people(
     assert (report.action, report.members, report.visitors, report.watches) == ("create", 1, 1, 2)
     assert report.orphans_ended == 1 and report.problems == (), report
     assert any("30 reports a day" in w for w in report.warnings), report.warnings
+    assert any("differs from the one this guest" in w for w in report.warnings), report.warnings
     row = await artifact_pages.get_by_public_id(db, "abcdefgh23")
     assert row is not None and row.imported_from == LEGACY
     assert (row.slug, row.current_version, row.data_revision) == ("q3-plan", 2, 7)

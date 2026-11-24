@@ -176,14 +176,10 @@ async def _resolve_people(
                 continue
             account = person.account_id
             visitor = person.kind != "member"
-            if (
-                visitor
-                and ref.google_sub is not None
-                and not await _pin(session, person, ref.google_sub, tenant_id)
-            ):
-                warnings.append(
-                    "a Google sign-in belongs to someone else here, so it is not pinned"
-                )
+            if visitor and ref.google_sub is not None:
+                held = await _pin(session, person, ref.google_sub, tenant_id)
+                if held is not None:
+                    warnings.append(f"a Google sign-in {held}, so it is not pinned")
         if account == owner or account in result.accounts:
             result.dropped += 1
             continue
@@ -197,8 +193,9 @@ async def _resolve_people(
 
 async def _pin(
     session: AsyncSession, person: WebPersonRow, subject: str, tenant_id: uuid.UUID
-) -> bool:
-    """Pin the visitor's Google sign-in; False when another person here already holds it."""
+) -> str | None:
+    """Pin the visitor's Google sign-in; why not when another person here already holds it,
+    or the visitor holds another, which would give them two."""
     held = [
         i
         for i in await web_identities.find_identity(
@@ -207,7 +204,10 @@ async def _pin(
         if i.tenant_id == tenant_id
     ]
     if any(i.person_id != person.id for i in held):
-        return False
+        return "belongs to someone else here"
+    own = await web_identities.list_for_person(session, person_id=person.id)
+    if any(i.provider == "google" and i.subject != subject for i in own):
+        return "differs from the one this guest already has"
     await web_identities.link_identity(
         session,
         tenant_id=tenant_id,
@@ -218,7 +218,7 @@ async def _pin(
         label=person.email or "",
         groups=(),
     )
-    return True
+    return None
 
 
 def _state(orm: Artifact) -> str:
