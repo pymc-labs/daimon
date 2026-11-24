@@ -59,8 +59,8 @@ _CREATE_HINT = (
     'Easiest: ask me in a channel, like "every weekday at 9am, post the sales numbers".\n\n'
     "Or fill in the form."
 )
-# Core caps the panel at 25 rows; 18 fit Teams' 28 KB with emoji labels and a status line.
-_ROWS_SHOWN = 18
+# Core caps the panel at 25 rows; 17 fit Teams' 28 KB with emoji labels, a status line and Move.
+_ROWS_SHOWN = 17
 
 Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete", "move"]
 
