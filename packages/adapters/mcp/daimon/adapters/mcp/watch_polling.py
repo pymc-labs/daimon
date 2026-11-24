@@ -72,6 +72,7 @@ from daimon.core.continuity.watch_projection import (
     payload as evidence_payload,
 )
 from daimon.core.errors import WatchFeatureUnreadable
+from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
@@ -557,7 +558,8 @@ async def _authorize_web_poll(
 
 
 async def read_page_data(runtime: McpRuntime, watch: WatchRow) -> JsonValue:
-    """`artifact_db_query` as the watch owner: refused once they can no longer use the page."""
+    """`artifact_db_query` as the watch owner: refused once they can no longer use the page, or
+    `artifacts` is off for its agent (which covers a workspace without artifacts)."""
     arguments = cast(dict[str, JsonValue], watch.source_state["arguments"])
     limits = runtime.settings.artifact_pages
     order_by = cast(str | None, arguments.get("order_by"))
@@ -580,6 +582,9 @@ async def read_page_data(runtime: McpRuntime, watch: WatchRow) -> JsonValue:
         )
         if page is None or role == "none":
             raise PollAccessRevoked("Watch owner can no longer use the page")
+        place = FeaturePlace(watch.tenant_id, "web", agent_id=page.agent_id)
+        if not (await feature_in(db, runtime.settings, place, "artifacts")).on:
+            raise PollAccessRevoked("Pages are off for the page's agent")
         rule = artifact_pages.bound_rule(page, query.collection, role)
         if rule is not None and rule.read == "own":
             query = query.model_copy(update={"created_by": watch.owner_account_id})

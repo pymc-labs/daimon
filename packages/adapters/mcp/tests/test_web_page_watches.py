@@ -42,6 +42,27 @@ pytestmark = pytest.mark.fresh_schema
 KEY = "x" * 43 + "="
 
 
+def _settings(**update: Any) -> Settings:
+    return Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        web={"public_url": "https://pages.example"},  # pyright: ignore[reportArgumentType]
+        crypto={"keys": [KEY]},  # pyright: ignore[reportArgumentType]
+    ).model_copy(update=update)
+
+
+async def _pages_off(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    await set_feature_value(
+        db,
+        tenant_id=tenant_id,
+        target=FeatureTarget("agent", agent_id="agent-web"),
+        key="artifacts",
+        value="off",
+        set_by=None,
+        surface="chat",
+    )
+
+
 async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_holds_one(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -105,12 +126,7 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
             membership_resolver=SimpleNamespace(
                 resolve=AsyncMock(return_value=Membership(is_member=True))
             ),
-            settings=Settings(
-                _env_file=None,  # pyright: ignore[reportCallIssue]
-                database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-                web={"public_url": "https://pages.example"},  # pyright: ignore[reportArgumentType]
-                crypto={"keys": [KEY]},  # pyright: ignore[reportArgumentType]
-            ),
+            settings=_settings(),
         ),
     )
 
@@ -202,24 +218,20 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
     with pytest.raises(ToolError, match="already watch"):
         await watch_as_viewer()
     async with db_session_factory.begin() as db:
-        await set_feature_value(
-            db,
-            tenant_id=tenant.id,
-            target=FeatureTarget("agent", agent_id="agent-web"),
-            key="artifacts",
-            value="off",
-            set_by=None,
-            surface="chat",
-        )
-    with pytest.raises(ToolError, match="This source isn't available here"):
-        await tools.create_watch_impl(
-            runtime,
-            auth(owner, "d-1"),
-            origin_context_id="ctx",
-            instructions="x",
-            source="page_event",
-            page="votes",
-        )
+        await _pages_off(db, tenant.id)
+    for source, extra in (
+        ("page_event", {"page": "votes"}),
+        ("poll", {"tool": "artifact_db_query", "arguments": {"slug": "votes"}}),
+    ):
+        with pytest.raises(ToolError, match="This source isn't available here"):
+            await tools.create_watch_impl(
+                runtime,
+                auth(owner, "d-1"),
+                origin_context_id="ctx",
+                instructions="x",
+                source=source,
+                **extra,
+            )
 
 
 async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
@@ -255,13 +267,7 @@ async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
             now=datetime.now(UTC),
             limits=ArtifactPagesSettings(),
         )
-    runtime = cast(
-        Any,
-        SimpleNamespace(
-            session_factory=db_session_factory,
-            settings=SimpleNamespace(artifact_pages=ArtifactPagesSettings()),
-        ),
-    )
+    runtime = cast(Any, SimpleNamespace(session_factory=db_session_factory, settings=_settings()))
     state = {"tool": "artifact_db_query", "arguments": {"slug": "votes", "collection": "ballots"}}
 
     def watch(account: Any) -> Any:
@@ -272,6 +278,16 @@ async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(
     }
     with pytest.raises(PollAccessRevoked):
         await read_page_data(runtime, watch(other))
+    elsewhere = SimpleNamespace(
+        session_factory=db_session_factory,
+        settings=_settings(artifact_pages=ArtifactPagesSettings(workspaces=(uuid.uuid4(),))),
+    )
+    with pytest.raises(PollAccessRevoked):
+        await read_page_data(cast(Any, elsewhere), watch(owner))
+    async with db_session_factory.begin() as db:
+        await _pages_off(db, tenant.id)
+    with pytest.raises(PollAccessRevoked):
+        await read_page_data(runtime, watch(owner))
 
 
 async def test_a_page_data_poll_by_a_viewer_reads_only_their_documents_under_an_own_rule(
@@ -314,7 +330,7 @@ async def test_a_page_data_poll_by_a_viewer_reads_only_their_documents_under_an_
         Any,
         SimpleNamespace(
             session_factory=db_session_factory,
-            settings=SimpleNamespace(artifact_pages=ArtifactPagesSettings()),
+            settings=_settings(),
         ),
     )
     state = {"tool": "artifact_db_query", "arguments": {"slug": "votes", "collection": "ballots"}}

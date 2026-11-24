@@ -50,6 +50,7 @@ from daimon.core.config import Settings, env_dm_policy, load_watches_settings
 from daimon.core.confirmation import watch_card_skipped
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import (
+    PAGE_DATA_TOOL,
     SourceChanged,
     catalogue_digest,
     require_listed,
@@ -549,9 +550,10 @@ async def create_watch_impl(
             raise ToolError("Name the page to watch in `page`.")
         if delivery == "dm":
             raise ToolError("A page watch reports in this thread or a new one.")
-        await _require_pages_here(runtime, auth.tenant_id, origin)
     elif select is not None or where is not None:
         raise ToolError("`select` and `where` are for page watches; polls use `projection`.")
+    if source == "page_event" or (polled == "poll" and tool == PAGE_DATA_TOOL):
+        await _require_pages_here(runtime, auth.tenant_id, origin)
     principal_platform, owner_id = await owner_principal(runtime, auth, origin)
     await require_skip_defaults(
         runtime,
@@ -676,8 +678,8 @@ async def create_watch_impl(
 async def _require_pages_here(
     runtime: McpRuntime, tenant_id: uuid.UUID, origin: TurnOriginRow
 ) -> None:
-    """A page watch is made only where `artifacts` is On for this place and agent, as the
-    page tools are (`CapabilityGateMiddleware`)."""
+    """A page watch or page-data poll is made only where `artifacts` is On for this place and
+    agent, as the page tools are (`CapabilityGateMiddleware`)."""
     place = FeaturePlace.of(
         tenant_id,
         origin.platform,
