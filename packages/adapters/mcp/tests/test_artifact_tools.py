@@ -632,7 +632,7 @@ async def test_a_hub_client_publishes_as_its_person_where_pages_are_on(
             data=HTML.encode(),
             now=datetime.now(UTC),
         )
-    by = await hub_call(world.runtime, world.auth, "agent-bound")
+    by = await hub_call(world.runtime, world.auth, "agent-bound", "artifact_list")
     page = await publish_impl(
         world.runtime, world.auth, by=by, slug="votes", upload=slot.upload, title="Votes"
     )
@@ -640,7 +640,14 @@ async def test_a_hub_client_publishes_as_its_person_where_pages_are_on(
 
     on.on = False
     with pytest.raises(ToolError, match="Pages are off"):
-        await hub_call(world.runtime, world.auth, "agent-bound")
+        await hub_call(world.runtime, world.auth, "agent-bound", "artifact_list")
+    on.on = True
+    world.runtime.settings = world.runtime.settings.model_copy(
+        update={"artifact_pages": ArtifactPagesSettings(workspaces=(uuid.uuid4(),))}
+    )
+    with pytest.raises(ToolError) as absent:
+        await hub_call(world.runtime, world.auth, "agent-bound", "artifact_list")
+    assert str(absent.value) == "artifact_list isn't available here, so nothing was done."
 
 
 async def _hold_with_outsider(world: World) -> uuid.UUID:

@@ -22,6 +22,7 @@ from inspect import cleandoc
 from typing import Final, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.middleware.capability_gate import absent_refusal
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
@@ -35,6 +36,8 @@ from daimon.core.artifact_pages.events import MAX_WATCHES_PER_PAGE
 from daimon.core.artifact_pages.model import ArtifactError, page_url
 from daimon.core.artifact_pages.standing import outsider_accounts, visitor_accounts
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.features.deployment import in_workspace
+from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.operator_tokens import OperatorScope
@@ -211,9 +214,12 @@ async def person_call(
     )
 
 
-async def hub_call(runtime: McpRuntime, auth: AuthIdentity, agent_id: str) -> PersonCall:
+async def hub_call(runtime: McpRuntime, auth: AuthIdentity, agent_id: str, tool: str) -> PersonCall:
     """A hub client is its person, signed in with their own platform login: a routine
-    never calls through the hub. Pages are on only where the agent has them on."""
+    never calls through the hub. Pages are on only where the agent has them on, and exist
+    only in the workspaces the deployment lists."""
+    if not in_workspace(FEATURES["artifacts"], runtime.settings, auth.tenant_id):
+        raise ToolError(absent_refusal(tool))
     place = FeaturePlace(tenant_id=auth.tenant_id, platform="web", agent_id=agent_id)
     async with runtime.session_factory() as db:
         if not (await feature_in(db, runtime.settings, place, "artifacts")).on:
@@ -935,15 +941,15 @@ HubResolve = Callable[[Context, str], Awaitable[tuple[AuthIdentity, str]]]
 def register_hub_artifact_tools(mcp: FastMCP, runtime: McpRuntime, resolve: HubResolve) -> None:
     """The same tools for hub clients (`hub_call`): each names its Daimon by `daimon_id`."""
 
-    async def person_of(ctx: Context, daimon_id: str) -> tuple[AuthIdentity, PersonCall]:
+    async def person_of(ctx: Context, daimon_id: str, tool: str) -> tuple[AuthIdentity, PersonCall]:
         auth, agent_id = await resolve(ctx, daimon_id)
-        return auth, await hub_call(runtime, auth, agent_id)
+        return auth, await hub_call(runtime, auth, agent_id, tool)
 
     @mcp.tool(name="artifact_upload_url", description=_hub_doc("artifact_upload_url"))
     async def hub_upload_url(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, filename: str = "page.html"
     ) -> UploadSlot:
-        auth, _ = await person_of(ctx, daimon_id)
+        auth, _ = await person_of(ctx, daimon_id, "artifact_upload_url")
         return await upload_url_impl(runtime, auth, filename)
 
     @mcp.tool(name="artifact_publish", description=_hub_doc("artifact_publish"))
@@ -965,7 +971,7 @@ def register_hub_artifact_tools(mcp: FastMCP, runtime: McpRuntime, resolve: HubR
         new_link: bool = False,
         rules: dict[str, CollectionRule] | None = None,
     ) -> Page:
-        auth, by = await person_of(ctx, daimon_id)
+        auth, by = await person_of(ctx, daimon_id, "artifact_publish")
         return await publish_impl(
             runtime,
             auth,
@@ -988,14 +994,14 @@ def register_hub_artifact_tools(mcp: FastMCP, runtime: McpRuntime, resolve: HubR
 
     @mcp.tool(name="artifact_list", description=_hub_doc("artifact_list"))
     async def hub_list(ctx: Context, daimon_id: str) -> Pages:  # pyright: ignore[reportUnusedFunction]
-        auth, _ = await person_of(ctx, daimon_id)
+        auth, _ = await person_of(ctx, daimon_id, "artifact_list")
         return await list_impl(runtime, auth)
 
     @mcp.tool(name="artifact_source", description=_hub_doc("artifact_source"))
     async def hub_source(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, slug: str, version: int | None = None
     ) -> SourceLink:
-        auth, by = await person_of(ctx, daimon_id)
+        auth, by = await person_of(ctx, daimon_id, "artifact_source")
         return await source_impl(runtime, auth, by=by, slug=slug, version=version)
 
     @mcp.tool(name="artifact_db_query", description=_hub_doc("artifact_db_query"))
@@ -1009,7 +1015,7 @@ def register_hub_artifact_tools(mcp: FastMCP, runtime: McpRuntime, resolve: HubR
         limit: int | None = None,
         doc_id: str | None = None,
     ) -> str:
-        auth, _ = await person_of(ctx, daimon_id)
+        auth, _ = await person_of(ctx, daimon_id, "artifact_db_query")
         return await query_impl(
             runtime,
             auth,
@@ -1031,19 +1037,19 @@ def register_hub_artifact_tools(mcp: FastMCP, runtime: McpRuntime, resolve: HubR
         data: dict[str, JsonValue] | None = None,
         mode: WriteMode = "set",
     ) -> Written:
-        auth, _ = await person_of(ctx, daimon_id)
+        auth, _ = await person_of(ctx, daimon_id, "artifact_db_write")
         return await write_impl(
             runtime, auth, slug=slug, collection=collection, doc_id=doc_id, data=data, mode=mode
         )
 
     @mcp.tool(name="artifact_delete", description=_hub_doc("artifact_delete"))
     async def hub_delete(ctx: Context, daimon_id: str, slug: str) -> str:  # pyright: ignore[reportUnusedFunction]
-        auth, by = await person_of(ctx, daimon_id)
+        auth, by = await person_of(ctx, daimon_id, "artifact_delete")
         return await delete_impl(runtime, auth, by=by, slug=slug)
 
     @mcp.tool(name="artifact_transfer", description=_hub_doc("artifact_transfer"))
     async def hub_transfer(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, slug: str, person: str
     ) -> Handed:
-        auth, by = await person_of(ctx, daimon_id)
+        auth, by = await person_of(ctx, daimon_id, "artifact_transfer")
         return await transfer_impl(runtime, auth, by=by, slug=slug, person=person)

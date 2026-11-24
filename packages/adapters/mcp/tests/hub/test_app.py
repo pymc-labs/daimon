@@ -15,6 +15,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
+    ArtifactPagesSettings,
     DatabaseSettings,
     HubSettings,
     McpSettings,
@@ -71,13 +72,13 @@ def _discord_hub(*, signing_key: str | None = None) -> HubSettings:
     )
 
 
-def _runtime(sessionmaker: Any) -> McpRuntime:
+def _runtime(sessionmaker: Any, settings: Settings | None = None) -> McpRuntime:
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     return McpRuntime(
         session_factory=sessionmaker,
         client=build_fake_anthropic(router.dispatch),
-        settings=_settings(),
+        settings=settings or _settings(),
         deployment_default=DeploymentDefault(environment_name=None),
     )
 
@@ -127,9 +128,11 @@ async def _tools_list(app: Starlette, path: str, token: str) -> set[str]:
         return {t["name"] for t in resp.json()["result"]["tools"]}
 
 
+@pytest.mark.parametrize("listed", [True, False])
 async def test_hub_app_lists_exactly_the_hub_tools(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: async_sessionmaker[AsyncSession], listed: bool
 ) -> None:
+    """Without a workspace that has artifacts, the page tools are not listed."""
     tenant = HubTenant(
         tenant_id=uuid.uuid4(), account_id=uuid.uuid4(), workspace_id="g1", workspace_name="PyMC"
     )
@@ -137,15 +140,18 @@ async def test_hub_app_lists_exactly_the_hub_tools(
     auth = StaticTokenVerifier(
         tokens={"tok": {"sub": "u1", "client_id": "c", "upstream_claims": claims}}
     )
+    pages = ArtifactPagesSettings(workspaces=(tenant.tenant_id if listed else uuid.uuid4(),))
+    settings = _settings().model_copy(update={"artifact_pages": pages})
     mcp = build_hub_app(
-        platform="discord", runtime=_runtime(sessionmaker), auth=auth, billing_config=None
+        platform="discord", runtime=_runtime(sessionmaker, settings), auth=auth, billing_config=None
     )
 
     names = await _tools_list(
         mcp.http_app(path="/mcp", stateless_http=True, json_response=True), "/mcp", "tok"
     )
 
-    assert names == _HUB_TOOLS, f"hub surface drifted: {sorted(names)}"
+    expected = _HUB_TOOLS if listed else {n for n in _HUB_TOOLS if not n.startswith("artifact_")}
+    assert names == expected, f"hub surface drifted: {sorted(names)}"
 
 
 async def test_unconfigured_hub_mounts_nothing(

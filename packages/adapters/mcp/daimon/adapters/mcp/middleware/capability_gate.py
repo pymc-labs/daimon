@@ -74,7 +74,8 @@ def _unset_refusal(tool: str, key: str) -> str:
     )
 
 
-def _absent_refusal(tool: str) -> str:
+def absent_refusal(tool: str) -> str:
+    """A tool whose feature does not exist in the caller's workspace (`in_workspace`)."""
     return f"{tool} isn't available here, so nothing was done."
 
 
@@ -181,7 +182,7 @@ class CapabilityGateMiddleware(Middleware):
             return await call_next(context)
         if not in_workspace(FEATURES[key], self._runtime.settings, auth.tenant_id):
             record_denial(UNSET_REASON)
-            raise ToolError(_absent_refusal(tool))
+            raise ToolError(absent_refusal(tool))
         if not server_setup_met(FEATURES[key], self._runtime.settings):
             record_denial(UNSET_REASON)
             raise ToolError(_unset_refusal(tool, key))

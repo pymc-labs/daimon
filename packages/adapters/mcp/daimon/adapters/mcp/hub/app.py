@@ -13,33 +13,63 @@ parent's and re-roots each provider's well-known routes on the parent.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import structlog
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.hub.discord_provider import DaimonDiscordProvider
-from daimon.adapters.mcp.hub.identity import HubIdentityMiddleware
+from daimon.adapters.mcp.hub.identity import HUB_AUTH_STATE_KEY, HubIdentity, HubIdentityMiddleware
 from daimon.adapters.mcp.hub.slack_provider import SlackHubProvider
 from daimon.adapters.mcp.hub.storage import asyncpg_dsn, build_hub_kv_base, hub_kv_for
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.hub import register_hub_tools
 from daimon.core.billing import BillingConfig
+from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.config import Settings
 from daimon.core.errors import BootstrapError
+from daimon.core.features.deployment import in_workspace
+from daimon.core.features.registry import FEATURES
 from daimon.core.stores.domain import Platform
 from fastmcp import FastMCP
 from fastmcp.server.auth.auth import AuthProvider
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools.base import Tool
 from key_value.aio.protocols import AsyncKeyValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
+import mcp.types as mt
+
 log = structlog.get_logger(__name__)
 
 HUB_MCP_PATH = "/mcp"
+
+
+class HubPagesMiddleware(Middleware):
+    """Lists the page tools only to a caller with a workspace that has artifacts; a call
+    elsewhere is refused by `hub_call`."""
+
+    def __init__(self, runtime: McpRuntime) -> None:
+        self._runtime = runtime
+
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
+    ) -> Sequence[Tool]:
+        tools = await call_next(context)
+        ctx = context.fastmcp_context
+        hub = await ctx.get_state(HUB_AUTH_STATE_KEY) if ctx is not None else None
+        spec, settings = FEATURES["artifacts"], self._runtime.settings
+        if isinstance(hub, HubIdentity) and not any(
+            in_workspace(spec, settings, t.tenant_id) for t in hub.tenants
+        ):
+            return [t for t in tools if t.name not in CAPABILITY_TOOLS["artifacts"]]
+        return tools
 
 
 def build_hub_app(
@@ -58,6 +88,7 @@ def build_hub_app(
         ),
     )
     mcp.add_middleware(HubIdentityMiddleware(platform))
+    mcp.add_middleware(HubPagesMiddleware(runtime))
     mcp.add_middleware(MaErrorMiddleware())
     register_hub_tools(mcp, runtime, billing_config=billing_config)
     return mcp
