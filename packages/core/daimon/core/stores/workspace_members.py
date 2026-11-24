@@ -226,7 +226,7 @@ async def list_member_role_ids(
             WorkspaceMember.role_ids.is_not(None),
         )
     )
-    return {user_id: list(roles) for user_id, roles in rows.tuples()}
+    return {user_id: list(roles or ()) for user_id, roles in rows.tuples()}
 
 
 async def clear_members(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:

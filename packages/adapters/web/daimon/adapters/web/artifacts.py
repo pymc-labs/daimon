@@ -270,8 +270,10 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/people")
     async def people(caller: Caller, q: str = Query("", max_length=100)) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
-        """The workspace's people the sharing pickers offer, by account."""
+        """The workspace's people the sharing pickers offer, by account; not to a visitor
+        or an outsider, who shares nothing."""
         async with runtime.sessionmaker() as db:
+            require(not (await viewer_of(db, caller)).is_visitor)
             found = await people_store.list_people(
                 db, tenant_id=caller.person.tenant_id, limit=20, search=q.strip() or None
             )

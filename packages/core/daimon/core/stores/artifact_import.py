@@ -94,8 +94,13 @@ def _problems(page: PageIn, limits: ArtifactPagesSettings) -> list[str]:
     kept = sorted((v.version for v in page.versions), reverse=True)[: limits.versions_kept]
     if page.current_version not in kept:
         found.append(f"current_version {page.current_version} is older than the versions kept")
-    count = size = 0
+    count = size = events = events_size = 0
+    seen: set[tuple[str, str]] = set()
     for doc in page.documents:
+        if (doc.collection, doc.doc_id) in seen:
+            found.append(f"document {doc.collection}/{doc.doc_id} appears twice")
+            continue
+        seen.add((doc.collection, doc.doc_id))
         try:
             if doc.collection != _EVENTS:
                 documents.check_writable_collection(doc.collection)
@@ -105,11 +110,15 @@ def _problems(page: PageIn, limits: ArtifactPagesSettings) -> list[str]:
         except ArtifactError as exc:
             found.append(f"document {doc.collection}/{doc.doc_id}: {exc}")
             continue
-        if doc.collection != _EVENTS:
+        if doc.collection == _EVENTS:
+            events, events_size = events + 1, events_size + measured
+        else:
             count, size = count + 1, size + measured
     scale = page.data_scale
     if count > limits.documents * scale or size > limits.data_bytes * scale:
         found.append(f"the data ({count} documents, {size:,} bytes) is over this page's limits")
+    if events > limits.events * scale or events_size > limits.events_bytes * scale:
+        found.append(f"the events ({events}, {events_size:,} bytes) are over this page's limits")
     return found
 
 
@@ -455,12 +464,17 @@ async def _import_watches(
     tenant_id = target.tenant_id
     ceiling = (await watches.watch_ceilings(session, tenant_id)).per_watch
     legacy_ids = {w.legacy_id for w in page.watches}
+    held = 0  # live watches the page keeps
     for old in await watches.page_watches(session, tenant_id=tenant_id, page_id=page_id):
         if old.source_state.get("legacy_id") in legacy_ids:
             await watches.delete_watch(session, old.id, now=now)
+        elif old.status in ("active", "paused") and (
+            old.expires_at is None or old.expires_at > now
+        ):
+            held += 1
     made = orphans = 0
     for watch in page.watches:
-        note = _unsupported(watch, page, made)
+        note = _unsupported(watch, page, held + made)
         if note is not None:
             warnings.append(f"watch {watch.legacy_id}: {note}")
             continue
@@ -524,11 +538,11 @@ def _projection(watch: WatchIn) -> tuple[str | None, bool]:
     return watch.select, False
 
 
-def _unsupported(watch: WatchIn, page: PageIn, made: int) -> str | None:
+def _unsupported(watch: WatchIn, page: PageIn, live: int) -> str | None:
     if watch.place_type not in _MEMBER_PLACES:
         return f"skipped, a {watch.place_type} cannot hold a page watch"
     if not page.events:
         return "skipped, the page does not send events"
-    if made >= MAX_WATCHES_PER_PAGE:
+    if live >= MAX_WATCHES_PER_PAGE:
         return f"skipped, a page holds at most {MAX_WATCHES_PER_PAGE} watches"
     return None

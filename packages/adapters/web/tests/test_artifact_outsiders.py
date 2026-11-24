@@ -226,12 +226,18 @@ async def test_an_owner_or_editor_turned_outsider_manages_nothing_until_a_member
             assert seen["role"] == "viewer" and not any(seen["can"].values()), (page.slug, seen)
             assert {k: r.status_code for k, r in refused.items()} == dict.fromkeys(refused, 403)
             assert bound.status_code == 403, f"{page.slug}: the collection rules bind a visitor"
+        outsider_picker = await client.get("/api/artifacts/people")
+    async with page_client(factory, t.visitor) as client:
+        visitor_picker = await client.get("/api/artifacts/people")
     await standing(INTERNAL_ROLE)
     async with page_client(factory, t.member) as client:
         back = [
             await client.patch(f"/api/artifacts/{p.id}", json={"title": "Back"}, headers=OWN)
             for p in (mine, edited)
         ]
+        picker = await client.get("/api/artifacts/people")
 
+    assert (outsider_picker.status_code, visitor_picker.status_code) == (403, 403), "no picker"
     assert [r.status_code for r in back] == [200, 200], "the stored role comes back"
+    assert picker.status_code == 200
     assert [r.json()["role"] for r in back] == ["owner", "editor"]

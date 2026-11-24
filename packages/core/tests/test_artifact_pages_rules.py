@@ -322,7 +322,9 @@ def test_a_watch_filter_is_bounded_and_scalar(bad: dict[str, object]) -> None:
 
 @pytest.mark.parametrize("key", ["data.kind", "kind", "Event", ""])
 def test_a_watch_filter_takes_only_top_level_event_fields(key: str) -> None:
-    with pytest.raises(ValueError, match="event, data, by, sender, page_visible_outside_workspace, at"):
+    with pytest.raises(
+        ValueError, match="event, data, by, sender, page_visible_outside_workspace, at"
+    ):
         events.check_where({key: "vote"})
     assert events.check_where({"event": "x" * 256}), "a text up to the limit"
 

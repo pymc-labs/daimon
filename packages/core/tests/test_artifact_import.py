@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,6 +13,7 @@ from cryptography.fernet import Fernet
 from daimon.core._models import Artifact, ArtifactDocument, ArtifactVersion, Watch, WebIdentity
 from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.documents import DocumentWrite
+from daimon.core.artifact_pages.events import MAX_WATCHES_PER_PAGE
 from daimon.core.artifact_pages.importing import Bundle, PageIn, compat_warnings
 from daimon.core.artifact_pages.model import page_url
 from daimon.core.config import ArtifactPagesSettings
@@ -102,7 +104,7 @@ def test_a_bundle_refuses_unknown_fields_and_unsafe_public_pages() -> None:
         "channel_id": "1",
         "place_type": "channel",
         "delivery": "new_thread",
-        "where": {"a": {"b": 1}},
+        "where": {"data.kind": "vote"},
     }
     with pytest.raises(ValidationError, match="where"):
         _page(watches=[bad_watch])
@@ -457,3 +459,53 @@ async def test_an_outsider_editor_refuses_the_page_as_the_store_rule_does(
     assert report.action == "refused", report
     assert any("1 of the owner and editors" in p for p in report.problems), report.problems
     assert await artifact_pages.get_by_public_id(db, "abcdefgh23") is None, "nothing written"
+
+
+def _doc(collection: str, doc_id: str) -> dict[str, Any]:
+    return {
+        "collection": collection,
+        "doc_id": doc_id,
+        "data": {"n": 1},
+        "created_at": "2026-01-02T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+
+
+@pytest.mark.parametrize(
+    ("docs", "problem"),
+    [
+        ([_doc("votes", "a"), _doc("votes", "a")], "votes/a appears twice"),
+        ([_doc("_events", "e1"), _doc("_events", "e2")], "the events (2,"),
+    ],
+)
+async def test_a_repeated_document_or_events_over_the_limit_refuse_the_page(
+    db_session: AsyncSession, tenant: TenantRow, docs: list[dict[str, Any]], problem: str
+) -> None:
+    target = replace(_target(tenant, db_session), limits=ArtifactPagesSettings(events=1))
+    page = _page(access="workspace", events=True, documents=docs)
+    report = await import_page(db_session, page, target, now=NOW)
+    assert report.action == "refused" and any(problem in p for p in report.problems), report
+
+
+async def test_a_page_watch_limit_counts_the_watches_the_page_keeps(
+    db_session: AsyncSession, tenant: TenantRow
+) -> None:
+    target = _target(tenant, db_session)
+
+    def watch(legacy_id: str) -> dict[str, Any]:
+        return {
+            "legacy_id": legacy_id,
+            "instructions": "Tally.",
+            "owner": {"discord_id": OWNER},
+            "channel_id": "4241",
+            "place_type": "channel",
+            "delivery": "new_thread",
+        }
+
+    kept = [watch(f"w{i}") for i in range(MAX_WATCHES_PER_PAGE)]
+    first = _page(events=True, data="off", documents=[], watches=kept)
+    assert (await import_page(db_session, first, target, now=NOW)).watches == MAX_WATCHES_PER_PAGE
+    again = _page(events=True, data="off", documents=[], watches=[watch("extra")])
+    report = await import_page(db_session, again, target, now=NOW)
+    assert report.action == "replace" and report.watches == 0, report
+    assert any("at most" in w for w in report.warnings), report.warnings

@@ -92,10 +92,13 @@ async def fetch_google_profile(http: httpx.AsyncClient, *, access_token: str) ->
 
 
 def google_identity(profile: GoogleProfile) -> VerifiedIdentity:
-    """The identity a profile proves; refused unless Google confirmed its address."""
+    """The identity a profile proves; refused unless Google confirmed its address, and
+    for a non-ASCII one, which sharing by email cannot match."""
     if not profile.email or not profile.email_verified:
         raise WebSignInRefused("Google hasn't confirmed your email address.")
     email = profile.email.strip().lower()
+    if not email.isascii():
+        raise WebSignInRefused("Sign in with an email address in plain letters.")
     return VerifiedIdentity(
         provider="google",
         subject=profile.subject,

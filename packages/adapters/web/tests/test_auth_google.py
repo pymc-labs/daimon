@@ -117,6 +117,20 @@ async def test_an_unconfirmed_email_is_refused_and_pins_nothing(
     assert await _pins(db_session_factory, "g-1") == [], "nothing was pinned"
 
 
+async def test_a_non_ascii_email_is_refused_and_pins_nothing(
+    web_client: WebClientFactory, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    ws = await funded_workspace(db_session_factory)
+    await visitor_of(db_session_factory, ws, email="gus@example.com")
+
+    back, _ = await _sign_in(
+        web_client, db_session_factory, fake_google(sub="g-1", email="güs@example.com")
+    )
+
+    assert _refusal(back) == "Sign in with an email address in plain letters.", back.headers
+    assert await _pins(db_session_factory, "g-1") == [], "nothing was pinned"
+
+
 async def test_a_members_email_never_signs_in_with_google(
     web_client: WebClientFactory, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
