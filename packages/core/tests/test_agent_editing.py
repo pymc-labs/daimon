@@ -10,7 +10,7 @@ import httpx
 import pytest
 from anthropic.types.beta.agent_create_params import Tool
 from daimon.core import agent_editing
-from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_editing import (
     AgentActor,
     AgentEditDeps,
@@ -22,7 +22,7 @@ from daimon.core.authz import Subject, Surface
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import agent_owners
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -330,6 +330,27 @@ async def test_set_places_rewrites_the_rule_of_a_restricted_agent(
     assert policy.agent_rules["helper"].runs_in == ("web", "c2"), (
         "an add on a restricted agent rewrites its rule to the listed places"
     )
+
+
+async def test_set_places_refuses_web_chat_for_an_agent_that_needs_a_role(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    actor = await _actor(db_session, admin=True)
+    gated = TenantAccessPolicy(
+        agent_rules={"helper": AgentRule(invoker_role_ids=("111111111111111111",))}
+    )
+    await set_access_policy(db_session, tenant_id=actor.tenant_id, policy=gated)
+    await db_session.commit()
+    deps = _deps(_router(actor.tenant_id, []), db_session_factory)
+    agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id="ag_x")
+    with pytest.raises(AgentEditError) as refused:
+        await agent_editing.set_places(
+            deps, actor=actor, agent=agent, before=[], after=[PlaceEdit("web")]
+        )
+    assert refused.value.kind == "invalid", "a web chat cannot check a Discord role"
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    assert policy.agent_rules == gated.agent_rules, "the rule is unchanged"
 
 
 async def test_set_places_refuses_an_owner_who_is_not_an_admin_and_writes_nothing(

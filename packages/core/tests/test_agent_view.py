@@ -13,6 +13,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_view
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_view import AgentFacts, AgentViewDeps, AgentViewer, OwnMcpServer, PlaceDoc
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_listing import ListedTool, McpToolLister
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault
@@ -169,6 +170,36 @@ def test_a_rule_that_leaves_web_out_drops_the_web_chat_and_no_rule_keeps_it() ->
     assert [p.id for p in _places(rule=AgentRule(runs_in=("c1",)))] == ["c1"]
     assert [p.id for p in _places()] == ["web"], "an unruled agent answers in web chat"
     assert [p.id for p in _places(rule=AgentRule(runs_in=()))] == [], "nowhere is no place"
+
+
+@pytest.mark.parametrize(
+    ("rule", "own"),
+    [
+        (None, ()),
+        (AgentRule(runs_in=("c1",)), ()),
+        (AgentRule(runs_in=("c1", "web")), ()),
+        (AgentRule(invoker_role_ids=("111111111111111111",)), ()),
+        (AgentRule(runs_in=("c2", "web")), ("c2",)),
+    ],
+)
+def test_web_chat_is_listed_only_where_a_web_chat_may_run_the_agent(
+    rule: AgentRule | None, own: tuple[str, ...]
+) -> None:
+    """The Channels panel says web chat only where the web chat picker offers the agent."""
+    policy = TenantAccessPolicy(
+        agent_rules={"helper": rule} if rule is not None else {},
+        channel_rules={c: ChannelRule(readers="own", writers="own") for c in own},
+    )
+    runs = authorize(
+        policy,
+        subject=Subject(platform_user_id="u1"),
+        action=Action.RUN_AGENT,
+        surface=Surface.WEB,
+        agent=AgentRef.of("helper"),
+        place=Place(channel_id="web:p1", parent_channel_id="web:p1"),
+    )
+    listed = "web" in [p.id for p in _places(rule=rule, own=own)]
+    assert listed == bool(runs), f"web chat listed={listed} but the web chat runs it={bool(runs)}"
 
 
 def test_a_channel_kept_to_its_own_agents_is_confidential() -> None:

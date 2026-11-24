@@ -70,6 +70,7 @@ from daimon.core.permissions import (
     SEALED_REFUSAL,
     WEB_PLACE_ID,
     agent_permissions,
+    is_barred_from_web_chat,
     sealed_outside,
     with_agent_rule,
 )
@@ -91,6 +92,10 @@ BuiltinToolName = Literal[
     "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
 ]
 BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
+WEB_CHAT_BARRED: Final = (
+    "The web chat can't run an agent that needs a Discord role or belongs to one channel. "
+    "Nothing was saved."
+)
 
 AgentEditRefusal = Literal[
     "forbidden", "invalid", "conflict", "stale", "not_found", "taken", "unavailable"
@@ -773,6 +778,9 @@ async def check_places(
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
                 cleared.append(channel_id)
+    added = set(_place_ids(after)) - set(_place_ids(before))
+    if WEB_PLACE_ID in added and is_barred_from_web_chat(policy, names):
+        raise AgentEditError(WEB_CHAT_BARRED, kind="invalid")
     # A private channel's pick is its setting, changed only from inside it, admins too.
     picks = tuple(c for c in (*turn_on, *cleared) if c != WEB_PLACE_ID)
     if picks and sealed_outside(

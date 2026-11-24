@@ -50,7 +50,7 @@ from daimon.core.mcp_tool_listing import ListedTool, McpToolLister, McpToolListi
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.permissions import WEB_PLACE_ID, channel_rule
+from daimon.core.permissions import WEB_PLACE_ID, channel_rule, is_barred_from_web_chat
 from daimon.core.platform_names import UNNAMED_CHANNEL, ChannelLookup, lookup_channel_names
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores import (
@@ -527,7 +527,7 @@ def places_of(
     channel_names: Mapping[str, str],
 ) -> list[PlaceDoc]:
     """Where the agent answers: the channels it is the default of, the ones its rule lets it
-    run in, and the web chat unless its rule keeps it off. Pure.
+    run in, and the web chat unless its rules keep it off or bar it. Pure.
 
     A channel kept to its own agents is confidential. A workspace-wide default and
     direct messages are not places a rule names, so they are not listed.
@@ -554,7 +554,7 @@ def places_of(
         )
         for channel_id in ids
     ]
-    if allowed is None or WEB_PLACE_ID in allowed:
+    if (allowed is None or WEB_PLACE_ID in allowed) and not is_barred_from_web_chat(policy, names):
         places.append(PlaceDoc(id=WEB_PLACE_ID, kind="web", platform="web", name="Web chat"))
     return places
 
