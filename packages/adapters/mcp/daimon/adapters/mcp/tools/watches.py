@@ -549,6 +549,7 @@ async def create_watch_impl(
             raise ToolError("Name the page to watch in `page`.")
         if delivery == "dm":
             raise ToolError("A page watch reports in this thread or a new one.")
+        await _require_pages_here(runtime, auth.tenant_id, origin)
     elif select is not None or where is not None:
         raise ToolError("`select` and `where` are for page watches; polls use `projection`.")
     principal_platform, owner_id = await owner_principal(runtime, auth, origin)
@@ -670,6 +671,23 @@ async def create_watch_impl(
         return summary(watch)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def _require_pages_here(
+    runtime: McpRuntime, tenant_id: uuid.UUID, origin: TurnOriginRow
+) -> None:
+    """A page watch is made only where `artifacts` is On for this place and agent, as the
+    page tools are (`CapabilityGateMiddleware`)."""
+    place = FeaturePlace.of(
+        tenant_id,
+        origin.platform,
+        origin.parent_channel_id,
+        origin.thread_id,
+        agent_id=origin.responder_ma_agent_id,
+    )
+    async with runtime.session_factory() as db:
+        if not (await feature_in(db, runtime.settings, place, "artifacts")).on:
+            raise ToolError("Pages are turned off here, so a page can't be watched.")
 
 
 async def callback_watch_terms(

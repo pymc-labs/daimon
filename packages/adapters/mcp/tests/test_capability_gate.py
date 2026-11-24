@@ -19,6 +19,7 @@ from daimon.adapters.mcp.server import create_mcp_app
 from daimon.adapters.mcp.tools._web_url import tenant_links
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.config import (
+    ArtifactPagesSettings,
     ComputeSettings,
     NotebookSettings,
     ReportHostSettings,
@@ -300,6 +301,25 @@ async def test_notebook_tools_when_the_server_lacks_a_host_leave_a_chat_credenti
     assert "publish_report" in listed, "a tool that is set up stays listed"
     assert f"{FEATURES['notebooks'].name} {UNSET}" in message, f"wrong refusal: {message!r}"
     assert OFF not in message, f"a missing host is not a feature turned off: {message!r}"
+
+
+async def test_page_tools_outside_the_listed_workspaces_leave_every_list_and_are_refused(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`DAIMON_ARTIFACT_PAGES__WORKSPACES` without the caller's workspace: no page tool exists."""
+    settings = _set_up().model_copy(
+        update={"artifact_pages": ArtifactPagesSettings(workspaces=(uuid.uuid4(),))}
+    )
+    mcp = await _app(sessionmaker, settings)
+    tenant_id = await _tenant(sessionmaker)
+    pages = CAPABILITY_TOOLS["artifacts"]
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        listed = {t.name for t in await client.list_tools()}
+        message = await _error(client, "artifact_list", {})
+    assert not listed & pages, f"page tools listed: {listed & pages}"
+    assert "publish_report" in listed, "other tools stay listed"
+    assert message == "artifact_list isn't available in this workspace, so nothing was done."
 
 
 def test_server_gate_key_covers_every_gated_tool_but_the_stop_tools() -> None:

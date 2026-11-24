@@ -17,12 +17,13 @@ from daimon.adapters.mcp.tools import watches as tools
 from daimon.adapters.mcp.watch_polling import PollAccessRevoked, read_page_data
 from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.documents import CollectionRule, DocumentWrite
-from daimon.core.config import ArtifactPagesSettings
+from daimon.core.config import ArtifactPagesSettings, Settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.membership import Membership
 from daimon.core.stores import artifact_pages as store
 from daimon.core.stores import watches
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import FeatureTarget, Role
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.web_identity import place_of, thread_key
 from daimon.testing.factories import (
@@ -33,7 +34,6 @@ from daimon.testing.factories import (
 )
 from daimon.testing.watch_fixtures import install_poll_ports
 from fastmcp.exceptions import ToolError
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import auth_identity
@@ -105,9 +105,11 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
             membership_resolver=SimpleNamespace(
                 resolve=AsyncMock(return_value=Membership(is_member=True))
             ),
-            settings=SimpleNamespace(
-                web=SimpleNamespace(public_url="https://pages.example"),
-                crypto=SimpleNamespace(keys=(SecretStr(KEY),)),
+            settings=Settings(
+                _env_file=None,  # pyright: ignore[reportCallIssue]
+                database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+                web={"public_url": "https://pages.example"},  # pyright: ignore[reportArgumentType]
+                crypto={"keys": [KEY]},  # pyright: ignore[reportArgumentType]
             ),
         ),
     )
@@ -199,6 +201,25 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
     await watch_as_viewer()
     with pytest.raises(ToolError, match="already watch"):
         await watch_as_viewer()
+    async with db_session_factory.begin() as db:
+        await set_feature_value(
+            db,
+            tenant_id=tenant.id,
+            target=FeatureTarget("agent", agent_id="agent-web"),
+            key="artifacts",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    with pytest.raises(ToolError, match="Pages are turned off here"):
+        await tools.create_watch_impl(
+            runtime,
+            auth(owner, "d-1"),
+            origin_context_id="ctx",
+            instructions="x",
+            source="page_event",
+            page="votes",
+        )
 
 
 async def test_a_page_data_poll_reads_as_its_owner_until_they_lose_the_page(

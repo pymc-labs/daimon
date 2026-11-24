@@ -11,7 +11,8 @@ config. Such a caller is refused at call time.
 
 A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
 and its call is refused as not set up: a worker can't judge that setup, and the server's
-settings, so that catalogue, stay fixed while it runs.
+settings, so that catalogue, stay fixed while it runs. So does a tool whose feature does not
+exist in the caller's workspace (`in_workspace`).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
 from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.features.deployment import in_workspace
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
 from daimon.core.features.tool_gate import (
@@ -68,6 +70,10 @@ def _unset_refusal(tool: str, key: str) -> str:
         f"{FEATURES[key].name} isn't set up here yet, so {tool} can't run. Nothing was done. "
         "Ask whoever runs Daimon to set it up."
     )
+
+
+def _absent_refusal(tool: str) -> str:
+    return f"{tool} isn't available in this workspace, so nothing was done."
 
 
 _UNREADABLE: Final = (
@@ -171,6 +177,9 @@ class CapabilityGateMiddleware(Middleware):
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
         if key is None or not isinstance(auth, AuthIdentity):
             return await call_next(context)
+        if not in_workspace(FEATURES[key], self._runtime.settings, auth.tenant_id):
+            record_denial(UNSET_REASON)
+            raise ToolError(_absent_refusal(tool))
         if not server_setup_met(FEATURES[key], self._runtime.settings):
             record_denial(UNSET_REASON)
             raise ToolError(_unset_refusal(tool, key))
@@ -206,7 +215,12 @@ class CapabilityGateMiddleware(Middleware):
         if not isinstance(auth, AuthIdentity):
             return tools
         settings = self._runtime.settings
-        unset = gated_tools(k for k in GATED_KEYS if not server_setup_met(FEATURES[k], settings))
+        unset = gated_tools(
+            k
+            for k in GATED_KEYS
+            if not server_setup_met(FEATURES[k], settings)
+            or not in_workspace(FEATURES[k], settings, auth.tenant_id)
+        )
         tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
         if _lists_everything(auth):
             return tools
