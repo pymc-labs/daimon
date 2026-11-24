@@ -31,6 +31,8 @@ The agent can change settings without an upload. `artifact_source` gives a link,
 
 People are named by their id in the web app, a chat user id or an @mention; a chat member who never opened the web app counts. In the Share dialog of a people page, anyone who may share can add an email address. A person with that address is added. Otherwise Daimon makes a visitor with no agents, adds them, and shows a sign-in link once that opens the page; each person may invite 20 such visitors a day. A public page has a secret link; the agent can replace it with `new_link` when it leaks.
 
+Where `audience_hold` is `on`, a Discord member with no internal role is an outsider and counts as a visitor for pages. They open a `workspace` page only if it names them, and their events carry `sender` `visitor`. They cannot be an editor or owner, or use the page tools. A page that names one is visible outside the workspace.
+
 A page going public expires after 30 days unless the owner sets another expiry; `expires_in_days=0` or Never keeps it for good. Other pages never expire unless asked to. An expired page is hidden and is deleted 30 days later.
 
 ### Roles
@@ -43,7 +45,7 @@ Roles follow Google Drive.
 | Editors | Republish and change settings. They change who can open the page unless the owner turned that off with `editors_can_share`; then, on a page people outside the workspace can open, data, events and `data_scale` and collection rules are locked too. An editor may always leave. |
 | Viewers | Open the page. In the web app they see its Details only, not its data, activity or older versions. |
 
-Editors, and so owners, must be members: visitors can only open pages. The first publisher owns the page. `artifact_transfer` gives it to one of its editors, and the old owner stays an editor. Deleting a page removes its versions, data and watches. Deleting a member's account deletes the pages they own.
+Editors, and so owners, must be members: visitors and outsiders can only open pages. The first publisher owns the page. `artifact_transfer` gives it to one of its editors, and the old owner stays an editor. Deleting a page removes its versions, data and watches. Deleting a member's account deletes the pages they own.
 
 ## What a page may do
 

@@ -19,13 +19,16 @@ from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools import artifacts as artifact_tools
 from daimon.adapters.mcp.tools import watches as watch_tools
 from daimon.adapters.mcp.tools.artifacts import (
+    PersonCall,
     Written,
+    delete_impl,
     hub_call,
     list_impl,
     person_call,
     publish_impl,
     query_impl,
     source_impl,
+    transfer_impl,
     upload_url_impl,
     write_impl,
 )
@@ -41,12 +44,14 @@ from daimon.core.stores.domain import AccountRow, Role, TenantRow
 from daimon.core.stores.file_uploads import store_upload_content
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import bind_origin_session
+from daimon.core.stores.workspace_members import upsert_member
 from daimon.testing.factories import (
     make_account,
     make_platform_principal,
     make_tenant,
     make_web_person,
 )
+from daimon.testing.outsiders import INTERNAL_ROLE, hold_audience, link_discord_member
 from daimon.testing.watch_fixtures import install_poll_ports
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
@@ -638,3 +643,156 @@ async def test_a_hub_client_publishes_as_its_person_where_pages_are_on(
     on.on = False
     with pytest.raises(ToolError, match="Pages are off"):
         await hub_call(world.runtime, world.auth, "agent-bound")
+
+
+async def _hold_with_outsider(world: World) -> uuid.UUID:
+    """`audience_hold` on, the world's member inside it, and a guest on Discord who is not."""
+    async with world.factory.begin() as db:
+        await hold_audience(db, world.tenant.id)
+        await upsert_member(
+            db,
+            tenant_id=world.tenant.id,
+            platform_user_id="123",
+            is_admin=False,
+            now=datetime.now(UTC),
+            role_ids=[INTERNAL_ROLE],
+        )
+        guest = await make_account(db, tenant=world.tenant)
+        await link_discord_member(
+            db, tenant_id=world.tenant.id, account_id=guest.id, internal=False, discord_id="456"
+        )
+    return guest.id
+
+
+async def test_an_outsider_opens_pages_as_a_visitor_and_is_no_editor(world: World) -> None:
+    """Where the audience is held, a Discord guest has no page tool, is named a reader but
+    never an editor, and the page then shows it is open to people outside the workspace."""
+    await put_page(world)
+    guest = await _hold_with_outsider(world)
+    outsider = auth_identity(guest, world.tenant.id, role=Role.USER, platform="discord")
+    with pytest.raises(ToolError, match="Only members can use pages"):
+        await list_impl(world.runtime, outsider)
+    with pytest.raises(ToolError, match="Only members can use pages"):
+        await write_impl(
+            world.runtime,
+            outsider,
+            slug="votes",
+            collection="votes",
+            doc_id="a",
+            data={"n": 1},
+            mode="set",
+        )
+    assert [p.slug for p in (await list_impl(world.runtime, world.auth)).pages] == ["votes"]
+    async with turn(world) as origin_id:
+        by = await person_call(world.runtime, world.auth, origin_id)
+        for refused in (
+            publish_impl(world.runtime, world.auth, by=by, slug="votes", editors=["<@456>"]),
+            transfer_impl(world.runtime, world.auth, by=by, slug="votes", person="456"),
+        ):
+            with pytest.raises(ToolError, match="Only members can edit|editor first"):
+                await refused
+        page = await publish_impl(
+            world.runtime, world.auth, by=by, slug="votes", access_mode="people", people=["<@456>"]
+        )
+    assert page.visible_outside_workspace
+    assert next(
+        p for p in (await list_impl(world.runtime, world.auth)).pages
+    ).visible_outside_workspace
+
+
+async def _admin_token(world: World, *scopes: str) -> AuthIdentity:
+    """An operator token of an admin of the world's workspace."""
+    async with world.factory.begin() as db:
+        admin = await make_account(db, tenant=world.tenant)
+        await make_platform_principal(
+            db, platform="discord", external_id="900", tenant=world.tenant, account=admin
+        )
+    return auth_identity(
+        admin.id,
+        world.tenant.id,
+        role=Role.ADMIN,
+        token_kind="operator",
+        scopes=frozenset(scopes),
+        platform="discord",
+    )
+
+
+async def test_an_artifacts_data_token_lists_and_reads_and_writes_but_changes_no_page(
+    world: World,
+) -> None:
+    """The scope opens the three data tools as the admin who minted it and no others."""
+    await put_page(world)
+    token = await _admin_token(world, "artifacts:data")
+    written = await write_impl(
+        world.runtime,
+        token,
+        slug="votes",
+        collection="votes",
+        doc_id="a",
+        data={"choice": "yes"},
+        mode="set",
+    )
+    assert written.revision == 1
+    seen = await query_impl(
+        world.runtime,
+        token,
+        slug="votes",
+        collection="votes",
+        order_by=None,
+        descending=False,
+        limit=None,
+    )
+    assert json.dumps({"choice": "yes"}) in seen
+    assert [p.slug for p in (await list_impl(world.runtime, token)).pages] == ["votes"]
+    nobody: PersonCall = None  # type: ignore[assignment]
+    for refused in (
+        publish_impl(world.runtime, token, by=nobody, slug="votes", title="x"),
+        source_impl(world.runtime, token, by=nobody, slug="votes", version=None),
+        delete_impl(world.runtime, token, by=nobody, slug="votes"),
+        transfer_impl(world.runtime, token, by=nobody, slug="votes", person="456"),
+        upload_url_impl(world.runtime, token, "a.html"),
+    ):
+        with pytest.raises(ToolError, match="operator token can only"):
+            await refused
+
+
+async def test_an_operator_token_without_artifacts_data_is_refused(world: World) -> None:
+    await put_page(world)
+    token = await _admin_token(world, "tenant:read")
+    with pytest.raises(ToolError, match="does not have the artifacts:data scope"):
+        await list_impl(world.runtime, token)
+
+
+async def test_an_artifacts_data_token_meets_the_rules_its_admin_meets(world: World) -> None:
+    """The token is its admin on the page: the collection rules that bind members leave a
+    manager free, so they leave the token free too."""
+    await put_page(world, collection_rules={"votes": CollectionRule(read="own", write="none")})
+    token = await _admin_token(world, "artifacts:data")
+    written = await write_impl(
+        world.runtime,
+        token,
+        slug="votes",
+        collection="votes",
+        doc_id="a",
+        data={"n": 1},
+        mode="set",
+    )
+    assert written.revision == 1
+    async with world.factory.begin() as db:
+        member = await make_account(db, tenant=world.tenant)
+        await make_platform_principal(
+            db, platform="discord", external_id="457", tenant=world.tenant, account=member
+        )
+    theirs = auth_identity(
+        member.id, world.tenant.id, role=Role.USER, platform="discord", platform_user_id="457"
+    )
+    with pytest.raises(ToolError, match="read-only"):
+        await write_impl(
+            world.runtime,
+            theirs,
+            slug="votes",
+            collection="votes",
+            doc_id="b",
+            data={"n": 1},
+            mode="set",
+        )

@@ -55,6 +55,7 @@ def test_the_panel_never_offers_the_deployment_scope() -> None:
         "agents:archive",
         "promo:redeem",
         "issues:read",
+        "artifacts:data",
     )
 
 

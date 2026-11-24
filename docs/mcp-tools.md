@@ -20,6 +20,7 @@ tool is hidden by default and restored only for a matching caller.
 - **OpenAI and Gemini agents** — carries the `host-memory` tag.
 - **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
+- **all callers, and operator tokens with artifacts:data** — carries the `scope:artifacts:data` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with issues:read** — carries the `scope:issues:read` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -157,10 +158,10 @@ Artifact page tools: publish an HTML page, share it, read and write its data.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `artifact_db_query` | all callers | Read documents from one collection of a page's data. |
-| `artifact_db_write` | all callers | Write or delete one document in a page's data; the page shows it within seconds. |
+| `artifact_db_query` | all callers, and operator tokens with artifacts:data | Read documents from one collection of a page's data. |
+| `artifact_db_write` | all callers, and operator tokens with artifacts:data | Write or delete one document in a page's data; the page shows it within seconds. |
 | `artifact_delete` | all callers | Delete a page with its versions, data and watches. |
-| `artifact_list` | all callers | List the pages you can use: slug, title, URL, version, sharing and capabilities. |
+| `artifact_list` | all callers, and operator tokens with artifacts:data | List the pages you can use: slug, title, URL, version, sharing and capabilities. |
 | `artifact_publish` | all callers | Publish an HTML page at `slug`, or republish it, or change only its settings. |
 | `artifact_source` | all callers | Get a 15-minute URL to download a page's HTML (the current version, or `version`). |
 | `artifact_transfer` | all callers | Give a page to one of its editors (named by their id in the app, a chat user id or an @mention); the old owner stays an editor. |
