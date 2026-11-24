@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Rooms with outside people: a room that blocks a person by name is narrow, and your own DM can read it.**
+  With the feature on, a member overwrite that denies View Channel or Read Message History to an
+  internal person who cannot read the room makes it narrow. In your own DM chat or DM routine,
+  Daimon reads a narrow room when Discord lets you view it. After such a read, that turn posts
+  only to your own DM and saves no routine or timer
+  ([Rooms with outside people](docs/outside-people.md)).
 - **Breaking: compute sessions run on Google Cloud Run only, and their tools are named
   `compute_*`.** The Fly provider is gone. `DAIMON_COMPUTE__PROVIDER`,
   `DAIMON_COMPUTE__API_TOKEN`, `DAIMON_COMPUTE__ORG_SLUG` and a profile's `cpu_kind` are

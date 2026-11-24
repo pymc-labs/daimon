@@ -1583,6 +1583,36 @@ async def test_routine_origin_cannot_promote_handoffs_to_attended(harness: Harne
     assert result.text == "unattended parent" and observed == [False]
 
 
+async def test_routine_origin_holds_own_dm_reach_and_has_read_nothing_through_it(
+    harness: Harness,
+):
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn_origin import current_origin_id
+
+    observed = []
+
+    async def inspect(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        origin_id = current_origin_id.get()
+        assert origin_id is not None
+        async with harness.factory() as db:
+            origin = await get_active_origin(
+                db,
+                origin_id=origin_id,
+                tenant_id=harness.tenant.id,
+                account_id=harness.accounts[OWNER_A],
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert origin is not None
+        observed.append((origin.own_dm_reach, origin.reach_read))
+        async for chunk in answer("unattended parent")(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [inspect]
+    await harness.routine()
+    assert observed == [(True, False)], "the owner-DM routine may reach; it has not read yet"
+
+
 @pytest.mark.parametrize("change", ["agent", "retarget"])
 @pytest.mark.parametrize("stage", ["running", "pending"])
 async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(

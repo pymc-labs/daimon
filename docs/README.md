@@ -33,6 +33,8 @@ server](https://daimon.decision.ai/) instead.
   turn.
 - [Isolation](isolation.md), [Permissions](permissions.md) and
   [Admins](admins.md): who can see and do what.
+- [Rooms with outside people](outside-people.md): which Discord rooms are
+  contained or narrow, and what your own DM can read.
 - [Unattended turns](unattended.md): what runs with nobody watching.
 - [Billing](billing.md): how model calls are metered and gated.
 - [Allowances](allowances.md): per-person spend limits.

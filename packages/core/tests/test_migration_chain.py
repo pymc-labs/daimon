@@ -188,6 +188,7 @@ TAIL = (
     "0224_ops_events",
     "0225_agent_github_grant_removals",
     "0226_compute_tool_names",
+    "0227_turn_origin_own_dm_reach",
 )
 HEAD = TAIL[-1]
 
@@ -529,7 +530,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "column"
-            and name in {"self_helpers", "helper_key"}
+            and name in {"self_helpers", "helper_key", "own_dm_reach", "reach_read"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):

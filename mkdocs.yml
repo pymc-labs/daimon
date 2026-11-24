@@ -43,6 +43,7 @@ nav:
       - Architecture: architecture.md
       - Isolation: isolation.md
       - Permissions: permissions.md
+      - Rooms with outside people: outside-people.md
       - Admins: admins.md
       - Unattended turns: unattended.md
       - Billing: billing.md
