@@ -213,6 +213,22 @@ async def member_is_internal(
     return bool(set(row[0]) & set(internal_role_ids))
 
 
+async def list_member_role_ids(
+    session: AsyncSession, *, tenant_id: uuid.UUID, user_ids: Collection[str]
+) -> dict[str, list[str]]:
+    """The mirror's current role ids of each listed member that has them, in one read."""
+    if not user_ids:
+        return {}
+    rows = await session.execute(
+        select(WorkspaceMember.platform_user_id, WorkspaceMember.role_ids).where(
+            WorkspaceMember.tenant_id == tenant_id,
+            WorkspaceMember.platform_user_id.in_(list(user_ids)),
+            WorkspaceMember.role_ids.is_not(None),
+        )
+    )
+    return {user_id: list(roles) for user_id, roles in rows.tuples()}
+
+
 async def clear_members(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
     """Forget the workspace's list, for an install that ended."""
     await session.execute(delete(WorkspaceMember).where(WorkspaceMember.tenant_id == tenant_id))

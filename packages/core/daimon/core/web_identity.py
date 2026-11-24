@@ -11,6 +11,7 @@ address finds the guests invited by it (`resolve_google_visitors`).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, Literal, NoReturn
@@ -33,7 +34,7 @@ from daimon.core.stores.domain import ChatPlatform, Role, WebPersonRow
 from daimon.core.stores.identity import (
     create_platform_principal,
     find_platform_principal,
-    list_platform_principals_for_account,
+    list_platform_principals_for_accounts,
 )
 from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -346,15 +347,24 @@ async def chat_identity(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> tuple[str, str] | None:
     """`(platform, user id)` of the account's first chat principal in the tenant, if any."""
+    found = await chat_identities(session, tenant_id=tenant_id, account_ids=[account_id])
+    return found.get(account_id)
+
+
+async def chat_identities(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """`chat_identity` of each account that has one, in one read."""
     linked = [
         p
-        for p in await list_platform_principals_for_account(session, account_id=account_id)
-        if p.platform in _LINKABLE and p.tenant_id == tenant_id
+        for p in await list_platform_principals_for_accounts(
+            session, tenant_id=tenant_id, account_ids=account_ids
+        )
+        if p.platform in _LINKABLE
     ]
-    if not linked:
-        return None
-    first = min(linked, key=lambda p: (_LINKABLE.index(p.platform), p.created_at))
-    return first.platform, first.external_id
+    # Later keys win, so each account keeps its first by platform order and age.
+    ordered = sorted(linked, key=lambda p: (_LINKABLE.index(p.platform), p.created_at))
+    return {p.account_id: (p.platform, p.external_id) for p in reversed(ordered)}
 
 
 async def principal_of(

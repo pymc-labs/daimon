@@ -11,9 +11,12 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection
 
+from daimon.core.channel_audience import audience_mode
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores import web_people as people_store
-from daimon.core.turn_hold import RequesterOrg
-from daimon.core.web_identity import chat_identity, linked_member_standing
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.workspace_members import list_member_role_ids
+from daimon.core.web_identity import chat_identities
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -21,16 +24,20 @@ async def outsider_accounts(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
 ) -> frozenset[uuid.UUID]:
     """Of the accounts, those whose chat account is an outsider here; the same verdict as
-    the web principal's `org`, which also keeps their chats to a client's."""
-    found: set[uuid.UUID] = set()
-    for account_id in account_ids:
-        chat = await chat_identity(session, tenant_id=tenant_id, account_id=account_id)
-        if chat is None or chat[0] != "discord":
-            continue
-        standing = await linked_member_standing(session, tenant_id=tenant_id, external_id=chat[1])
-        if standing is RequesterOrg.OUTSIDER:
-            found.add(account_id)
-    return frozenset(found)
+    the web principal's `org` (`linked_member_standing`), which also keeps their chats to a
+    client's. One read each of the mode, the policy, the chat accounts and their roles."""
+    if not account_ids or await audience_mode(session, FeaturePlace(tenant_id, "discord")) != "on":
+        return frozenset()
+    chats = await chat_identities(session, tenant_id=tenant_id, account_ids=account_ids)
+    discord = {a: user_id for a, (platform, user_id) in chats.items() if platform == "discord"}
+    if not discord:
+        return frozenset()
+    # No internal role configured, or none mirrored for the member: an outsider (fail closed).
+    internal = set((await load_access_policy(session, tenant_id=tenant_id)).internal_role_ids)
+    roles = await list_member_role_ids(session, tenant_id=tenant_id, user_ids=discord.values())
+    return frozenset(
+        a for a, user_id in discord.items() if not internal & set(roles.get(user_id, ()))
+    )
 
 
 async def visitor_accounts(

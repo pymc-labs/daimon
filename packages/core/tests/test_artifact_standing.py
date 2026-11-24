@@ -19,6 +19,7 @@ from daimon.core.turn_hold import RequesterOrg
 from daimon.core.web_identity import principal_of
 from daimon.testing.factories import make_account, make_tenant, make_web_person
 from daimon.testing.outsiders import hold_audience, link_discord_member
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 NOW = datetime(2026, 11, 22, 12, tzinfo=UTC)
@@ -107,7 +108,7 @@ async def test_a_workspace_without_the_hold_has_no_outsiders(
     async def off(*_a: object, **_k: object) -> str:
         return "off"
 
-    monkeypatch.setattr("daimon.core.web_identity.audience_mode", off)
+    monkeypatch.setattr("daimon.core.artifact_pages.standing.audience_mode", off)
     found = await visitor_accounts(
         db_session, tenant_id=server.tenant.id, account_ids=[server.outsider.id]
     )
@@ -193,3 +194,28 @@ async def _refresh(db: AsyncSession, page: ArtifactRow) -> ArtifactRow:
     fresh = await store.get(db, page.id)
     assert fresh is not None
     return fresh
+
+
+async def test_standing_reads_as_often_for_many_readers_as_for_one(
+    db_session: AsyncSession, server: Server
+) -> None:
+    """A page's readers are classed together: the reads do not grow with their number. The
+    first call also reads the hold's mode, which the transaction then keeps."""
+    connection = (await db_session.connection()).sync_connection
+    assert connection is not None
+    statements: list[str] = []
+
+    def record(*args: object) -> None:
+        statements.append(str(args[2]))
+
+    everyone = [server.owner.id, server.insider.id, server.outsider.id, server.visitor.id]
+    event.listen(connection, "before_cursor_execute", record)
+    try:
+        counts = []
+        for accounts in (everyone[:1], everyone, everyone[:1]):
+            statements.clear()
+            await visitor_accounts(db_session, tenant_id=server.tenant.id, account_ids=accounts)
+            counts.append(len(statements))
+    finally:
+        event.remove(connection, "before_cursor_execute", record)
+    assert counts[1] == counts[2], f"four readers or one, the same reads: {counts}"
