@@ -1343,6 +1343,8 @@ class TurnOriginRow(BaseModel):
     serves_helpers: bool = False
     self_helpers: bool = False
     helper_key: str | None = None
+    own_dm_reach: bool = False
+    reach_read: bool = False
 
     @property
     def session_thread_id(self) -> str:

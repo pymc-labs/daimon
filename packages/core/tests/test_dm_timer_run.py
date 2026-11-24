@@ -15,14 +15,17 @@ from daimon.core.continuity.wakes import enqueue_wake
 from daimon.core.direct_messages import (
     DirectMessageAccessRevoked,
     owner_dm_turn,
+    run_dm_routine,
     run_dm_timer,
+    run_dm_watch,
 )
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import ContinuationReason, TenantRow
 from daimon.core.stores.task_continuations import get_continuation
-from daimon.core.turn.admission import Admission, AdmissionGrant
+from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource
 from daimon.core.turn.errors import SessionBusyError
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
@@ -155,3 +158,51 @@ async def test_a_timer_waits_while_its_owner_has_a_dm_turn_running(
     async with owner_dm_turn(deps, platform="discord", owner=OWNER, wait=True):
         with pytest.raises(SessionBusyError):
             await run_dm_timer(deps, row, prompt="x")
+
+
+@pytest.mark.parametrize(
+    ("entry", "reach"), [("routine", True), ("timer", False), ("watch", False)]
+)
+async def test_only_the_owner_dm_routine_fire_is_given_own_dm_reach(
+    db_session_factory: async_sessionmaker, monkeypatch, entry: str, reach: bool
+):
+    """Watches and timers share the routine's DM path but never reach a limited room."""
+    tenant, account, row = await seed(
+        db_session_factory, reason="watch_report" if entry == "watch" else "timer"
+    )
+    admission = admission_for(tenant, account.id, "ag_target")
+    patch_world(monkeypatch, admission)
+    monkeypatch.setattr(
+        direct_messages,
+        "bind_session",
+        AsyncMock(
+            return_value=SimpleNamespace(admission=admission, backend=None, ma_session_id="sesn")
+        ),
+    )
+    unattended = AsyncMock(return_value=SimpleNamespace(text="done"))
+    monkeypatch.setattr(direct_messages, "_run_unattended_turn", unattended)
+    monkeypatch.setattr(
+        "daimon.core.stores.watches.record_delivery_session", AsyncMock(return_value=True)
+    )
+    deps = deps_for(None, db_session_factory)
+    source = DmSource(channel_id="4241", thread_id="4242")
+
+    if entry == "routine":
+        await run_dm_routine(
+            deps,
+            tenant_id=tenant.id,
+            owner_user_id=OWNER,
+            agent_name="target-agent",
+            prompt="p",
+            source=None,
+            budget_channel_id=None,
+            requester_org=RequesterOrg.HOST,
+        )
+    elif entry == "timer":
+        await run_dm_timer(deps, row, prompt="p")
+    else:
+        await run_dm_watch(
+            deps, row, owner_user_id=OWNER, prompt="p", source=source, budget_channel_id="4241"
+        )
+
+    assert unattended.await_args.kwargs["own_dm_reach"] is reach

@@ -2759,6 +2759,13 @@ class TurnOrigin(Base):
     self_helpers: Mapped[FalseFlag]
     # A helper turn's own session key, when the helper's agent id does not give it.
     helper_key: Mapped[str | None]
+    # Set at admission, never by a caller: the turn may read a limited room its person can
+    # read themselves (`daimon.core.authz`, READ_CHANNEL). True only for an interactive owner
+    # DM turn and a routine fired by the scheduler's owner-DM path.
+    own_dm_reach: Mapped[FalseFlag]
+    # Set when the turn read a limited room through that reach: for the rest of the turn it
+    # posts and sends direct messages to its person's own DM only.
+    reach_read: Mapped[FalseFlag]
 
 
 class AgentHelper(Base):

@@ -906,6 +906,7 @@ async def _run_admitted_dm_turn(
     tell: TellMonitored | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     reseed_prompt: Callable[[], Awaitable[str]] | None = None,
+    own_dm_reach: bool = False,
 ) -> _DmTurn:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -918,7 +919,8 @@ async def _run_admitted_dm_turn(
     `confirm_write` a write that needs approval is refused, as on any surface with
     no card. `request_text` is the person's own words, for the turn's MCP context, and
     `request_ref` their message's id; `platform_channel_id` and `platform_message_id`
-    are recorded on the turn's origin.
+    are recorded on the turn's origin, with `own_dm_reach` (see `turn_origin`): only the
+    two callers that name an owner's own DM turn set it; a watch or a timer never does.
     """
     async with (
         destination if destination is not None else nullcontext(),
@@ -937,6 +939,7 @@ async def _run_admitted_dm_turn(
             shared_channel=prepared.admission.shared_channel,
             platform_channel_id=platform_channel_id,
             platform_message_id=platform_message_id,
+            own_dm_reach=own_dm_reach,
         ) as turn_origin_row,
     ):
         controls = render_turn_origin(
@@ -1246,6 +1249,7 @@ async def reply_to_dm_result(
                     if reseed_prefix is None
                     else lambda: _reseed_prompt(context, reseed_prefix, text)
                 ),
+                own_dm_reach=platform == "discord",
             )
             turns = bounded_turns(
                 [
@@ -1336,6 +1340,7 @@ async def run_dm_routine(
             prompt=prompt,
             source=source,
             budget_channel_id=budget_channel_id,
+            own_dm_reach=True,
         )
     finally:
         dm_routine_sandbox.reset(token)
@@ -1517,6 +1522,7 @@ async def _run_dm_fire(
     watch_row: TaskContinuationRow | None = None,
     timer_row: TaskContinuationRow | None = None,
     requester_org: RequesterOrg = RequesterOrg.HOST,
+    own_dm_reach: bool = False,
 ) -> DmRoutineReply:
     async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False) as fence:
         now = datetime.now(UTC)
@@ -1630,6 +1636,8 @@ async def _run_dm_fire(
             account_id=admission.account_id,
             watch_row=watch_row,
             fence=fence,
+            # A watch or a timer shares this path but never reaches.
+            own_dm_reach=own_dm_reach and watch_row is None and timer_row is None,
         )
 
 
@@ -1646,8 +1654,13 @@ async def _run_unattended_turn(
     account_id: uuid.UUID,
     watch_row: TaskContinuationRow | None = None,
     fence: OwnerDmFence | None = None,
+    own_dm_reach: bool = False,
 ) -> DmRoutineReply:
-    """Run an admitted unattended fire in its fresh scope; a drain or lost fence settles it."""
+    """Run an admitted unattended fire in its fresh scope; a drain or lost fence settles it.
+
+    `own_dm_reach` is true only for a routine of the scheduler's owner-DM path
+    (`run_dm_routine`): watches, timers and channel timers never reach.
+    """
 
     async def sealed() -> None:
         raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
@@ -1667,6 +1680,7 @@ async def _run_unattended_turn(
             on_sealed=sealed,
             origin="routine",
             watch_row=watch_row,
+            own_dm_reach=own_dm_reach,
         )
     except asyncio.CancelledError:
         if deps.running_turns.is_drain_cancel() or (fence is not None and fence.lost.is_set()):

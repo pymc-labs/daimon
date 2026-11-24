@@ -40,6 +40,7 @@ from daimon.core.authz import (
     Action,
     AgentRef,
     Decision,
+    OwnDmRead,
     Place,
     Subject,
     authorize,
@@ -64,7 +65,12 @@ from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
-from daimon.core.stores.turn_origins import get_active_origin, list_active_origins
+from daimon.core.stores.turn_origins import (
+    get_active_origin,
+    get_live_origin,
+    list_active_origins,
+    mark_reach_read,
+)
 from daimon.core.turn_hold import TurnHold
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,6 +122,19 @@ _AUDIENCE_MSG = (
 _AUDIENCE_UNREADABLE_MSG = (
     "who can read this channel could not be checked, so daimon did not post there. "
     "Tell the caller to try again later."
+)
+_REACH_LATCH_MSG = (
+    "this conversation read a room that only some people can read, so it posts and sends "
+    "only into the caller's own direct messages with Daimon for the rest of this turn. "
+    "Tell the caller. Do not retry."
+)
+_REACH_SCHEDULE_MSG = (
+    "this conversation read a room that only some people can read, so it sets up no routine "
+    "or timer for the rest of this turn: a later run would carry what it read. "
+    "Tell the caller to ask again in a new message. Do not retry."
+)
+_REACH_RECORD_MSG = (
+    "this read could not be recorded, so nothing was returned. Tell the caller to try again."
 )
 _AMBIGUOUS_HOLD_MSG = (
     "this agent is answering in more than one channel kept to its own agents at once, so "
@@ -193,6 +212,14 @@ async def require_channel_writable(
         own_dm=_is_requesters_own_dm(channel_id),
     )
     subject = mcp_subject(auth)
+    if await caller_reach_latched(runtime, auth):
+        # The latch rule does not depend on the tenant policy: `authorize` decides it alone.
+        refusal = authorize(
+            OPEN_ACCESS_POLICY, subject=subject, action=Action.POST, place=place, reach_latched=True
+        )
+        if refusal.reason == "reach_latched":
+            record_authz_denial(Action.POST, refusal.reason)
+            raise ToolError(_REACH_LATCH_MSG)
     # Who can read the destination is read first and is final: a room that outsiders can
     # read takes a post only from a turn held to it, whatever the rules below say. The
     # policy, the mode and the fact share one session; a server with no `audience_hold`
@@ -402,6 +429,17 @@ async def require_dm_recipient_allowed(
     Keeps such an agent admitted in an admin's DM or hub turn from carrying
     its context to any other workspace member through a direct message.
     """
+    if await caller_reach_latched(runtime, auth):
+        refusal = authorize(
+            OPEN_ACCESS_POLICY,
+            subject=mcp_subject(auth),
+            action=Action.DIRECT_MESSAGE,
+            recipient_id=recipient_id,
+            reach_latched=True,
+        )
+        if refusal.reason == "reach_latched":
+            record_authz_denial(Action.DIRECT_MESSAGE, refusal.reason)
+            raise ToolError(_REACH_LATCH_MSG)
     if not _restricted(auth) and auth.chat_agent_id is None and auth.agent_id is None:
         return
     policy = await load_channel_policy(runtime, auth)
@@ -638,8 +676,12 @@ class ChannelReadPolicy:
     subject: Subject = field(default_factory=Subject)
     #: The channel a held credential stays in; None for an unheld call.
     hold: TurnHold | None = None
+    #: Targets this call read through own-DM reach; `record_reach` latches the turn.
+    reached: set[str] = field(default_factory=set[str], compare=False)
 
-    def _decide(self, channel_id: str, parent_channel_id: str | None) -> Decision:
+    def _decide(
+        self, channel_id: str, parent_channel_id: str | None, *, caller_checked: bool = False
+    ) -> Decision:
         inside = self.origin_channel_ids
         if self.hold is not None and self.hold.contains(channel_id, parent_channel_id):
             # The credential places the call in the channel, so what limits its
@@ -647,16 +689,50 @@ class ChannelReadPolicy:
             inside = inside | {channel_id, self.hold.channel_id}
             if parent_channel_id is not None:
                 inside = inside | {parent_channel_id}
-        return authorize(
-            self.policy,
-            subject=self.subject,
-            action=Action.READ_CHANNEL,
-            agent=self.agent,
-            place=Place(channel_id=channel_id, parent_channel_id=parent_channel_id),
-            origin_channel_ids=inside,
-            origin=self.origin_place,
-            hold=self.hold,
-        )
+
+        def decide(own_dm_read: OwnDmRead | None) -> Decision:
+            return authorize(
+                self.policy,
+                subject=self.subject,
+                action=Action.READ_CHANNEL,
+                agent=self.agent,
+                place=Place(channel_id=channel_id, parent_channel_id=parent_channel_id),
+                origin_channel_ids=inside,
+                origin=self.origin_place,
+                hold=self.hold,
+                own_dm_read=own_dm_read,
+            )
+
+        decision = decide(None)
+        # Own-DM reach: only a turn whose origin holds the server-set capability, and only
+        # for a target the adapter checked for the caller itself in this call.
+        if (
+            decision.reason != "not_a_reader"
+            or not caller_checked
+            or self.origin is None
+            or not self.origin.own_dm_reach
+        ):
+            return decision
+        reached = decide(OwnDmRead(self.origin.platform, frozenset({channel_id})))
+        if reached:
+            self.reached.add(channel_id)
+        return reached
+
+    async def record_reach(self, runtime: McpRuntime) -> None:
+        """Latch the calling turn if this call read a limited room through reach.
+
+        Call before returning content. A failed write refuses the call: nothing is returned.
+        """
+        if not self.reached or self.origin is None:
+            return
+        try:
+            async with runtime.session_factory.begin() as session:
+                recorded = await mark_reach_read(session, origin_id=self.origin.id)
+        except Exception as exc:
+            _log.warning("reach.latch_failed", error=type(exc).__name__)
+            raise ChannelReadRefused(_REACH_RECORD_MSG) from exc
+        if not recorded:
+            raise ChannelReadRefused(_REACH_RECORD_MSG)
 
     @property
     def withholds_hits(self) -> bool:
@@ -665,8 +741,16 @@ class ChannelReadPolicy:
         readers are limited, or the call is held to one channel."""
         return self.hold is not None or any_readers_limited(self.policy)
 
-    def allows(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
-        return bool(self._decide(channel_id, parent_channel_id))
+    def allows(
+        self,
+        channel_id: str,
+        parent_channel_id: str | None = None,
+        *,
+        caller_checked: bool = False,
+    ) -> bool:
+        """`caller_checked` is the adapter's evidence that it checked the caller's own live
+        View, History and thread membership for exactly this `channel_id` in this call."""
+        return bool(self._decide(channel_id, parent_channel_id, caller_checked=caller_checked))
 
     def lists(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
         """Whether a channel list may name this channel: a call held to a channel
@@ -677,12 +761,18 @@ class ChannelReadPolicy:
         held = home_hold(self.policy, self.agent, self.origin_place)
         return held is None or held == home_of(self.policy, channel_id, parent_channel_id)
 
-    def require(self, channel_id: str, parent_channel_id: str | None = None) -> None:
+    def require(
+        self,
+        channel_id: str,
+        parent_channel_id: str | None = None,
+        *,
+        caller_checked: bool = False,
+    ) -> None:
         """Raise ToolError for a target whose readers exclude the calling turn, or
         any target outside the channel the call is held to.
 
-        Call after the platform's caller-permission check."""
-        decision = self._decide(channel_id, parent_channel_id)
+        Call after the platform's caller-permission check. `caller_checked` is as in `allows`."""
+        decision = self._decide(channel_id, parent_channel_id, caller_checked=caller_checked)
         if decision:
             return
         if decision.reason in _HELD_REASONS:
@@ -844,6 +934,44 @@ async def _held_origin(
     if len(held) > 1:
         raise ToolError(_AMBIGUOUS_HOLD_MSG)
     return next(iter(held.values()), passed)
+
+
+async def caller_reach_latched(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """Whether a running turn of this caller's session read a limited room through reach.
+
+    Read from the signed session grant's own origins, so a call that names no origin, or
+    another, escapes nothing. A helper's turn takes its asking turn's latch.
+    """
+    running = await list_running_origins(runtime, auth)
+    if any(origin.reach_read for origin in running):
+        return True
+    asking = [origin.helper_of for origin in running if origin.helper_of is not None]
+    if not asking:
+        return False
+    async with runtime.session_factory() as session:
+        for origin_id in asking:
+            parent = await get_live_origin(
+                session,
+                origin_id=origin_id,
+                tenant_id=auth.tenant_id,
+                platform=auth.platform or "",
+                now=datetime.now(UTC),
+            )
+            if parent is not None and parent.reach_read:
+                return True
+    return False
+
+
+async def require_schedulable(runtime: McpRuntime, auth: AuthIdentity) -> None:
+    """A turn that read a limited room through reach saves no routine and no timer.
+
+    Their words run later in a turn that the latch does not hold, so they would carry
+    what this turn read to wherever that turn posts. A watch needs no check here: its
+    owner approves its exact words on a card first.
+    """
+    if await caller_reach_latched(runtime, auth):
+        record_authz_denial(Action.SAVE_ROUTINE, "reach_latched")
+        raise ToolError(_REACH_SCHEDULE_MSG)
 
 
 async def list_running_origins(runtime: McpRuntime, auth: AuthIdentity) -> list[TurnOriginRow]:
