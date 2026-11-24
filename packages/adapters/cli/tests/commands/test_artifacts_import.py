@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from typer.testing import CliRunner
 
 GUILD = "777"
-LINK = "legacy-link-value"
+LINK = "legacy-link-value-0123456789"
 
 
 def _bundle(guild: str = GUILD) -> dict[str, object]:
@@ -127,3 +127,17 @@ async def test_a_provisional_export_can_be_previewed_but_not_applied(operator, t
     assert refused.exit_code != 0 and "re-export with --apply first" in refused.output
     async with operator.factory() as db:
         assert await get_by_public_id(db, "abcdefgh23") is None
+
+
+async def test_each_file_is_read_once_so_what_was_checked_is_imported(
+    operator, tmp_path, monkeypatch
+):
+    (tmp_path / "q3-plan.json").write_text(json.dumps(_bundle()))
+    reads: list[str] = []
+    read = commands._read
+    monkeypatch.setattr(commands, "_read", lambda path: reads.append(path.name) or read(path))
+
+    done = await run(operator, tmp_path, "--apply")
+
+    assert done.exit_code == 0, done.output
+    assert reads == ["q3-plan.json"], "a file changed after the checks is never imported"

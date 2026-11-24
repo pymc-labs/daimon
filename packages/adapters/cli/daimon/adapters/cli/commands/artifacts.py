@@ -71,31 +71,29 @@ def import_command(
     own with --apply. A rerun replaces a page imported from the same address in place and
     refuses any other name or id that is taken. Prints counts, never HTML, data or links.
     """
-    files = _files(directory)
-    slugs: set[str] = set()
-    guilds: set[str] = set()
-    for path in files:
-        bundle = _read(path)
+    # Each file is read once: what was checked here is what is imported.
+    bundles = {path: _read(path) for path in _files(directory)}
+    for path, bundle in bundles.items():
         if apply and bundle.provisional:
             typer.echo(f"{path.name} is provisional: re-export with --apply first", err=True)
             raise typer.Exit(1)
-        slugs.add(bundle.page.slug)
-        guilds.add(bundle.guild_id)
+    slugs = frozenset(b.page.slug for b in bundles.values())
+    guilds = {b.guild_id for b in bundles.values()}
 
     async def run() -> int:
         async with build_runtime(load_settings()) as runtime:
-            target = await _target(runtime, tenant, agent, guilds, frozenset(slugs))
+            target = await _target(runtime, tenant, agent, guilds, slugs)
             now = datetime.now(UTC)
             reports: list[PageReport] = []
             if apply:
-                for path in files:
+                for bundle in bundles.values():
                     async with runtime.sessionmaker.begin() as db:
-                        reports.append(await import_page(db, _read(path).page, target, now=now))
+                        reports.append(await import_page(db, bundle.page, target, now=now))
             else:
                 async with runtime.sessionmaker() as db, db.begin() as transaction:
-                    for path in files:
+                    for bundle in bundles.values():
                         async with db.begin_nested():
-                            reports.append(await import_page(db, _read(path).page, target, now=now))
+                            reports.append(await import_page(db, bundle.page, target, now=now))
                     await transaction.rollback()
         for report in reports:
             for line in _line(report):
