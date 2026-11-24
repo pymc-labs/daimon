@@ -79,6 +79,69 @@ async def test_a_request_without_the_exact_token_runs_nothing(
         assert other.status_code == 401, path
 
 
+class _User:
+    def __init__(self, uid: int, gid: int) -> None:
+        self.pw_uid, self.pw_gid = uid, gid
+
+
+def _record_identity_calls(monkeypatch: pytest.MonkeyPatch, *, euid: int) -> list[object]:
+    calls: list[object] = []
+    monkeypatch.setattr(os, "geteuid", lambda: euid)
+    monkeypatch.setattr(os, "setgroups", lambda groups: calls.append(("groups", groups)))
+    monkeypatch.setattr(os, "setresgid", lambda *ids: calls.append(("gid", ids)))
+    monkeypatch.setattr(os, "setresuid", lambda *ids: calls.append(("uid", ids)))
+    return calls
+
+
+def test_started_as_root_the_server_is_one_user_and_acts_as_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real and saved ids decide who may signal the server; the effective ids own its files."""
+    users = {"server": _User(10001, 20001), "work": _User(10000, 20000)}
+    monkeypatch.setattr(entry.pwd, "getpwnam", users.__getitem__)
+    calls = _record_identity_calls(monkeypatch, euid=0)
+    entry.separate_users()
+    assert calls == [
+        ("groups", []),
+        ("gid", (20001, 20000, 20001)),
+        ("uid", (10001, 10000, 10001)),
+    ], "groups and gids change first: giving up root ends the right to change them"
+
+    monkeypatch.setattr(entry.pwd, "getpwnam", {"work": users["work"]}.__getitem__)
+    with pytest.raises(SystemExit, match="must exist"):
+        entry.separate_users()
+
+
+def test_not_started_as_root_the_server_says_that_commands_share_its_user(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _record_identity_calls(monkeypatch, euid=10000)
+    entry.separate_users()
+    assert calls == []
+    assert "can stop the server" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("two_users", [False, True])
+async def test_a_command_keeps_only_the_user_the_server_acts_as(
+    monkeypatch: pytest.MonkeyPatch, two_users: bool
+) -> None:
+    """With a second, real user the command would be allowed to signal the server."""
+    seen: dict[str, object] = {}
+    spawn = tools.asyncio.create_subprocess_exec
+
+    async def spy(*args: object, **options: object) -> object:
+        seen.update(options)
+        return await spawn(*args, **options)
+
+    monkeypatch.setattr(tools.asyncio, "create_subprocess_exec", spy)
+    if two_users:
+        monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
+    result = await tools.run_bash("id -u; id -g", timeout_s=20)
+    assert result["stdout"] == f"{os.geteuid()}\n{os.getegid()}\n"
+    expected = (os.geteuid(), os.getegid()) if two_users else (None, None)
+    assert (seen["user"], seen["group"]) == expected
+
+
 def test_an_empty_token_is_never_a_valid_server() -> None:
     for blank in ("", "   "):
         with pytest.raises(ValueError, match="token"):
@@ -97,6 +160,7 @@ def test_the_server_does_not_start_without_the_token(monkeypatch: pytest.MonkeyP
         raise AssertionError("the server started without a token")
 
     monkeypatch.setattr(uvicorn, "run", never)
+    monkeypatch.setattr(entry, "separate_users", never)
     for environment in ({}, {"MCP_AUTH_TOKEN": ""}, {"MCP_AUTH_TOKEN": "  "}):
         monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
         for name, value in environment.items():
@@ -111,17 +175,21 @@ def test_the_server_listens_on_every_interface_and_keeps_the_token_from_commands
     monkeypatch: pytest.MonkeyPatch, port: str | None, expected: int
 ) -> None:
     started: dict[str, object] = {}
+    order: list[str] = []
 
     def run(app: object, **options: object) -> None:
+        order.append("listen")
         started.update(options)
 
     monkeypatch.setattr(uvicorn, "run", run)
+    monkeypatch.setattr(entry, "separate_users", lambda: order.append("separate users"))
     monkeypatch.setenv("MCP_AUTH_TOKEN", TOKEN)
     monkeypatch.delenv("PORT", raising=False)
     if port is not None:
         monkeypatch.setenv("PORT", port)
     entry.main()
     assert (started["host"], started["port"]) == ("0.0.0.0", expected)
+    assert order == ["separate users", "listen"], "no request is served while still root"
     assert "MCP_AUTH_TOKEN" not in os.environ, "commands inherit the server's environment"
 
 
@@ -201,6 +269,18 @@ async def test_run_bash_is_bash_and_merges_stderr(tool: Call) -> None:
     assert (await tool("run_bash", {"command": "pwd"}))["stdout"] == os.getcwd() + "\n"
 
 
+@pytest.mark.parametrize(
+    ("command", "exit_code"),
+    [("exit 3", 3), ("no-such-command-here", 127), ("kill -KILL $$", 137), ("kill -TERM $$", 143)],
+)
+async def test_run_bash_reports_an_end_by_signal_as_a_shell_does(
+    tool: Call, command: str, exit_code: int
+) -> None:
+    """128 + signal number, the code the background command scripts record."""
+    result = await tool("run_bash", {"command": command})
+    assert (result["exit_code"], result["timed_out"]) == (exit_code, False)
+
+
 async def test_run_bash_stops_a_command_and_its_children_at_the_timeout() -> None:
     started = time.monotonic()
     result = await tools.run_bash("sleep 30 & echo $!; wait", timeout_s=0.2)
@@ -209,7 +289,7 @@ async def test_run_bash_stops_a_command_and_its_children_at_the_timeout() -> Non
     child = int(result["stdout"])
     with _left_running(child):
         assert result == {
-            "exit_code": -1,
+            "exit_code": 137,
             "stdout": f"{child}\n",
             "timed_out": True,
             "truncated": False,
@@ -244,6 +324,18 @@ async def test_run_bash_keeps_the_start_of_long_output(
     assert (result["exit_code"], result["truncated"]) == (0, True)
 
 
+async def test_run_bash_cuts_long_output_between_characters(
+    tool: Call, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tools, "MAX_STDOUT_BYTES", 1000)  # 333 euro signs and one byte more
+    result = await tool("run_bash", {"command": "for i in $(seq 400); do printf '€'; done"})
+    assert (result["stdout"], result["truncated"]) == ("€" * 333, True)
+    whole = await tool("run_bash", {"command": "printf 'ok \\377 \\342\\202'"})
+    assert (whole["stdout"], whole["truncated"]) == ("ok \ufffd \ufffd", False), (
+        "output that is not UTF-8 is shown with replacement characters"
+    )
+
+
 async def test_write_then_read_in_chunks(tool: Call, tmp_path: Path) -> None:
     path = str(tmp_path / "new" / "dir" / "notes.txt")
     text = "naïve café\nline two\n"
@@ -260,6 +352,7 @@ async def test_write_then_read_in_chunks(tool: Call, tmp_path: Path) -> None:
         "size": size,
         "offset": 0,
         "bytes": size,
+        "encoding": "utf-8",
         "content": text,
         "eof": True,
     }
