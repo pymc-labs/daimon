@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The web chat runs an agent kept to Discord roles for people who hold them.** A person
   whose linked Discord account holds the role now finds the agent in the web chat picker; the
-  roles come from the member list Daimon keeps and are checked with Discord again before the
-  agent runs. Anyone else, or a person with no linked account, still can't run it there
+  roles come from the member list Daimon keeps and are checked live with Discord before each
+  step. A server's own role list now applies there the same way, where it refused every web
+  turn before; its admin bypass is a live Discord admin's, not the web role's. Anyone else, or
+  a person with no linked account, still can't run it there
   ([Admins](docs/admins.md#limit-an-agent-to-roles)).
 - **The agent page shows where an agent really answers and what its servers offer.** Web
   chat is not listed for a channel's own agent, and turning it on there is refused. The

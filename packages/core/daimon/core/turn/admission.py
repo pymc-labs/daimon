@@ -2512,7 +2512,9 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
             deps.membership_resolver,
             tenant_id=grant.tenant_id,
             user_id=grant.subject.platform_user_id,
+            # The web app gets no gateway events to expire its cache: it always asks.
             require_fresh=grant.act_for_creator
+            or grant.surface is Surface.WEB
             or bool(agent_invoker_roles(policy, grant.agent.names)),
         )
         if subject.verified_membership is not True:

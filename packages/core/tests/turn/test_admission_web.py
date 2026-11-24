@@ -139,17 +139,24 @@ async def test_web_binding_answers_only_its_creator(
 
 
 def _member_deps(
-    factory: async_sessionmaker[AsyncSession], tmp_path: Path, tenant: TenantRow, facts: Membership
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    tenant: TenantRow,
+    facts: list[Membership] | None,
 ) -> TurnDeps:
+    """Discord answers ``facts[0]`` on each lookup; None is a web app with no bot token."""
+
     async def fetch(*_args: object) -> Membership:
-        return facts
+        assert facts is not None
+        return facts[0]
 
     deps = _deps(sessionmaker=factory, defaults_root=tmp_path, router=_admittable_router(tenant))
-    return replace(deps, membership_resolver=CachedMembershipResolver(fetch))
+    resolver = CachedMembershipResolver(fetch) if facts is not None else None
+    return replace(deps, membership_resolver=resolver)
 
 
 async def _admit_linked(
-    deps: TurnDeps, tenant: TenantRow, role_ids: tuple[str, ...] = ()
+    deps: TurnDeps, tenant: TenantRow, role_ids: tuple[str, ...] = (), role: Role | None = None
 ) -> Admission:
     """A web turn of a member whose linked Discord account the member mirror lists."""
     return await admit_chat(
@@ -162,39 +169,65 @@ async def _admit_linked(
         now=_NOW,
         surface=Surface.WEB,
         principal_platform="discord",
+        role=role,
         role_ids=role_ids,
         verified_membership=True,
     )
 
 
-@pytest.mark.parametrize(("roles", "runs"), [(("9001",), True), (("9002",), False), ((), False)])
-async def test_a_role_gated_agent_answers_a_web_member_whose_linked_account_holds_the_role(
+_GATED = TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("9001",))})
+
+
+async def test_a_role_gated_agent_runs_in_the_web_chat_while_discord_says_the_role_is_held(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """The member mirror lists the role (`principal_of`); Discord is asked before each step."""
+    tenant = await _seed_admittable_tenant(db_session, policy=_GATED)
+    facts = [Membership(is_member=True, role_ids=("9001",))]
+    deps = _member_deps(db_session_factory, tmp_path, tenant, facts)
+    admission = await reauthorize(deps, await _admit_linked(deps, tenant, role_ids=("9001",)))
+    facts[0] = Membership(is_member=True)
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await reauthorize(deps, admission)
+
+
+@pytest.mark.parametrize(
+    "live",
+    [Membership(is_member=False), Membership(is_member=True), Membership(), None],
+    ids=["left", "role-removed", "discord-unreachable", "no-resolver"],
+)
+async def test_a_role_gated_agent_refuses_a_mirror_holder_discord_does_not_confirm(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    roles: tuple[str, ...],
-    runs: bool,
+    live: Membership | None,
 ) -> None:
-    """The roles are the linked account's (`principal_of`), asked of Discord again before it runs."""
+    tenant = await _seed_admittable_tenant(db_session, policy=_GATED)
+    deps = _member_deps(db_session_factory, tmp_path, tenant, None if live is None else [live])
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await reauthorize(deps, await _admit_linked(deps, tenant, role_ids=("9001",)))
+
+
+async def test_a_web_admin_passes_a_workspace_role_list_only_as_a_live_discord_admin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """The admin bypass is Discord's, asked again before each step: the web role is not it."""
     tenant = await _seed_admittable_tenant(
-        db_session,
-        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("9001",))}),
+        db_session, policy=TenantAccessPolicy(invoker_role_ids=("9001",))
     )
-    deps = _member_deps(
-        db_session_factory, tmp_path, tenant, Membership(is_member=True, role_ids=roles)
-    )
-    try:
-        await reauthorize(deps, await _admit_linked(deps, tenant, role_ids=roles))
-    except AdmissionDenied as denied:
-        assert not runs and denied.reason == "invoker_not_allowed"
-    else:
-        assert runs, "only a holder of the agent's role runs it"
+    facts = [Membership(is_member=True, role_ids=("9002",), is_admin=True)]
+    deps = _member_deps(db_session_factory, tmp_path, tenant, facts)
+    admitted = await _admit_linked(deps, tenant, role_ids=("9002",), role=Role.ADMIN)
+    admission = await reauthorize(deps, admitted)
+    facts[0] = Membership(is_member=True, role_ids=("9002",))
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await reauthorize(deps, admission)
 
 
 async def test_a_web_turn_is_not_refused_when_discord_cannot_answer_and_no_role_applies(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=None)
-    deps = _member_deps(db_session_factory, tmp_path, tenant, Membership())
+    deps = _member_deps(db_session_factory, tmp_path, tenant, [Membership()])
     admission = await _admit_linked(deps, tenant)
     assert await reauthorize(deps, admission) == admission, "the member mirror is enough"
