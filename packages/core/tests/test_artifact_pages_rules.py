@@ -280,14 +280,26 @@ def test_build_event_carries_server_facts_and_refuses_oversize() -> None:
 
 
 def test_a_watch_filter_matches_every_key_to_one_of_its_values() -> None:
-    doc: dict[str, JsonValue] = {"event": "vote", "sender": "member", "outside": False, "n": 1}
-    where = events.check_where({"event": ["vote", "undo"], "sender": "member", "outside": False})
+    doc: dict[str, JsonValue] = {
+        "event": "vote",
+        "sender": "member",
+        "page_visible_outside_workspace": False,
+        "by": None,
+    }
+    where = events.check_where(
+        {"event": ["vote", "undo"], "sender": "member", "page_visible_outside_workspace": False}
+    )
     assert events.event_matches(where, doc)
     assert events.event_matches(None, doc), "no filter wakes on everything"
-    for other in ({"event": "poke"}, {"outside": 0}, {"n": True}, {"missing": "x"}):
+    for other in (
+        {"event": "poke"},
+        {"page_visible_outside_workspace": 0},
+        {"by": True},
+        {"at": "x"},
+    ):
         assert not events.event_matches(other, doc), other
-    assert (
-        events.describe_where(where) == "event is vote or undo; sender is member; outside is false"
+    assert events.describe_where(where) == (
+        "event is vote or undo; sender is member; page_visible_outside_workspace is false"
     )
     assert events.describe_where(None) is None
 
@@ -297,15 +309,22 @@ def test_a_watch_filter_matches_every_key_to_one_of_its_values() -> None:
     [
         {},
         {f"k{i}": 1 for i in range(9)},
-        {"a": []},
-        {"a": list(range(21))},
-        {"a": {"b": 1}},
-        {"": 1},
+        {"event": []},
+        {"event": list(range(21))},
+        {"event": {"b": 1}},
+        {"event": "x" * 257},
     ],
 )
 def test_a_watch_filter_is_bounded_and_scalar(bad: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="where"):
         events.check_where(bad)
+
+
+@pytest.mark.parametrize("key", ["data.kind", "kind", "Event", ""])
+def test_a_watch_filter_takes_only_top_level_event_fields(key: str) -> None:
+    with pytest.raises(ValueError, match="event, data, by, sender, page_visible_outside_workspace, at"):
+        events.check_where({key: "vote"})
+    assert events.check_where({"event": "x" * 256}), "a text up to the limit"
 
 
 def test_a_large_event_reaches_watches_as_a_bounded_preview() -> None:

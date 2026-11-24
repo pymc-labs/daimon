@@ -155,6 +155,16 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
             page="votes",
             where={"event": []},
         )
+    with pytest.raises(ToolError, match="only the event fields"):
+        await tools.create_watch_impl(
+            runtime,
+            auth(owner, "d-1"),
+            origin_context_id="ctx",
+            instructions="x",
+            source="page_event",
+            page="votes",
+            where={"data.kind": "vote"},
+        )
 
     with pytest.raises(ToolError, match="only be made in Discord"):
         await tools.create_watch_impl(

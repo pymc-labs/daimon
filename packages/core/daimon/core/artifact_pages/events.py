@@ -27,6 +27,8 @@ EVENT_NAME: Final = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
 MAX_WATCHES_PER_PAGE: Final = 5
 MAX_WHERE_KEYS: Final = 8
 MAX_WHERE_VALUES: Final = 20
+MAX_WHERE_TEXT: Final = 256
+EVENT_FIELDS: Final = ("event", "data", "by", "sender", "page_visible_outside_workspace", "at")
 
 
 @dataclass(frozen=True)
@@ -104,21 +106,25 @@ def _scalar(value: object) -> bool:
 
 
 def check_where(where: Mapping[str, object]) -> dict[str, JsonValue]:
-    """A watch's event filter: top-level event fields, each mapped to one allowed value or
-    a list of them. At most `MAX_WHERE_KEYS` keys and `MAX_WHERE_VALUES` values a key."""
+    """A watch's event filter: top-level event fields (`EVENT_FIELDS`), each mapped to one
+    allowed value or a list of them. At most `MAX_WHERE_KEYS` keys, `MAX_WHERE_VALUES`
+    values a key and `MAX_WHERE_TEXT` characters a text."""
     if not 0 < len(where) <= MAX_WHERE_KEYS:
         raise ValueError(f"`where` takes 1 to {MAX_WHERE_KEYS} event fields")
     checked: dict[str, JsonValue] = {}
     for key, wanted in where.items():
+        if key not in EVENT_FIELDS:
+            raise ValueError(
+                f"`where` takes only the event fields {', '.join(EVENT_FIELDS)} "
+                f"(check {key[:64]!r})"
+            )
         values = _values(wanted)
-        if (
-            not 0 < len(key) <= 64
-            or not 0 < len(values) <= MAX_WHERE_VALUES
-            or not all(_scalar(v) for v in values)
+        if not 0 < len(values) <= MAX_WHERE_VALUES or not all(
+            _scalar(v) and not (isinstance(v, str) and len(v) > MAX_WHERE_TEXT) for v in values
         ):
             raise ValueError(
-                f"`where` maps an event field to a text, number or true/false value, or to "
-                f"up to {MAX_WHERE_VALUES} of them (check {key[:64]!r})"
+                f"`where` maps an event field to a text of at most {MAX_WHERE_TEXT} characters, "
+                f"a number or true/false, or to up to {MAX_WHERE_VALUES} of them (check {key!r})"
             )
         checked[key] = wanted  # type: ignore[assignment]  # scalars and lists of scalars
     return checked
