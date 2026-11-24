@@ -194,17 +194,21 @@ class ComputeSessions:
             try:
                 # One short transaction a read: no row lock is held while the launch waits.
                 async with asyncio.timeout_at(give_up_at), self.sm.begin() as db:
-                    current = await self._owned(db, caller, session.id)
-                    if current.state == "launching" and current.expires_at <= self.clock():
-                        current = current.model_copy(update={"state": "stopping"})
-                        await store.save(db, current)
-                    elif current.state == "launching":
-                        current = await self._settle(db, current, tell_owner=False)
-                        failed = current.state == "stopping"
+                    read = await self._owned(db, caller, session.id)
+                    settled_failed = False
+                    if read.state == "launching" and read.expires_at <= self.clock():
+                        read = read.model_copy(update={"state": "stopping"})
+                        await store.save(db, read)
+                    elif read.state == "launching":
+                        read = await self._settle(db, read, tell_owner=False)
+                        settled_failed = read.state == "stopping"
             except TimeoutError:
-                # The read rolled back. `ensure` is safe to repeat, so the next call
-                # or the scheduler moves the session on.
+                # The read rolled back, so `current` keeps the last committed state.
+                # `ensure` is safe to repeat: the next call or the scheduler moves
+                # the session on.
                 break
+            # Only a committed read is reported or acted on.
+            current, failed = read, settled_failed
             if current.state != "launching" or self.clock() >= waited_until:
                 break
             await self.sleep(_START_POLL_SECONDS)
