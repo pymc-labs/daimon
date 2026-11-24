@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Collection, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -53,6 +53,7 @@ from daimon.core.mux_compat import (
     store_credential,
     update_credential,
 )
+from daimon.core.session_seal import format_seal_ids, seal_ids_from_value
 from daimon.core.stores.accounts import account_exists, get_account_with_tenant
 from daimon.core.stores.github_router_sessions import (
     GITHUB_ROUTER_SESSION_TTL as GITHUB_ROUTER_SESSION_TTL,  # re-exported for callers here
@@ -80,6 +81,8 @@ def shared_vault_name(owner: uuid.UUID, agent_id: uuid.UUID) -> str:
 
 #: Credential metadata key that records the hold a held credential was minted with.
 HOLD_METADATA_KEY = "daimon_chat_hold"
+#: Credential metadata key that records the seals a credential signs (`SEAL_CLAIM`).
+SEAL_METADATA_KEY = "daimon_chat_seals"
 #: Marks a session's signed-identity relay credential; the binding keys follow it.
 RELAY_METADATA_KEY = "daimon_chat_relay"
 RELAY_AGENT_NAME_METADATA_KEY = "daimon_relay_agent_name"
@@ -203,10 +206,12 @@ async def chat_mcp_credential(
     routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
     hold: TurnHold | None = None,
     relay: RelayBinding | None = None,
+    seal_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """Build one vault payload and register its individually revocable JWT.
 
-    A ``hold`` or ``relay`` binding is signed into the JWT and recorded in the
+    A ``hold`` or ``relay`` binding, or the ``seal_ids`` of an unattended run that
+    reads inside its room, is signed into the JWT and recorded in the
     credential's metadata, where a refresh finds it again.
     """
     execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
@@ -221,6 +226,7 @@ async def chat_mcp_credential(
         routine_execution=execution,
         hold=hold,
         relay=relay,
+        seal_ids=seal_ids,
     )
     metadata = {
         "daimon_chat_identity": str(agent_id),
@@ -237,6 +243,8 @@ async def chat_mcp_credential(
         metadata["daimon_chat_context"] = str(slack_turn_context_id)
     if hold is not None:
         metadata[HOLD_METADATA_KEY] = hold_metadata_value(hold)
+    if seal_ids:
+        metadata[SEAL_METADATA_KEY] = format_seal_ids(seal_ids)
     if relay is not None:
         metadata[RELAY_METADATA_KEY] = "true"
         metadata[RELAY_AGENT_NAME_METADATA_KEY] = relay.agent_name
@@ -269,6 +277,7 @@ async def _refresh_chat_credential_locked(
     chat_session_id: str | None = None,
     routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
     hold: TurnHold | None = None,
+    seal_ids: Collection[str] = (),
     preserve_context: bool = False,
     registered_payload: dict[str, Any] | None = None,
     create_missing: bool = True,
@@ -305,6 +314,9 @@ async def _refresh_chat_credential_locked(
             # widens or drops it. A turn that names its hold (`hold`) wins: a
             # credential minted without it is re-minted with it, never kept.
             hold = hold or hold_from_metadata(metadata[HOLD_METADATA_KEY])
+        if preserve_context and metadata.get(SEAL_METADATA_KEY) is not None:
+            # Likewise its seals: a refresh never drops them.
+            seal_ids = frozenset(seal_ids) | seal_ids_from_value(metadata[SEAL_METADATA_KEY])
         raw_jti = metadata.get("daimon_chat_jti")
         try:
             jti = uuid.UUID(raw_jti) if isinstance(raw_jti, str) else None
@@ -331,6 +343,7 @@ async def _refresh_chat_credential_locked(
             == (None if slack_turn_context_id is None else str(slack_turn_context_id))
             and metadata.get(HOLD_METADATA_KEY)
             == (None if hold is None else hold_metadata_value(hold))
+            and metadata.get(SEAL_METADATA_KEY) == (format_seal_ids(seal_ids) if seal_ids else None)
             and (row.platform, row.channel_id)
             == ((None, None) if hold is None else (hold.platform, hold.channel_id))
         ):
@@ -352,6 +365,7 @@ async def _refresh_chat_credential_locked(
             chat_session_id=chat_session_id,
             routine_execution=execution,
             hold=hold,
+            seal_ids=seal_ids,
         )
         # A running session can observe the provider write before its response
         # returns. Commit first, then re-lock and re-read so another refresh or
@@ -372,6 +386,7 @@ async def _refresh_chat_credential_locked(
             chat_session_id=chat_session_id,
             routine_execution=execution,
             hold=hold,
+            seal_ids=seal_ids,
             registered_payload=payload,
             create_missing=create_missing,
         )
@@ -388,6 +403,7 @@ async def _refresh_chat_credential_locked(
             not in {
                 "daimon_chat_context",
                 HOLD_METADATA_KEY,
+                SEAL_METADATA_KEY,
                 "daimon_chat_session",
                 "daimon_routine_id",
                 "daimon_routine_execution",
@@ -492,6 +508,7 @@ async def _ensure_agent_mcp_vault_locked(
     slack_turn_context_id: uuid.UUID | None = None,
     chat_session_id: str | None = None,
     hold: TurnHold | None = None,
+    seal_ids: Collection[str] = (),
     scope: Scope,
 ) -> str:
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
@@ -516,6 +533,7 @@ async def _ensure_agent_mcp_vault_locked(
             slack_turn_context_id=slack_turn_context_id,
             chat_session_id=chat_session_id,
             hold=hold,
+            seal_ids=seal_ids,
         )
         return oldest.id
     vault = await create_vault(client, display_name, scope=scope)
@@ -529,6 +547,7 @@ async def _ensure_agent_mcp_vault_locked(
         slack_turn_context_id=slack_turn_context_id,
         chat_session_id=chat_session_id,
         hold=hold,
+        seal_ids=seal_ids,
     )
     await store_credential(client, vault.id, payload, scope=scope)
     return vault.id
@@ -695,9 +714,17 @@ async def ensure_agent_mcp_vault(
     slack_turn_context_id: uuid.UUID | None = None,
     chat_session_id: str | None = None,
     hold: TurnHold | None = None,
+    seal_ids: Collection[str] = (),
     scope: Scope | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
+
+    ``seal_ids`` signs the seals of an unattended run that reads inside its room
+    (`SEAL_CLAIM`), as a provider turn's credential does: the run then reads that
+    room and no other limited one. Pass them with ``chat_session_id`` only: the
+    session's own vault carries them, and the ordinary vault never does. A refresh
+    of a mounted session credential keeps them (`SEAL_METADATA_KEY`). A ``hold``
+    outranks them: pass one or the other.
 
     `chat_session_id` selects an isolated identity vault and signed session grant.
     Its URL has a distinct session selector; personal OAuth stays in the shared
@@ -764,6 +791,7 @@ async def ensure_agent_mcp_vault(
             slack_turn_context_id=slack_turn_context_id,
             chat_session_id=chat_session_id,
             hold=hold,
+            seal_ids=seal_ids,
             scope=scope,
         )
 

@@ -172,6 +172,11 @@ class RoutineOrigin:
     thread_id: str | None
     seal_ids: frozenset[str]
     private_dm_id: str
+    # Whether the run reads inside the room it fires into, as a chat turn there does:
+    # only a Discord channel or thread destination. A run with no destination, one that
+    # reports to a DM, or one on another platform, stays outside though it is stamped
+    # with a place.
+    reads_inside: bool = False
 
 
 def _routine_channel_thread(row: RoutineRow, *, platform: str) -> tuple[str, str | None] | None:
@@ -221,6 +226,9 @@ def routine_origin(
         thread_id=thread_id,
         seal_ids=limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id),
         private_dm_id=private_routine_stamp(row.id),
+        reads_inside=platform == "discord"
+        and row.destination_kind in ("channel", "thread")
+        and row.destination_id is not None,
     )
 
 

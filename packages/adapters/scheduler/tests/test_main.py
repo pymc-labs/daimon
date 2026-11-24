@@ -2040,8 +2040,8 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
 
     assert len(calls) == 1, "the routine runs"
     assert calls[0]["origin_place"] == RoutineOrigin(
-        "room", "555000555", frozenset({"room"}), f"routine:{row.id}"
-    ), "the session carries the destination and the seal over it"
+        "room", "555000555", frozenset({"room"}), f"routine:{row.id}", reads_inside=True
+    ), "the session carries the destination and the seal over it, and the run reads inside it"
 
 
 async def test_fire_checks_the_agent_pin_before_the_channel_budget(
