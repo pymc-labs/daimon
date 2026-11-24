@@ -66,6 +66,8 @@ class SignInFlow:
     verifier: str
     state: str
     next: str
+    # The provider `start` sent the browser to: a callback for any other is refused.
+    provider: str
     # Set when a signed-in session connects this account to itself rather than signing in:
     # the session's id.
     connect_session: str | None = None
@@ -78,6 +80,7 @@ def seal_flow(fernet: MultiFernet, flow: SignInFlow) -> str:
             "v": flow.verifier,
             "s": flow.state,
             "x": flow.next,
+            "p": flow.provider,
             "c": flow.connect_session,
         }
     ).encode()
@@ -94,6 +97,7 @@ def open_flow(fernet: MultiFernet, sealed: str | None) -> SignInFlow | None:
             verifier=data["v"],
             state=data["s"],
             next=data["x"],
+            provider=data["p"],
             connect_session=data.get("c"),
         )
     except (InvalidToken, ValueError, KeyError, TypeError):
