@@ -9,6 +9,7 @@ import pytest
 from daimon.core import settings_panel as panel
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.service import FeatureActor, read_features
@@ -106,6 +107,16 @@ async def test_every_feature_opens_with_a_control_for_an_admin(
         assert len(screen.selects) <= 4, spec.key
         for select in screen.selects:
             assert 0 < len(select.options) <= panel.SELECT_LIMIT, spec.key
+
+
+async def test_a_feature_outside_its_workspaces_opens_as_an_unknown_key(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    actor = _actor(await _tenant(db_session), True)
+    pages = ArtifactPagesSettings(workspaces=(uuid.uuid4(),))
+    settings = _settings().model_copy(update={"artifact_pages": pages})
+    op = panel.open_op("capabilities", "artifacts")
+    assert await panel.show(db_session_factory, settings, actor, _place(actor), op) is None
 
 
 async def test_a_member_is_told_who_can_help_when_nothing_is_theirs(
