@@ -3230,6 +3230,8 @@
       'description': '''
         Create a recurring routine; owner DMs run as unattended live-DM turns.
         <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        <blank line>
         Owner-DM routines are scheduled live-DM turns, using the owner's normal
         personal/shared memory, credentials and DM tool authority in a fresh private
         scope. They support Managed Agents only and run unattended: calls needing
@@ -3940,7 +3942,11 @@
       }),
     }),
     'delete_routine': dict({
-      'description': 'Delete a routine (hard delete, tenant-scoped).',
+      'description': '''
+        Delete a routine (hard delete, tenant-scoped).
+        <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -5206,6 +5212,8 @@
       'description': '''
         Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
         are not an admin.
+        <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6819,7 +6827,11 @@
       }),
     }),
     'list_routines': dict({
-      'description': 'List the routines you created (an admin sees every routine in the workspace).',
+      'description': '''
+        List the routines you created (an admin sees every routine in the workspace).
+        <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -8738,6 +8750,8 @@
       'description': '''
         Tell the admins this routine run could not do its task, and why.
         <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        <blank line>
         Only inside a routine run, once, when something kept you from the task. `note` is
         one short line on what blocked you (at most 300 characters), with no private
         content; admins see it on their issues page. Still put the blocker in your reply.
@@ -9659,6 +9673,8 @@
     'run_routine': dict({
       'description': '''
         Run a routine now, ahead of its schedule; its own schedule continues after.
+        <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
         <blank line>
         The routine's owner or an admin. A paused routine is refused: resume it first.
       ''',
@@ -11038,6 +11054,8 @@
       'description': '''
         Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
+        <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
         <blank line>
         They are off for every unattended run by default. The supported way today is the
         operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform
@@ -13014,6 +13032,8 @@
     'update_routine': dict({
       'description': '''
         PATCH-update a routine, including owner-only DM delivery where supported.
+        <blank line>
+        Legacy: prefer the workflow tools (create_workflow, run_workflow).
         <blank line>
         Only provided fields are changed.
         <blank line>

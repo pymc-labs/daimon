@@ -65,6 +65,7 @@ from daimon.core.routine_service import (
     RoutineRefused,
 )
 from daimon.core.routine_service import create_routine as create_routine_checked
+from daimon.core.routines import LEGACY_USE_WORKFLOWS
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import SANDBOX_KEY, AnySandboxPin, RoutineRow, stored_pin
@@ -89,7 +90,7 @@ from rich.console import Console
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-routines_app = typer.Typer(help="Routines admin tasks.")
+routines_app = typer.Typer(help=f"{LEGACY_USE_WORKFLOWS} (daimon workflows). Routines admin tasks.")
 
 
 @routines_app.command("create")
