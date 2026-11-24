@@ -3837,7 +3837,12 @@
       }),
     }),
     'fly_read_file': dict({
-      'description': 'Read a file from your session in byte chunks. This does not extend its lease.',
+      'description': '''
+        Read a file from your session in byte chunks of at most 512 KiB.
+        <blank line>
+        Read a larger file with several calls, each from the next offset. This does
+        not extend its lease.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
