@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import uuid
 from typing import Any
@@ -335,7 +336,12 @@ async def test_set_places_rewrites_the_rule_of_a_restricted_agent(
 async def test_set_places_refuses_web_chat_for_a_channels_own_agent(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    actor = await _actor(db_session, admin=True)
+    outside = await _actor(db_session, admin=True)
+    # From inside the channel, where the agent's settings may change.
+    actor = dataclasses.replace(
+        outside,
+        subject=dataclasses.replace(outside.subject, origin_channel_ids=frozenset({"c2"})),
+    )
     own = TenantAccessPolicy(
         agent_rules={"helper": AgentRule(runs_in=("c2",))},
         channel_rules={"c2": ChannelRule(readers="own", writers="own")},
@@ -379,7 +385,6 @@ async def test_set_places_changes_no_private_channels_pick_from_outside_it(
 ) -> None:
     """A shared agent's places include a private channel's pick, which is that
     channel's setting: an admin outside it neither adds nor removes it."""
-    import dataclasses
 
     from daimon.core.permissions import SEALED_REFUSAL
     from daimon.core.stores.access_policy import set_access_policy
