@@ -361,7 +361,10 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             artifact = await artifact_store.get_by_public_id(db, public_id)
             version = (
                 None
-                if ticket is None or artifact is None or ticket.artifact_id != artifact.id
+                if ticket is None
+                or artifact is None
+                or ticket.artifact_id != artifact.id
+                or not await page_on(runtime, db, artifact)
                 else await artifact_store.get_version(db, artifact.id, ticket.version)
             )
         if version is None:
@@ -645,8 +648,10 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
             version = await artifact_store.get_version(db, artifact.id, number)
             # A manager's preview captures a version's thumbnail once, and only of a page
             # that shows no data or thread: the picture is stored for everyone who can open it.
+            # Never on a shared content host, whose storage holds every page's.
             capture = (
                 version is not None
+                and (content_host is None or content_host.per_page)
                 and can_edit(role)
                 and artifact.data == "off"
                 and not artifact.ask

@@ -7,12 +7,17 @@ import html
 import json
 import re
 import struct
+import uuid
 import zlib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from daimon.core._models import Artifact
+from daimon.core.artifact_pages import tickets
 from daimon.core.artifact_pages.model import page_url
+from daimon.core.artifact_pages.tickets import fernet_of
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.stores.domain import ArtifactRow
 from daimon.testing.turn_router import build_turn_router
 from httpx import AsyncClient, Response
@@ -20,7 +25,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN
-from .artifact_support import HTML, page_client, publish, team
+from .artifact_support import HTML, KEYS, page_client, page_settings, publish, team
 from .chat_support import build_turns, funded_workspace, one_session, sse_frames
 from .conftest import web_settings
 
@@ -307,3 +312,33 @@ async def test_a_page_with_data_or_asks_is_never_captured(
                 headers={**OWN, "Content-Type": "image/png"},
             )
             assert put.status_code == 409, f"a page with {slug} keeps no thumbnail: {put.text}"
+
+
+async def test_a_shared_content_host_never_captures_a_thumbnail(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One host's storage holds every page's, so a picture of one could show another's."""
+    t = await team(db_session_factory)
+    page = await publish(db_session_factory, t.owner)
+    shared = web_settings(
+        artifact_content_url="https://pages.example.net", artifact_content_shared_host=True
+    )
+    async with page_client(db_session_factory, t.owner, web=shared) as client:
+        assert _bridge(await client.get(_path(page)))["thumbnail"] is None, "no capture"
+
+
+async def test_a_source_link_is_not_found_where_pages_do_not_exist(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    t = await team(db_session_factory)
+    page = await publish(db_session_factory, t.owner)
+    ticket = tickets.Ticket(purpose="source", artifact_id=page.id, version=1)
+    url = f"/a/{page.public_id}/_source?t={tickets.seal(fernet_of(KEYS), ticket, now=datetime.now(UTC))}"
+    elsewhere = page_settings().model_copy(
+        update={"artifact_pages": ArtifactPagesSettings(workspaces=(uuid.uuid4(),))}
+    )
+    async with page_client(db_session_factory, t.owner) as client:
+        shown = await client.get(url)
+    async with page_client(db_session_factory, t.owner, settings=elsewhere) as client:
+        absent = await client.get(url)
+    assert shown.status_code == 200 and absent.status_code == 404, "the link needs pages here"
