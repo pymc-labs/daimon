@@ -12,6 +12,8 @@ from typing import Annotated
 from daimon.adapters.web.cookies import session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import WebModuleKey
+from daimon.core.features.deployment import in_workspace
+from daimon.core.features.registry import FEATURES
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_invites as invites_store
@@ -174,6 +176,20 @@ async def _caller(
     raise _unauthorized()
 
 
+def artifacts_in(runtime: WebRuntime, tenant_id: uuid.UUID) -> bool:
+    """Whether artifacts exist in the workspace (`in_workspace`)."""
+    return in_workspace(FEATURES["artifacts"], runtime.settings, tenant_id)
+
+
+async def artifacts_here(
+    request: Request, caller: Annotated[WebCaller, Depends(current_caller)]
+) -> None:
+    """Dependency of every artifacts API route: 404 in a workspace without artifacts, whose
+    people have no Artifacts section either (`build_caller`)."""
+    if not artifacts_in(request.app.state.runtime, caller.person.tenant_id):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
 async def build_caller(
     runtime: WebRuntime, db: AsyncSession, web_session: WebSessionRow, person: WebPersonRow
 ) -> WebCaller:
@@ -183,8 +199,14 @@ async def build_caller(
     standings = await chat_standings(db, [person])
     identities = await identities_store.list_for_person(db, person_id=person.id)
     role = (await roles_of(db, [person], standings))[person.id]
-    # A workspace can turn a module off, never on; admin always stays.
-    enabled: list[WebModuleKey] = [m for m in runtime.web.modules if m not in chosen.modules_off]
+    # A workspace can turn a module off, never on; admin always stays. Artifacts exist only
+    # in the workspaces the deployment lists.
+    enabled: list[WebModuleKey] = [
+        m
+        for m in runtime.web.modules
+        if m not in chosen.modules_off
+        and (m != "artifacts" or artifacts_in(runtime, person.tenant_id))
+    ]
     modules = tuple(modules_for(role, enabled))
     return WebCaller(
         session=web_session,

@@ -40,7 +40,7 @@ from daimon.core.features.service import (
     thread_open_to_anyone,
 )
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import feature_schema, view_json
+from daimon.core.features.surface import feature_schema, present, view_json
 from daimon.core.stores.domain import CHAT_PLATFORMS
 from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.tenants import get_tenant
@@ -166,7 +166,8 @@ def features_router(runtime: WebRuntime) -> APIRouter:
                 agent_builtins=await builtins(caller, place),
             )
         return FeaturesDoc(
-            platform=place.platform, features=[view_json(v, place.platform) for v in views]
+            platform=place.platform,
+            features=[view_json(v, place.platform) for v in present(views)],
         )
 
     @router.put("")

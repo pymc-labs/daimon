@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import unquote
@@ -237,3 +238,21 @@ async def test_only_the_inviter_or_an_admin_shares_more_with_an_emailed_visitor(
     assert (await share(t.member, second)).status_code == 200, "the inviter shares more"
     res = await share(t.owner, admins)
     assert res.status_code == 200, res.text
+
+
+async def test_a_workspace_the_deployment_leaves_out_has_no_artifacts(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`DAIMON_ARTIFACT_PAGES__WORKSPACES` without it: no section, API or page, even saved."""
+    t = await team(db_session_factory)
+    page = await publish(db_session_factory, t.owner)
+    elsewhere = page_settings().model_copy(
+        update={"artifact_pages": ArtifactPagesSettings(workspaces=(uuid.uuid4(),))}
+    )
+    async with page_client(db_session_factory, t.owner, settings=elsewhere) as client:
+        me = (await client.get("/api/me")).json()
+        api = await client.get("/api/artifacts")
+        shown = await client.get(f"/a/{page.public_id}/{page.slug}")
+
+    assert "artifacts" not in me["modules"], "the section is hidden"
+    assert api.status_code == 404 and shown.status_code == 404, "the API and the page don't exist"

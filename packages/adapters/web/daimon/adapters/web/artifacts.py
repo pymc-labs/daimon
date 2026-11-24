@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 from daimon.adapters.web.admin_common import listed_agents
 from daimon.adapters.web.audit import audit, person_target
-from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.caller import WebCaller, artifacts_here, requires
 from daimon.adapters.web.cookies import token_sha256
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.invites import SIGN_IN_LINK_TTL, issue_link, join_invite, link_url
@@ -104,7 +104,7 @@ def _doc_json(doc: ArtifactDocumentRow) -> dict[str, Any]:
 
 
 def artifacts_router(runtime: WebRuntime) -> APIRouter:
-    router = APIRouter(prefix="/api/artifacts")
+    router = APIRouter(prefix="/api/artifacts", dependencies=[Depends(artifacts_here)])
     limits = runtime.settings.artifact_pages
     docs_page, events_shown = (min(n, limits.list_documents) for n in (_DOCS_PAGE, _EVENTS_SHOWN))
 

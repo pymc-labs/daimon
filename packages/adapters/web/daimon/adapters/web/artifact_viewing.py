@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from daimon.adapters.web.caller import WebCaller, current_caller, requires
+from daimon.adapters.web.caller import WebCaller, artifacts_here, current_caller, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.viewer import page_on, viewer_of
 from daimon.core.artifact_pages.access import admit, can_edit, role_for
@@ -32,7 +32,9 @@ _NOT_FOUND = "This page doesn't exist or isn't shared with you."
 
 
 def artifact_viewing_router(runtime: WebRuntime) -> APIRouter:
-    router = APIRouter(prefix="/api/artifacts/{artifact_id}")
+    router = APIRouter(
+        prefix="/api/artifacts/{artifact_id}", dependencies=[Depends(artifacts_here)]
+    )
 
     async def load(db: AsyncSession, caller: WebCaller, artifact_id: uuid.UUID) -> ArtifactRow:
         artifact = await artifact_store.get(db, artifact_id)

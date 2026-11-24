@@ -6,7 +6,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Literal
 
-from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.caller import WebCaller, artifacts_here, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.viewer import page_on, viewer_of
 from daimon.core.artifact_pages.access import admit, can_edit, role_for
@@ -28,7 +28,7 @@ class WatchAction(BaseModel):
 
 
 def artifact_watches_router(runtime: WebRuntime) -> APIRouter:
-    router = APIRouter(prefix="/api/artifacts")
+    router = APIRouter(prefix="/api/artifacts", dependencies=[Depends(artifacts_here)])
 
     async def managed(
         db: AsyncSession, caller: WebCaller, artifact_id: uuid.UUID, watch_id: uuid.UUID
