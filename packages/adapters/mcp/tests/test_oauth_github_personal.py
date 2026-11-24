@@ -121,6 +121,7 @@ async def test_personal_link_verifies_browser_and_discord_user(
         opened = await browser.get(link)
         assert opened.status_code == 307
         assert urlparse(opened.headers["location"]).hostname == "discord.com"
+        assert "__Host-daimon_gh_personal" in browser.cookies
         platform_state = parse_qs(urlparse(opened.headers["location"]).query)["state"][0]
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"

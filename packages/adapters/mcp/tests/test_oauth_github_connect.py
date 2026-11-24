@@ -348,7 +348,7 @@ async def test_cancel_after_oauth_revokes_user_token(
         )
         async with committing_sessionmaker.begin() as session:
             flow = await github_connect.cancel_flow(
-                session, state=state, cookie=browser.cookies["daimon_gh_connect"]
+                session, state=state, cookie=browser.cookies["__Host-daimon_gh_connect"]
             )
             assert flow is not None
             assert flow.cancelled_at is not None
@@ -356,7 +356,7 @@ async def test_cancel_after_oauth_revokes_user_token(
             assert not await github_connect.confirm(
                 session,
                 state=state,
-                cookie=browser.cookies["daimon_gh_connect"],
+                cookie=browser.cookies["__Host-daimon_gh_connect"],
                 github_user_id=17,
                 repos=[],
             )
@@ -395,7 +395,7 @@ async def test_cancel_after_oauth_revokes_user_token(
                     repos=[],
                 )
                 pending = await github_connect.cancel_flow(
-                    session, state=state, cookie=browser.cookies["daimon_gh_connect"]
+                    session, state=state, cookie=browser.cookies["__Host-daimon_gh_connect"]
                 )
                 assert pending is not None and pending.encrypted_user_token is not None
         repeated = await browser.get(
@@ -406,7 +406,7 @@ async def test_cancel_after_oauth_revokes_user_token(
         if revoke_failure_status is not None:
             async with committing_sessionmaker() as session:
                 flow = await github_connect.cancel_flow(
-                    session, state=state, cookie=browser.cookies["daimon_gh_connect"]
+                    session, state=state, cookie=browser.cookies["__Host-daimon_gh_connect"]
                 )
                 assert flow is not None
                 assert flow.encrypted_user_token is None

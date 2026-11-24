@@ -86,6 +86,13 @@ _COOKIE = "daimon_gh_connect"
 # GitHub drops `state` from the setup redirect after some installation changes, so the
 # browser keeps it too. It still has to match the flow cookie in `get_flow`.
 _STATE_COOKIE = "daimon_gh_connect_state"
+
+
+def host_cookie(name: str, root: str) -> str:
+    """`name`, `__Host-` prefixed over https, so no other subdomain can set it for this host."""
+    return ("__Host-" if root.startswith("https://") else "") + name
+
+
 _log = logging.getLogger(__name__)
 _ADMIN_RETRY = "Couldn't confirm you're still an admin. Try again in a minute."
 # A save posts one `repo=<id>` per addition plus one shared `access=write`,
@@ -2145,6 +2152,7 @@ def build_oauth_github_routes(
         or config.private_key is None
     ):
         raise ValueError("GitHub connection is not configured")
+    cookie_name, state_cookie = (host_cookie(name, root) for name in (_COOKIE, _STATE_COOKIE))
     factory = client_factory or (lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False))
     client_id = config.client_id
     secret = config.client_secret.get_secret_value()
@@ -2372,7 +2380,7 @@ def build_oauth_github_routes(
             }
         )
         response = RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
-        for name, value in ((_COOKIE, cookie), (_STATE_COOKIE, state)):
+        for name, value in ((cookie_name, cookie), (state_cookie, state)):
             response.set_cookie(
                 name,
                 value,
@@ -2386,7 +2394,7 @@ def build_oauth_github_routes(
     async def callback(request: Request) -> Response:
         state = request.query_params.get("state", "")
         code = request.query_params.get("code", "")
-        cookie = request.cookies.get(_COOKIE, "")
+        cookie = request.cookies.get(cookie_name, "")
         if not code:
             async with sessionmaker() as session:
                 refused_flow = await github_connect.get_flow(
@@ -2466,10 +2474,10 @@ def build_oauth_github_routes(
 
     async def setup(request: Request) -> Response:
         # GitHub's installation_id is untrusted. Confirmation always re-lists as the user.
-        state = request.query_params.get("state") or request.cookies.get(_STATE_COOKIE, "")
+        state = request.query_params.get("state") or request.cookies.get(state_cookie, "")
         async with sessionmaker() as session:
             flow = await github_connect.get_flow(
-                session, state=state, cookie=request.cookies.get(_COOKIE, ""), settings=settings
+                session, state=state, cookie=request.cookies.get(cookie_name, ""), settings=settings
             )
         if flow is None or flow.encrypted_user_token is None:
             return _error()
@@ -2500,7 +2508,7 @@ def build_oauth_github_routes(
             fields = {}
             state = request.query_params.get("state", "")
             invitation_hash = ""
-        cookie = request.cookies.get(_COOKIE, "")
+        cookie = request.cookies.get(cookie_name, "")
         if request.method == "GET" and request.query_params.get("cancel") == "1":
             async with sessionmaker.begin() as session:
                 cancelled = await github_connect.cancel_flow(session, state=state, cookie=cookie)
@@ -3165,7 +3173,7 @@ def build_oauth_github_routes(
             if response is None:
                 return _error()
             response.set_cookie(
-                _COOKIE,
+                cookie_name,
                 cookie,
                 max_age=7 * 24 * 60 * 60,
                 httponly=True,
@@ -3387,7 +3395,7 @@ def build_oauth_github_routes(
                 agent_name=invitation.agent_name,
             )
             response.set_cookie(
-                _COOKIE,
+                cookie_name,
                 cookie,
                 max_age=7 * 24 * 60 * 60,
                 httponly=True,

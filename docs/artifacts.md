@@ -93,12 +93,12 @@ Use a registrable domain of its own, kept for pages. Pages on subdomains of one 
 
 ### One shared content host
 
-A single host shares storage across every page, so Daimon refuses one unless [`DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST`](configuration.md#daimon_web__artifact_content_shared_host) is on. Then `DAIMON_ARTIFACT_PAGES__WORKSPACES` must list exactly one workspace. The host, such as `https://pages.daimon.example.com`, needs no wildcard and may share the app's domain, but not its host. It serves page content only.
+One host shares storage across pages, so Daimon refuses it unless [`DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST`](configuration.md#daimon_web__artifact_content_shared_host) is on. Then `DAIMON_ARTIFACT_PAGES__WORKSPACES` must list exactly one workspace. The host, such as `https://pages.daimon.example.com`, needs no wildcard and may share the app's domain, not its host.
 
 The trade-offs:
 
 - All of that workspace's pages share one browser storage.
-- A page can set cookies for the parent domain. The app's own `__Host-` cookies are safe.
+- A page can set parent-domain cookies: flood them so sites there fail to load, or plant ones they read, such as the report host's `rh_<slug>`. The app's own `__Host-` cookies are safe.
 - Its requests are same-site to the app, which still checks CSRF and `Origin`.
 
 ### What a page can still reach
