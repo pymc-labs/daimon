@@ -196,11 +196,11 @@ async def install_poll_ports(session: AsyncSession) -> None:
     )
     await session.execute(text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar"))
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
-    # 0225 replaces the page and poll ports: principal platform, non-thread page delivery.
+    # 0229 replaces the page and poll ports: principal platform, non-thread page delivery.
     platforms = runpy.run_path(
         str(
             Path(__file__).resolve().parents[3]
-            / "core/alembic/versions/0225_page_watch_platforms.py"
+            / "core/alembic/versions/0229_page_watch_platforms.py"
         )
     )
     for key in ("PAGE_SQL", "POLL_SQL"):

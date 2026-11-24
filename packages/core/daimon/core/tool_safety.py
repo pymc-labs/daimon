@@ -64,6 +64,7 @@ __all__ = [
     "CARDED_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
     "REACH_APPROVAL_TOOLS",
+    "RENAMED_DAIMON_TOOLS",
     "WATCH_APPROVAL_TOOLS",
     "WATCH_CONFIRMED_TOOLS",
     "DAIMON_SERVER_NAME",
@@ -94,6 +95,7 @@ __all__ = [
     "unwrap_daimon_call",
     "session_tools_for_policy",
     "toolset_permission_policy",
+    "with_current_tool_names",
     "trusted_servers_for",
 ]
 
@@ -197,8 +199,8 @@ CARDED_TOOLS: Final[Mapping[str, str]] = {
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     **CARDED_TOOLS,
-    "fly_launch_session": "template",
-    "fly_extend_session": "hours",
+    "compute_launch_session": "template",
+    "compute_extend_session": "hours",
     "start_long_job": "command",
     "create_watch": "source",
     "resume_watch": "watch_id",
@@ -223,6 +225,29 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
 }
 
 
+#: Daimon's own tools that changed name, old to new. An agent's tool list is kept by
+#: the model provider and can still name the old one. `with_current_tool_names`
+#: carries that entry over, so the tool stays enabled or held as its author set it.
+#: Tool rules were moved by migration `0226_compute_tool_names`.
+RENAMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    f"fly_{tool}": f"compute_{tool}"
+    for tool in (
+        "launch_session",
+        "extend_session",
+        "stop_session",
+        "run_bash",
+        "write_file",
+        "read_file",
+        "list_files",
+        "list_sessions",
+        "get_session_status",
+        "task_status",
+        "task_result",
+        "list_templates",
+    )
+}
+
+
 WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
     {
         "create_watch",
@@ -230,14 +255,14 @@ WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
         "rotate_watch_key",
         "update_watch",
         "start_long_job",
-        "fly_launch_session",
-        "fly_extend_session",
+        "compute_launch_session",
+        "compute_extend_session",
     }
 )
 
 
 #: The watch tools whose card the `watch_approval` setting can skip. Editing a watch,
-#: key rotation, long jobs and Fly sessions in `WATCH_CONFIRMED_TOOLS` always ask.
+#: key rotation, long jobs and compute sessions in `WATCH_CONFIRMED_TOOLS` always ask.
 WATCH_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({"create_watch", "resume_watch"})
 
 
@@ -1152,6 +1177,34 @@ def _ask_for(
             config["permission_policy"] = ask
             changed = True
     return out, changed
+
+
+def with_current_tool_names(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]] | None:
+    """`tools` with daimon's per-tool configs moved off a renamed tool's old name, or `None`.
+
+    `None` means no config names a renamed tool. Only the reserved `daimon-mcp`
+    toolset is read: the same tool name on another connection is that server's own.
+    A config for the new name wins over one for the old, which is dropped.
+    """
+    changed = False
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        entry = dict(tool)
+        configs: Sequence[Mapping[str, Any]] = entry.get("configs") or ()
+        if (
+            entry.get("type") == "mcp_toolset"
+            and entry.get("mcp_server_name") == DAIMON_SERVER_NAME
+            and any(config.get("name") in RENAMED_DAIMON_TOOLS for config in configs)
+        ):
+            current = {config.get("name") for config in configs}
+            entry["configs"] = [
+                {**config, "name": RENAMED_DAIMON_TOOLS.get(config["name"], config["name"])}
+                for config in configs
+                if RENAMED_DAIMON_TOOLS.get(config.get("name", "")) not in current
+            ]
+            changed = True
+        out.append(entry)
+    return out if changed else None
 
 
 def has_confirmation_gate(tools: Sequence[Mapping[str, Any]], *, tool_name: str) -> bool:

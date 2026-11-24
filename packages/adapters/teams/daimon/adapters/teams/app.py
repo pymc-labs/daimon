@@ -133,6 +133,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.owner_notices import OwnerDm
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -430,6 +431,7 @@ class TeamsApp:
         installs: TeamInstalls | None = None,
         direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
+        owner_dm: OwnerDm | None = None,
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
         catch_up: RestartCatchUp | None = None,
@@ -467,6 +469,7 @@ class TeamsApp:
         )
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
+        self._owner_dm = owner_dm
         # Support is on: answers carry an Ask a human button.
         self._ask_human = ask_human
         # Graph subscriptions to private and shared channels; None leaves them mention-only.
@@ -568,6 +571,7 @@ class TeamsApp:
                         platform="teams",
                         post=self._routine_poster,
                         should_stop=lambda: self.draining,
+                        owner_dm=self._owner_dm,
                     )
                     self._delivery_poller = asyncio.create_task(
                         deliveries, name="teams.routine-delivery"

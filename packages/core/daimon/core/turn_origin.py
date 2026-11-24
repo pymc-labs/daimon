@@ -206,6 +206,7 @@ async def turn_origin(
     platform_message_id: str | None = None,
     helper_of: uuid.UUID | None = None,
     helper_key: str | None = None,
+    own_dm_reach: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -224,6 +225,9 @@ async def turn_origin(
     takes them; signed MCP caller identities name them. None when unknown.
     `helper_of` is the asking turn's origin when this turn is a helper's.
     `helper_key` is a helper turn's own session key, when its agent id does not give it.
+    `own_dm_reach` is the admission's decision that the turn may read a limited room its
+    person can read themselves: true only for an interactive owner DM turn and a routine the
+    scheduler fires into its owner's DM. A helper's turn never has it.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -250,6 +254,7 @@ async def turn_origin(
             platform_message_id=platform_message_id,
             helper_of=helper_of,
             helper_key=helper_key,
+            own_dm_reach=own_dm_reach,
         )
         if message_text is not None:
             if not queued_message:

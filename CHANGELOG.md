@@ -13,6 +13,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `select`, and report in a new thread or web chat per event. `artifact_db_query`
   can be a poll source. A page's managers pause or delete its watches from the
   Activity tab, and someone who does not manage a page holds one watch on it.
+- **A routine that posts to a narrow Discord room reads that room.** On Anthropic agents the run
+  had no way to show it ran inside the room, so its own `read_thread` and `read_channel` were
+  refused. The run now reads the room or thread it posts to, as a chat there does, and no other
+  narrow room. A routine with no destination, one that reports to a DM, or one on Slack or
+  Teams is unchanged
+  ([Rooms with outside people](docs/outside-people.md)).
+- **Rooms with outside people: a room that blocks a person by name is narrow, and your own DM can read it.**
+  With the feature on, a member overwrite that denies View Channel or Read Message History to an
+  internal person who cannot read the room makes it narrow. In your own DM chat or DM routine,
+  Daimon reads a narrow room when Discord lets you view it. After such a read, that turn posts
+  only to your own DM and saves no routine or timer
+  ([Rooms with outside people](docs/outside-people.md)).
+- **Breaking: compute sessions run on Google Cloud Run only, and their tools are named
+  `compute_*`.** The Fly provider is gone. `DAIMON_COMPUTE__PROVIDER`,
+  `DAIMON_COMPUTE__API_TOKEN`, `DAIMON_COMPUTE__ORG_SLUG` and a profile's `cpu_kind` are
+  ignored, so a deployment that still passes them starts with compute not set up. To use
+  compute, set `DAIMON_COMPUTE__CLOUD_RUN_PROJECT` and
+  `DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT` and give every profile Google Cloud regions
+  ([Compute sessions](docs/compute.md)). Stop every Fly session before upgrading: Daimon no
+  longer deletes Fly machines. Each `fly_*` tool keeps its verb (`fly_run_bash` is
+  `compute_run_bash`), and `compute_launch_session` needs a `region`.
+  - Tool rules and an agent's own tool list follow the new names with no action. A rule
+    on an old name is copied to the new name and the old one is kept, so a deny set
+    before the upgrade holds while the old and new releases run side by side. Change a
+    compute tool rule only after the upgrade finishes: a change made under one name
+    during the upgrade is not copied to the other. A later release removes the old rules.
+  - The old names are not kept as second names. No session can be in use across this
+    upgrade, because the provider it ran on is gone. A call to an old name answers with
+    the tool's new name and runs nothing.
+- **A machine is reported ready only after it has started.** A new compute session stays
+  `launching` until its machine answers, and becomes `running` then. A command sent
+  earlier gets "The machine is still starting. Try again in about 10 seconds." and starts
+  nothing. A machine that cannot start, for example from a wrong image, is removed, and
+  its owner is told to ask an admin.
+- **A background command lost to a machine restart keeps its last output.** The message
+  that reports it, and `compute_task_result`, show what Daimon last saved.
+- **`compute_read_file` reads at most 512 KiB a call.** Its old 4 MiB maximum never fitted in
+  a session's answer, so the largest reads failed. Read a larger file in several calls.
+- **Production deploys no longer pin both backend switches off.** `DAIMON_TURN__CHANNEL_BACKENDS` and `DAIMON_TURN__AGENT_BACKENDS` come from each environment's own config, like any other setting.
+- **The web app no longer turns blank after a deploy, and works on phones in desktop mode.**
+  A tab left open or restored after a deploy asked for files of the previous build and
+  got the page back as HTML, which the browser refused; it now reloads into the new
+  build, and any other crash shows Reload instead of a white page. Phones no longer get
+  a second scroll into blank space below some pages, the sidebar shows from 768px so a
+  phone's desktop mode gets the desktop layout, and inputs no longer zoom iOS on focus.
+  A message is kept when it never reached the server or its new thread failed to start.
+  Thread actions show on touch screens, a workspace switch stops the old workspace's
+  chats, and an agent edit made just before leaving is saved.
+- **The check for outside people in a room reads Discord itself.** On Discord, who can
+  see each room now comes from the server's roles, channels and members as Discord
+  lists them, read about every 5 minutes, and no longer from the bot's own member
+  list, which could miss people and roles. A role, member, channel or owner change
+  makes the server's rooms unknown until the next read, about 2 seconds later. One
+  slow server no longer keeps the others' room facts from staying current.
+- **An agent can follow its whole GitHub org.** An admin of the org ticks "Also give
+  <agent> new repos added to <org>" on the agent's GitHub connect page. The agent then holds
+  every repo of the org, new ones within an hour, except repos taken off it.
+- **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
+  an earlier Managed Agents limit; the provider now accepts far more. 50 fits every
+  backend, including OpenAI agents whose skills are pinned by content digest: a list
+  too long for one metadata value is now stored in a compact form that holds them
+  all, and agents already stored keep reading as before. The web inspector, chat and
+  MCP skill tools, channel skills and platform skills use the new limit; an
+  over-limit list the provider still refuses is reported as before.
+- **Saving the GitHub connect page picks a working repo only for an agent's first repos.**
+  An agent that has repos keeps its working repo, or none, unless the person chooses one.
+
+- **Admins can see what is failing in a workspace.** Failed answers, direct messages,
+  routines, deliveries, watches, follow-ups and bridged-tool calls are recorded once per
+  issue, without message content, and read on the Overview and Issues pages. An issue can
+  be resolved (it returns if it happens again) or muted. `daimon issues` reads and changes
+  them from the command line, and operator tokens with the new `issues:read` scope read
+  them over MCP. Admins and owners can also resolve, mute or reopen an issue by asking
+  in chat, from the command line (`--account` names who did it) and from the issue page,
+  which has a link to copy. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
+
+- **A routine's owner hears about a failed run, and runs can say what blocked them.**
+  On Discord, Slack and Teams, the first failure of a routine after a success reaches
+  its owner by direct message, written by the routine's own agent from fixed facts (the routine,
+  why it stopped, when, the next run and how to pause it), never the raw error. When
+  the agent cannot run, the owner gets a plain error card. The channel notice is
+  unchanged. A run that could not do its task calls `report_routine_problem` with a
+  category and one short line, which admins see on the Issues page, and failed calls
+  to an attached MCP server are recorded there per server.
 
 - **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
   With the new Wait for bot access setting on (off by default, set per

@@ -16,7 +16,7 @@ _FAMILIES = {
     "watches": lambda name: "watch" in name,
     "routines": lambda name: "routine" in name,
     "long_jobs": lambda name: "long_job" in name,
-    "compute": lambda name: name.startswith("fly_"),
+    "compute": lambda name: name.startswith("compute_"),
     "microsoft_365": lambda name: "microsoft" in name,
     "lead_intake": lambda name: name.startswith("lead_intake_"),
     "artifacts": lambda name: name.startswith("artifact_"),

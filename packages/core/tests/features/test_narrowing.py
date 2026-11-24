@@ -53,8 +53,8 @@ def _integrated_settings() -> Settings:
             "compute": ComputeSettings(
                 enabled=True,
                 deployment_id="d",
-                api_token=SecretStr("s"),
-                org_slug="o",
+                cloud_run_project="p",
+                cloud_run_service_account="s@p.iam.gserviceaccount.com",
                 session_auth_key=SecretStr("s"),
             ),
             "microsoft_accounts": MicrosoftAccountsSettings(

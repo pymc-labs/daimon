@@ -39,10 +39,16 @@ from daimon.core.features.snapshot import (
 from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
 from daimon.core.features.toolset import place_session, place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
-from daimon.core.session_snapshot import desired_snapshot, session_mcp_servers, session_tools
+from daimon.core.session_snapshot import (
+    desired_snapshot,
+    hash_tools,
+    session_mcp_servers,
+    session_tools,
+)
+from daimon.core.stores.agent_daimon_tools import enabled_daimon_tools
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import place_values, set_feature_value
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, RENAMED_DAIMON_TOOLS
 from daimon.core.turn.selfhosted_tools import build_turn_tools
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -242,12 +248,12 @@ def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
 def test_compute_off_keeps_the_stop_tools_and_long_jobs_off_hides_its_own() -> None:
     """A deliberate difference: a running sandbox session stays stoppable from chat with
     compute Off, while the long job tools all go with their feature."""
-    assert {"fly_stop_session", "fly_list_sessions"} == SESSION_KEPT_TOOLS, "the allow-list"
+    assert {"compute_stop_session", "compute_list_sessions"} == SESSION_KEPT_TOOLS, "the allow-list"
     assert CAPABILITY_TOOLS["compute"] > SESSION_KEPT_TOOLS, "kept tools belong to compute"
     assert not SESSION_KEPT_TOOLS & CAPABILITY_TOOLS["long_jobs"], "long jobs keep none"
     compute = agent_toolset(_snapshot(compute="off"), _agent())
     assert not SESSION_KEPT_TOOLS & compute.hidden_daimon_tools, "stop tools stay offered"
-    assert "fly_launch_session" in compute.hidden_daimon_tools, "the rest still goes"
+    assert "compute_launch_session" in compute.hidden_daimon_tools, "the rest still goes"
     jobs = agent_toolset(_snapshot(long_jobs="off"), _agent())
     assert jobs.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "all long job tools go"
 
@@ -576,3 +582,80 @@ async def test_a_workspace_value_reaches_tools_the_agent_left_unset(
     CACHE.clear()
     toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
     assert toolset.builtins == {"bash": False, "grep": False}, "a lock beats the agent's entry"
+
+
+def _renamed_agent(configs: list[dict[str, Any]], *, default_on: bool) -> BetaManagedAgentsAgent:
+    return ma_agent(
+        id="agent_tools",
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": {
+                    "enabled": default_on,
+                    "permission_policy": {"type": "always_allow"},
+                },
+                "configs": configs,
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "internal",
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_ask"}},
+                "configs": [
+                    {
+                        "name": "fly_run_bash",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_ask"},
+                    }
+                ],
+            },
+        ],
+        mcp_servers=[
+            {"name": "daimon-mcp", "type": "url", "url": PUBLIC},
+            {"name": "internal", "type": "url", "url": "https://old.example/mcp"},
+        ],
+    )
+
+
+def test_an_agent_that_names_a_renamed_tool_keeps_it_in_every_session() -> None:
+    """An agent's own tool list is kept by the provider, so no migration reaches it.
+
+    The session builder is the one definition a new session, the drift check and the
+    in-place update share: a session that began before the rename is updated on its
+    next turn, because its tools no longer hash the same.
+    """
+    assert set(RENAMED_DAIMON_TOOLS.values()) == CAPABILITY_TOOLS["compute"], "every tool moved"
+    assert not set(RENAMED_DAIMON_TOOLS) & set().union(*CAPABILITY_TOOLS.values())
+    allow, ask = {"type": "always_allow"}, {"type": "always_ask"}
+    agent = _renamed_agent(
+        [
+            {"name": "fly_run_bash", "enabled": True, "permission_policy": ask},
+            {"name": "fly_read_file", "enabled": True, "permission_policy": allow},
+            # The author already wrote the new name: it wins over the old entry.
+            {"name": "fly_list_files", "enabled": True, "permission_policy": allow},
+            {"name": "compute_list_files", "enabled": False, "permission_policy": allow},
+            {"name": "search_tools", "enabled": True, "permission_policy": allow},
+        ],
+        default_on=False,
+    )
+    tools = session_tools(agent, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC)
+    daimon, relayed = _dicts(tools)
+    assert {c["name"]: (c["enabled"], c["permission_policy"]) for c in daimon["configs"]} == {
+        "compute_run_bash": (True, ask),
+        "compute_read_file": (True, allow),
+        "compute_list_files": (False, allow),
+        "search_tools": (True, allow),
+    }
+    assert enabled_daimon_tools(_dicts(tools)) == {
+        "compute_run_bash",
+        "compute_read_file",
+        "search_tools",
+    }
+    # Another server's tool of the same name is not Daimon's to rename.
+    assert [c["name"] for c in relayed["configs"]] == ["fly_run_bash"]
+    assert hash_tools(tools) != hash_tools(agent.tools), "an earlier session reads as drifted"
+    # An agent that names no renamed tool gets back the very tools it had.
+    plain = _agent()
+    assert session_tools(
+        plain, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC
+    ) == list(plain.tools)

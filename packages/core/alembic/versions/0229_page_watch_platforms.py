@@ -14,8 +14,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0225_page_watch_platforms"
-down_revision: str | None = "0224_artifacts"
+revision: str = "0229_page_watch_platforms"
+down_revision: str | None = "0228_artifacts"
 branch_labels: str | None = None
 depends_on: str | None = None
 

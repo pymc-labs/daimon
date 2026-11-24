@@ -19,6 +19,7 @@ typo is silent — check the spelling here.
 - [Compute](#compute)
 - [Long Jobs](#long-jobs)
 - [Monitoring](#monitoring)
+- [Ops Events](#ops-events)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -158,25 +159,28 @@ Read from `daimon.core.config.ComputeSettings`. Prefix `DAIMON_COMPUTE__`.
 
 `bool` · optional · default `False`
 
-Allow attended owners to launch Fly sessions. Disabling launch does not disable cleanup.
+Allow attended owners to launch compute sessions. Disabling launch does not disable
+cleanup.
 
 ### `DAIMON_COMPUTE__DEPLOYMENT_ID`
 
 `str` · optional · default unset
 
-Stable unique deployment identifier fencing Fly resources. Required to use compute.
+Stable unique deployment identifier fencing session resources. Required to use compute.
 
-### `DAIMON_COMPUTE__API_TOKEN`
-
-`SecretStr | None` · optional · default unset · secret
-
-Fly API token, control plane and scheduler only. Never mounted in compute machines.
-
-### `DAIMON_COMPUTE__ORG_SLUG`
+### `DAIMON_COMPUTE__CLOUD_RUN_PROJECT`
 
 `str` · optional · default unset
 
-Fly organization for this deployment's disposable sessions.
+Google Cloud project id that holds the session services. Required to use compute. Daimon
+signs in with application default credentials.
+
+### `DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT`
+
+`str` · optional · default unset
+
+Email of the service account session containers run as. Give it no roles. Required to
+use compute.
 
 ### `DAIMON_COMPUTE__SESSION_AUTH_KEY`
 
@@ -214,8 +218,7 @@ for at most max_ttl_hours.
 
 `dict[str, ComputeProfile]` · optional · default `{}`
 
-Operator-managed image profiles. Empty means no images can be launched. No environment
-or credentials are copied from template apps.
+Operator-managed image profiles. Empty means no images can be launched.
 
 ## Long Jobs
 
@@ -256,6 +259,17 @@ Read from `daimon.core.config.MonitoringSettings`. Prefix `DAIMON_MONITORING__`.
 
 Days a monitored question, answer or tool call is kept before the scheduler deletes it,
 default 90.
+
+## Ops Events
+
+Read from `daimon.core.config.OpsEventsSettings`. Prefix `DAIMON_OPS_EVENTS__`.
+
+### `DAIMON_OPS_EVENTS__RETENTION_DAYS`
+
+`int` · optional · default `30`
+
+Days a failure or warning shown on the admin Issues page is kept before the scheduler
+deletes it, default 30.
 
 ## Database
 

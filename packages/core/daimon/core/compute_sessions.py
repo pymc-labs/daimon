@@ -11,8 +11,9 @@ wake goes only to the originating conversation, once.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -24,6 +25,7 @@ from daimon.core.compute_models import (
     ComputeSession,
     ComputeStatus,
     ComputeTask,
+    machine_readiness,
 )
 from daimon.core.compute_provider import (
     ComputeProvider,
@@ -45,6 +47,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
+# How long a launch waits for its machine before it returns the session as still
+# starting, and how often it asks the provider meanwhile.
+_LAUNCH_WAIT = timedelta(seconds=30)
+_START_POLL_SECONDS = 2.0
+# A machine that has not started this long after launch is treated as failed.
+_START_DEADLINE = timedelta(minutes=10)
+#: What a caller is told while a machine starts, and when it never will.
+STILL_STARTING = "The machine is still starting. Try again in about 10 seconds."
+START_FAILED = (
+    "The machine could not start, so it is being removed. "
+    "Ask an admin to check the image profile it was launched from."
+)
 # A start whose inline call was lost has this long to leave its pid file.
 _START_GRACE = timedelta(minutes=2)
 # How long after its deadline an unreachable or stuck task is given up.
@@ -69,9 +83,11 @@ class ComputeSessions:
         provider: ComputeProvider,
         *,
         clock: Callable[[], datetime] | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self.sm, self.settings, self.provider = sm, settings, provider
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.sleep = sleep
 
     def ttl(self, hours: int | None) -> int:
         value = (
@@ -130,7 +146,7 @@ class ComputeSessions:
         source_metadata: dict[str, str],
     ) -> ComputeSession:
         if not self.settings.enabled:
-            raise StoreError("Fly session launches are disabled. Ask an admin.")
+            raise StoreError("Starting a machine is turned off. Ask an admin.")
         image = self.settings.profiles.get(profile)
         if image is None or region not in image.regions:
             raise StoreError("Choose an available image profile and region.")
@@ -158,7 +174,6 @@ class ComputeSessions:
             profile=profile,
             image=image.image,
             region=region,
-            cpu_kind=image.cpu_kind,
             cpus=image.cpus,
             memory_mb=image.memory_mb,
             ttl_hours=ttl,
@@ -170,19 +185,94 @@ class ComputeSessions:
             session = await store.register(db, session, cap=self.settings.per_person_sessions)
         # Registration commits before any external mutation. A lost response is
         # recovered by the deterministic app name, not by launching a second app.
-        async with self.sm.begin() as db:
-            current = await self._owned(db, caller, session.id)
-            if current.state == "launching" and current.expires_at <= self.clock():
-                current = current.model_copy(update={"state": "stopping"})
-                await store.save(db, current)
-            elif current.state == "launching":
-                current = await self._provision(current)
-                await store.save(db, current)
-            return current
+        waited_until = self.clock() + _LAUNCH_WAIT
+        # A provider call that hangs must not hold the launch past its wait either.
+        give_up_at = asyncio.get_running_loop().time() + _LAUNCH_WAIT.total_seconds()
+        current = session
+        while True:
+            failed = False
+            try:
+                # One short transaction a read: no row lock is held while the launch waits.
+                async with asyncio.timeout_at(give_up_at), self.sm.begin() as db:
+                    read = await self._owned(db, caller, session.id)
+                    settled_failed = False
+                    if read.state == "launching" and read.expires_at <= self.clock():
+                        read = read.model_copy(update={"state": "stopping"})
+                        await store.save(db, read)
+                    elif read.state == "launching":
+                        read = await self._settle(db, read, tell_owner=False)
+                        settled_failed = read.state == "stopping"
+            except TimeoutError:
+                # The read rolled back, so `current` keeps the last committed state.
+                # `ensure` is safe to repeat: the next call or the scheduler moves
+                # the session on.
+                break
+            # Only a committed read is reported or acted on.
+            current, failed = read, settled_failed
+            if current.state != "launching" or self.clock() >= waited_until:
+                break
+            await self.sleep(_START_POLL_SECONDS)
+        if failed:
+            await self._remove_failed(current)
+            raise StoreError(START_FAILED)
+        # Still `launching` here means the machine needs longer: the caller is told
+        # so, and the next call or the scheduler moves the session on.
+        return current
 
-    async def _provision(self, session: ComputeSession) -> ComputeSession:
+    async def _settle(
+        self, db: AsyncSession, session: ComputeSession, *, tell_owner: bool
+    ) -> ComputeSession:
+        """Move a launching session on by what the provider reports, and save it.
+
+        The only place a session becomes `running`: after the provider says the
+        machine has started. A machine that failed, or has not started within
+        `_START_DEADLINE`, ends the session as `stopping` for cleanup. Anything else
+        leaves it `launching`. `ensure` creates the machine when it is missing, so an
+        unknown create outcome is recovered here and never sent twice. `tell_owner`
+        queues the one notice for a failure nobody is in the call to hear about.
+        """
         resource = await self.provider.ensure(session, session_token(self.settings, session.id))
-        return session.model_copy(update={"state": "running", "machine_id": resource.machine_id})
+        readiness = machine_readiness(resource.machine_state)
+        state = session.state
+        if readiness == "ready":
+            state = "running"
+        elif readiness == "failed" or self.clock() - session.created_at > _START_DEADLINE:
+            state = "stopping"
+        settled = session.model_copy(
+            update={"state": state, "machine_id": resource.machine_id or session.machine_id}
+        )
+        await store.save(db, settled)
+        if state == "stopping" and tell_owner:
+            await store.start_failed(db, settled, self.clock())
+        return settled
+
+    async def _remove_failed(self, session: ComputeSession) -> None:
+        """Delete a failed start's resource now; the scheduler retries what this cannot."""
+        try:
+            await self._delete(session)
+        except ComputeProviderError:
+            log.warning("compute.failed_start_delete_retry", session_id=str(session.id))
+
+    async def _started(
+        self, caller: ComputeCaller, session_id: uuid.UUID, *, refuse_starting: bool = True
+    ) -> None:
+        """Let a call through only to a machine that has started.
+
+        A session that is still `launching` is moved on first. If its machine is not
+        ready the caller is told so in plain words and nothing is sent to it, so no
+        command or background task is started on a machine that cannot answer.
+        `refuse_starting` is off for a status read, which reports the wait instead.
+        """
+        async with self.sm.begin() as db:
+            session = await self._owned(db, caller, session_id)
+            if session.state != "launching" or session.expires_at <= self.clock():
+                return
+            session = await self._settle(db, session, tell_owner=False)
+        if session.state == "stopping":
+            await self._remove_failed(session)
+            raise StoreError(START_FAILED)
+        if session.state == "launching" and refuse_starting:
+            raise StoreError(STILL_STARTING)
 
     async def extend(
         self, caller: ComputeCaller, session_id: uuid.UUID, *, hours: int, approval_key: str
@@ -190,6 +280,7 @@ class ComputeSessions:
         ttl = self.ttl(hours)
         if not approval_key:
             raise StoreError("Owner approval is required")
+        await self._started(caller, session_id)
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id)
             if session.state != "running" or session.expires_at <= self.clock():
@@ -231,6 +322,7 @@ class ComputeSessions:
                     deployment_id=current.deployment_id,
                     session_id=current.id,
                     machine_id=current.machine_id,
+                    region=current.region,
                 )
             )
             await store.save(db, current.model_copy(update={"state": "deleted"}))
@@ -240,6 +332,12 @@ class ComputeSessions:
             return await self._owned(db, caller, session_id)
 
     async def status(self, caller: ComputeCaller, session_id: uuid.UUID) -> ComputeStatus:
+        """The session and its machine as they are now.
+
+        A session still `launching` is moved on first, so a status never shows
+        `running` for a machine that has not started, and shows it as soon as it has.
+        """
+        await self._started(caller, session_id, refuse_starting=False)
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id)
             resource = await self.provider.inspect(session)
@@ -269,6 +367,7 @@ class ComputeSessions:
     ) -> JsonValue:
         if tool not in {"run_bash", "write_file", "read_file", "list_files"}:
             raise StoreError("Unsupported session operation")
+        await self._started(caller, session_id)
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id)
             if session.state != "running" or session.expires_at <= self.clock():
@@ -364,8 +463,8 @@ class ComputeSessions:
             elif current.state == "launching":
                 # Unknown create outcomes are never blindly re-POSTed. ensure()
                 # recovers an existing machine by its deterministic app identity.
-                current = await self._provision(current)
-                await store.save(db, current)
+                # Nobody is in this call, so a failed start is told to the owner.
+                current = await self._settle(db, current, tell_owner=True)
             elif (
                 current.expires_at - now <= timedelta(hours=min(1, current.ttl_hours / 4))
                 and current.warned_for != current.expires_at
@@ -393,6 +492,9 @@ class ComputeSessions:
         if not request_key:
             raise StoreError("Run the command from the owner's conversation.")
         minutes = self._task_timeout(timeout_minutes)
+        # Before the task row exists: a task registered for a machine that cannot
+        # answer would be reported lost.
+        await self._started(caller, session_id)
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id)
             now = self.clock()
@@ -599,7 +701,10 @@ class ComputeSessions:
                     )
             else:
                 # The process ended without an exit file (machine restart) or never
-                # started. It is reported, never run again.
+                # started. It is reported, never run again. A probe that finds no
+                # files at all has no output to report: the machine was replaced, so
+                # the owner keeps the output the last poll saved.
+                kept = probe.status == "missing"
                 await task_store.finish(
                     db,
                     task,
@@ -607,6 +712,6 @@ class ComputeSessions:
                     state="lost",
                     now=now,
                     wake=wake,
-                    output_bytes=probe.output_bytes,
-                    output_tail=probe.tail,
+                    output_bytes=None if kept else probe.output_bytes,
+                    output_tail=None if kept else probe.tail,
                 )

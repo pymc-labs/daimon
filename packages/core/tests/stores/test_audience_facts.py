@@ -104,27 +104,39 @@ async def test_a_new_publish_replaces_the_old_set_under_a_new_generation(
     assert (await _read(db_session, tenant.id, "5")).contained
 
 
-async def test_renewal_extends_fresh_servers_and_never_revives_a_lapsed_or_unknown_one(
+async def test_renewal_extends_only_its_own_fresh_set_and_never_revives_a_lapsed_one(
     db_session: AsyncSession,
 ) -> None:
     fresh = await make_tenant(db_session, platform="discord", workspace_id="3005")
     lapsed = await make_tenant(db_session, platform="discord", workspace_id="3006")
     unknown = await make_tenant(db_session, platform="discord", workspace_id="3007")
-    await _publish(db_session, fresh.id)
-    await _publish(db_session, lapsed.id, at=NOW - timedelta(seconds=400))
-    await _publish(db_session, unknown.id)
+    replaced = await make_tenant(db_session, platform="discord", workspace_id="3008")
+    generations = {
+        fresh.id: await _publish(db_session, fresh.id),
+        lapsed.id: await _publish(db_session, lapsed.id, at=NOW - timedelta(seconds=400)),
+        unknown.id: await _publish(db_session, unknown.id),
+        replaced.id: await _publish(db_session, replaced.id),
+    }
     await store.mark_unknown(db_session, tenant_id=unknown.id, now=NOW)
+    await _publish(db_session, replaced.id)  # a newer set than the one being renewed
 
-    renewed = await store.renew_fresh_until(
-        db_session,
-        fresh_until={t.id: LATER + timedelta(seconds=180) for t in (fresh, lapsed, unknown)},
-        now=LATER,
-    )
+    renewed = {
+        tenant_id
+        for tenant_id, generation in generations.items()
+        if await store.renew_fresh_until(
+            db_session,
+            tenant_id=tenant_id,
+            generation=generation,
+            fresh_until=LATER + timedelta(seconds=180),
+            now=LATER,
+        )
+    }
 
     assert renewed == {fresh.id}
     later = NOW + timedelta(seconds=200)
     assert await _read(db_session, fresh.id, "1", later) == RoomFacts(False, False)
     assert await _read(db_session, lapsed.id, "1", later) == UNKNOWN_FACTS
+    assert await _read(db_session, replaced.id, "1", later) == UNKNOWN_FACTS, "not its own set"
 
 
 async def test_an_uncached_thread_takes_contained_from_its_parent_and_is_narrow(
@@ -165,49 +177,3 @@ async def test_known_survives_a_database_round_trip_for_every_kind_of_row(
     assert (narrow.contained, narrow.narrow) == (False, True)
     assert not (await _read(db_session, tenant.id, "404")).known
     assert (await _read(db_session, tenant.id, "70", parent_id="1")).known, "from the parent"
-
-
-def _rooms(**kinds: RoomFacts) -> dict[str, StoredRoom]:
-    return {channel: StoredRoom(facts, parent_id=f"p{channel}") for channel, facts in kinds.items()}
-
-
-def test_a_cache_result_is_never_more_open_than_the_baseline_in_either_fact() -> None:
-    both, neither = RoomFacts(True, True, 1, 4), RoomFacts(False, False, 0, 0)
-    merged = store.merge_with_baseline(
-        _rooms(a=neither, b=neither, c=RoomFacts(True, False, 2, 0), d=neither),
-        _rooms(a=both, b=RoomFacts(True, False, 1, 0), c=RoomFacts(False, True, 0, 4), d=neither),
-    )
-
-    assert (merged["a"].facts.contained, merged["a"].facts.narrow) == (True, True)
-    assert (merged["b"].facts.contained, merged["b"].facts.narrow) == (True, False)
-    assert (merged["c"].facts.contained, merged["c"].facts.narrow) == (True, True), "either one"
-    assert (merged["d"].facts.contained, merged["d"].facts.narrow) == (False, False)
-    assert merged["c"].facts.outsiders_count == 2, "counts come from the cache"
-    assert merged["a"].parent_id == "pa"
-
-
-def test_a_new_room_keeps_the_cache_result_and_a_missing_room_is_dropped() -> None:
-    cache = _rooms(new=OPEN, kept=OPEN)
-    merged = store.merge_with_baseline(cache, _rooms(kept=NARROW, gone=CONTAINED))
-
-    assert merged["new"] == cache["new"]
-    assert merged["kept"].facts.narrow
-    assert "gone" not in merged
-    assert store.merge_with_baseline(cache, None) == cache, "no baseline: the cache result"
-
-
-def test_a_new_thread_is_never_more_open_than_its_reconciled_parent() -> None:
-    # The cache holds the parent stale (open); the reconcile saw it contained. A public
-    # thread created since inherits the stale parent in the cache.
-    cache = {"room": StoredRoom(OPEN), "new": StoredRoom(OPEN, parent_id="room")}
-    merged = store.merge_with_baseline(cache, {"room": StoredRoom(CONTAINED)})
-
-    assert merged["room"].facts.contained
-    assert merged["new"].facts.contained, "the thread follows its merged parent"
-    assert merged["new"].parent_id == "room"
-
-
-def test_an_unknown_room_stays_unknown_whatever_the_baseline_says() -> None:
-    merged = store.merge_with_baseline(_rooms(x=UNKNOWN_FACTS), _rooms(x=OPEN))
-
-    assert not merged["x"].facts.known

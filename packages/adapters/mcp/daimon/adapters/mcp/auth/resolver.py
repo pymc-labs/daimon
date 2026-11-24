@@ -112,10 +112,14 @@ class AuthIdentity:
                 daimon_admin=self.is_admin,
                 action=action,
             )
-            and not self.is_external_agent
-            and self.hold is None
-            and not self.client
+            and self.holds_own_authority
         )
+
+    @property
+    def holds_own_authority(self) -> bool:
+        """Not an external agent key, a held credential or another organisation's client: the
+        caller acts as themselves, so their own configuration authority applies."""
+        return not self.is_external_agent and self.hold is None and not self.client
 
     @property
     def is_personal_user(self) -> bool:

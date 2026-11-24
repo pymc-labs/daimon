@@ -2999,37 +2999,85 @@ class ComputeProfile(BaseModel):
     image: str = Field(
         description="Operator-reviewed thin MCP image reference, preferably a digest."
     )
-    regions: list[str] = Field(default_factory=lambda: ["iad"], description="Allowed Fly regions.")
-    cpu_kind: Literal["shared", "performance"] = Field(
-        default="shared", description="Fly CPU class."
+    regions: list[str] = Field(
+        default_factory=lambda: list[str](),
+        description="Allowed Google Cloud regions, such as us-central1. At least one.",
     )
-    cpus: int = Field(default=2, gt=0, le=16, description="Fixed CPU count for this image profile.")
-    memory_mb: int = Field(default=4096, ge=256, le=131072, description="Fixed RAM in MB.")
+    cpus: int = Field(
+        default=2,
+        gt=0,
+        le=16,
+        description="Fixed CPU count for this image profile: 1, 2, 4, 6 or 8.",
+    )
+    memory_mb: int = Field(
+        default=4096,
+        ge=256,
+        le=131072,
+        description="Fixed RAM in MB: 512 to 32768, within the range its CPU count permits.",
+    )
+
+
+_CLOUD_RUN_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
+# Cloud Run's memory range in MiB for each CPU count it accepts. The floor is 512 MiB
+# because sessions use the second generation environment and instance-based billing.
+_CLOUD_RUN_MEMORY_MB: Mapping[int, tuple[int, int]] = {
+    1: (512, 4096),
+    2: (512, 8192),
+    4: (2048, 16384),
+    6: (4096, 24576),
+    8: (4096, 32768),
+}
+
+
+def _cloud_run_profile_error(name: str, profile: ComputeProfile) -> str | None:
+    """Why Cloud Run would refuse this profile, so a launch never finds out first."""
+    bad = [region for region in profile.regions if not _CLOUD_RUN_REGION.fullmatch(region)]
+    if not profile.regions or bad:
+        return (
+            f"compute profile {name!r} needs Google Cloud regions such as us-central1; "
+            f"got {profile.regions}"
+        )
+    limits = _CLOUD_RUN_MEMORY_MB.get(profile.cpus)
+    if limits is None:
+        return (
+            f"compute profile {name!r}: Cloud Run allows 1, 2, 4, 6 or 8 CPUs, not {profile.cpus}"
+        )
+    if not limits[0] <= profile.memory_mb <= limits[1]:
+        return (
+            f"compute profile {name!r}: Cloud Run allows {limits[0]} to {limits[1]} MB "
+            f"with {profile.cpus} CPUs, not {profile.memory_mb}"
+        )
+    return None
 
 
 class ComputeSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Allow attended owners to launch Fly sessions. Disabling launch does not "
+            "Allow attended owners to launch compute sessions. Disabling launch does not "
             "disable cleanup."
         ),
     )
     deployment_id: str = Field(
         default="",
         description=(
-            "Stable unique deployment identifier fencing Fly resources. Required to use compute."
+            "Stable unique deployment identifier fencing session resources. Required to "
+            "use compute."
         ),
     )
-    api_token: SecretStr | None = Field(
-        default=None,
-        repr=False,
+    cloud_run_project: str = Field(
+        default="",
         description=(
-            "Fly API token, control plane and scheduler only. Never mounted in compute machines."
+            "Google Cloud project id that holds the session services. Required to use "
+            "compute. Daimon signs in with application default credentials."
         ),
     )
-    org_slug: str = Field(
-        default="", description="Fly organization for this deployment's disposable sessions."
+    cloud_run_service_account: str = Field(
+        default="",
+        description=(
+            "Email of the service account session containers run as. Give it no roles. "
+            "Required to use compute."
+        ),
     )
     session_auth_key: SecretStr | None = Field(
         default=None,
@@ -3071,11 +3119,35 @@ class ComputeSettings(BaseModel):
     )
     profiles: dict[str, ComputeProfile] = Field(
         default_factory=dict,
-        description=(
-            "Operator-managed image profiles. Empty means no images can be launched. "
-            "No environment or credentials are copied from template apps."
-        ),
+        description=("Operator-managed image profiles. Empty means no images can be launched."),
     )
+
+    @property
+    def provider_configured(self) -> bool:
+        """Whether the provider has the settings its API calls need."""
+        return bool(self.cloud_run_project and self.cloud_run_service_account)
+
+    @model_validator(mode="after")
+    def _cloud_run_is_complete(self) -> ComputeSettings:
+        """Refuse a half-configured provider, or a profile Cloud Run could not run.
+
+        Nothing is checked until a Cloud Run setting is given: an installation that
+        does not use compute, or still carries settings of a removed provider, starts.
+        """
+        fields = ("cloud_run_project", "cloud_run_service_account")
+        given = [field for field in fields if getattr(self, field)]
+        missing = [field for field in fields if field not in given]
+        if not given:
+            return self
+        if missing:
+            raise ValueError(
+                f"DAIMON_COMPUTE__{given[0].upper()} also needs "
+                f"DAIMON_COMPUTE__{missing[0].upper()}"
+            )
+        for name, profile in self.profiles.items():
+            if (error := _cloud_run_profile_error(name, profile)) is not None:
+                raise ValueError(error)
+        return self
 
 
 class LongJobsSettings(BaseModel):
@@ -3112,6 +3184,17 @@ class MonitoringSettings(BaseModel):
         description=(
             "Days a monitored question, answer or tool call is kept before the scheduler "
             "deletes it, default 90."
+        ),
+    )
+
+
+class OpsEventsSettings(BaseModel):
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a failure or warning shown on the admin Issues page is kept before the "
+            "scheduler deletes it, default 30."
         ),
     )
 
@@ -3182,6 +3265,7 @@ class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    ops_events: OpsEventsSettings = Field(default_factory=OpsEventsSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,

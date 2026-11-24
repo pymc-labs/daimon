@@ -15,6 +15,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.turn.outcomes import drain_outcomes
@@ -232,4 +233,5 @@ async def build_runtime(settings: Settings) -> AsyncIterator[CliRuntime]:
             )
         finally:
             await drain_outcomes()
+            await drain_ops_events()
             await engine.dispose()

@@ -20,7 +20,7 @@ nav:
       - Model providers: providers.md
       - Self-hosted harness: self-hosted-harness.md
       - Operations: operations.md
-      - Fly compute: compute.md
+      - Compute sessions: compute.md
   - Connect:
       - Slack: slack.md
       - Microsoft Teams: teams.md
@@ -44,6 +44,7 @@ nav:
       - Architecture: architecture.md
       - Isolation: isolation.md
       - Permissions: permissions.md
+      - Rooms with outside people: outside-people.md
       - Admins: admins.md
       - Unattended turns: unattended.md
       - Billing: billing.md

@@ -122,6 +122,7 @@ Where each feature can be set, and its default.
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Follow the GitHub org | `github_follow_org` | Guardrail | Off |  |  | ✓ |  |  |  |  |
 
 ## Approvals
 
@@ -1307,7 +1308,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and machine launches keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1352,4 +1353,16 @@ Keeps what people ask this agent from their coding tools and what it answers, pl
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
+## Follow the GitHub org
+
+Follows the whole org.
+
+| | |
+| --- | --- |
+| Key | `github_follow_org` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Agent |
 | Combines | Off above is a ceiling |

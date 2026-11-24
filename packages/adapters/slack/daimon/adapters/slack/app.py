@@ -168,7 +168,7 @@ from daimon.adapters.slack.privacy_panel.submit import (
 from daimon.adapters.slack.provider_actions import ACTION_PREFIX as PROVIDER_ACTION_PREFIX
 from daimon.adapters.slack.provider_actions import SlackProviderActions, provider_action_options
 from daimon.adapters.slack.requester_org import decide_requester_org
-from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
+from daimon.adapters.slack.routine_delivery import make_slack_owner_dm, make_slack_routine_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
     handle_routines_command,
@@ -280,6 +280,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.output_runtime import OutputRuntime
@@ -965,6 +966,7 @@ class SlackApp:
                 platform="slack",
                 post=make_slack_routine_poster(self.runtime),
                 should_stop=lambda: self.draining,
+                owner_dm=make_slack_owner_dm(self.runtime),
             )
         )
 
@@ -1103,13 +1105,28 @@ class SlackApp:
                 noticed_files=self._noticed_output_files,
                 requester_user_id=requester_user_id,
                 requester_label=requester_label,
+                sessions=self.runtime.sessionmaker,
             )
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(
                 "slack.output_delivery.unhandled_error",
+                tenant_id=str(derive_tenant_uuid(platform="slack", workspace_id=team_id)),
+                platform="slack",
                 session_id=session_id,
                 thread_id=thread_ts,
-                error=str(exc)[:300],
+                error_type=type(exc).__name__,
+            )
+            report_ops_event(
+                self.runtime.sessionmaker,
+                OpsEvent(
+                    "delivery.output_failed",
+                    derive_tenant_uuid(platform="slack", workspace_id=team_id),
+                    reason=type(exc).__name__,
+                    platform="slack",
+                    thread_id=thread_ts,
+                    session_id=session_id,
+                ),
+                logged=False,
             )
 
     async def on_request(

@@ -427,10 +427,16 @@ def make_discord_routine_poster(
                 await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
             await attach(row, dm, fallback_guard=may_post)
         except (discord.HTTPException, LookupError) as err:
-            log.info(
-                "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+            log.warning(
+                "routine.delivery_fallback_failed",
+                routine_id=str(row.id),
+                error_type=type(err).__name__,
             )
-            return DeliveryOutcome(status="skipped", note=reason)
+            # Closed DMs or a gone member repeat on every run: a skip, not a failure that pages.
+            closed = isinstance(err, (discord.Forbidden, discord.NotFound))
+            return DeliveryOutcome(
+                status="skipped", note=reason, failed=None if closed else type(err).__name__
+            )
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
     async def _post(row: RoutineRow) -> DeliveryOutcome:

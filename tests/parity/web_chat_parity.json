@@ -131,6 +131,9 @@
   "POST /api/admin/invites": {
    "tool": "create_web_invite"
   },
+  "POST /api/admin/issues/{fingerprint}/state": {
+   "tool": "change_issue_state"
+  },
   "POST /api/admin/people/{person_id}/link": {
    "tool": "issue_visitor_link"
   },

@@ -19,7 +19,7 @@ vi.mock("@/modules/features/api", () => ({
   useFeatures: () => ok({ platform: "discord", features: [feature] }),
   useFeatureSave: () => ({ pending: false, run }),
 }))
-vi.mock("@/lib/hooks", () => ({ useChatAgents: () => ok([]) }))
+vi.mock("@/lib/hooks", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/hooks")>()), useChatAgents: () => ok([]) }))
 vi.mock("./dm", () => ({
   usePlatformGroups: () => ok({ platform: "discord", groups: [{ id: "r1", name: "Staff" }], problem: null }),
   useDmPeople: () => ok([]),

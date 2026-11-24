@@ -5,7 +5,8 @@ import { bytes, MAX_FILE_BYTES } from "./format"
 import { cn } from "@/lib/utils"
 
 export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, autoFocus, canAttach }: {
-  onSend: (text: string, files: File[]) => void; onStop: () => void; busy: boolean; canAttach: boolean
+  /** A returned promise keeps the draft until it resolves; a rejection keeps it for another try. */
+  onSend: (text: string, files: File[]) => unknown; onStop?: () => void; busy: boolean; canAttach: boolean
   placeholder: string; disabled?: boolean; picker: React.ReactNode; autoFocus?: boolean
 }) {
   const [text, setText] = useState("")
@@ -24,10 +25,11 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
   const canSend = (!!text.trim() || staged.length > 0) && !busy && !disabled
   const submit = () => {
     if (!canSend) return
-    onSend(text.trim(), staged)
-    setText("")
-    setFiles([])
-    setTooBig([])
+    Promise.resolve(onSend(text.trim(), staged)).then(() => {
+      setText("")
+      setFiles([])
+      setTooBig([])
+    }, () => {})
   }
   const add = (list: File[]) => {
     if (!list.length || disabled || !canAttach) return
@@ -66,12 +68,12 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
         onPaste={(e) => { if (e.clipboardData.files.length) { e.preventDefault(); add(Array.from(e.clipboardData.files)) } }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit() }
-          if (e.key === "Escape" && busy) onStop()
+          if (e.key === "Escape" && busy) onStop?.()
         }}
         placeholder={placeholder}
         id="composer"
         aria-label="Message"
-        className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6 outline-none placeholder:text-faint disabled:cursor-not-allowed"
+        className="block max-h-60 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-base leading-6 md:text-[15px] outline-none placeholder:text-faint disabled:cursor-not-allowed"
       />
       <div className="flex items-center gap-1 px-2 pb-2">
         {picker}
@@ -89,7 +91,7 @@ export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, 
             </button>
           </>
         )}
-        {busy ? (
+        {busy && onStop ? (
           <button type="button" onClick={onStop} aria-label="Stop" className="ml-auto inline-flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
             <Square className="size-3 fill-current" />
           </button>

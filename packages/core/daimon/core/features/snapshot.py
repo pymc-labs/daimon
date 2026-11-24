@@ -101,10 +101,7 @@ def _adapter_set_up(settings: Settings, platform: str) -> bool:
 
 _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
     "compute_setup": lambda s: (
-        s.compute.enabled
-        and bool(s.compute.deployment_id)
-        and s.compute.api_token is not None
-        and bool(s.compute.org_slug)
+        s.compute.enabled and bool(s.compute.deployment_id) and s.compute.provider_configured
     ),
     "notebook_host": lambda s: (
         s.notebook.host_url is not None and s.notebook.admin_secret is not None

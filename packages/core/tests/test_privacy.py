@@ -1052,6 +1052,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "web_people": "web_people",
         "web_admin_grants": "web_admin_grants",
         "monitored_events": "monitored_events",
+        "ops_events": "ops_events",
         "mux_slots": "mux_slots",
         "mux_binding_generations": "mux_binding_generations",
         "mux_journal_sessions": "mux_journal_sessions",
@@ -1127,6 +1128,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "artifact_documents": "updated_by_account_id SET NULL; artifact_pages.scrub_account",
         "web_people": "account_id FK -> accounts.id",
         "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
+        "ops_events": "account_id FK -> accounts.id; ops_events.delete_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",
@@ -1158,7 +1160,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
             # Owner records cascade with account erasure, including conversation
-            # metadata. Tagged Fly apps then have no registration and are deleted
+            # metadata. Labelled machines then have no registration and are deleted
             # by the scheduler orphan sweep; Daimon calls lose their owner authority.
             "compute_sessions",
             # Background command rows (with their output tail) cascade with the
@@ -1259,6 +1261,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # the workspace keeps its record of what changed. A person or invite it is
             # about is an id that clears when they go; the text names no one.
             "web_audit",
+            # An admin's resolve or mute of an issue: the only accounts.id FK is who did
+            # it, by_account_id with ON DELETE SET NULL; the state names no one else.
+            "ops_issue_states",
             # Channel setting changes: the only accounts.id FK is the actor, ON DELETE
             # SET NULL; the values name agents and amounts, never a person.
             "channel_changes",

@@ -16,6 +16,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509.oid import NameOID
+from daimon.adapters.mcp import identity_relay
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.identity_relay import (
     MAX_BODY_BYTES,
@@ -35,6 +36,7 @@ from daimon.core.mcp_identity import (
     SigningKey,
     generate_signing_key,
 )
+from daimon.core.ops_events import OpsEvent
 from daimon.core.stores import watches
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine
@@ -80,10 +82,11 @@ def _public_ca() -> tuple[str, bytes]:
 
 
 class _Upstream:
-    def __init__(self, *, down: bool = False, busy: bool = False) -> None:
+    def __init__(self, *, down: bool = False, busy: bool = False, status: int = 200) -> None:
         self.requests: list[httpx.Request] = []
         self.down = down
         self.busy = busy
+        self.status = status
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -92,7 +95,7 @@ class _Upstream:
             raise httpx.PoolTimeout("no free connection", request=request)
         self.requests.append(request)
         return httpx.Response(
-            200,
+            self.status,
             content=b'{"jsonrpc":"2.0","id":1,"result":{}}',
             headers={"content-type": "application/json", "mcp-session-id": "up-1"},
         )
@@ -390,6 +393,33 @@ async def test_unreachable_server_is_a_bad_gateway_and_a_full_pool_a_retry(
     assert down.status_code == 502, "a server that cannot be reached is a 502"
     assert busy.status_code == 503, "every connection to the server is in use"
     assert busy.headers["retry-after"] == "5", "the caller is told when to retry"
+
+
+async def test_each_relay_failure_is_an_issue_with_its_own_reason(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Busy, unconfigured and an upstream 503 differ; a valid credential to an unknown
+    server is still its tenant's issue."""
+    reported: list[OpsEvent] = []
+    monkeypatch.setattr(
+        identity_relay, "report_ops_event", lambda sm, event, *, logged: reported.append(event)
+    )
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    key = generate_signing_key()
+    async with _relay(db_session_factory, _Upstream(busy=True), key) as client:
+        await _call(client, token)
+        await client.post("/mcp-identity/other", headers={"authorization": f"Bearer {token}"})
+    async with _relay(db_session_factory, _Upstream(), None, BEARER_SERVER) as client:
+        await _post(client, token, _tool_call())
+    async with _relay(db_session_factory, _Upstream(status=503), key) as client:
+        await _call(client, token)
+    assert [(e.code, e.tenant_id, e.reason, e.subject_key) for e in reported] == [
+        ("bridge.relay_failed", person.tenant_id, "relay_busy", "tools"),
+        ("bridge.relay_refused", person.tenant_id, "404", None),
+        ("bridge.relay_failed", person.tenant_id, "relay_unconfigured", "tools"),
+        ("bridge.relay_failed", person.tenant_id, "503", "tools"),
+    ]
 
 
 BEARER_KEY = "bearer-key-1"
