@@ -285,10 +285,10 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "approve_server_skill_update",
                 "change_setting",
                 "change_workspace_settings",
+                "compute_extend_session",
+                "compute_launch_session",
                 "create_watch",
                 "delete_allowance",
-                "fly_extend_session",
-                "fly_launch_session",
                 "remove_my_data",
                 "restore_library_skill_version",
                 "resume_watch",
@@ -441,9 +441,9 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
                 "add_server_skill",
                 "add_skill",
                 "approve_reach",
+                "compute_extend_session",
+                "compute_launch_session",
                 "create_watch",
-                "fly_extend_session",
-                "fly_launch_session",
                 "resume_watch",
                 "rotate_watch_key",
                 "start_long_job",
@@ -783,8 +783,8 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
         "call_tool",
         "hubspot_update_objects",
         "create_watch",
-        "fly_extend_session",
-        "fly_launch_session",
+        "compute_extend_session",
+        "compute_launch_session",
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
@@ -812,9 +812,9 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
             "add_skill",
             "approve_reach",
             "call_tool",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "publish_report",
             "resume_watch",
             "rotate_watch_key",
@@ -871,9 +871,9 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
             "add_skill",
             "approve_reach",
             "call_tool",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "resume_watch",
             "rotate_watch_key",
             "start_long_job",
@@ -894,9 +894,9 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
             "add_skill",
             "approve_reach",
             "call_tool",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "get_session",
             "resume_watch",
             "rotate_watch_key",
@@ -990,15 +990,15 @@ def test_protected_names_always_ask_whatever_annotations_or_rules_say(
 @pytest.mark.parametrize(
     "tool,arguments,expected",
     [
-        ("fly_launch_session", {"template": "mmm"}, "ask"),
-        ("fly_extend_session", {"hours": 24}, "ask"),
-        ("fly_run_bash", {"command": "true"}, "allow"),
-        ("fly_write_file", {"content": "input"}, "allow"),
+        ("compute_launch_session", {"template": "mmm"}, "ask"),
+        ("compute_extend_session", {"hours": 24}, "ask"),
+        ("compute_run_bash", {"command": "true"}, "allow"),
+        ("compute_write_file", {"content": "input"}, "allow"),
     ],
 )
-def test_fly_only_lease_actions_force_a_card(tool, arguments, expected):
+def test_compute_lease_actions_force_a_card(tool, arguments, expected):
     call = ToolCall(
-        tool_use_id="fly", server_name=DAIMON_SERVER_NAME, tool_name=tool, input=arguments
+        tool_use_id="compute", server_name=DAIMON_SERVER_NAME, tool_name=tool, input=arguments
     )
     verdict = decide_tool_call(
         _ON, call, attended=True, trusted_servers=frozenset({DAIMON_SERVER_NAME})

@@ -96,6 +96,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("docker/", "core"),
     ("assets/", "core"),
     ("apps/harness/", "harness"),
+    ("apps/compute-session/", "compute-session"),
     ("apps/notebook-host/", "notebook-host"),
     ("apps/report-host/", "report-host"),
     ("scripts/check_report_host_lock.py", "report-host"),
@@ -137,8 +138,17 @@ SUITES: dict[str, tuple[str, ...]] = {
     "simulated": ("simulated", "lint"),
     # The mux tests read the golden scenarios, defaults/ (core) and the agent-chat tool (mcp).
     "golden": (*DAIMON, "mux"),
-    "testing": (*DAIMON, "mux", "harness", "harness-conformance", "report-host", "notebook-host"),
-    "core": (*_HOSTS, "mux"),
+    "testing": (
+        *DAIMON,
+        "mux",
+        "harness",
+        "harness-conformance",
+        "report-host",
+        "notebook-host",
+        "compute-session",
+    ),
+    # The compute-session tests drive the server with core's own caller and task scripts.
+    "core": (*_HOSTS, "mux", "compute-session"),
     "migrations": (*_HOSTS, "mux", "migration-upgrade"),
     # A script, so ruff runs on it as well.
     "migration-check": ("lint", "migration-upgrade"),
@@ -154,6 +164,7 @@ SUITES: dict[str, tuple[str, ...]] = {
     # Core's tests and daimon.testing import both hosts.
     "notebook-host": (*DAIMON, "notebook-host", "image-notebook-host"),
     "report-host": (*DAIMON, "report-host", "image-report-host"),
+    "compute-session": ("compute-session", "image-compute-session", "lint"),
 }
 
 Leg = dict[str, str | int]
@@ -192,6 +203,7 @@ MATRICES: dict[str, list[Leg]] = {
     "pytest-light": [
         {"suite": "report-host", "paths": "apps/report-host"},
         {"suite": "harness", "paths": "apps/harness"},
+        {"suite": "compute-session", "paths": "apps/compute-session"},
         {"suite": "mux", "paths": "packages/mux"},
         {"suite": "harness-conformance", "paths": "tests/harness_conformance"},
     ],
@@ -211,7 +223,12 @@ JOBS: dict[str, tuple[str, ...]] = {
     "mux-standalone": ("mux",),
     "pytest-notebook-host": ("notebook-host",),
     "shard-check": ("shard-check",),
-    "docker-build": ("image-daimon", "image-notebook-host", "image-report-host"),
+    "docker-build": (
+        "image-daimon",
+        "image-notebook-host",
+        "image-report-host",
+        "image-compute-session",
+    ),
     # The simulated turns run inside the built image.
     "image-smoke": ("image-daimon", "simulated"),
     "migration-upgrade": ("migration-upgrade",),

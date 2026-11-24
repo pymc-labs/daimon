@@ -50,6 +50,8 @@ from daimon.core.mcp_identity import (
     watch_conversation,
 )
 from daimon.core.mcp_server_url import same_ascii_mcp_url
+from daimon.core.ops_catalog import OpsCode
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, WatchRow
@@ -365,6 +367,71 @@ async def _held_in_audience_mode_on(
     return audience.contained
 
 
+def _refused(
+    status: int,
+    reason: str,
+    *,
+    server: SignedIdentityServer | None = None,
+    tenant_id: uuid.UUID | None = None,
+    sessions: async_sessionmaker[AsyncSession] | None = None,
+) -> Response:
+    """A refusal that used to be silent, with a fixed reason. The tenant is named only once
+    the credential resolved it, and no server name is logged for one the relay does not have.
+    With `sessions`, a refusal of a resolved tenant is also recorded as an issue."""
+    # Scanner noise (an unknown path, a missing bearer) is info; the rest is a warning.
+    noise = reason in {"unknown_server", "no_bearer"} and tenant_id is None
+    (log.info if noise else log.warning)(
+        "mcp_identity.relay_refused",
+        status=status,
+        reason=reason,
+        server=server.name if server is not None else None,
+        tenant_id=str(tenant_id) if tenant_id is not None else None,
+    )
+    if sessions is not None:
+        _report_relay(sessions, "bridge.relay_refused", server, tenant_id, str(status))
+    return Response(status_code=status)
+
+
+def _report_relay(
+    sessions: async_sessionmaker[AsyncSession],
+    code: OpsCode,
+    server: SignedIdentityServer | None,
+    tenant_id: uuid.UUID | None,
+    reason: str,
+) -> None:
+    subject = server.name if server is not None else None
+    report_ops_event(
+        sessions, OpsEvent(code, tenant_id, reason=reason, subject_key=subject), logged=False
+    )
+
+
+def _claimed_tenant(claims: Mapping[str, object]) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(claims["tenant_id"]))
+    except (KeyError, ValueError):
+        return None
+
+
+async def _bearer_tenant(auth: TokenVerifier, request: Request) -> uuid.UUID | None:
+    """The tenant a valid bearer names, so a refusal before its server is known is reported."""
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        return None
+    access = await auth.verify_token(header[len("bearer ") :])
+    return _claimed_tenant(access.claims) if access is not None else None
+
+
+def _tool_name(request: Request, message: object, body: bytes) -> str | None:
+    """The tool a relayed `tools/call` names, clipped; never its arguments."""
+    if message is None and request.method == "POST":
+        try:
+            message = read_request_body(body)
+        except RequesterBodyError:
+            return None
+    name = called_tool(message)
+    return name[:64] if name is not None else None
+
+
 def build_identity_relay_route(
     *,
     servers: Mapping[str, SignedIdentityServer],
@@ -384,13 +451,14 @@ def build_identity_relay_route(
     async def handler(request: Request) -> Response:
         server = servers.get(request.path_params["name"])
         if server is None:
-            return Response(status_code=404)
+            tenant = await _bearer_tenant(auth, request)
+            return _refused(404, "unknown_server", tenant_id=tenant, sessions=sessionmaker)
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("bearer "):
-            return Response(status_code=401)
+            return _refused(401, "no_bearer", server=server)
         access = await auth.verify_token(header[len("bearer ") :])
         if access is None:
-            return Response(status_code=401)
+            return _refused(401, "token_rejected", server=server)
         claims = access.claims
         # Only a session's relay credential: it names the executing agent and the
         # session. Daimon's own chat credential, coding, operator and CLI keys do not.
@@ -400,20 +468,36 @@ def build_identity_relay_route(
             agent_id = uuid.UUID(str(claims["chat_agent_id"]))
             binding = parse_relay_claim(claims[RELAY_CLAIM])
         except (KeyError, ValueError):
-            return Response(status_code=403)
+            return _refused(
+                403,
+                "not_session_credential",
+                server=server,
+                tenant_id=_claimed_tenant(claims),
+                sessions=sessionmaker,
+            )
         if claims.get(TOKEN_KIND_CLAIM) != "agent":
-            return Response(status_code=403)
+            return _refused(
+                403, "not_agent_token", server=server, tenant_id=tenant_id, sessions=sessionmaker
+            )
         platform = str(claims.get("platform") or "")
         if HOLD_CLAIM in claims and await _held_in_audience_mode_on(
             sessionmaker, claims[HOLD_CLAIM], tenant_id=tenant_id, platform=platform
         ):
             # A held session is in a room outsiders may read, or nobody can vouch for: in
             # `on` it mounts no signed-identity server, so this token is a leftover. Refused.
-            return Response(status_code=403)
+            return _refused(
+                403, "held_session", server=server, tenant_id=tenant_id, sessions=sessionmaker
+            )
         workspace = claims.get("external_id")
         workspace = workspace if isinstance(workspace, str) else None
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:
-            return Response(status_code=403)
+            return _refused(
+                403,
+                "workspace_not_allowed",
+                server=server,
+                tenant_id=tenant_id,
+                sessions=sessionmaker,
+            )
         # An allowlist names the agents that may use a server (a bearer server always has one).
         if (
             server.agents
@@ -422,17 +506,26 @@ def build_identity_relay_route(
                 anthropic, sessionmaker, server, binding, tenant_id=tenant_id, agent_id=agent_id
             )
         ):
-            return Response(status_code=403)
+            return _refused(
+                403, "agent_not_allowed", server=server, tenant_id=tenant_id, sessions=sessionmaker
+            )
         bearer = keys.get(server.name)
         if (server.auth == "bearer" and bearer is None) or (
             server.auth == "signed" and tokens is None
         ):
-            log.error("mcp_identity.relay_unconfigured", server=server.name)
+            log.error(
+                "mcp_identity.relay_unconfigured", server=server.name, tenant_id=str(tenant_id)
+            )
+            _report_relay(
+                sessionmaker, "bridge.relay_failed", server, tenant_id, "relay_unconfigured"
+            )
             return Response(status_code=503)
         person = claims.get("platform_user_id")
         body = await read_capped_body(request)
         if body is None:
-            return Response(status_code=413)
+            return _refused(
+                413, "body_too_large", server=server, tenant_id=tenant_id, sessions=sessionmaker
+            )
         now = clock()
         origin = await _session_turn(
             sessionmaker,
@@ -461,15 +554,29 @@ def build_identity_relay_route(
                 public_url=public_url,
             )
             if watch is None or request.method != "POST":
-                return Response(status_code=403)
+                return _refused(
+                    403,
+                    "watch_poll_refused",
+                    server=server,
+                    tenant_id=tenant_id,
+                    sessions=sessionmaker,
+                )
         message: object = None
         if watch is not None or (server.requester_meta and request.method == "POST"):
             try:
                 message = read_request_body(body)
             except RequesterBodyError:
-                return Response(status_code=400)
+                return _refused(
+                    400, "bad_body", server=server, tenant_id=tenant_id, sessions=sessionmaker
+                )
         if watch is not None and not _is_poll_message(message, str(watch.source_state.get("tool"))):
-            return Response(status_code=403)
+            return _refused(
+                403,
+                "watch_poll_tool_refused",
+                server=server,
+                tenant_id=tenant_id,
+                sessions=sessionmaker,
+            )
         headers = {
             name: value
             for name in _REQUEST_HEADERS
@@ -560,7 +667,9 @@ def build_identity_relay_route(
                     message, person=named, conversation=conversation, kind=kind, wake_url=wake_url
                 )
             except RequesterBodyError:
-                return Response(status_code=400)
+                return _refused(
+                    400, "bad_body", server=server, tenant_id=tenant_id, sessions=sessionmaker
+                )
         http = clients[server.name]
         upstream = http.build_request(
             request.method,
@@ -577,20 +686,48 @@ def build_identity_relay_route(
         try:
             response = await http.send(upstream, stream=True)
         except httpx.PoolTimeout:
-            log.warning("mcp_identity.relay_busy", server=server.name)
+            log.warning(
+                "mcp_identity.relay_busy",
+                server=server.name,
+                tenant_id=str(tenant_id),
+                tool=_tool_name(request, message, body),
+            )
+            _report_relay(sessionmaker, "bridge.relay_failed", server, tenant_id, "relay_busy")
             return Response(status_code=503, headers={"retry-after": "5"})
         except httpx.HTTPError as err:
             log.warning(
-                "mcp_identity.relay_failed", server=server.name, error_type=type(err).__name__
+                "mcp_identity.relay_failed",
+                server=server.name,
+                tenant_id=str(tenant_id),
+                tool=_tool_name(request, message, body),
+                error_type=type(err).__name__,
             )
+            _report_relay(sessionmaker, "bridge.relay_failed", server, tenant_id, "502")
             return Response(status_code=502)
-        log.info(
-            "mcp_identity.request_relayed",
-            server=server.name,
-            status=response.status_code,
-            person=origin is not None,
-            auth=server.auth,
-        )
+        # An upstream 5xx is a failed relay for alerting; the call still reaches the caller.
+        # The tool name is read for failure lines only, never on the success path.
+        if response.status_code >= 500:
+            log.warning(
+                "mcp_identity.relay_failed",
+                server=server.name,
+                tenant_id=str(tenant_id),
+                tool=_tool_name(request, message, body),
+                status=response.status_code,
+                person=origin is not None,
+                auth=server.auth,
+            )
+            _report_relay(
+                sessionmaker, "bridge.relay_failed", server, tenant_id, str(response.status_code)
+            )
+        else:
+            log.info(
+                "mcp_identity.request_relayed",
+                server=server.name,
+                tenant_id=str(tenant_id),
+                status=response.status_code,
+                person=origin is not None,
+                auth=server.auth,
+            )
         return StreamingResponse(
             response.aiter_bytes(),
             status_code=response.status_code,

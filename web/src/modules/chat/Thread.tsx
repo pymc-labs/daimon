@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils"
 import { MonitoringNotice } from "./Cards"
 import { Composer } from "./Composer"
 import { AssistantMessage, UserMessage } from "./Message"
-import type { Msg } from "./types"
+import type { Msg, Notice } from "./types"
 import { useCredit, useSessionDetail } from "./threadHooks"
 import { answer, hydrate, loadEarlier, resume, send, stop, switchBack, useThread, type SendOpts } from "./turns"
 
@@ -47,13 +47,12 @@ export function Thread({ id, agent, compact, placeholder, picker, fill, after, e
   const anchor = useRef<{ height: number; first?: string } | null>(null)
   const detail = useSessionDetail(id)
   const { data } = detail
-  const [closed, setClosed] = useState<string | undefined>()
-  const notice = closed === id ? undefined : monitoring ?? data?.monitoring
   // A notice streamed after a dismiss is a re-tell (monitoring switched on again): show it.
-  useEffect(() => setClosed(undefined), [monitoring])
+  const [closed, setClosed] = useState<{ id?: string; monitoring?: Notice }>()
+  const notice = closed?.id === id && closed?.monitoring === monitoring ? undefined : monitoring ?? data?.monitoring
   // Gone for this person and agent until monitoring is switched on again; the server keeps it.
   const closeNotice = () => {
-    setClosed(id)
+    setClosed({ id, monitoring })
     api.post(`/api/chat/sessions/${id}/monitoring/dismiss`).catch(() => setClosed(undefined))
   }
   useEffect(() => {

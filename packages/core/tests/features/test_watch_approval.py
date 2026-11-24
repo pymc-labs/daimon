@@ -93,8 +93,8 @@ async def test_skip_drops_only_make_and_resume(
     await _set(db_session_factory, tenant.id, tier, "skip")
     got = await confirmed_tools_for_tenant(_deps(db_session_factory), tenant.id, AGENT)
     assert not got & WATCH_APPROVAL_TOOLS, "create and resume run without a card"
-    assert got >= STILL_ASK, "key rotation, long jobs and Fly keep asking"
-    assert {"start_long_job", "rotate_watch_key", "fly_launch_session"} <= got
+    assert got >= STILL_ASK, "key rotation, long jobs and machine launches keep asking"
+    assert {"start_long_job", "rotate_watch_key", "compute_launch_session"} <= got
     assert "update_watch" in got, "editing a watch keeps its card, as it can change anything"
 
 

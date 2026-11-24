@@ -4,7 +4,6 @@ import { useState } from "react"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router"
 
 import { AgentAvatar } from "@/components/common"
-import { useConfirm } from "@/lib/confirm"
 import { creditTone } from "@/lib/credit"
 import { Page } from "@/components/shell/Page"
 import { RenameDialog } from "@/components/shell/RenameDialog"
@@ -23,7 +22,7 @@ import { ThreadModel } from "./ThreadModel"
 import { Composer } from "./Composer"
 import { Thread } from "./Thread"
 import { useCredit, useSessionDetail } from "./threadHooks"
-import { evict, hydrate, send } from "./turns"
+import { hydrate, send, useDeleteThread } from "./turns"
 
 
 /** Credit left, in one line for the header. */
@@ -31,9 +30,9 @@ function HeaderMeter({ meter }: { meter: CreditMeter }) {
   const tone = creditTone(meter)
   const pct = Math.max(0, Math.min(1, meter.left_usd / meter.total_usd))
   return (
-    <span className="ml-3 flex items-center gap-2 text-xs lg:hidden">
+    <span className="ml-3 flex shrink-0 items-center gap-2 text-xs whitespace-nowrap md:hidden">
       <span className={cn("font-medium tabular", tone === "out" && "text-destructive", tone === "low" && "text-warning")}>{usd(meter.left_usd)} left</span>
-      <span className="h-1 w-20 overflow-hidden rounded-full bg-foreground/10">
+      <span className="hidden h-1 w-20 overflow-hidden rounded-full bg-foreground/10 sm:block">
         <span className={cn("block h-full rounded-full", tone === "out" ? "bg-destructive" : tone === "low" ? "bg-warning" : "bg-teal")} style={{ width: `${pct * 100}%` }} />
       </span>
     </span>
@@ -58,12 +57,12 @@ export function NewChat() {
       navigate(`/chat/${s.id}`)
     },
   })
-  const go = (text: string, files: File[]) => { if (agent) start.mutate({ agentId: agent.id, text, files }) }
+  const go = (text: string, files: File[]) => agent && start.mutateAsync({ agentId: agent.id, text, files })
   const pick = (a: AgentRef) => setParams({ agent: a.id }, { replace: true })
 
   return (
     <Page crumbs={[{ label: "Chat" }, { label: "New thread" }]} flush>
-      <div className="mx-auto flex h-full max-w-[720px] flex-col justify-center px-4 pb-[10vh]">
+      <div className="mx-auto flex min-h-full max-w-[720px] flex-col justify-center px-4 pb-[10vh]">
         <QueryState
           query={agents} empty="No agent is available to you. Ask an admin."
           skeleton={<Skeleton className="mx-auto mb-7 h-28 w-48" />}
@@ -80,14 +79,14 @@ export function NewChat() {
               </div>
               {out && <div className="mb-3">{card}</div>}
               <Composer
-                key={agent.id} onSend={go} onStop={() => {}} busy={start.isPending} disabled={out} canAttach={can("files.attach")} autoFocus
+                key={agent.id} onSend={go} busy={start.isPending} disabled={out} canAttach={can("files.attach")} autoFocus
                 placeholder={out ? "Out of credit" : `Message ${agent.name}`}
                 picker={<AgentPicker agents={list} value={agent} onChange={pick} />}
               />
               {!out && !!agent.starters?.length && (
                 <div className="mt-3 flex flex-wrap justify-center gap-2">
                   {agent.starters.map((s) => (
-                    <button key={s} disabled={start.isPending} onClick={() => go(s, [])} className="h-8 rounded-md border px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">{s}</button>
+                    <button key={s} disabled={start.isPending} onClick={() => go(s, [])?.catch(() => {})} className="h-8 rounded-md border px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">{s}</button>
                   ))}
                 </div>
               )}
@@ -101,30 +100,15 @@ export function NewChat() {
 
 export function ChatView() {
   const { id } = useParams()
-  const navigate = useNavigate()
-  const qc = useQueryClient()
   const { meter, out } = useCredit()
   const detail = useSessionDetail(id)
   const { data } = detail
   const { data: sessions } = useSessions()
   const session = sessions?.find((s) => s.id === id) ?? data?.session
   const agent = session?.agent
-  const confirm = useConfirm()
   const { data: me } = useMe()
   const [renaming, setRenaming] = useState<ChatSession | null>(null)
-  const del = useMutation({
-    mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
-    onSuccess: (_, s) => {
-      evict(s.id)
-      qc.removeQueries({ queryKey: ["chat", "session", s.id] })
-      qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
-      navigate("/chat")
-    },
-  })
-  const remove = async () => {
-    if (!session || !(await confirm({ title: "Delete thread?", body: session.title, action: "Delete", destructive: true }))) return
-    del.mutate(session)
-  }
+  const remove = useDeleteThread()
 
   if (detail.error instanceof ApiError && detail.error.status === 404) {
     return (
@@ -146,14 +130,14 @@ export function ChatView() {
             <AgentAvatar src={session.agent.avatar} name={session.agent.name} className="size-4 rounded" />
             <span>{session.agent.name}</span>
           </span>
-          <ThreadModel sid={session.id} model={session.agent.model ?? ""} onChanged={() => void detail.refetch()} />
-          {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
+          <ThreadModel sid={session.id} model={session.agent.model ?? ""} />
+          {me?.role === "visitor" && <Pill className="hidden sm:inline-flex">Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Thread actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => setRenaming(session)}>Rename</DropdownMenuItem>
-              <DropdownMenuItem variant="destructive" onSelect={remove}>Delete</DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onSelect={() => void remove(session)}>Delete</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </>

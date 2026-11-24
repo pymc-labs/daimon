@@ -342,6 +342,9 @@ EXEMPT: dict[str, str] = {
         "a run's signed callback: it hands data to one Wait of that run and changes no "
         "channel's or agent's settings"
     ),
+    "POST /api/admin/issues/{fingerprint}/state": (
+        "workspace level: an issue's resolve or mute state, no channel and no agent settings"
+    ),
     "DELETE /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "PATCH /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "POST /{path:path}": "the app's page fallback: it serves the page and changes nothing",

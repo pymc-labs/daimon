@@ -127,8 +127,32 @@ async def warn(db: AsyncSession, session: ComputeSession, now: datetime) -> None
         idempotency_key=uuid.uuid5(session.id, session.expires_at.isoformat()),
         available_at=now,
         attended=False,
-        requested_work=f"Tell the owner: Fly machine {session.id} expires at "
+        requested_work=f"Tell the owner: machine {session.id} expires at "
         f"{session.expires_at.isoformat()} and its files will be deleted. "
         "Ask them to extend it in an attended conversation if needed. Do not run commands.",
     )
     await save(db, session.model_copy(update={"warned_for": session.expires_at}))
+
+
+async def start_failed(db: AsyncSession, session: ComputeSession, now: datetime) -> None:
+    """Queue the one notice that a machine never started, for an owner who is not in the call."""
+    from daimon.core.stores.task_continuations import record_continuation
+
+    await record_continuation(
+        db,
+        tenant_id=session.tenant_id,
+        platform=session.platform,
+        parent_channel_id=session.parent_channel_id,
+        thread_id=session.thread_id,
+        requester_account_id=session.owner_account_id,
+        requester_external_user_id=session.owner_external_user_id,
+        target_ma_agent_id=session.agent_id,
+        target_name=session.agent_name,
+        reason="timer",
+        idempotency_key=uuid.uuid5(session.id, "start-failed"),
+        available_at=now,
+        attended=False,
+        requested_work=f"Tell the owner: machine {session.id} could not start and is being "
+        f"removed. "
+        f"An admin can check the image profile {session.profile}. Do not run commands.",
+    )

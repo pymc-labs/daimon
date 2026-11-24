@@ -35,6 +35,7 @@ from daimon.core.permissions import (
     outside_runs_in,
     post_refusal,
     readable_from,
+    readers_set_by_hand,
     ruled_agents,
     run_refusal,
     sealed_outside,
@@ -385,6 +386,9 @@ DenyReason = Literal[
     "sealed_channel",
     # POST: the destination may be read by outsiders and the execution is not held to it.
     "audience_contained",
+    # POST, DIRECT_MESSAGE: this turn read a limited room through own-DM reach, so it
+    # posts and sends to its own person's DM only.
+    "reach_latched",
 ]
 
 
@@ -404,6 +408,20 @@ ALLOW = Decision(True)
 
 def _deny(reason: DenyReason) -> Decision:
     return Decision(False, reason)
+
+
+@dataclass(frozen=True)
+class OwnDmRead:
+    """What lets a DM turn read a limited room its person can read themselves.
+
+    Built by a caller that holds both facts: the turn's server-set capability (the turn
+    origin's `own_dm_reach`, recorded at admission) and `checked`, the exact channel or thread
+    ids whose live View, History and thread membership it checked for the caller in this
+    very call. `platform` is the turn origin's. Never built from a model-supplied value.
+    """
+
+    platform: str
+    checked: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -444,6 +462,10 @@ class Request:
     # POST: the destination's audience, read by a caller that enforces `audience_hold`
     # (`daimon.core.audience_gate.audience_fact`). None: the audience is not checked.
     audience: ChannelAudience | None = None
+    # READ_CHANNEL: the own-DM reach evidence; None for every caller that has none.
+    own_dm_read: OwnDmRead | None = None
+    # POST, DIRECT_MESSAGE: the calling turn read a limited room through own-DM reach.
+    reach_latched: bool = False
 
 
 #: What a client requester may never do, whatever its place or surface.
@@ -669,6 +691,30 @@ def _decide_shared_agent_change(req: Request) -> Decision:
     return _deny("admin_required")
 
 
+def _own_dm_reads(policy: TenantAccessPolicy, req: Request) -> bool:
+    """Own-DM reach: the only way past `not_a_reader` for a turn outside the room.
+
+    Needs the adapter's evidence for this exact target on Discord, and a person (never an
+    agent key or a client) whose turn the caller verified. The caller built the evidence
+    only for a turn whose origin holds the capability. Only a limit the room facts made is
+    passed: a room whose readers an admin limited by hand keeps its rule. Everything else
+    is refused as before.
+    """
+    evidence = req.own_dm_read
+    place = req.place
+    return (
+        evidence is not None
+        and evidence.platform == "discord"
+        and place.channel_id is not None
+        and place.channel_id in evidence.checked
+        and not readers_set_by_hand(policy, place.channel_id, place.parent_channel_id)
+        and req.subject.platform_user_id is not None
+        and not req.subject.via_agent_key
+        and not req.subject.client
+        and req.hold is None
+    )
+
+
 def _channel_bound(agent: AgentRef) -> bool:
     """An agent ruled to channels without the web chat. Naming the web chat in every
     rule lets it answer there, unless it is a channel's own agent (`_decide`)."""
@@ -842,6 +888,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if may_mint and not subject.via_agent_key else _deny("admin_required")
 
     if req.action is Action.POST:
+        # A turn that read a limited room through reach posts only into its own DM.
+        if req.reach_latched and not place.own_dm:
+            return _deny("reach_latched")
         if req.audience is not None and (
             audience_refusal(req.audience, req.hold, place.channel_id, place.parent_channel_id)
             == AUDIENCE_CONTAINED
@@ -869,6 +918,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if refusal is None else _deny(refusal)
 
     if req.action is Action.DIRECT_MESSAGE:
+        if req.reach_latched and (
+            subject.platform_user_id is None or req.recipient_id != subject.platform_user_id
+        ):
+            return _deny("reach_latched")
         if not agent.present:
             return ALLOW
         recipients = agent.permissions.direct_messages(_origin_permissions(req))
@@ -928,7 +981,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             return ALLOW
         if not readable_from(
             policy, req.origin_channel_ids, place.channel_id, place.parent_channel_id
-        ):
+        ) and not _own_dm_reads(policy, req):
             return _deny("not_a_reader")
         if (
             place.permissions.home is not None
@@ -1140,6 +1193,8 @@ def authorize(
     answering: bool = False,
     owned_by_caller: bool = False,
     audience: ChannelAudience | None = None,
+    own_dm_read: OwnDmRead | None = None,
+    reach_latched: bool = False,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -1167,6 +1222,8 @@ def authorize(
             answering=answering,
             owned_by_caller=owned_by_caller,
             audience=audience,
+            own_dm_read=own_dm_read,
+            reach_latched=reach_latched,
         ),
     )
     # The channel, not a thread under it: its own rule is the thread's to keep.
@@ -1195,6 +1252,7 @@ __all__ = [
     "Decision",
     "DenyReason",
     "OperationFamily",
+    "OwnDmRead",
     "Place",
     "Request",
     "SessionFacts",

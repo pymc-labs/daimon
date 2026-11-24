@@ -4,8 +4,8 @@ import { Ctx, type Theme } from "./theme-context"
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // stored only when picked; the old key held "system" for everyone
-  const [theme, set] = useState<Theme>(() => (localStorage.getItem("daimon:theme") as Theme) || "light")
-  const setTheme = (t: Theme) => { localStorage.setItem("daimon:theme", t); set(t) }
+  const [theme, set] = useState<Theme>(() => { try { return (localStorage.getItem("daimon:theme") as Theme) || "light" } catch { return "light" } })
+  const setTheme = (t: Theme) => { try { localStorage.setItem("daimon:theme", t) } catch { /* blocked storage: the choice lasts this visit */ } set(t) }
   const [system, setSystem] = useState(() => matchMedia("(prefers-color-scheme: dark)").matches)
   useEffect(() => {
     const m = matchMedia("(prefers-color-scheme: dark)")

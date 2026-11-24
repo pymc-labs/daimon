@@ -52,8 +52,8 @@ from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
+    compute,
     environments,
-    fly,
     long_jobs,
     routines,
     self_edit,
@@ -96,6 +96,7 @@ from daimon.adapters.mcp.tools.monitored_activity import register_monitored_acti
 from daimon.adapters.mcp.tools.my_data import register_my_data_tools
 from daimon.adapters.mcp.tools.never_tag import register_never_tag_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
+from daimon.adapters.mcp.tools.ops_issues import register_ops_issues_tools
 from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
@@ -144,6 +145,7 @@ from daimon.core.node_exchange import node_identity_key
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
 from daimon.core.operator_tokens import scope_tag
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.agent_avatars import get_avatar_by_token
@@ -476,6 +478,7 @@ def create_mcp_app(
                 pass
             finally:
                 await identity_middleware.drain_audit()
+                await drain_ops_events()
                 await slack_http.close()
                 for client in relay_clients.values():
                     await client.aclose()
@@ -594,7 +597,7 @@ def create_mcp_app(
     register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
     long_jobs.register_long_job_tools(mcp, runtime)
-    fly.register_fly_tools(mcp, runtime)
+    compute.register_compute_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 
@@ -642,6 +645,7 @@ def create_mcp_app(
     register_agent_tool_rule_tools(mcp, runtime)
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
     register_promo_issuing_tools(mcp, runtime)  # operator-token promo issuing
+    register_ops_issues_tools(mcp, runtime)  # failures and warnings
 
     register_upload_tool(mcp, runtime=runtime)
 

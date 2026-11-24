@@ -37,8 +37,8 @@ _STANDING = frozenset(
         "rotate_watch_key",
         "update_watch",
         "start_long_job",
-        "fly_launch_session",
-        "fly_extend_session",
+        "compute_launch_session",
+        "compute_extend_session",
     }
 )
 _TOOLS: list[dict[str, object]] = [

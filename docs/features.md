@@ -86,6 +86,7 @@ Where each feature can be set, and its default.
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Secret sharing | `secret_sharing` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
+| Wait for bot access | `bot_access_wait` | Capability | Off |  | ✓ |  |  |  |  | Only Discord |
 | Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -129,6 +130,7 @@ Where each feature can be set, and its default.
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Follow the GitHub org | `github_follow_org` | Guardrail | Off |  |  | ✓ |  |  |  |  |
 
 ## Approvals
 
@@ -824,7 +826,7 @@ Report only changes nothing.
 
 ## Web app: chat
 
-The chat pages. Off hides them for the team.
+The chat pages. Off hides them.
 
 | | |
 | --- | --- |
@@ -836,7 +838,7 @@ The chat pages. Off hides them for the team.
 
 ## Web app: agents
 
-The agents pages. Off hides them for the team.
+The agents pages. Off hides them.
 
 | | |
 | --- | --- |
@@ -848,7 +850,7 @@ The agents pages. Off hides them for the team.
 
 ## Web app: channels
 
-The channels pages. Off hides them for the team.
+The channels pages. Off hides them.
 
 | | |
 | --- | --- |
@@ -860,7 +862,7 @@ The channels pages. Off hides them for the team.
 
 ## Web app: routines
 
-The routines pages. Off hides them for the team.
+The routines pages. Off hides them.
 
 | | |
 | --- | --- |
@@ -872,7 +874,7 @@ The routines pages. Off hides them for the team.
 
 ## Web app: credits
 
-The credits pages. Off hides them for the team.
+The credits pages. Off hides them.
 
 | | |
 | --- | --- |
@@ -884,7 +886,7 @@ The credits pages. Off hides them for the team.
 
 ## Web app: integrations
 
-The integrations pages. Off hides them for the team.
+The integrations pages. Off hides them.
 
 | | |
 | --- | --- |
@@ -896,7 +898,7 @@ The integrations pages. Off hides them for the team.
 
 ## Web app: workflows
 
-The workflows pages. Off hides them for the team.
+The workflows pages. Off hides them.
 
 | | |
 | --- | --- |
@@ -953,6 +955,18 @@ The agent can start a long job that keeps working after the chat moves on. Off u
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
+## Wait for bot access
+
+Work for a channel Daimon cannot reach waits, without failing, and runs once it can.
+
+| | |
+| --- | --- |
+| Key | `bot_access_wait` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace |
 | Combines | Off above is a ceiling |
 
 ## Cloud computers
@@ -1398,7 +1412,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and machine launches keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1443,4 +1457,16 @@ Keeps what people ask this agent from their coding tools and what it answers, pl
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
+## Follow the GitHub org
+
+Follows the whole org.
+
+| | |
+| --- | --- |
+| Key | `github_follow_org` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Agent |
 | Combines | Off above is a ceiling |

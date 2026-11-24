@@ -119,7 +119,7 @@ Each tick, 30 seconds apart by default, the scheduler:
    settlement, then sleeps.
 
 The scheduler also runs [long jobs](long-jobs.md) and cleans up
-[Fly compute sessions](compute.md), each on its own loop.
+[compute sessions](compute.md), each on its own loop.
 
 The tick does not wait for the runs. A dispatcher bounds concurrency, so a slow
 routine cannot hold up later ticks or overlap itself. A crash after a claim can
@@ -241,8 +241,7 @@ timeout cannot be set below it. Settings are in [configuration.md](configuration
 | run now | admin or the creator, web app only | not offered | not offered |
 
 Ownerless routines are admin-only, and a refusal reads as "not found".
-Non-admins see only their own routines, since output often holds business
-data. A routine runs with its agent's repo, keys and connectors, so a member
+Non-admins see only their own routines. A routine runs with its agent's repo, keys and connectors, so a member
 may schedule only the agent they are talking to. Admins too need a role-gated
 agent's roles.
 
@@ -252,18 +251,20 @@ destination and skips a run that would cross the line (`own_agents_only`).
 
 ## When a run fails
 
-The scheduler does not retry a failed run or count failures; a failing routine
-tries again at its next slot. It pauses one whose owner lost a
-[role its agent needs](admins.md#limit-an-agent-to-roles)
-(`owner_lacks_agent_role`). A failed run
-writes `last_error` and clears `last_result_tail`, and a success does the
-reverse. The panels show a failure whenever `last_error` is set.
+A failing routine is not retried; it tries again at its next slot. It pauses when its
+owner lost a [role its agent needs](admins.md#limit-an-agent-to-roles)
+(`owner_lacks_agent_role`). A failed run writes `last_error` and clears
+`last_result_tail`; a success does the reverse. The panels show a failure whenever
+`last_error` is set.
 
-A channel or thread routine announces the first failure after a success, or a
-first run that fails. An owner-DM routine only records it. The notice goes through the same checks as a result, with
-the DM fallback. It says what failed in plain words, never the raw error, and
-that the routine will try again. It never replaces an undelivered result. A
-routine that keeps failing posts once and stays quiet until a run succeeds.
+A channel or thread routine announces the first failure after a success, or a first run
+that fails, through the same checks as a result, with the DM fallback. On Discord, Slack
+and Teams the owner also gets a DM written by the routine's own agent, or a plain notice
+when it cannot run; a routine that posts to the owner's DM gets only that DM. Notices say
+what failed in plain words, never the raw error. A routine that keeps failing posts once
+until a run succeeds.
+
+A run that could not do its task calls `report_routine_problem`; admins see it on Issues.
 
 The `last_error` values are a closed set: `invoker_not_allowed` (the creator was
 removed from the allowlist), `access_policy_unreadable`, `balance_depleted`,
@@ -273,17 +274,15 @@ characters. A ceiling breach reads `TurnError: ceiling: ...`.
 
 ## Turn routines on
 
-There is no feature flag. Routines run only while the scheduler process runs,
-so a deployment without the `scheduler` service collects routines that never
-fire. The process will not boot without `DAIMON_MCP__JWT_SECRET` and
+There is no feature flag. Routines run only while the scheduler process runs; without
+the `scheduler` service they never fire. The process will not boot without `DAIMON_MCP__JWT_SECRET` and
 `DAIMON_MCP__PUBLIC_URL`
 ([JWT secret](configuration.md#daimon_mcp__jwt_secret),
 [public URL](configuration.md#daimon_mcp__public_url)).
 
 Four gates apply to every run: the invoker allowlist against the creator, the
-credit balance, the owner's spend [allowance](allowances.md) and, for a routine with a channel,
-that channel's budget, checked last after the agent's rule
-([billing.md](billing.md#channel-budgets)). A refused run records the reason and
-fires again at its next slot. On Discord each fire, and each delivery,
+credit balance, the owner's spend [allowance](allowances.md) and a channel routine's
+channel budget, checked last
+([billing.md](billing.md#channel-budgets)). A refused run records the reason and fires at its next slot. On Discord each fire, and each delivery,
 checks the creator's live membership, roles and admin permissions. Elsewhere
 only the creator's stored admin role exempts them from the allowlist.

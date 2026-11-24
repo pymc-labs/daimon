@@ -30,7 +30,7 @@ gemini = ["daimon-mux[gemini]"]
 Repository = "https://github.com/pymc-labs/daimon"
 
 [tool.uv.workspace]
-members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host", "apps/harness"]
+members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host", "apps/harness", "apps/compute-session"]
 
 [tool.uv.sources]
 daimon-core = { workspace = true }
@@ -65,14 +65,14 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 
 [tool.pyright]
 exclude = ["qa/live/tests"]
-include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/adapters/web/daimon", "packages/adapters/sidecar/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness"]
+include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/adapters/web/daimon", "packages/adapters/sidecar/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness", "apps/compute-session/src/compute_session"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingImports = "error"
 
 [tool.importlinter]
-root_packages = ["daimon", "mux", "notebook_host", "report_host", "daimon_harness"]
+root_packages = ["daimon", "mux", "notebook_host", "report_host", "daimon_harness", "compute_session"]
 # External packages are in the graph so the mux contracts can forbid provider SDKs.
 include_external_packages = true
 
@@ -156,11 +156,12 @@ type = "forbidden"
 source_modules = [
     "daimon.core._erasure_guards",
     "daimon.core._workflow_ledger_guard",
-    "daimon.core.compute_fly",
+    "daimon.core.compute_cloud_run",
     "daimon.core.compute_models",
     "daimon.core.compute_provider",
     "daimon.core.compute_sessions",
     "daimon.core.compute_tasks",
+    "daimon.core.compute_thin_mcp",
     "daimon.core.long_job_models",
     "daimon.core.long_jobs",
     "daimon.core.long_jobs_ma",
@@ -199,6 +200,7 @@ source_modules = [
     "daimon.core.authz",
     "daimon.core.billing",
     "daimon.core.billing_panel",
+    "daimon.core.bot_access",
     "daimon.core.broker",
     "daimon.core.bundle_handle",
     "daimon.core.capability_tools",
@@ -243,6 +245,7 @@ source_modules = [
     "daimon.core.dm_carry_over",
     "daimon.core.dm_debounce",
     "daimon.core.dm_explain",
+    "daimon.core.dm_failures",
     "daimon.core.dm_import",
     "daimon.core.dm_routing",
     "daimon.core.dm_settings",
@@ -320,12 +323,18 @@ source_modules = [
     "daimon.core.notebooks",
     "daimon.core.observability",
     "daimon.core.ops_alerts",
+    "daimon.core.ops_catalog",
+    "daimon.core.ops_events",
+    "daimon.core.ops_events_sweep",
+    "daimon.core.ops_overview",
+    "daimon.core.routine_owner_notice",
     "daimon.core.operation_policy",
     "daimon.core.operator_tokens",
     "daimon.core.security_audit",
     "daimon.core.outbound",
     "daimon.core.output_delivery",
     "daimon.core.outsiders",
+    "daimon.core.owner_notices",
     "daimon.core.panel_audit",
     "daimon.core.panel_operator_tokens",
     "daimon.core.participation_gates",
@@ -573,6 +582,13 @@ type = "forbidden"
 source_modules = ["daimon_harness"]
 forbidden_modules = ["daimon"]
 
+# The session image carries this package alone, and its machine runs untrusted commands.
+[[tool.importlinter.contracts]]
+name = "compute-session must not import daimon"
+type = "forbidden"
+source_modules = ["compute_session"]
+forbidden_modules = ["daimon", "mux"]
+
 # Daimon reaches a provider driver through its package (`mux.drivers.<provider>`),
 # whose `__all__` is the host-facing API; the driver's submodules and private
 # modules are not an import path. The ignores are the names that stay on a
@@ -609,7 +625,7 @@ pythonpath = [".", "tests/golden"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/adapters/web/tests", "packages/adapters/sidecar/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests"]
+testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/adapters/web/tests", "packages/adapters/sidecar/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests", "apps/compute-session/tests"]
 addopts = "--import-mode=importlib -m 'not contract and not slow and not judge and not platform_contract'"
 markers = [
     "judge: manual Codex subscription transcript judge -- excluded by default",

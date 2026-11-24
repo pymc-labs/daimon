@@ -54,7 +54,7 @@ from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
 from daimon.adapters.teams.reactions import ReactionTarget
 from daimon.adapters.teams.restart_catch_up import RestartCatchUp
-from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
+from daimon.adapters.teams.routine_delivery import make_teams_owner_dm, make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.settings import VERB as SETTINGS_VERB
@@ -453,6 +453,13 @@ def create_teams_http_service(
             platform="teams",
             links=workflow_cards.web_at(runtime),
             edit=workflow_cards.card_editor(TimedSender(teams_app)),
+        ),
+        owner_dm=make_teams_owner_dm(
+            runtime.sessionmaker,
+            direct,
+            tenant_id=installs.tenant_id,
+            dm_policies=runtime.settings.direct_message_policies,
+            team_members=team_member_lookup(runtime),
         ),
     )
 

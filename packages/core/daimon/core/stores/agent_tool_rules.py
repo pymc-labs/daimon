@@ -16,6 +16,7 @@ from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
+    RENAMED_DAIMON_TOOLS,
     WILDCARD_TOOL,
     ResolvedAgentToolRule,
     stricter_agent_tool_rule,
@@ -28,6 +29,39 @@ _log = structlog.get_logger(__name__)
 
 Rule = Literal["allow", "ask", "deny"]
 Scope = Literal["chat", "chat_and_routines"]
+
+#: `daimon-mcp/<new name>` to the key the same tool's rules had before it was renamed,
+#: and back. A release that still calls the tool by its old name reads and writes the
+#: old key, so both keys can hold a rule while the two releases run side by side.
+_OLD_KEY: dict[str, str] = {
+    f"{DAIMON_SERVER_NAME}/{new}": f"{DAIMON_SERVER_NAME}/{old}"
+    for old, new in RENAMED_DAIMON_TOOLS.items()
+}
+_NEW_KEY: dict[str, str] = {old: new for new, old in _OLD_KEY.items()}
+
+
+def _with_old_keys(tool_keys: Collection[str]) -> list[str]:
+    return [*tool_keys, *(_OLD_KEY[key] for key in tool_keys if key in _OLD_KEY)]
+
+
+def _current(rows: Sequence[AgentToolRuleRecord]) -> list[AgentToolRuleRecord]:
+    """`rows` as the current tool names see them.
+
+    A rule stored under a renamed tool's old key stands for the tool until the same
+    agent and place has a row under the new key, set or cleared. So a deny written
+    before the rename keeps denying on both releases, and an admin's later change
+    under the new name is the one that counts. The two keys are not kept in step after
+    the migration copies them: a change the older release makes under the old key
+    during a deploy is not seen once the new key has a row. `rows` must hold both
+    keys, whatever their rule, for the places being judged.
+    """
+    held = {(row.tenant_id, row.agent_id, row.channel_id, row.tool_key) for row in rows}
+    return [
+        row
+        for row in rows
+        if (new := _NEW_KEY.get(row.tool_key)) is None
+        or (row.tenant_id, row.agent_id, row.channel_id, new) not in held
+    ]
 
 
 class StaleAgentToolRule(Exception):
@@ -132,7 +166,8 @@ async def list_rules(
             )
         )
     ).all()
-    return [_view(row) for row in rows]
+    # One row a tool: an old-name row is listed only while nothing replaces it.
+    return [_view(row) for row in _current(rows)]
 
 
 async def get_rule(
@@ -176,13 +211,12 @@ async def get_for_call(
             select(AgentToolRuleRecord).where(
                 AgentToolRuleRecord.tenant_id == tenant_id,
                 AgentToolRuleRecord.agent_id == agent_id,
-                AgentToolRuleRecord.tool_key == tool_key,
-                AgentToolRuleRecord.server_url == server_url,
-                AgentToolRuleRecord.rule.is_not(None),
+                AgentToolRuleRecord.tool_key.in_(_with_old_keys([tool_key])),
                 channel_match,
             )
         )
     ).all()
+    rows = [row for row in _current(rows) if row.server_url == server_url and row.rule is not None]
     resolved: ResolvedAgentToolRule | None = None
     for row in rows:
         resolved = stricter_agent_tool_rule(
@@ -205,20 +239,20 @@ async def deny_rules_for_trusted_tool(
     and compares each by `derive_agent_uuid`. One query on
     `uq_agent_tool_rules_global` (leading `tenant_id`). Channel rules are left
     out: the server does not know the channel. Tombstones (`rule IS NULL`),
-    `allow` and `ask` rows are left out too. A deny holds in every scope, so
-    scope is not read.
+    `allow` and `ask` rows are read only to tell whether a renamed tool's old
+    key still stands for it (`_current`), then left out. A deny holds in every
+    scope, so scope is not read.
     """
     rows = (
         await session.scalars(
             select(AgentToolRuleRecord).where(
                 AgentToolRuleRecord.tenant_id == tenant_id,
-                AgentToolRuleRecord.tool_key.in_(list(tool_keys)),
+                AgentToolRuleRecord.tool_key.in_(_with_old_keys(tool_keys)),
                 AgentToolRuleRecord.channel_id.is_(None),
-                AgentToolRuleRecord.rule == "deny",
             )
         )
     ).all()
-    return [_view(row) for row in rows]
+    return [_view(row) for row in _current(rows) if row.rule == "deny"]
 
 
 class DaimonRuleSet(NamedTuple):
@@ -257,28 +291,31 @@ async def daimon_rule_set(
     a toolset config MA would refuse, so it is logged and skipped.
     """
     prefix = f"{DAIMON_SERVER_NAME}/"
-    rows = await session.execute(
-        select(
-            AgentToolRuleRecord.tool_key, AgentToolRuleRecord.channel_id, AgentToolRuleRecord.rule
-        ).where(
-            AgentToolRuleRecord.tenant_id == tenant_id,
-            AgentToolRuleRecord.agent_id == agent_id,
-            AgentToolRuleRecord.rule.in_(("ask", "deny")),
-            AgentToolRuleRecord.tool_key.startswith(prefix),
+    rows = (
+        await session.scalars(
+            select(AgentToolRuleRecord).where(
+                AgentToolRuleRecord.tenant_id == tenant_id,
+                AgentToolRuleRecord.agent_id == agent_id,
+                AgentToolRuleRecord.tool_key.startswith(prefix),
+            )
         )
-    )
+    ).all()
     names: set[str] = set()
     needs_driver = False
-    for key, channel_id, rule in rows:
+    for row in _current(rows):
+        if row.rule not in ("ask", "deny"):
+            continue
+        # A rule still under a renamed tool's old key holds the tool by its new name.
+        key = _NEW_KEY.get(row.tool_key, row.tool_key)
         name = key.removeprefix(prefix)
         if name == WILDCARD_TOOL:
-            if rule != "deny" or channel_id is not None:
+            if row.rule != "deny" or row.channel_id is not None:
                 continue
         elif not valid_tool_name(name):
             _log.warning("tool_safety.rule_name_skipped", tool=key[:160])
             continue
         names.add(name)
-        needs_driver = needs_driver or rule == "ask" or channel_id is not None
+        needs_driver = needs_driver or row.rule == "ask" or row.channel_id is not None
     return DaimonRuleSet(frozenset(names), needs_driver)
 
 

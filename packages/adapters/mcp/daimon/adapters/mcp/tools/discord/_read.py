@@ -43,6 +43,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_history_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
+    _history_allowed,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.permissions import any_readers_limited
 from fastmcp.exceptions import ToolError
@@ -189,7 +190,9 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("this is a thread — use read_thread")
 
         _check_view_permission(channel, member)
-        read_policy.require(str(channel.id))
+        # The caller's own View and History, checked here for this channel, are what let
+        # a DM turn read a limited room (`ChannelReadPolicy`).
+        read_policy.require(str(channel.id), caller_checked=_history_allowed(channel, member))
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support message history")
         _check_history_permission(channel, member)
@@ -208,6 +211,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
             raise
         if not rows and (missing := await _bot_lacks_read_permission(guild, channel)):
             raise _bot_read_error(channel, missing_history=missing == "history")
+        await read_policy.record_reach(runtime)
         return ReadChannelResult(rows=rows, next_before=next_before, hint=hint)
 
 
@@ -278,10 +282,14 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
 
         if isinstance(channel, discord.Thread):
             await _check_thread_view(c, channel, member, _require_discord_identity(auth))
-            read_policy.require(str(channel.id), str(channel.parent_id))
+            read_policy.require(
+                str(channel.id),
+                str(channel.parent_id),
+                caller_checked=_history_allowed(channel, member),
+            )
         else:
             _check_view_permission(channel, member)
-            read_policy.require(str(channel.id))
+            read_policy.require(str(channel.id), caller_checked=_history_allowed(channel, member))
         _check_history_permission(channel, member)
 
         if not isinstance(channel, discord.abc.Messageable):
@@ -299,6 +307,7 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
             read_policy.require(sealed_thread, str(channel.id))  # refuses: it's sealed
         if sealed_thread is not None:
             raise ToolError("message not found")  # a notice naming no thread: withheld
+        await read_policy.record_reach(runtime)
         return _to_message_row(message).model_copy(update={"trust": "untrusted"})
 
 
@@ -392,7 +401,11 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("not a thread — use read_channel for channels")
 
         await _check_thread_view(c, channel, member, _require_discord_identity(auth))
-        read_policy.require(str(channel.id), str(channel.parent_id))
+        read_policy.require(
+            str(channel.id),
+            str(channel.parent_id),
+            caller_checked=_history_allowed(channel, member),
+        )
 
         _check_history_permission(channel, member)
         try:
@@ -410,6 +423,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
             raise
         if not rows and (missing := await _bot_lacks_read_permission(guild, channel)):
             raise _bot_read_error(channel, missing_history=missing == "history")
+        await read_policy.record_reach(runtime)
         return ReadThreadResult(rows=rows, next_before=next_before, hint=hint)
 
 
@@ -446,8 +460,11 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
             raise ToolError("channel does not support threads")
 
         _check_view_permission(parent, member)
-        # Thread names are content too.
-        read_policy.require(str(parent.id))
+        # Thread names are content too. A DM turn lists a limited room's threads only when
+        # the caller holds History there as well as View; each thread below is then one the
+        # caller may open (a private one needs their own membership).
+        history = _history_allowed(parent, member)
+        read_policy.require(str(parent.id), caller_checked=history)
 
         # Active threads — guild-wide, filter by parent_id
         active_threads = await guild.active_threads()
@@ -462,14 +479,15 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
                 except ToolError:
                     continue  # silently omit (no existence leak)
             # A thread sealed on its own keeps even its name from outside turns.
-            if read_policy.allows(str(t.id), str(parent.id)):
+            if read_policy.allows(str(t.id), str(parent.id), caller_checked=history):
                 result.append(_to_thread_row(t))
 
         # Archived public threads (private=False is default)
         async for t in parent.archived_threads(limit=50):
-            if read_policy.allows(str(t.id), str(parent.id)):
+            if read_policy.allows(str(t.id), str(parent.id), caller_checked=history):
                 result.append(_to_thread_row(t))
 
+        await read_policy.record_reach(runtime)
         return result
 
 

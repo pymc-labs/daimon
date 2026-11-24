@@ -2040,8 +2040,8 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
 
     assert len(calls) == 1, "the routine runs"
     assert calls[0]["origin_place"] == RoutineOrigin(
-        "room", "555000555", frozenset({"room"}), f"routine:{row.id}"
-    ), "the session carries the destination and the seal over it"
+        "room", "555000555", frozenset({"room"}), f"routine:{row.id}", reads_inside=True
+    ), "the session carries the destination and the seal over it, and the run reads inside it"
 
 
 async def test_fire_checks_the_agent_pin_before_the_channel_budget(
@@ -4740,3 +4740,34 @@ async def test_a_routine_result_is_queued_with_the_hold_its_fire_ran_under(
         {"held": True, "channel_id": "chan-shared", "client": False, "relay": False},
         {"held": False},
     ]
+
+
+@pytest.mark.parametrize("wait", [True, False])
+async def test_a_routine_aimed_at_a_channel_the_bot_cannot_reach_waits_quietly(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    wait: bool,
+) -> None:
+    import daimon.adapters.scheduler.main as scheduler_main
+
+    async def on(*_args: object, **_kwargs: object) -> bool:
+        return wait
+
+    async def blocked(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(scheduler_main, "bot_access_wait_on", on)
+    monkeypatch.setattr(scheduler_main, "bot_access_blocked", blocked)
+    rest = _SentDms()
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "555"),
+        agent_posts_to=None,
+        send_dm=rest,
+    )
+    assert (not seen) is wait, "with the setting on the turn never starts"
+    assert (after.last_error == "bot_access_unavailable") is wait
+    assert after.enabled is True and not rest.sent

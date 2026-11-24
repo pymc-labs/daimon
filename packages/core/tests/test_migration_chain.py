@@ -185,7 +185,11 @@ TAIL = (
     "0221_routine_delivery_hold",
     "0222_secret_shares",
     "0223_dm_watch_delivery",
-    "0224_workflows",
+    "0224_ops_events",
+    "0225_agent_github_grant_removals",
+    "0226_compute_tool_names",
+    "0227_turn_origin_own_dm_reach",
+    "0228_workflows",
 )
 HEAD = TAIL[-1]
 
@@ -242,6 +246,7 @@ AFTER_MERGE_COLUMNS = {
     ("usage_observation", "provider"),
     ("usage_observation", "observed_at"),
     ("routines", "delivery_hold"),
+    ("routines", "owner_notice"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 
@@ -526,7 +531,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "column"
-            and name in {"self_helpers", "helper_key"}
+            and name in {"self_helpers", "helper_key", "own_dm_reach", "reach_read"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):

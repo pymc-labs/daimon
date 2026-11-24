@@ -1018,10 +1018,12 @@ async def _drain_background_tasks() -> None:
     """
     from daimon.core.agent_identity import cancel_and_wait_pending_agent_faces
     from daimon.core.channel_budget_notice import drain_budget_notices
+    from daimon.core.ops_events import drain_ops_events
     from daimon.core.turn.outcomes import drain_outcomes
 
     await cancel_and_wait_pending_agent_faces()
     await drain_outcomes()
+    await drain_ops_events()
     await drain_budget_notices()
     await platform_names.settle()
     platform_names.forget_all()

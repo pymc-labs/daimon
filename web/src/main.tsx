@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router"
 import { toast } from "sonner"
 
 import { ConfirmProvider } from "@/components/confirm"
+import { Crashed } from "@/components/Crashed"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { ApiError } from "@/lib/api"
@@ -36,7 +37,7 @@ createRoot(document.getElementById("root")!).render(
         <TooltipProvider delayDuration={300}>
           <ConfirmProvider>
             <BrowserRouter>
-              <App />
+              <Crashed><App /></Crashed>
             </BrowserRouter>
           </ConfirmProvider>
           <Toaster position="bottom-right" />

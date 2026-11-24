@@ -17,7 +17,7 @@ _FAMILIES = {
     "routines": lambda name: "routine" in name,
     "workflows": lambda name: "workflow" in name or name in WORKFLOW_STEP_TOOLS,
     "long_jobs": lambda name: "long_job" in name,
-    "compute": lambda name: name.startswith("fly_"),
+    "compute": lambda name: name.startswith("compute_"),
     "microsoft_365": lambda name: "microsoft" in name,
     "lead_intake": lambda name: name.startswith("lead_intake_"),
 }

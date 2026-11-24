@@ -32,7 +32,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -127,6 +127,9 @@ __all__ = [
     "routine_agent_name",
     "run_delivery_poller",
 ]
+
+if TYPE_CHECKING:
+    from daimon.core.owner_notices import OwnerDm
 
 log = structlog.get_logger(__name__)
 
@@ -442,7 +445,7 @@ async def record_failure(
     error: str,
     reason: TerminationReason | None,
     expected_row: RoutineRow | None = None,
-) -> None:
+) -> bool:
     """Record a failed run and, for the first failure in a row, queue a notice.
 
     `reason` is why the run ended, classified where it was caught; `None`
@@ -450,16 +453,20 @@ async def record_failure(
     notice goes through the same outbox as a result, so the chat adapter
     posts it with every check a result gets. One per failing streak: a routine
     that keeps failing stays quiet until a run succeeds (`queue_failure_notice`).
+    Returns whether a notice was queued.
     """
+    queued = False
     if reason is not None:
         notice = failure_notice_text(
             reason, platform=await routine_platform(session, routine_id) or ""
         )
-        if await queue_failure_notice(
+        queued = await queue_failure_notice(
             session, routine_id, notice=notice, expected_row=expected_row
-        ):
+        )
+        if queued:
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))
     await record_result(session, routine_id, tail=None, error=error, expected_row=expected_row)
+    return queued
 
 
 async def record_routine_failure(
@@ -468,12 +475,12 @@ async def record_routine_failure(
     *,
     error: str,
     reason: TerminationReason | None,
-) -> None:
+) -> bool:
     """Record a fire that failed or was refused, fenced on the row it was claimed as.
 
     An owner-DM routine records only the error, and only while its private
-    revision and destination are unchanged; any other routine goes through
-    `record_failure`.
+    revision and destination are unchanged: its owner is told by `tell_owner`. Any
+    other routine goes through `record_failure`. Returns whether its channel is told.
     """
     if row.destination_kind == "dm":
         await record_result(
@@ -484,8 +491,8 @@ async def record_routine_failure(
             expected_destination=(row.destination_kind, row.destination_id),
             expected_private=row,
         )
-    else:
-        await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
+        return False
+    return await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
 def render_fallback_post(
@@ -956,13 +963,16 @@ async def run_delivery_poller(
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
     workflow: WorkflowPoster | None = None,
     run_cards: Callable[[], Awaitable[int]] | None = None,
+    owner_dm: OwnerDm | None = None,
 ) -> None:
     """Poll routine posts, workflow posts with `workflow` and run cards with `run_cards`,
-    until `should_stop`."""
+    until `should_stop`; with `owner_dm`, also send the failure notices waiting for this
+    platform's routine owners."""
     await run_poller(
         sessionmaker,
         platform=platform,
         post=JobPoster(post, workflow, run_cards),
         should_stop=should_stop,
         interval_s=interval_s,
+        owner_dm=owner_dm,
     )

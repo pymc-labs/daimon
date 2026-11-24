@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import get_args
 
-import httpx
 import pytest
-from daimon.core.compute_fly import FlyComputeProvider
-from daimon.core.compute_models import ComputeResource
+from daimon.core.compute_models import (
+    ComputeResource,
+    ComputeSession,
+    MachineReadiness,
+    MachineState,
+    machine_readiness,
+)
 from daimon.core.compute_provider import ComputeProviderError, app_name
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
 from daimon.core.config import ComputeProfile, ComputeSettings
 from daimon.core.errors import StoreError
+from daimon.core.stores import compute_sessions as session_store
+from daimon.core.stores import compute_tasks as task_store
 from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin, get_active_origin
 from daimon.testing.compute import FakeComputeProvider
@@ -31,10 +39,12 @@ def settings(**kwargs):
     return ComputeSettings(
         enabled=True,
         deployment_id="test-deployment",
-        api_token=SecretStr("fly-secret-test-only"),
-        org_slug="test-org",
+        cloud_run_project="test-project",
+        cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
         session_auth_key=SecretStr("session-secret-test-only"),
-        profiles={"mmm": ComputeProfile(image="registry.example/mmm@sha256:abc")},
+        profiles={
+            "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+        },
         **kwargs,
     )
 
@@ -78,7 +88,12 @@ async def caller(sm, *, tenant=None, account=None, attended=True, human=True):
 
 async def launch(service, owner, key="approved"):
     return await service.launch(
-        owner, profile="mmm", region="iad", ttl_hours=24, approval_key=key, source_metadata={}
+        owner,
+        profile="mmm",
+        region="us-central1",
+        ttl_hours=24,
+        approval_key=key,
+        source_metadata={},
     )
 
 
@@ -110,7 +125,7 @@ async def test_owner_tenant_origin_and_machine_token_isolation(db_engine, db_cle
     assert await service.list(foreign) == []
     env = fake.machine_env[session.id]
     assert set(env) == {"MCP_AUTH_TOKEN"}
-    assert env["MCP_AUTH_TOKEN"] not in {"fly-secret-test-only", "session-secret-test-only"}
+    assert env["MCP_AUTH_TOKEN"] != "session-secret-test-only"
     assert "secret-test" not in session.model_dump_json()
     admin = replace(other, admin=True)
     with pytest.raises(StoreError):
@@ -121,6 +136,8 @@ async def test_owner_tenant_origin_and_machine_token_isolation(db_engine, db_cle
         await service.stop(replace(foreign, admin=True), session.id)
     assert (await service.stop(admin, session.id)).state == "deleted"
     assert fake.deleted == [session.id]
+    # The provider is told where the session ran: Cloud Run addresses a service by region.
+    assert fake.deleted_regions == ["us-central1"]
 
 
 @pytest.mark.parametrize("attended,human", [(False, True), (True, False), (True, None)])
@@ -147,7 +164,7 @@ async def test_caps_ttl_disabled_and_expiry(db_engine, db_clean):
             await service.launch(
                 owner,
                 profile="mmm",
-                region="iad",
+                region="us-central1",
                 ttl_hours=hours,
                 approval_key="approved",
                 source_metadata={},
@@ -251,29 +268,6 @@ async def test_renew_and_delete_are_serialized(db_committing_engine, db_clean):
     await write
     assert (await stop).state == "deleted"
     assert session.id not in fake.resources
-
-
-async def test_provider_never_exposes_remote_errors_or_cross_deployment_calls():
-    seen = []
-
-    async def handler(request):
-        seen.append(request)
-        return httpx.Response(500, text="fly-secret-test-only session-secret-test-only")
-
-    provider = FlyComputeProvider(settings(), transport=httpx.MockTransport(handler))
-    with pytest.raises(ComputeProviderError) as error:
-        await provider.inventory()
-    assert "secret-test" not in str(error.value)
-    assert "secret-test" not in repr(error.value)
-    before = len(seen)
-    other_id = uuid.uuid4()
-    with pytest.raises(ComputeProviderError):
-        await provider.delete(
-            ComputeResource(
-                session_id=other_id, deployment_id="other", app_name=app_name("other", other_id)
-            )
-        )
-    assert len(seen) == before
 
 
 async def test_concurrent_admission_cannot_exceed_the_person_cap(db_committing_engine, db_clean):
@@ -538,7 +532,12 @@ async def test_task_limits_cap_and_lease_ceiling(db_engine, db_clean):
         sm, settings(max_ttl_hours=2, per_session_tasks=1), fake, clock=lambda: now
     )
     session = await service.launch(
-        owner, profile="mmm", region="iad", ttl_hours=1, approval_key="a", source_metadata={}
+        owner,
+        profile="mmm",
+        region="us-central1",
+        ttl_hours=1,
+        approval_key="a",
+        source_metadata={},
     )
     for minutes in (0, 121):
         with pytest.raises(StoreError):
@@ -594,11 +593,16 @@ async def test_lost_start_restart_and_overdue_tasks_are_reported_never_rerun(db_
     overdue = await service.start_task(
         owner, session.id, command="sleep 9999", timeout_minutes=1, request_key="overdue"
     )
+    fake.tasks[restarted.id.hex].output = "epoch 3 of 9 done\n"
+    await service.poll_tasks()
     del fake.tasks[restarted.id.hex]  # a machine restart wipes /tmp
     now += timedelta(minutes=10)
     await service.poll_tasks()
     assert (await service.task_result(owner, pending.id)).state == "lost"
-    assert (await service.task_result(owner, restarted.id)).state == "lost"
+    lost = await service.task_result(owner, restarted.id)
+    # The restart took the output file; the owner still gets what the last poll saved.
+    assert (lost.state, lost.output_tail, lost.output_bytes) == ("lost", "epoch 3 of 9 done\n", 18)
+    assert any("epoch 3 of 9 done" in wake.requested_work for wake in await wakes_for(sm, owner))
     timed = await service.task_result(owner, overdue.id)
     assert timed.state == "timed_out"
     assert any(
@@ -709,3 +713,237 @@ async def test_status_turns_a_failed_database_write_into_a_plain_refusal(monkeyp
     with pytest.raises(StoreError) as error:
         await service.task_status(None, uuid.uuid4())
     assert "secret" not in str(error.value) and "INSERT" not in str(error.value)
+
+
+# --- A session is `running` only after its machine has started -----------------
+
+
+def _waiting(sm, fake, **kwargs):
+    """A service whose launch wait costs no real time: sleeping moves its clock."""
+    state = {"now": NOW, "slept": []}
+
+    async def sleep(seconds):
+        state["slept"].append(seconds)
+        state["now"] += timedelta(seconds=seconds)
+
+    service = ComputeSessions(sm, settings(**kwargs), fake, clock=lambda: state["now"], sleep=sleep)
+    return service, state
+
+
+async def _state(sm, owner, session_id):
+    async with sm.begin() as db:
+        row = await session_store.get(db, owner.tenant_id, session_id)
+    assert row is not None
+    return row.state
+
+
+# Every public entry point, called while the machine is still starting.
+_WHILE_STARTING = {
+    "launch": lambda service, owner, session: launch(service, owner),
+    "extend": lambda service, owner, session: service.extend(
+        owner, session.id, hours=1, approval_key="extend"
+    ),
+    "get": lambda service, owner, session: service.get(owner, session.id),
+    "status": lambda service, owner, session: service.status(owner, session.id),
+    "list": lambda service, owner, session: service.list(owner),
+    "call": lambda service, owner, session: service.call(
+        owner, session.id, tool="run_bash", arguments={"command": "true", "timeout_s": 1}
+    ),
+    "start_task": lambda service, owner, session: service.start_task(
+        owner, session.id, command="make", timeout_minutes=5, request_key="task"
+    ),
+    "task_status": lambda service, owner, session: service.task_status(owner, uuid.uuid4()),
+    "task_result": lambda service, owner, session: service.task_result(owner, uuid.uuid4()),
+    "reconcile": lambda service, owner, session: service.reconcile(),
+    "poll_tasks": lambda service, owner, session: service.poll_tasks(),
+    "stop": lambda service, owner, session: service.stop(owner, session.id),
+}
+
+
+def test_the_starting_contract_names_every_public_entry_point():
+    public = {
+        name
+        for name, member in inspect.getmembers(ComputeSessions, inspect.iscoroutinefunction)
+        if not name.startswith("_")
+    }
+    assert set(_WHILE_STARTING) == public, "say what a new entry point does while a machine starts"
+
+
+@pytest.mark.parametrize("entry", sorted(_WHILE_STARTING))
+async def test_no_entry_point_calls_a_machine_or_reports_it_running_before_it_has_started(
+    db_engine, db_clean, entry
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    fake.starts_after = 10**9
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert session.state == "launching"
+    # The launch waited its bound and no longer, and it cost no real time.
+    assert sum(clock["slept"]) == pytest.approx(30)
+
+    try:
+        result = await _WHILE_STARTING[entry](service, owner, session)
+    except StoreError as refusal:
+        result = refusal
+    shown = result if isinstance(result, list) else [result]
+    assert "running" not in {getattr(item, "state", None) for item in shown}
+    assert await _state(sm, owner, session.id) in {"launching", "deleted"}
+    assert fake.calls == [], "nothing is sent to a machine that cannot answer"
+    async with sm.begin() as db:
+        assert await task_store.list_active(db, owner.tenant_id) == [], "no task to lose"
+    assert await wakes_for(sm, owner) == []
+    if entry in {"call", "start_task", "extend"}:
+        assert str(result) == "The machine is still starting. Try again in about 10 seconds."
+    if entry == "status":
+        assert (result.state, result.machine_state) == ("launching", "starting")
+
+
+@pytest.mark.parametrize("promoter", ["call", "start_task", "status", "extend", "reconcile"])
+async def test_the_next_call_or_the_scheduler_promotes_a_session_once_its_machine_started(
+    db_engine, db_clean, promoter
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    fake.starts_after = 10**9
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert await _state(sm, owner, session.id) == "launching"
+    fake.starts_after = 0  # the machine has started
+    await _WHILE_STARTING[promoter](service, owner, session)
+    assert await _state(sm, owner, session.id) == "running"
+    assert (await service.status(owner, session.id)).machine_state == "started"
+    assert await service.call(
+        owner, session.id, tool="run_bash", arguments={"command": "true", "timeout_s": 1}
+    ) == {"exit_code": 0, "stdout": "done", "timed_out": False}
+
+
+async def test_a_launch_waits_a_short_bounded_time_for_the_machine(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    fake.starts_after = 3
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert session.state == "running"
+    assert clock["slept"] == [2.0, 2.0, 2.0]
+
+
+async def test_a_launch_does_not_wait_on_a_provider_that_hangs(db_engine, db_clean, monkeypatch):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+
+    async def hang(session: ComputeSession, token: str) -> ComputeResource:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(fake, "ensure", hang)
+    monkeypatch.setattr("daimon.core.compute_sessions._LAUNCH_WAIT", timedelta(seconds=0.05))
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert session.state == "launching", "the launch returned; a later call settles it"
+    assert await _state(sm, owner, session.id) == "launching"
+
+
+@pytest.mark.parametrize("found_by", ["launch", "call", "start_task", "status", "reconcile"])
+async def test_a_machine_that_cannot_start_ends_its_session_and_says_who_can_help(
+    db_engine, db_clean, found_by
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, _ = _waiting(sm, fake)
+    told = "The machine could not start, so it is being removed. Ask an admin to check the image"
+    if found_by == "launch":
+        fake.fail_start = True
+        with pytest.raises(StoreError, match=told):
+            await launch(service, owner)
+        (session,) = await _all_sessions(sm, owner)
+    else:
+        fake.starts_after = 10**9
+        session = await launch(service, owner)
+        fake.fail_start = True  # for example an image with no server in it
+        if found_by == "reconcile":
+            await service.reconcile()
+            await service.reconcile()
+        else:
+            with pytest.raises(StoreError, match=told):
+                await _WHILE_STARTING[found_by](service, owner, session)
+    assert await _state(sm, owner, session.id) == "deleted"
+    assert fake.deleted == [session.id], "the failed machine is removed, not left to bill"
+    assert fake.calls == []
+    wakes = await wakes_for(sm, owner)
+    if found_by == "reconcile":
+        # Nobody was in the call, so the conversation is told, once.
+        (wake,) = wakes
+        assert f"machine {session.id} could not start and is being removed" in wake.requested_work
+        assert "An admin can check the image profile mmm" in wake.requested_work
+    else:
+        assert wakes == [], "the caller was told in the call"
+    assert await service.list(owner) == []
+
+
+async def test_a_failed_start_whose_cleanup_fails_is_retried_by_the_scheduler(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    fake.fail_start = fake.fail_delete = True
+    service, _ = _waiting(sm, fake)
+    with pytest.raises(StoreError, match="could not start"):
+        await launch(service, owner)
+    (session,) = await _all_sessions(sm, owner)
+    assert session.state == "stopping"
+    fake.fail_delete = False
+    await service.reconcile()
+    assert await _state(sm, owner, session.id) == "deleted"
+
+
+async def test_a_machine_that_never_starts_is_given_up_after_the_start_deadline(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    fake.starts_after = 10**9
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    clock["now"] += timedelta(minutes=9)
+    await service.reconcile()
+    assert await _state(sm, owner, session.id) == "launching"
+    clock["now"] += timedelta(minutes=2)
+    await service.reconcile()
+    assert await _state(sm, owner, session.id) == "deleted"
+    assert fake.deleted == [session.id]
+    assert len(await wakes_for(sm, owner)) == 1
+
+
+async def _all_sessions(sm, owner):
+    async with sm.begin() as db:
+        return await session_store.list_sessions(db, owner.tenant_id, owner=owner.account_id)
+
+
+@pytest.mark.parametrize(
+    ("machine_state", "readiness"),
+    [
+        ("started", "ready"),
+        ("starting", "starting"),
+        ("unknown", "starting"),
+        ("failed", "failed"),
+        ("destroying", "gone"),
+        ("no_machines", "gone"),
+        # A word no provider is allowed to say is never taken for ready.
+        ("created", "starting"),
+        ("ready", "starting"),
+    ],
+)
+def test_only_a_started_machine_is_ready(machine_state, readiness):
+    assert machine_readiness(machine_state) == readiness
+
+
+def test_every_machine_state_a_provider_may_report_has_a_readiness():
+    states = get_args(MachineState)
+    assert [state for state in states if machine_readiness(state) == "ready"] == ["started"]
+    assert {machine_readiness(state) for state in states} == set(get_args(MachineReadiness))

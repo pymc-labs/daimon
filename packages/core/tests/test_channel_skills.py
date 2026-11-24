@@ -358,7 +358,7 @@ def test_only_the_web_chat_adds_workflow_authoring() -> None:
 async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The default agent's 11 skills leave room for 9 channel skills, 5 on Teams.
+    """The default agent's 11 skills leave room for the rest of the cap, 4 fewer on Teams.
 
     The provider's limit counts the whole session `skills` list, so the Office
     built-ins and `microsoft-365` added on Teams count first; a channel that
@@ -389,9 +389,11 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
         platform_skills=load_platform_skills(_DEFAULTS, features=frozenset()),
         now=_NOW,
     )
-    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 14 == 6, (
+    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 14, (
         "without Microsoft accounts, Teams keeps the room microsoft-365 would take"
     )
+
+    room, room_slack = AGENT_SKILL_CAP - 15, AGENT_SKILL_CAP - 11
 
     async def turn(count: int, platform_skills: Sequence[MaSkill] = office) -> list[str]:
         picked = await turn_channel_skills(
@@ -408,17 +410,19 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
         return [s.skill_id for s in picked]
 
     with capture_logs() as logs:
-        first, second = await turn(9), await turn(9)
-        await turn(10)
-    assert first == second == [f"skill_{i}" for i in range(5)], (
-        "the five added first run on every turn, the same five each time"
+        first, second = await turn(room + 4), await turn(room + 4)
+        await turn(room + 5)
+    assert first == second == [f"skill_{i}" for i in range(room)], (
+        "the channel skills that fit run on every turn, the same ones each time"
     )
     warnings = [log["dropped"] for log in logs if log["event"] == "channel_skills.over_cap"]
     assert warnings == [
-        [f"skill_{i}" for i in range(5, 9)],
-        [f"skill_{i}" for i in range(5, 10)],
+        [f"skill_{i}" for i in range(room, room + 4)],
+        [f"skill_{i}" for i in range(room, room + 5)],
     ], "the dropped skills are named once, not on every turn, and again only when they change"
-    assert await turn(9, ()) == [f"skill_{i}" for i in range(9)], "without them, nine fit"
+    assert await turn(room_slack, ()) == [f"skill_{i}" for i in range(room_slack)], (
+        "without them, the Slack and Discord room fits"
+    )
 
 
 async def test_a_custom_platform_skill_keeps_its_last_id_through_a_failed_read() -> None:
@@ -468,7 +472,7 @@ async def test_a_custom_platform_skill_keeps_its_last_id_through_a_failed_read()
 
 
 async def test_platform_skills_fill_only_the_room_the_agents_own_skills_leave() -> None:
-    """An agent holding 19 skills gets one Office skill on Teams rather than a failing session."""
+    """An agent one skill under the cap gets one Office skill on Teams rather than a failing session."""
     agent = ma_agent(
         name="default",
         tenant_id=uuid.uuid4(),
@@ -526,7 +530,7 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
     """On Teams the default agent's built-ins count toward the cap and keep their names.
 
     The default agent holds 11 skills and Teams adds 4, so a Teams channel may
-    add 5, a Slack one 9; a custom skill named like a built-in would clash with it.
+    add 4 fewer than a Slack one; a custom skill named like a built-in would clash with it.
     """
     tenant = await make_tenant(db_session)
     titles = {
@@ -534,7 +538,7 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
         for name in ("report", "docx", "microsoft-365")
     }
     client = _client([_skill(f"skill_{name}", title) for name, title in titles.items()])
-    current = [_row(f"skill_{i}", f"s{i}") for i in range(5)]
+    current = [_row(f"skill_{i}", f"s{i}") for i in range(AGENT_SKILL_CAP - 15)]
 
     async def choose(skill: str, platform: str) -> ChannelSkillChoice | str:
         return await _choose_channel_skill(
@@ -548,7 +552,7 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
             platform_skills=load_platform_skills(_DEFAULTS),
         )
 
-    assert await choose("report", "teams") == "too_many", "a sixth is refused on Teams"
+    assert await choose("report", "teams") == "too_many", "one more is refused on Teams"
     assert not isinstance(await choose("report", "slack"), str), "Slack has room for it"
     assert await choose("docx", "teams") == "mount_clash", "docx is the built-in's name on Teams"
     assert not isinstance(await choose("docx", "slack"), str), "Slack has no docx built-in"

@@ -681,6 +681,16 @@ def readable_from(
     return True
 
 
+def readers_set_by_hand(
+    policy: TenantAccessPolicy, channel_id: str, parent_channel_id: str | None = None
+) -> bool:
+    """Whether a rule set by hand limits who reads this channel, or the channel a thread
+    is under. Such a limit is an admin's own choice: the room facts neither made it nor
+    lift it."""
+    ids = (channel_id,) if parent_channel_id is None else (channel_id, parent_channel_id)
+    return any(channel_rule(policy, i).readers != "any" for i in ids)
+
+
 def session_readable_from(
     policy: TenantAccessPolicy,
     origin_ids: Collection[str],
@@ -773,6 +783,7 @@ __all__ = [
     "post_refusal",
     "posts_at",
     "readable_from",
+    "readers_set_by_hand",
     "readers_limited_at",
     "ruled_agents",
     "run_refusal",
