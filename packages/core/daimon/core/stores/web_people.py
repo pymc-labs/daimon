@@ -135,10 +135,11 @@ async def create_invited(
     display_name: str,
     workspace_name: str,
     email: str | None,
-    invite_id: uuid.UUID,
+    invite_id: uuid.UUID | None,
     invited_by_account_id: uuid.UUID | None,
 ) -> WebPersonRow:
-    """The person an accepted invite brings in, on an account of their own."""
+    """The person an accepted invite brings in, on an account of their own; an operator's
+    import has no invite."""
     orm = WebPerson(
         id=person_id,
         tenant_id=tenant_id,

@@ -29,7 +29,7 @@ from daimon.core.config import Settings, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
 from daimon.core.continuity.poll_tools import PAGE_DATA_TOOL
-from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT
+from daimon.core.continuity.watch_imports import INSTRUCTIONS_LIMIT, clip
 from daimon.core.continuity.watch_projection import projection_path
 from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.features.registry import limit_int
@@ -2095,6 +2095,131 @@ async def import_callback_watch(
     result = await get_watch(session, watch_id)
     assert result is not None
     return CallbackImport(definition.legacy_id, result, token, "imported", capped, truncated)
+
+
+@dataclass(frozen=True)
+class PageWatchImport:
+    """What one imported page watch became. `downgraded`: it asked to report in a thread
+    with no live conversation here, so it reports in a new thread instead."""
+
+    watch: WatchRow | None
+    outcome: Literal["imported", "expired", "owner_cap"]
+    downgraded: bool = False
+    truncated: bool = False
+
+
+async def import_page_watch(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    page_id: uuid.UUID,
+    legacy_id: str,
+    owner_discord_id: str,
+    agent_id: str,
+    agent_name: str,
+    channel_id: str,
+    thread_id: str | None,
+    delivery: WatchDelivery,
+    instructions: str,
+    select_path: str | None,
+    max_turns_per_day: int,
+    expires_at: datetime | None,
+    paused: bool,
+    crypto_keys: tuple[str, ...],
+    now: datetime,
+) -> PageWatchImport:
+    """Operator-only import of a page-event watch from another system, for the caller's
+    transaction. The owner is the Discord principal (made if missing). It is permanent when
+    `expires_at` is None, paused when `paused`, and a daily limit above the default is the
+    operator's own approval. The watch is keyed like any page watch."""
+    if select_path is not None:
+        projection_path(select_path)
+    clipped, truncated = clip(instructions, INSTRUCTIONS_LIMIT)
+    if expires_at is not None and expires_at <= now:
+        return PageWatchImport(None, "expired")
+    principal = await get_or_create_platform_principal(
+        session, tenant_id=tenant_id, platform="discord", external_id=owner_discord_id
+    )
+    await _lock_owner(session, principal.account_id)
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Watch)
+        .where(
+            Watch.owner_account_id == principal.account_id,
+            Watch.status.in_(("active", "paused")),
+            _live_at(now),
+        )
+    )
+    if count is not None and count >= 25:
+        return PageWatchImport(None, "owner_cap")
+    place = thread_id or channel_id
+    live = (
+        await get_live_thread_session(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=place,
+            account_id=principal.account_id,
+        )
+        if delivery == "thread"
+        else None
+    )
+    if live is not None and (live.ma_agent_id != agent_id or live.channel_id != channel_id):
+        live = None
+    row = Watch(
+        tenant_id=tenant_id,
+        owner_account_id=principal.account_id,
+        owner_external_id=owner_discord_id,
+        platform="discord",
+        parent_channel_id=channel_id,
+        thread_id=place,
+        agent_id=agent_id,
+        agent_name=agent_name,
+        session_id=None if live is None else live.ma_session_id,
+        delivery="thread" if live is not None else "new_thread",
+        instructions=clipped,
+        page_id=page_id,
+        rule={} if select_path is None else {"projection": select_path},
+        source="page_event",
+        status="paused" if paused else "active",
+        paused_at=now if paused else None,
+        expires_at=expires_at,
+        producer=f"watch:{uuid.uuid4()}",
+        max_turns_per_day=max_turns_per_day,
+        source_state={
+            "legacy_id": legacy_id,
+            **({"cap_approved_by": "operator"} if max_turns_per_day > DEFAULT_WATCH_CAP else {}),
+        },
+    )
+    session.add(row)
+    await session.flush()
+    watch = WatchRow.model_validate(row)
+    await enroll_page_key(session, watch, crypto_keys, now=now)
+    await session.refresh(row)
+    return PageWatchImport(
+        WatchRow.model_validate(row),
+        "imported",
+        downgraded=delivery == "thread" and live is None,
+        truncated=truncated,
+    )
+
+
+async def end_callback_watches(
+    session: AsyncSession, *, tenant_id: uuid.UUID, legacy_id: str, now: datetime
+) -> int:
+    """End the callback watches imported with this source id: a page watch replaces them."""
+    ids = list(
+        await session.scalars(
+            select(Watch.id).where(
+                Watch.tenant_id == tenant_id,
+                Watch.source == "callback",
+                Watch.source_state["legacy_id"].astext == legacy_id,
+            )
+        )
+    )
+    for watch_id in ids:
+        await delete_watch(session, watch_id, now=now)
+    return len(ids)
 
 
 async def _set_callback_expiry(

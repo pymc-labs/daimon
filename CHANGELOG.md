@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Move pages in from another system.** `daimon artifacts import` reads a folder of page
+  files, previews what would work here with a dry run, and keeps each page's id and link.
+  People are made when missing, email-only people become visitors, and page watches
+  replace callback watches with the same id. Reruns replace a page in place.
+  `DAIMON_WEB__ARTIFACT_LEGACY_HOSTS` sends the old addresses to the new pages.
 - **Page watches report wherever their owner chats.** Slack, Teams and the web app
   can make page-event watches, and Daimon rechecks a Slack or Teams owner before
   every report. Page watches can be permanent, keep one part of each event with

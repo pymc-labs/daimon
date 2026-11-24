@@ -1,9 +1,10 @@
 # Move people in
 
-Two operator commands bring people's choices and earlier conversations from
-another bot into one Discord server. Both read a version 1 JSON file of at most
-1 MiB, check that its `guild_id` is the server of `--tenant`, and run in one
-transaction. Repeating a file is safe.
+Operator commands bring people's choices, earlier conversations and pages from
+another bot into one Discord server. Each reads version 1 JSON files, checks that
+the `guild_id` is the server of `--tenant`, and repeating a file is safe. Tag opt-outs
+and conversations take one file of at most 1 MiB in one transaction;
+[pages](#pages) take a folder.
 
 ## Tag opt-outs
 
@@ -142,6 +143,59 @@ paused in the old system; rerun `go-live` to schedule released timers.
 `rotate-link` replaces every link of a callback watch and shows the new
 one once, or writes it to `--urls-out` (mode 0600), keyed by the old id as
 `import --urls-out` is.
+
+## Pages
+
+```bash
+daimon artifacts import DIR --tenant TENANT_UUID --agent NAME          # dry run
+daimon artifacts import DIR --tenant TENANT_UUID --agent NAME --apply
+```
+
+`DIR` holds one `.json` file per page, each at most 64 MiB, and `NAME` is the agent
+the pages belong to. Without `--apply` the whole run happens in a transaction that is
+rolled back. It prints, per page, whether it would be created, replaced, refused or
+skipped as expired, how many members and visitors it would hold, and what would not
+work here. It never prints HTML, data or links. With `--apply` each page commits on
+its own, and the command exits 1 if any page was refused.
+
+A file is `{"version": 1, "guild_id", "exported_at", "page": {...}}`. Unknown fields are refused.
+In `page`:
+
+- Required: `legacy_url`, `public_id` (10 characters, `a-z2-7`), `slug`, `title`, `created_at`,
+  `updated_at`, `owner`, `access` (`workspace`, `people` or `public`), `current_version`, and
+  `versions` (`version`, `html`, `created_at`, optional `published_by`).
+- Optional: `editors`, `editors_can_share`, `people`, `link_secret`, `expires_at`, `data`
+  (`off`, `read` or `write`), `events`, `data_scale`, `data_revision`.
+- `documents`: `collection`, `doc_id`, `data`, `updated_by`, `updated_by_ref`, `created_at`,
+  `updated_at`. The `_events` collection holds sent events.
+- `watches`: `legacy_id`, `instructions`, `owner`, `channel_id`, `thread_id`, `place_type`,
+  `delivery`, `select`, `max_turns_per_day`, `expires_at`, `paused`.
+
+A person is `{"discord_id"}` or `{"email"}`. An email may carry `google_sub`, the Google
+account the visitor signs in with.
+
+The page keeps its `public_id`, `slug` and `link_secret`, so existing links work. The
+secret is stored encrypted like any page link; a public page without one gets a new link,
+and a secret on any other page is ignored. Discord ids become people here, made when
+missing. A person known by email becomes a visitor invited by the page's owner, and
+`google_sub` pins their Google sign-in unless another person here holds it. Only the
+newest versions the deployment keeps are imported, and a version larger than the HTML
+limit refuses the page.
+
+`legacy_url` is the page's address in the old system, and the page's `imported_from`.
+A rerun finds the page by it and replaces its versions, data, people and imported
+watches in place, so its threads and the settings made here stay. A page whose name or
+`public_id` is taken by another page, or that was imported under another name, is refused.
+
+A watch is imported as a page watch and ends any callback watch imported with the same
+`legacy_id`. One in a thread with no live conversation reports in a new thread instead.
+Watches in other places, on a page that sends no events, or past five on one page are
+skipped with a warning, as is a daily limit above the workspace's.
+
+The dry run also warns about what the page loads from hosts [this deployment blocks](artifacts.md#where-a-page-runs),
+frames that need a content domain, browser storage without one, and links to
+pages outside the import. To send old links to the new pages, list the old host in
+[`DAIMON_WEB__ARTIFACT_LEGACY_HOSTS`](configuration.md#daimon_web__artifact_legacy_hosts).
 
 ## Repository memory
 

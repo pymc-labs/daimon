@@ -4,7 +4,9 @@
 checks hold the hard rules for anonymous viewers of a public page: no data writes, not
 both data reads and events, no ask, and always an expiry. `web_threads.artifact_id`
 marks a viewer's ask thread for a page, one per person and page. A version's thumbnail
-and a viewer's consent to a page's asks are rows of their own.
+and a viewer's consent to a page's asks are rows of their own. `artifacts.imported_from`
+is the address a page had elsewhere, unique per workspace: a re-import finds the page by
+it and a legacy host redirects by it.
 
 downgrade: destructive
 """
@@ -45,6 +47,7 @@ def upgrade() -> None:
         sa.Column("ask", sa.Boolean(), server_default=sa.false(), nullable=False),
         sa.Column("data_scale", sa.Integer(), server_default="1", nullable=False),
         sa.Column("link_secret", sa.LargeBinary(), nullable=True),
+        sa.Column("imported_from", sa.Text(), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("current_version", sa.Integer(), server_default="0", nullable=False),
         sa.Column("size_bytes", sa.Integer(), server_default="0", nullable=False),
@@ -83,6 +86,8 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("public_id", name="uq_artifacts_public_id"),
         sa.UniqueConstraint("tenant_id", "slug", name="uq_artifacts_tenant_slug"),
+        # The address leads, so a lookup by address alone uses this index too.
+        sa.UniqueConstraint("imported_from", "tenant_id", name="uq_artifacts_imported_from"),
     )
     op.create_index("ix_artifacts_owner", "artifacts", ["owner_account_id"])
     op.create_index(
