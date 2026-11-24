@@ -27,7 +27,10 @@ check the server again.
 
 ## Read a narrow room from your own DM
 
-Only people inside a narrow room can read it through Daimon. One exception: in
+Only people inside a narrow room can read it through Daimon. On Discord, a routine that
+posts to a narrow room, or to a thread in it, also reads that room, as a chat there does. It
+reads no other narrow room. A routine with no destination, one that reports to a DM, or one
+on another platform gets only the exception below. That exception: in
 your own DM, Daimon reads a narrow room for you when Discord lets you view it
 and read its history. This covers your DM chats and your own DM routines.
 

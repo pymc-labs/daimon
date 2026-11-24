@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A routine that posts to a narrow Discord room reads that room.** On Anthropic agents the run
+  had no way to show it ran inside the room, so its own `read_thread` and `read_channel` were
+  refused. The run now reads the room or thread it posts to, as a chat there does, and no other
+  narrow room. A routine with no destination, one that reports to a DM, or one on Slack or
+  Teams is unchanged
+  ([Rooms with outside people](docs/outside-people.md)).
 - **Rooms with outside people: a room that blocks a person by name is narrow, and your own DM can read it.**
   With the feature on, a member overwrite that denies View Channel or Read Message History to an
   internal person who cannot read the room makes it narrow. In your own DM chat or DM routine,

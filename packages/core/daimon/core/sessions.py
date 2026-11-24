@@ -719,6 +719,7 @@ async def create_session(
     origin_channel_id: str | None = None,
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
+    credential_seal_ids: Collection[str] = (),
     before_create: Callable[[], Awaitable[None]] | None = None,
     on_app_access: Callable[[AppSessionAccess], None] | None = None,
     channel_skills: Sequence[MaSkill] = (),
@@ -762,6 +763,14 @@ async def create_session(
     ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
+
+    ``credential_seal_ids`` signs seals into the session-specific Daimon credential
+    (`SEAL_CLAIM`), the one the agent's ``daimon-mcp`` server uses, so an unattended
+    run reads inside the room it fires into, as a chat turn there does. The ordinary
+    vault never carries them, so personal connections stay mounted. An agent without
+    ``daimon-mcp`` has no session credential and no Daimon read tools, so it needs
+    none. Only a run with such a room passes them; a ``hold`` outranks them.
+    ``origin_seal_ids`` alone only stamps the session.
 
     ``channel_skills`` are the turn's extra skills (the platform's, then the
     channel's), added after the agent's own (`session_skills`, the shape the
@@ -1040,6 +1049,7 @@ async def create_session(
                 slack_turn_context_id=slack_turn_context_id,
                 chat_session_id=chat_session_id,
                 hold=hold,
+                seal_ids=credential_seal_ids,
                 scope=scope,
             )
 

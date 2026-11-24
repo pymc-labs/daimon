@@ -28,7 +28,7 @@ from daimon.adapters.mcp.tools._channel_policy import (
 from daimon.adapters.mcp.tools.routines import (
     _update_routine_impl as update_routine_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.audience_facts import RoomFacts
 from daimon.core.config import (
     AnthropicSettings,
@@ -223,11 +223,14 @@ async def _caller(
     session: str = "test-session",
     policy: TenantAccessPolicy | None = None,
     narrow: bool = True,
+    seals: frozenset[str] = frozenset(),
 ) -> _Caller:
     """A Discord DM turn (or a turn in the limited room's neighbour) with its signed token.
 
     `narrow` is what the room facts say of the two limited rooms; `policy` is what an admin
-    set by hand, nothing by default.
+    set by hand, nothing by default. A routine run's credential is the session-specific one and a
+    call of it names no turn origin (`_call(origin=False)`); `seals` signs its room into it
+    (`ensure_agent_mcp_vault` with a `chat_session_id`).
     """
     tenant = await make_tenant(db, platform="discord", workspace_id=_GUILD)  # pyright: ignore[reportArgumentType]
     principal = await make_platform_principal(
@@ -281,6 +284,7 @@ async def _caller(
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x"),
             secret=_SECRET,
             chat_session_id=session,
+            seal_ids=seals,
             now=now,
         )
     await db.commit()
@@ -290,14 +294,14 @@ async def _caller(
 
 
 async def _call(
-    app: ASGIApp, who: _Caller, tool: str, arguments: dict[str, object]
+    app: ASGIApp, who: _Caller, tool: str, arguments: dict[str, object], *, origin: bool = True
 ) -> dict[str, Any]:
     result = await call_mcp_tool(
         app,
         token=who.token,
         name=tool,
         arguments={**arguments, "origin_context_id": who.origin_id}
-        if tool != "send_message"
+        if tool != "send_message" and origin
         else arguments,
     )
     return result.get("result", result)  # type: ignore[return-value]
@@ -474,6 +478,70 @@ async def test_a_room_an_admin_sealed_by_hand_keeps_its_rule(
     assert payload.get("isError") and "limited to conversations inside it" in _text(payload)
     assert room.fetched == []
     assert not await _latched(sessionmaker, who)
+
+
+# --- A routine run in a room ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_hand", [False, True], ids=["room-facts", "readers-inside-by-hand"])
+@pytest.mark.parametrize(("tool", "arguments"), _READS, ids=_READ_IDS)
+async def test_a_routine_run_in_a_limited_room_reads_it_and_no_other_limited_room(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tool: str,
+    arguments: dict[str, object],
+    by_hand: bool,
+) -> None:
+    """The run's session credential signs its room's seals and a call names no turn origin, as an
+    unattended run has none: it reads its own room, as a chat turn there does. A run into
+    a thread signs the thread's id too, so it reads that thread."""
+    hand_set = TenantAccessPolicy(
+        channel_rules={r: ChannelRule(readers="inside") for r in _LIMITED_ROOMS}
+    )
+    who = await _caller(
+        db_session,
+        reach=False,
+        narrow=not by_hand,
+        policy=hand_set if by_hand else None,
+        seals=frozenset({_LIMITED, "901"} if tool == "read_thread" else {_LIMITED}),
+    )
+    room = _Room()
+    patch_discord_http(monkeypatch, room.handler)
+    app = _app(sessionmaker)
+
+    own = await _call(app, who, tool, arguments, origin=False)
+    other = await _call(app, who, "read_channel", {"channel_id": _LIMITED_TOO}, origin=False)
+
+    assert not own.get("isError"), f"got {own!r}"
+    assert other.get("isError") and "limited to conversations inside it" in _text(other), (
+        f"got {other!r}"
+    )
+    assert _LIMITED_TOO not in room.fetched
+    assert not await _latched(sessionmaker, who), "a room read from inside is no reach read"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool", "arguments"), _READS, ids=_READ_IDS)
+async def test_a_routine_run_with_no_room_signed_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tool: str,
+    arguments: dict[str, object],
+) -> None:
+    """A run with no destination, or one to a DM, signs no seals: it stays outside."""
+    who = await _caller(db_session, reach=False)
+    room = _Room()
+    patch_discord_http(monkeypatch, room.handler)
+
+    payload = await _call(_app(sessionmaker), who, tool, arguments, origin=False)
+
+    assert payload.get("isError") and "limited to conversations inside it" in _text(payload), (
+        f"got {payload!r}"
+    )
+    assert room.fetched == []
 
 
 @pytest.mark.asyncio
