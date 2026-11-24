@@ -33,6 +33,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget, Role
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.turn_origins import create_origin
+from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
@@ -142,6 +143,28 @@ async def test_every_capability_tool_when_its_feature_is_off_is_refused(
         for tool in sorted(STOP_TOOLS):
             message = await _error(client, tool, {})
             assert OFF not in message, f"{tool} must stay callable to stop running work"
+
+
+@pytest.mark.parametrize("proxied", [False, True])
+async def test_a_call_to_a_renamed_tool_says_its_new_name(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, proxied: bool
+) -> None:
+    """A conversation from before the rename may still ask for `fly_*`. No old name
+    runs anything: the caller is told where the tool went, in plain words."""
+    mcp = await _app(sessionmaker)
+    registered = {t.name for t in await mcp.local_provider.list_tools()}
+    assert set(RENAMED_DAIMON_TOOLS.values()) <= registered, "every new name is a real tool"
+    assert not set(RENAMED_DAIMON_TOOLS) & registered, "no old name is kept as a second tool"
+    _as(monkeypatch, await _tenant(sessionmaker), platform="cli")
+    async with Client(mcp) as client:
+        for old_name, new_name in sorted(RENAMED_DAIMON_TOOLS.items()):
+            message = (
+                await _error(client, "call_tool", {"name": old_name, "arguments": {}})
+                if proxied
+                else await _error(client, old_name, {})
+            )
+            assert f"{old_name} is now called {new_name}. Call {new_name} instead." in message
+            assert "Unknown tool" not in message
 
 
 async def test_repo_memory_tools_when_memory_is_off_for_the_workspace_are_refused(

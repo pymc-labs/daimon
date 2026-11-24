@@ -534,9 +534,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected != HEAD
         ):
             return False
-        # Dropped by the compute tool names migration (0226), the head.
-        if reflected and expected != HEAD and kind == "column" and name == "cpu_kind":
-            return False
         # Unmapped at HEAD; checked below instead.
         if kind == "column" and name in SANDBOX_COLUMNS:
             return False

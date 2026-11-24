@@ -41,6 +41,7 @@ from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
@@ -160,6 +161,11 @@ class CapabilityGateMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         tool = context.message.name
+        renamed = RENAMED_DAIMON_TOOLS.get(tool)
+        if renamed is not None:
+            # A conversation that began before the rename can still ask for the old
+            # name. Say where the tool went instead of "unknown tool".
+            raise ToolError(f"{tool} is now called {renamed}. Call {renamed} instead.")
         key = server_gate_key(tool)
         ctx = context.fastmcp_context
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
