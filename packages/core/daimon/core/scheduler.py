@@ -6,10 +6,15 @@ import asyncio
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from daimon.core.features.snapshot import FeaturePlace, place_feature_or_none
+from daimon.core.fire.failure import record_fire_error
+from daimon.core.fire.run import Dispatch
+from daimon.core.fire.run import fire as fire_guarded
+from daimon.core.fire.store import FireStatus
+from daimon.core.fire.subject import routine_subject
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_events import OpsEvent, report_ops_event
@@ -23,8 +28,7 @@ from daimon.core.stores.routines import (
     release_claimed_slot,
     skip_slots_during_fire,
 )
-from daimon.core.turn.outcomes import TurnObservation
-from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn.termination import TerminationReason
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session
@@ -143,60 +147,6 @@ class RoutineDispatcher:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-# Fires that did not run on purpose: logged as `routine.fire_skipped` (info), never as a failure.
-_BENIGN_FIRE_REASONS = frozenset(
-    {"routines_turned_off", "lead_intake_turned_off", "scheduler_shutdown"}
-)
-
-
-async def _record_fire_error(
-    sm: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
-    msg: str,
-    reason: TerminationReason | None,
-    *,
-    error_class: str | None = None,
-    notify_owner: OwnerNotifier | None = None,
-) -> None:
-    """Record a failure on a FRESH session (never reuse fire's session), then tell the owner.
-
-    The log line carries only a fixed reason and the exception class, never `msg`,
-    which may hold exception text."""
-    fixed = reason.value if reason is not None else msg
-    log_fire, event = (
-        (log.info, "routine.fire_skipped")
-        if fixed in _BENIGN_FIRE_REASONS
-        else (log.warning, "routine.fire_failed")
-    )
-    log_fire(
-        event,
-        tenant_id=str(row.tenant_id),
-        routine_id=str(row.id),
-        agent_id=row.agent_id,
-        reason=fixed,
-        error_class=error_class,
-    )
-    if event == "routine.fire_failed":
-        report_ops_event(
-            sm,
-            OpsEvent(
-                event,
-                row.tenant_id,
-                reason=error_class or fixed,
-                routine_id=row.id,
-                agent_id=row.agent_id,
-            ),
-            logged=False,
-        )
-    try:
-        async with asyncio.timeout(1), sm() as s, s.begin():
-            told = await record_routine_failure(s, row, error=msg, reason=reason)
-    except Exception:
-        log.exception("record_result(error) failed", routine_id=str(row.id))
-        return
-    tell_owner(notify_owner, row, reason, channel_told=told)
-
-
 async def record_refusal(
     s: AsyncSession,
     sm: async_sessionmaker[AsyncSession],
@@ -251,6 +201,43 @@ async def record_refusal(
         tell_owner(notify_owner, row, reason, channel_told=False)
 
     event.listen(s.sync_session, "after_commit", told_after_commit, once=True)
+
+
+class RoutineFireStore:
+    """`FireStore` over a claimed routine row: every write fenced on the row as claimed."""
+
+    def __init__(
+        self,
+        sm: async_sessionmaker[AsyncSession],
+        row: RoutineRow,
+        notify_owner: OwnerNotifier | None = None,
+    ) -> None:
+        self._sm, self._row, self._notify = sm, row, notify_owner
+
+    def execution(self, lifetime_s: float) -> AbstractAsyncContextManager[None]:
+        return routine_execution(self._sm, self._row.tenant_id, self._row.id, lifetime_s=lifetime_s)
+
+    async def fail(
+        self, session: AsyncSession, *, error: str, reason: TerminationReason | None
+    ) -> bool:
+        return await record_routine_failure(session, self._row, error=error, reason=reason)
+
+    def tell_owner(self, reason: str | None, *, channel_told: bool) -> None:
+        tell_owner(self._notify, self._row, reason, channel_told=channel_told)
+
+
+async def _record_fire_error(
+    sm: async_sessionmaker[AsyncSession],
+    row: RoutineRow,
+    msg: str,
+    reason: TerminationReason | None,
+    *,
+    error_class: str | None = None,
+    notify_owner: OwnerNotifier | None = None,
+) -> None:
+    """Record a failure of `row`'s fire and tell its owner (`record_fire_error`)."""
+    store = RoutineFireStore(sm, row, notify_owner)
+    await record_fire_error(sm, routine_subject(row), store, msg, reason, error_class=error_class)
 
 
 async def _release_slot(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:
@@ -331,89 +318,10 @@ async def run_one_tick(
         # fire — claim/advance/record-result and the turn body — carries a fresh
         # rid and the row's tenant_id. Unbind in finally so the context is clean
         # even on the error paths.
-        observation = TurnObservation(
-            sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
-        )
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid, tenant_id=str(row.tenant_id))
-        unreadable = False
-        started = loop.time()
-        outcome = "ok"
-        skip_reason: str | None = None
-        try:
-            async with sem:
-                try:
-                    place = FeaturePlace(row.tenant_id, "", row.channel_id, agent_id=row.agent_id)
-                    routines = await place_feature_or_none(sm, None, place, "routines")
-                    if routines is None or not routines.on:
-                        # Off here, or unreadable: the schedule does not run this tick.
-                        # Unreadable is not Off: the owner sees why, and the slot is given
-                        # back below so the next tick tries again, as a watch's poll does.
-                        unreadable = routines is None
-                        reason = "feature_read_failed" if unreadable else "routines_turned_off"
-                        outcome, skip_reason = "skipped", reason
-                        await _record_fire_error(sm, row, reason, None)
-                        return
-                    if (row.tenant_id, row.id) in intake_bindings:
-                        intake = await place_feature_or_none(sm, None, place, "lead_intake")
-                        if intake is None or not intake.on:
-                            unreadable = intake is None
-                            reason = (
-                                "feature_read_failed" if unreadable else "lead_intake_turned_off"
-                            )
-                            outcome, skip_reason = "skipped", reason
-                            await _record_fire_error(sm, row, reason, None)
-                            return
-                    with observation.activate():
-                        async with routine_execution(
-                            sm,
-                            row.tenant_id,
-                            row.id,
-                            lifetime_s=dispatch_timeout_s,
-                        ):
-                            await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
-                except TimeoutError as err:
-                    outcome = "failed"
-                    observation.finish(error=err, reason=TerminationReason.CEILING)
-                    # Capture to Sentry, then keep the existing swallow —
-                    # sibling tasks continue and record_result still runs.
-                    capture_exception_with_scope(err)
-                    timeout = f"timeout: exceeded {dispatch_timeout_s}s"
-                    await _record_fire_error(
-                        sm, row, timeout, TerminationReason.CEILING, notify_owner=notify_owner
-                    )
-                except Exception as err:
-                    outcome = "failed"
-                    reason = termination_reason(err)
-                    observation.finish(error=err, reason=reason)
-                    capture_exception_with_scope(err)
-                    await _record_fire_error(
-                        sm,
-                        row,
-                        "execution_failed"
-                        if row.destination_kind == "dm"
-                        else f"{type(err).__name__}: {err}"[:500],
-                        reason,
-                        error_class=type(err).__name__,
-                        notify_owner=notify_owner,
-                    )
-        except asyncio.CancelledError as err:
-            outcome = "failed"
-            observation.finish(error=err)
-            # Includes cancellation while waiting for a dispatch slot.
-            await _record_fire_error(sm, row, "scheduler_shutdown", None)
-            raise
-        finally:
-            observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
-            log.info(
-                "routine.finished",
-                tenant_id=str(row.tenant_id),
-                routine_id=str(row.id),
-                agent_id=row.agent_id,
-                outcome=outcome,
-                skip_reason=skip_reason,
-                duration_ms=int((loop.time() - started) * 1000),
-            )
+
+        async def settle(status: FireStatus) -> None:
             try:
                 async with asyncio.timeout(1), sm() as session, session.begin():
                     await skip_slots_during_fire(
@@ -425,10 +333,22 @@ async def run_one_tick(
             except Exception:
                 log.exception("scheduler.completion_skip_failed", routine_id=str(row.id))
             finally:
-                if unreadable:
+                if status == "unreadable":
                     # After the skip, which would otherwise pass over the restored slot.
                     await _release_slot(sm, row)
-                structlog.contextvars.unbind_contextvars("rid", "tenant_id")
+
+        try:
+            await fire_guarded(
+                routine_subject(row),
+                RoutineFireStore(sm, row, notify_owner),
+                lambda: fire(row),
+                Dispatch(sm, sem, dispatch_timeout_s, capture=capture_exception_with_scope),
+                routines_gate=True,
+                intake_bound=(row.tenant_id, row.id) in intake_bindings,
+                settle=settle,
+            )
+        finally:
+            structlog.contextvars.unbind_contextvars("rid", "tenant_id")
 
     # Pitfall 2: spawn each fire as its own task so asyncio.create_task copies the
     # current contextvars context at creation — concurrent fires then bind into
