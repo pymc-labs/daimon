@@ -4270,7 +4270,11 @@
         With source "page_event", `page` names a page you can use that sends events: each
         event its viewers send wakes the agent, and no key is shown or needed. `select` (such
         as `.data.vote`) keeps only that part of each event and skips events where it is
-        empty. A page watch reports in this thread, or with "new_thread" in a new thread
+        empty. `where` wakes it only for events whose top-level fields match: each key
+        maps to one allowed value or a list of up to 20, at most 8 keys, and every key must
+        match, as in `{"event": ["vote", "undo"], "sender": "member"}`. The event's fields
+        are `event`, `data`, `by`, `sender`, `page_visible_outside_workspace` and `at`.
+        A page watch reports in this thread, or with "new_thread" in a new thread
         per report. `permanent=true` needs no admin for a page watch, which still ends
         with its page. A page holds up to 5 watches; someone who does not manage it holds
         one. Page watches work in every chat. Other sources are offered only where the
@@ -4318,6 +4322,10 @@
         gates are enabled.
       ''',
       'parameters': dict({
+        '$defs': dict({
+          'JsonValue': dict({
+          }),
+        }),
         'additionalProperties': False,
         'properties': dict({
           'arguments': dict({
@@ -4445,6 +4453,20 @@
           'tool': dict({
             'default': 'read_thread',
             'type': 'string',
+          }),
+          'where': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': dict({
+                  '$ref': '#/$defs/JsonValue',
+                }),
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
