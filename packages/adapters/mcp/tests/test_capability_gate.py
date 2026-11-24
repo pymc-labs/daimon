@@ -5,11 +5,14 @@ Drives the real app: the live registry, the real identity middleware and `call_t
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import mcp.types as mt
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -315,11 +318,37 @@ async def test_page_tools_outside_the_listed_workspaces_leave_every_list_and_are
     pages = CAPABILITY_TOOLS["artifacts"]
     _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
     async with Client(mcp) as client:
-        listed = {t.name for t in await client.list_tools()}
+        listed_tools = await client.list_tools()
         message = await _error(client, "artifact_list", {})
+    listed = {t.name for t in listed_tools}
     assert not listed & pages, f"page tools listed: {listed & pages}"
     assert "publish_report" in listed, "other tools stay listed"
-    assert message == "artifact_list isn't available in this workspace, so nothing was done."
+    assert message == "artifact_list isn't available here, so nothing was done."
+    _assert_pageless(listed_tools)
+
+
+def _assert_pageless(tools: list[mt.Tool]) -> None:
+    """The watch tools stay listed but never offer or name pages."""
+    watch = {t.name: t for t in tools if t.name in ("create_watch", "rotate_watch_key")}
+    assert set(watch) == {"create_watch", "rotate_watch_key"}, "the watch tools stay listed"
+    for tool in watch.values():
+        text = json.dumps(tool.inputSchema) + (tool.description or "")
+        assert not re.search("page|artifact", text, re.I), f"{tool.name} names pages: {text}"
+    assert watch["create_watch"].inputSchema["properties"]["source"]["enum"] == ["poll", "callback"]
+
+
+async def test_watch_tools_name_no_pages_where_artifacts_is_off(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = await _app(sessionmaker)
+    tenant_id = await _tenant(sessionmaker)
+    _as(monkeypatch, tenant_id, platform="discord")
+    async with Client(mcp) as client:
+        [before] = [t for t in await client.list_tools() if t.name == "create_watch"]
+        await _set(sessionmaker, tenant_id, "artifacts", "off")
+        after = await client.list_tools()
+    assert "page_event" in before.inputSchema["properties"]["source"]["enum"], "pages are on"
+    _assert_pageless(after)
 
 
 def test_server_gate_key_covers_every_gated_tool_but_the_stop_tools() -> None:

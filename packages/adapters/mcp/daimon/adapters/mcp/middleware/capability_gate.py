@@ -12,7 +12,8 @@ config. Such a caller is refused at call time.
 A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
 and its call is refused as not set up: a worker can't judge that setup, and the server's
 settings, so that catalogue, stay fixed while it runs. So does a tool whose feature does not
-exist in the caller's workspace (`in_workspace`).
+exist in the caller's workspace (`in_workspace`). Where pages are absent or off, the watch
+tools are listed without their page source and words (`without_pages`).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
+from daimon.adapters.mcp.tools._pageless import without_pages
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.features.deployment import in_workspace
 from daimon.core.features.registry import FEATURES
@@ -73,7 +75,7 @@ def _unset_refusal(tool: str, key: str) -> str:
 
 
 def _absent_refusal(tool: str) -> str:
-    return f"{tool} isn't available in this workspace, so nothing was done."
+    return f"{tool} isn't available here, so nothing was done."
 
 
 _UNREADABLE: Final = (
@@ -222,8 +224,7 @@ class CapabilityGateMiddleware(Middleware):
             or not in_workspace(FEATURES[k], settings, auth.tenant_id)
         )
         tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
-        if _lists_everything(auth):
-            return tools
+        pageless = not in_workspace(FEATURES["artifacts"], settings, auth.tenant_id)
         try:
             places = await caller_places(self._runtime, auth, None)
             found = [
@@ -234,6 +235,11 @@ class CapabilityGateMiddleware(Middleware):
             ]
         except Exception:  # named boundary: the list stays whole; every call is still checked
             log.warning("capability_gate.list_read_failed", exc_info=True)
+            found = []
+        # Where pages are absent or off, the watch tools keep their names but never name pages.
+        if pageless or any(hides_tools(place.get("artifacts")) for place in found):
+            tools = [without_pages(t) for t in tools]
+        if _lists_everything(auth) or not found:
             return tools
         off = gated_tools(
             key for key in GATED_KEYS if any(hides_tools(place.get(key)) for place in found)

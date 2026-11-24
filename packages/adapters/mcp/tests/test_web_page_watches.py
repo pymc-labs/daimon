@@ -211,7 +211,7 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
             set_by=None,
             surface="chat",
         )
-    with pytest.raises(ToolError, match="Pages are turned off here"):
+    with pytest.raises(ToolError, match="This source isn't available here"):
         await tools.create_watch_impl(
             runtime,
             auth(owner, "d-1"),

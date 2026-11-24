@@ -687,7 +687,7 @@ async def _require_pages_here(
     )
     async with runtime.session_factory() as db:
         if not (await feature_in(db, runtime.settings, place, "artifacts")).on:
-            raise ToolError("Pages are turned off here, so a page can't be watched.")
+            raise ToolError('This source isn\'t available here. Use "poll" or "callback".')
 
 
 async def callback_watch_terms(
