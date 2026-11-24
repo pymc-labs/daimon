@@ -36,6 +36,16 @@ def session_token(settings: ComputeSettings, session_id: uuid.UUID) -> str:
 
 
 class ComputeProvider(Protocol):
+    """Where session machines run.
+
+    `ensure` creates the machine if it is missing and returns at once; it does not
+    wait for the machine to start. `ensure` and `inspect` report `machine_state` as one
+    of `MachineState`, and `started` only when `call` would reach the machine. The
+    session logic keeps a session out of `running` until then (`machine_readiness`),
+    so a provider that reports `started` early hands people a machine that cannot
+    answer.
+    """
+
     async def ensure(self, session: ComputeSession, token: str) -> ComputeResource: ...
     async def delete(self, resource: ComputeResource) -> None: ...
     async def inspect(self, session: ComputeSession) -> ComputeResource: ...
