@@ -123,7 +123,7 @@ def register_routine_run_tool(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def run_routine(ctx: Context, routine_id: uuid.UUID) -> RoutineRunQueued:  # pyright: ignore[reportUnusedFunction]
         """Run a routine now, ahead of its schedule; its own schedule continues after.
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         The routine's owner or an admin. A paused routine is refused: resume it first.
         """
@@ -135,7 +135,7 @@ def register_routine_run_tool(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> RoutineProblemReported:
         """Tell the admins this routine run could not do its task, and why.
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         Only inside a routine run, once, when something kept you from the task. `note` is
         one short line on what blocked you (at most 300 characters), with no private

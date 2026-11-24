@@ -810,7 +810,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> RoutineView:
         """Create a recurring routine; owner DMs run as unattended live-DM turns.
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         Owner-DM routines are scheduled live-DM turns, using the owner's normal
         personal/shared memory, credentials and DM tool authority in a fresh private
@@ -885,7 +885,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_routines(ctx: Context) -> list[RoutineView]:  # pyright: ignore[reportUnusedFunction]
         """List the routines you created (an admin sees every routine in the workspace).
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         """
         auth = await _auth(ctx)
         return await _views(runtime, auth, await _list_routines_impl(runtime, auth))
@@ -895,7 +895,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
         are not an admin.
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         """
         auth = await _auth(ctx)
         return await _viewed(
@@ -918,7 +918,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> RoutineView:
         """PATCH-update a routine, including owner-only DM delivery where supported.
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         Only provided fields are changed.
 
@@ -955,7 +955,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def delete_routine(ctx: Context, routine_id: UUID) -> DeleteResult:  # pyright: ignore[reportUnusedFunction]
         """Delete a routine (hard delete, tenant-scoped).
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         """
         return await _delete_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
 
@@ -966,7 +966,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
 
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         They are off for every unattended run by default. The supported way today is the
         operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform
