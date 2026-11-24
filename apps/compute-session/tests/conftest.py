@@ -10,7 +10,7 @@ from starlette.types import ASGIApp
 
 TOKEN = "per-session-token"
 URL = "https://session.test/mcp/"
-#: The headers daimon.core.compute_fly sends on every request of a call.
+#: The headers daimon.core.compute_thin_mcp sends on every request of a call.
 HEADERS = {"Authorization": "Bearer " + TOKEN, "Accept": "application/json, text/event-stream"}
 
 type Call = Callable[[str, dict[str, JsonValue]], Awaitable[dict[str, JsonValue]]]

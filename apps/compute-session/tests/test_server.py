@@ -194,7 +194,7 @@ def test_the_server_listens_on_every_interface_and_keeps_the_token_from_commands
 
 
 async def test_the_handshake_is_stateless_json(client: httpx.AsyncClient) -> None:
-    """The three requests daimon.core.compute_fly sends for one call, in its order."""
+    """The three requests daimon.core.compute_thin_mcp sends for one call, in its order."""
     headers = dict(HEADERS)
     init = await client.post(
         URL,

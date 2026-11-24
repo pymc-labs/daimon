@@ -37,8 +37,7 @@ docker run --rm -d -p 127.0.0.1:18080:8080 -e MCP_AUTH_TOKEN=smoke registry.exam
 uv run python apps/compute-session/tests/image_smoke.py http://127.0.0.1:18080 smoke
 ```
 
-The script calls the container through `FlyComputeProvider.call`, the code
-Daimon uses, and runs a background command to its end. Add `--pymc` to install
+The script calls the container through `call_thin_mcp`, the code Daimon uses, and runs a background command to its end. Add `--pymc` to install
 PyMC in the container and sample a model.
 
 ## Contract
@@ -122,8 +121,8 @@ some other way needs these for them:
 
 ## Where it runs
 
-On Fly Machines, Daimon passes the token and routes port 443 to 8080. The image
-also meets what Cloud Run asks of a container: it listens on `PORT` and exits
+Daimon runs the image as a Cloud Run service and passes the token. The image
+meets what Cloud Run asks of a container: it listens on `PORT` and exits
 within about 5 seconds of `SIGTERM`. On Cloud Run the filesystem is memory, and
 background commands need CPU that stays allocated between requests. Nothing in
 the image depends on one platform: it needs a start as root for the two users,

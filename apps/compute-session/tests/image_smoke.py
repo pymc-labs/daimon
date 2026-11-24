@@ -17,11 +17,10 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 from daimon.core import compute_tasks as scripts
-from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_models import ComputeSession
 from daimon.core.compute_provider import app_name
-from daimon.core.config import ComputeSettings
-from pydantic import JsonValue, SecretStr
+from daimon.core.compute_thin_mcp import call_thin_mcp
+from pydantic import JsonValue
 
 DEPLOYMENT = "image-smoke"
 #: What docs/compute.md and the task scripts need on the machine.
@@ -53,7 +52,7 @@ IDENTITY = "ps -o pid=,lstart=,ruser=,euser=,suser= -p 1,$PPID"
 
 
 class ToContainer(httpx.AsyncBaseTransport):
-    """Sends the caller's requests for ``https://<app>.fly.dev`` to the container."""
+    """Sends the caller's requests to the container, whatever host they name."""
 
     def __init__(self, base: str) -> None:
         self.base = httpx.URL(base)
@@ -69,14 +68,8 @@ class ToContainer(httpx.AsyncBaseTransport):
 
 class Machine:
     def __init__(self, base: str, token: str) -> None:
-        settings = ComputeSettings(
-            deployment_id=DEPLOYMENT,
-            org_slug="org",
-            api_token=SecretStr("unused"),
-            session_auth_key=SecretStr("unused"),
-        )
         session_id = uuid.uuid4()
-        self.provider = FlyComputeProvider(settings, transport=ToContainer(base))
+        self.transport = ToContainer(base)
         self.token = token
         self.session = ComputeSession(
             id=session_id,
@@ -93,8 +86,7 @@ class Machine:
             app_name=app_name(DEPLOYMENT, session_id),
             profile="work",
             image="compute-session",
-            region="iad",
-            cpu_kind="shared",
+            region="us-east4",
             cpus=2,
             memory_mb=4096,
             ttl_hours=1,
@@ -103,7 +95,8 @@ class Machine:
         )
 
     async def call(self, tool: str, arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        result = await self.provider.call(self.session, self.token, tool, arguments)
+        url = f"https://{self.session.app_name}.example/mcp/"
+        result = await call_thin_mcp(url, self.token, tool, arguments, transport=self.transport)
         assert isinstance(result, dict), result
         return result
 

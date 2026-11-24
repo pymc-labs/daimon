@@ -1,6 +1,6 @@
 """The real control-plane caller against the real server, with no network between them.
 
-`FlyComputeProvider.call` sends the requests and reads the result, and the background
+`call_thin_mcp` sends the requests and reads the result, and the background
 command scripts of `daimon.core.compute_tasks` run through `run_bash`, so a change on
 either side that breaks the contract of `docs/compute.md` fails here.
 """
@@ -21,12 +21,11 @@ import httpx
 import pytest
 from compute_session import tools
 from daimon.core import compute_tasks as scripts
-from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_models import ComputeSession
 from daimon.core.compute_provider import ComputeProviderError, app_name
-from daimon.core.config import ComputeSettings
+from daimon.core.compute_thin_mcp import call_thin_mcp
 from daimon.testing.compute import FakeComputeProvider
-from pydantic import JsonValue, SecretStr
+from pydantic import JsonValue
 from starlette.types import ASGIApp
 
 from .conftest import TOKEN
@@ -39,15 +38,22 @@ pytestmark = pytest.mark.skipif(
 DEPLOYMENT = "deployment-a"
 
 
+class SessionCaller:
+    """Reaches the session server with the code every Daimon provider calls it with."""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport) -> None:
+        self.transport = transport
+
+    async def call(
+        self, session: ComputeSession, token: str, tool: str, arguments: dict[str, JsonValue]
+    ) -> JsonValue:
+        url = f"https://{session.app_name}.example/mcp/"
+        return await call_thin_mcp(url, token, tool, arguments, transport=self.transport)
+
+
 @pytest.fixture
-def provider(app: ASGIApp) -> FlyComputeProvider:
-    settings = ComputeSettings(
-        deployment_id=DEPLOYMENT,
-        org_slug="org",
-        api_token=SecretStr("fly-test-token"),
-        session_auth_key=SecretStr("hmac-test-key"),
-    )
-    return FlyComputeProvider(settings, transport=httpx.ASGITransport(app=app))
+def provider(app: ASGIApp) -> SessionCaller:
+    return SessionCaller(httpx.ASGITransport(app=app))
 
 
 @pytest.fixture
@@ -68,8 +74,7 @@ def session() -> ComputeSession:
         app_name=app_name(DEPLOYMENT, session_id),
         profile="work",
         image="registry.example/compute-session@sha256:abc",
-        region="iad",
-        cpu_kind="shared",
+        region="us-east4",
         cpus=2,
         memory_mb=4096,
         ttl_hours=24,
@@ -79,7 +84,7 @@ def session() -> ComputeSession:
 
 
 async def test_inline_bash_answers_in_the_shape_the_fake_promises(
-    provider: FlyComputeProvider, session: ComputeSession
+    provider: SessionCaller, session: ComputeSession
 ) -> None:
     result = await provider.call(
         session, TOKEN, "run_bash", {"command": "printf done", "timeout_s": 40}
@@ -90,7 +95,7 @@ async def test_inline_bash_answers_in_the_shape_the_fake_promises(
 
 
 async def test_file_tools_take_the_arguments_the_mcp_adapter_sends(
-    provider: FlyComputeProvider, session: ComputeSession, tmp_path: Path
+    provider: SessionCaller, session: ComputeSession, tmp_path: Path
 ) -> None:
     path = str(tmp_path / "out" / "result.txt")
     written = await provider.call(session, TOKEN, "write_file", {"path": path, "content": "abc"})
@@ -119,7 +124,7 @@ async def test_file_tools_take_the_arguments_the_mcp_adapter_sends(
 
 
 async def test_the_caller_reports_a_wrong_token_and_a_refused_call(
-    provider: FlyComputeProvider, session: ComputeSession, tmp_path: Path
+    provider: SessionCaller, session: ComputeSession, tmp_path: Path
 ) -> None:
     marker = tmp_path / "ran"
     with pytest.raises(ComputeProviderError, match="did not answer"):
@@ -134,7 +139,7 @@ async def test_the_caller_reports_a_wrong_token_and_a_refused_call(
 
 
 async def test_the_largest_read_the_adapter_allows_fits_the_callers_body_limit(
-    provider: FlyComputeProvider, session: ComputeSession, tmp_path: Path
+    provider: SessionCaller, session: ComputeSession, tmp_path: Path
 ) -> None:
     """4 MiB of quotes is 8 MiB as JSON, twice: the caller would drop it at 8 MiB."""
     path = tmp_path / "quotes.txt"
@@ -148,7 +153,7 @@ async def test_the_largest_read_the_adapter_allows_fits_the_callers_body_limit(
 
 
 async def test_a_text_file_read_in_chunks_has_the_same_hash(
-    provider: FlyComputeProvider, session: ComputeSession, tmp_path: Path
+    provider: SessionCaller, session: ComputeSession, tmp_path: Path
 ) -> None:
     """The adapter's read tool works in byte chunks; its default chunk is 65536 bytes."""
     path = tmp_path / "report.txt"
@@ -170,7 +175,7 @@ async def test_a_text_file_read_in_chunks_has_the_same_hash(
 
 
 async def _probe(
-    provider: FlyComputeProvider, session: ComputeSession, task_id: uuid.UUID, task_dir: str
+    provider: SessionCaller, session: ComputeSession, task_id: uuid.UUID, task_dir: str
 ) -> scripts.Probe:
     # The arguments compute_sessions sends when it polls a task.
     arguments: dict[str, JsonValue] = {
@@ -181,7 +186,7 @@ async def _probe(
 
 
 async def test_a_background_command_starts_once_and_reports_its_end(
-    provider: FlyComputeProvider, session: ComputeSession, tmp_path: Path
+    provider: SessionCaller, session: ComputeSession, tmp_path: Path
 ) -> None:
     task_dir, task_id = str(tmp_path / "tasks"), uuid.uuid4()
     started = time.monotonic()
@@ -206,7 +211,7 @@ async def test_a_background_command_starts_once_and_reports_its_end(
     assert (probe.tail, probe.output_bytes) == ("hi\noops\n", 8)
     assert not marker.exists(), "a repeated start must not run the command again"
 
-    # fly_task_result points the owner at the output file for more than the tail.
+    # compute_task_result points the owner at the output file for more than the tail.
     output = await provider.call(
         session,
         TOKEN,
@@ -217,7 +222,7 @@ async def test_a_background_command_starts_once_and_reports_its_end(
 
 
 async def test_a_detached_command_outlives_its_start_call(
-    provider: FlyComputeProvider, session: ComputeSession, tmp_path: Path
+    provider: SessionCaller, session: ComputeSession, tmp_path: Path
 ) -> None:
     task_dir, task_id = str(tmp_path / "tasks"), uuid.uuid4()
     started = time.monotonic()
