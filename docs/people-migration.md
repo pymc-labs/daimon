@@ -159,6 +159,8 @@ work here. It never prints HTML, data or links. With `--apply` each page commits
 its own, and the command exits 1 if any page was refused.
 
 A file is `{"version": 1, "guild_id", "exported_at", "page": {...}}`. Unknown fields are refused.
+An export marked `"provisional": true` has ids that are not final: it previews, and `--apply`
+refuses it.
 In `page`:
 
 - Required: `legacy_url`, `public_id` (10 characters, `a-z2-7`), `slug`, `title`, `created_at`,
@@ -169,7 +171,7 @@ In `page`:
 - `documents`: `collection`, `doc_id`, `data`, `updated_by`, `updated_by_ref`, `created_at`,
   `updated_at`. The `_events` collection holds sent events.
 - `watches`: `legacy_id`, `instructions`, `owner`, `channel_id`, `thread_id`, `place_type`,
-  `delivery`, `select`, `max_turns_per_day`, `expires_at`, `paused`.
+  `delivery`, `select`, `where`, `max_turns_per_day`, `expires_at`, `paused`.
 
 A person is `{"discord_id"}` or `{"email"}`. An email may carry `google_sub`, the Google
 account the visitor signs in with.
@@ -190,7 +192,9 @@ watches in place, so its threads and the settings made here stay. A page whose n
 A watch is imported as a page watch and ends any callback watch imported with the same
 `legacy_id`. One in a thread with no live conversation reports in a new thread instead.
 Watches in other places, on a page that sends no events, or past five on one page are
-skipped with a warning, as is a daily limit above the workspace's.
+skipped with a warning, as is a daily limit above the workspace's. `where` is an
+[event filter](watches.md#page-watches). A `select` that is not a projection path such as
+`.data.item` imports the watch paused and without it.
 
 The dry run also warns about what the page loads from hosts [this deployment blocks](artifacts.md#where-a-page-runs),
 frames that need a content domain, browser storage without one, and links to

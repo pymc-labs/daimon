@@ -105,12 +105,6 @@ def _problems(page: PageIn, limits: ArtifactPagesSettings) -> list[str]:
     scale = page.data_scale
     if count > limits.documents * scale or size > limits.data_bytes * scale:
         found.append(f"the data ({count} documents, {size:,} bytes) is over this page's limits")
-    for watch in page.watches:
-        if watch.select is not None:
-            try:
-                projection_path(watch.select)
-            except ValueError:
-                found.append(f"watch {watch.legacy_id}: select {watch.select!r} is not a path")
     return found
 
 
@@ -422,6 +416,12 @@ async def _import_watches(
             warnings.append(f"watch {watch.legacy_id}: {note}")
             continue
         cap = watch.max_turns_per_day or watches.DEFAULT_WATCH_CAP
+        select, paused = _projection(watch)
+        if paused:
+            warnings.append(
+                f"watch {watch.legacy_id}: select is not a path here, so it is paused "
+                "without it; use `where` to filter events"
+            )
         item = await watches.import_page_watch(
             session,
             tenant_id=tenant_id,
@@ -434,10 +434,11 @@ async def _import_watches(
             thread_id=watch.thread_id,
             delivery=watch.delivery,
             instructions=watch.instructions,
-            select_path=watch.select,
+            select_path=select,
+            where=watch.where,
             max_turns_per_day=cap,
             expires_at=watch.expires_at,
-            paused=watch.paused,
+            paused=watch.paused or paused,
             crypto_keys=target.crypto_keys,
             now=now,
         )
@@ -461,6 +462,17 @@ async def _import_watches(
                 f"allows {ceiling}; raise it with `daimon watches limits set`"
             )
     return made, orphans
+
+
+def _projection(watch: WatchIn) -> tuple[str | None, bool]:
+    """The watch's `select` when it is a projection path, else none and a pause."""
+    if watch.select is None:
+        return None, False
+    try:
+        projection_path(watch.select)
+    except ValueError:
+        return None, True
+    return watch.select, False
 
 
 def _unsupported(watch: WatchIn, page: PageIn, made: int) -> str | None:

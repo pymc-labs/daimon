@@ -90,6 +90,17 @@ def test_a_bundle_refuses_unknown_fields_and_unsafe_public_pages() -> None:
         _page(surprise=1)
     with pytest.raises(ValidationError, match="cannot write data"):
         _page(data="write")
+    bad_watch = {
+        "legacy_id": "w",
+        "instructions": "x",
+        "owner": {"discord_id": OWNER},
+        "channel_id": "1",
+        "place_type": "channel",
+        "delivery": "new_thread",
+        "where": {"a": {"b": 1}},
+    }
+    with pytest.raises(ValidationError, match="where"):
+        _page(watches=[bad_watch])
     with pytest.raises(ValidationError, match="google_sub goes with an email"):
         _page(people=[{"discord_id": MEMBER, "google_sub": "g"}])
     bundle = {
@@ -160,8 +171,18 @@ async def test_an_import_keeps_the_id_and_link_and_resolves_people(
                 "place_type": "thread",
                 "delivery": "thread",
                 "select": ".data.item",
+                "where": {"event": ["vote", "undo"]},
                 "max_turns_per_day": 30,
-            }
+            },
+            {
+                "legacy_id": "w2",
+                "instructions": "Odd filter.",
+                "owner": {"discord_id": OWNER},
+                "channel_id": "4241",
+                "place_type": "channel",
+                "delivery": "new_thread",
+                "select": ".[] | select(.type == 1)",
+            },
         ],
     )
     orphan = await get_or_create_platform_principal(
@@ -186,7 +207,7 @@ async def test_an_import_keeps_the_id_and_link_and_resolves_people(
 
     report = await import_page(db, page, target, now=NOW)
 
-    assert (report.action, report.members, report.visitors, report.watches) == ("create", 1, 1, 1)
+    assert (report.action, report.members, report.visitors, report.watches) == ("create", 1, 1, 2)
     assert report.orphans_ended == 1 and report.problems == (), report
     assert any("30 reports a day" in w for w in report.warnings), report.warnings
     row = await artifact_pages.get_by_public_id(db, "abcdefgh23")
@@ -215,9 +236,17 @@ async def test_an_import_keeps_the_id_and_link_and_resolves_people(
         )
     ).all()
     assert [tuple(v) for v in visitor] == [("google", "sub-1")], "pinned, one visitor"
-    watch = (await watches.page_watches(db, tenant_id=tenant.id, page_id=row.id))[0]
+    listed = {
+        w.source_state["legacy_id"]: w
+        for w in await watches.page_watches(db, tenant_id=tenant.id, page_id=row.id)
+    }
+    watch, odd = listed["w1"], listed["w2"]
     assert (watch.source, watch.status, watch.delivery) == ("page_event", "active", "new_thread")
     assert watch.owner_account_id == orphan.account_id
+    assert watch.source_state["where"] == {"event": ["vote", "undo"]}
+    assert watch.rule == {"projection": ".data.item"}
+    assert (odd.status, odd.rule) == ("paused", {}), "a jq select pauses it, unfiltered"
+    assert any("w2" in w and "paused" in w for w in report.warnings), report.warnings
     left = await db.scalar(
         select(func.count()).select_from(Watch).where(Watch.source == "callback")
     )

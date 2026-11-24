@@ -13,9 +13,10 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final
+from typing import Final, cast
 
 from daimon.core.artifact_pages.access import Sender
 from daimon.core.artifact_pages.model import ArtifactError, has_json_nul
@@ -24,6 +25,8 @@ from pydantic import JsonValue
 
 EVENT_NAME: Final = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
 MAX_WATCHES_PER_PAGE: Final = 5
+MAX_WHERE_KEYS: Final = 8
+MAX_WHERE_VALUES: Final = 20
 
 
 @dataclass(frozen=True)
@@ -90,3 +93,60 @@ def _preview(head: dict[str, JsonValue], document: dict[str, JsonValue]) -> byte
         cut = cut[: len(cut) * 9 // 10]
         body = json.dumps({**preview, "data_preview": cut}, ensure_ascii=False).encode()
     return body
+
+
+def _values(wanted: object) -> list[object]:
+    return cast("list[object]", wanted) if isinstance(wanted, list) else [wanted]
+
+
+def _scalar(value: object) -> bool:
+    return isinstance(value, str | int | float | bool)
+
+
+def check_where(where: Mapping[str, object]) -> dict[str, JsonValue]:
+    """A watch's event filter: top-level event fields, each mapped to one allowed value or
+    a list of them. At most `MAX_WHERE_KEYS` keys and `MAX_WHERE_VALUES` values a key."""
+    if not 0 < len(where) <= MAX_WHERE_KEYS:
+        raise ValueError(f"`where` takes 1 to {MAX_WHERE_KEYS} event fields")
+    checked: dict[str, JsonValue] = {}
+    for key, wanted in where.items():
+        values = _values(wanted)
+        if (
+            not 0 < len(key) <= 64
+            or not 0 < len(values) <= MAX_WHERE_VALUES
+            or not all(_scalar(v) for v in values)
+        ):
+            raise ValueError(
+                f"`where` maps an event field to a text, number or true/false value, or to "
+                f"up to {MAX_WHERE_VALUES} of them (check {key[:64]!r})"
+            )
+        checked[key] = wanted  # type: ignore[assignment]  # scalars and lists of scalars
+    return checked
+
+
+def _same(left: object, right: object) -> bool:
+    return isinstance(left, bool) == isinstance(right, bool) and left == right
+
+
+def _filter(where: object) -> dict[str, object]:
+    return cast("dict[str, object]", where) if isinstance(where, dict) else {}
+
+
+def event_matches(where: object, document: Mapping[str, JsonValue]) -> bool:
+    """Whether a page event wakes a watch: every key of its stored `where` (none matches
+    all) holds one of that key's values."""
+    for key, wanted in _filter(where).items():
+        allowed = _values(wanted)
+        if key not in document or not any(_same(document[key], v) for v in allowed):
+            return False
+    return True
+
+
+def describe_where(where: object) -> str | None:
+    """A watch's stored filter in plain words, e.g. `sender is member; event is a or b`."""
+    parts: list[str] = []
+    for key, wanted in _filter(where).items():
+        values = _values(wanted)
+        words = [str(v).lower() if isinstance(v, bool) else str(v) for v in values]
+        parts.append(f"{key} is {' or '.join(words)}")
+    return "; ".join(parts) or None

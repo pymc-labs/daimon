@@ -39,6 +39,7 @@ from daimon.core.artifact_pages.documents import (
     build_list_query,
     check_page_collection,
 )
+from daimon.core.artifact_pages.events import describe_where
 from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, page_url
 from daimon.core.permissions import WEB_PLACE_PREFIX
 from daimon.core.stores import artifact_pages as artifact_store
@@ -216,6 +217,7 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                     else "active",
                     "turns_today": w.fires_today,
                     "max_turns_per_day": w.watch.max_turns_per_day,
+                    "where": describe_where(w.watch.source_state.get("where")),
                     "thread_url": None,
                 }
                 for w in watches

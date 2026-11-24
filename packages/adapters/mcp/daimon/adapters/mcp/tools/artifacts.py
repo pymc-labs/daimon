@@ -660,6 +660,7 @@ async def create_page_watch(
     now: datetime,
     delivery: WatchDelivery = "thread",
     select_path: str | None = None,
+    where: dict[str, JsonValue] | None = None,
 ) -> tuple[WatchRow, str]:
     """A watch on the page's events, with its key; the page must send events and be one
     tools may use, and holds at most `MAX_WATCHES_PER_PAGE` live watches. Someone who
@@ -696,6 +697,7 @@ async def create_page_watch(
                 max_turns_per_day=max_turns_per_day,
                 delivery=delivery,
                 select_path=select_path,
+                where=where,
             )
             key_id, _ = await watches.enroll_page_key(db, watch, caller.crypto_keys, now=now)
             return watch, key_id

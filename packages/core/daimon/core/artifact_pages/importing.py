@@ -14,6 +14,7 @@ from typing import Annotated, Final, Literal
 from urllib.parse import urlsplit
 
 from daimon.core.artifact_pages.content import ASSET_HOSTS, PLAYER_FRAMES
+from daimon.core.artifact_pages.events import check_where
 from daimon.core.artifact_pages.model import MAX_TITLE, Limits
 from pydantic import (
     AwareDatetime,
@@ -79,7 +80,9 @@ class DocumentIn(BaseModel):
 
 
 class WatchIn(BaseModel):
-    """A page-event watch. `select` is a Daimon projection path such as `.data.item`."""
+    """A page-event watch. `select` is a Daimon projection path such as `.data.item`, and
+    `where` keeps only events whose fields match (`events.check_where`). Anything else in
+    `select` imports the watch paused, without it."""
 
     model_config = _PAGE_FIELD
 
@@ -92,9 +95,16 @@ class WatchIn(BaseModel):
     place_type: Literal["channel", "thread", "direct-message", "mcp", "voice", "routine"]
     delivery: Literal["thread", "new_thread"]
     select: str | None = None
+    where: dict[str, JsonValue] | None = None
     max_turns_per_day: int | None = Field(default=None, ge=1, le=240)
     expires_at: AwareDatetime | None = None
     paused: bool = False
+
+    @model_validator(mode="after")
+    def _where_is_valid(self) -> WatchIn:
+        if self.where is not None:
+            check_where(self.where)
+        return self
 
 
 class PageIn(BaseModel):
@@ -137,11 +147,14 @@ class PageIn(BaseModel):
 
 
 class Bundle(BaseModel):
-    """One page's file: `{"version": 1, "guild_id", "exported_at", "page": {...}}`."""
+    """One page's file: `{"version": 1, "guild_id", "exported_at", "page": {...}}`.
+    `provisional` marks a dry-run export whose ids are not final: it can be previewed,
+    never applied."""
 
     model_config = _PAGE_FIELD
 
     version: Literal[1]
+    provisional: bool = False
     guild_id: _ID
     exported_at: AwareDatetime
     page: PageIn

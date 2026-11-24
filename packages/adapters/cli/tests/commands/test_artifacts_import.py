@@ -116,3 +116,14 @@ async def test_files_for_another_server_or_a_bad_file_write_nothing(operator, tm
     assert bad.exit_code != 0 and LINK not in bad.output, bad.output
     async with operator.factory() as db:
         assert await get_by_public_id(db, "abcdefgh23") is None
+
+
+async def test_a_provisional_export_can_be_previewed_but_not_applied(operator, tmp_path):
+    (tmp_path / "a.json").write_text(json.dumps({**_bundle(), "provisional": True}))
+
+    preview = await run(operator, tmp_path)
+    assert preview.exit_code == 0, preview.output
+    refused = await run(operator, tmp_path, "--apply")
+    assert refused.exit_code != 0 and "re-export with --apply first" in refused.output
+    async with operator.factory() as db:
+        assert await get_by_public_id(db, "abcdefgh23") is None

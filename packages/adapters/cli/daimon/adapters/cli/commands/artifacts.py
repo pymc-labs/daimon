@@ -76,6 +76,8 @@ def import_command(
     guilds: set[str] = set()
     for path in files:
         bundle = _read(path)
+        if apply and bundle.provisional:
+            raise typer.BadParameter(f"{path.name} is provisional: re-export with --apply first")
         slugs.add(bundle.page.slug)
         guilds.add(bundle.guild_id)
 

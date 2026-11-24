@@ -24,6 +24,7 @@ from daimon.core._models import (
     WatchFiring,
     WatchNoticeReceipt,
 )
+from daimon.core.artifact_pages.events import check_where
 from daimon.core.artifact_pages.keys import new_key_id, page_event_key
 from daimon.core.config import Settings, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
@@ -48,6 +49,7 @@ from daimon.core.stores.identity import find_platform_principal, get_or_create_p
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.untrusted import render_untrusted
+from pydantic import JsonValue
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -238,19 +240,22 @@ async def register_page_watch(
     max_lifetime: timedelta = MAX_LIFETIME,
     delivery: WatchDelivery = "thread",
     select_path: str | None = None,
+    where: dict[str, JsonValue] | None = None,
 ) -> WatchRow:
     """Register a human-admitted owner's exact live binding; never called by ingress.
 
     `expires_at=None` is a permanent watch (`require_permanent_allowed`); for a polled one
     the caller has checked a fresh admin approved it, named in `permanent_approved_by`.
     A page watch's `delivery` is checked here; a polled one's by its caller, which sets it.
-    `select_path` keeps only that part of each page event, dropping empty ones.
+    `select_path` keeps only that part of each page event, dropping empty ones; `where`
+    (`events.check_where`) wakes the watch only for events that match it.
     """
     require_watch_platform(binding.platform, source)
     if source == "page_event":
         delivery = require_delivery(binding, delivery)
     if select_path is not None:
         projection_path(select_path)
+    where = check_where(where) if where else None
     if not 0 < len(instructions) <= INSTRUCTIONS_LIMIT:
         raise ValueError(f"Instructions must be 1 to {INSTRUCTIONS_LIMIT} characters")
     if expires_at is not None and not now < expires_at <= now + max_lifetime:
@@ -292,6 +297,7 @@ async def register_page_watch(
         instructions=instructions,
         page_id=page_id,
         rule={} if select_path is None else {"projection": select_path},
+        source_state={} if where is None else {"where": where},
         source=source,
         expires_at=expires_at,
         permanent_approved_by=None if expires_at is not None else permanent_approved_by,
@@ -1269,7 +1275,7 @@ async def register_poll_watch(
         validate_poll,
     )
     from daimon.core.tool_safety import DAIMON_SERVER_NAME
-    from pydantic import JsonValue, TypeAdapter
+    from pydantic import TypeAdapter
 
     require_watch_platform(binding.platform, "poll", tool)
     # The operator registry is the only thing that allows a poll.
@@ -1349,7 +1355,7 @@ async def register_mcp_poll_watch(
     credential; `catalogue_digest` pins what the owner approved.
     """
     from daimon.core.continuity.poll_tools import require_listed, validate_mcp_poll
-    from pydantic import JsonValue, TypeAdapter
+    from pydantic import TypeAdapter
 
     # The operator registry is the only thing that allows a poll.
     listed = require_listed(server_url, tool)
@@ -1453,7 +1459,7 @@ async def update_watch(
         validate_poll,
         watch_server,
     )
-    from pydantic import JsonValue, TypeAdapter
+    from pydantic import TypeAdapter
 
     current = await require_owned_watch(
         session, watch_id, tenant_id=tenant_id, account_id=owner_account_id
@@ -2122,6 +2128,7 @@ async def import_page_watch(
     delivery: WatchDelivery,
     instructions: str,
     select_path: str | None,
+    where: dict[str, JsonValue] | None,
     max_turns_per_day: int,
     expires_at: datetime | None,
     paused: bool,
@@ -2188,6 +2195,7 @@ async def import_page_watch(
         max_turns_per_day=max_turns_per_day,
         source_state={
             "legacy_id": legacy_id,
+            **({} if where is None else {"where": check_where(where)}),
             **({"cap_approved_by": "operator"} if max_turns_per_day > DEFAULT_WATCH_CAP else {}),
         },
     )

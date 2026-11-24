@@ -15,6 +15,7 @@ from daimon.core.artifact_pages.tickets import Ticket, fernet_of, open_ticket, s
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.page_events import MAX_EVENT_BYTES
 from daimon.core.stores.domain import ArtifactRow, ArtifactUsage, CollectionRule
+from pydantic import JsonValue
 
 NOW = datetime(2026, 11, 1, tzinfo=UTC)
 OWNER, EDITOR, LISTED, MEMBER = (uuid.UUID(int=i) for i in range(1, 5))
@@ -272,6 +273,35 @@ def test_build_event_carries_server_facts_and_refuses_oversize() -> None:
             max_bytes=LIMITS.event_bytes,
         )
     assert large.value.code == "too_large", "events stay within their limit"
+
+
+def test_a_watch_filter_matches_every_key_to_one_of_its_values() -> None:
+    doc: dict[str, JsonValue] = {"event": "vote", "sender": "member", "outside": False, "n": 1}
+    where = events.check_where({"event": ["vote", "undo"], "sender": "member", "outside": False})
+    assert events.event_matches(where, doc)
+    assert events.event_matches(None, doc), "no filter wakes on everything"
+    for other in ({"event": "poke"}, {"outside": 0}, {"n": True}, {"missing": "x"}):
+        assert not events.event_matches(other, doc), other
+    assert (
+        events.describe_where(where) == "event is vote or undo; sender is member; outside is false"
+    )
+    assert events.describe_where(None) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {},
+        {f"k{i}": 1 for i in range(9)},
+        {"a": []},
+        {"a": list(range(21))},
+        {"a": {"b": 1}},
+        {"": 1},
+    ],
+)
+def test_a_watch_filter_is_bounded_and_scalar(bad: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="where"):
+        events.check_where(bad)
 
 
 def test_a_large_event_reaches_watches_as_a_bounded_preview() -> None:
