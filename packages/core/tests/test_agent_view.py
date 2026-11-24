@@ -502,7 +502,10 @@ async def _own_server_view(
         markup=Decimal(1),
         mcp_tools=McpToolLister(transport=handler),
         own_server=OwnMcpServer(
-            url=_OWN, secret=b"s" * 32, now=lambda: datetime(2026, 10, 2, tzinfo=UTC)
+            url=_OWN,
+            secret=b"s" * 32,
+            now=lambda: datetime(2026, 10, 2, tzinfo=UTC),
+            relay_names=frozenset({"crm"}),
         ),
     )
     view = None
@@ -571,12 +574,33 @@ async def test_a_server_behind_the_identity_relay_is_listed_with_a_credential_na
     assert ([t.name for t in server.tools], server.listed) == (["search"], True), (
         "the viewer sees the relayed server's real tools"
     )
-    claims = [pyjwt.decode(t, options={"verify_signature": False})[RELAY_CLAIM] for t in seen]
-    assert claims and all(c == {"agent_name": "helper"} for c in claims), (
+    payloads = [pyjwt.decode(t, options={"verify_signature": False}) for t in seen]
+    assert payloads and all(p[RELAY_CLAIM] == {"agent_name": "helper"} for p in payloads), (
         "the relay is told the agent and no session"
     )
     (token,) = await _tokens_of(db_session, account)
     assert token.revoked_at is not None, "the credential is revoked once the list is read"
+    assert token.expires_at == datetime(2026, 10, 2, 0, 2, tzinfo=UTC), "it lives two minutes"
+
+
+async def test_a_relay_url_for_no_configured_server_gets_no_credential(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    asked: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        return _answer(request)
+
+    view, account = await _own_server_view(
+        db_session,
+        db_session_factory,
+        httpx.MockTransport(handler),
+        is_admin=True,
+        url=relay_url(_OWN, "other"),
+    )
+    assert view is not None and view.mcp_servers[0].listed is False, "nothing is listed"
+    assert (asked, await _tokens_of(db_session, account)) == ([], []), "nor a credential minted"
 
 
 async def test_an_unreadable_own_server_shows_not_listed_and_logs_why(

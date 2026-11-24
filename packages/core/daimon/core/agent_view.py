@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -582,6 +583,8 @@ class OwnMcpServer:
     url: str
     secret: bytes
     now: Callable[[], datetime]
+    # The signed-identity servers its relay forwards to: only these get a relay credential.
+    relay_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -787,7 +790,7 @@ async def _own_server_tools(
                 secret=own.secret,
                 now=own.now(),
                 relay=RelayBinding(agent_name=agent.name),
-                ttl=timedelta(seconds=900),
+                ttl=timedelta(seconds=120),
             )
         else:
             token = await mint_agent_mcp_token(
@@ -808,8 +811,13 @@ async def _own_server_tools(
             lister, ContextServer(name, url, token), agent_id=agent.id, cache_as=key
         )
     finally:
-        async with deps.session_factory.begin() as db:
-            await revoke_mcp_token(db, jti=token_jti(token), now=own.now())
+        # A cancelled page load still revokes the credential it minted.
+        await asyncio.shield(_revoke(deps, own, token))
+
+
+async def _revoke(deps: AgentViewDeps, own: OwnMcpServer, token: str) -> None:
+    async with deps.session_factory.begin() as db:
+        await revoke_mcp_token(db, jti=token_jti(token), now=own.now())
 
 
 async def _listed_tools(
@@ -842,8 +850,9 @@ async def _listed_tools(
     for server in agent.mcp_servers:
         if own is None or server.name in listed:
             continue
-        # Only the configured URL, or its relay's, gets a minted token, whatever the name.
-        relayed = relay_server_name(server.url, own.url) is not None
+        # Only the configured URL, or its relay's for a configured server, gets a minted
+        # token, whatever the name.
+        relayed = relay_server_name(server.url, own.url) in own.relay_names
         if not relayed and canonical_mcp_url(server.url) != canonical_mcp_url(own.url):
             continue
         tools = await _own_server_tools(
