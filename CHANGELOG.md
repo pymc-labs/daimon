@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent page shows where an agent really answers and what its servers offer.** Web
+  chat is no longer listed for an agent that needs a Discord role or belongs to one channel,
+  since no web chat can run it, and turning it on there is refused. The Channels panel drops
+  its Direct messages switch, which never saved; direct messages stay under Features. A
+  server behind the signed-identity relay lists its tools. A server nobody signs in to no
+  longer says Not signed in, and the token field reads `*****` when a token is set and Not set
+  otherwise ([MCP servers](docs/mcp-servers.md)).
 - **A routine that posts to a narrow Discord room reads that room.** On Anthropic agents the run
   had no way to show it ran inside the room, so its own `read_thread` and `read_channel` were
   refused. The run now reads the room or thread it posts to, as a chat there does, and no other
