@@ -43,11 +43,11 @@ def test_every_platform_refuses_a_running_turn_and_deletes_through_one_loop() ->
 
 
 def test_slack_never_records_a_routine_result_so_delete_reply_cannot_take_one() -> None:
-    """A routine's result is a `source='routine'` post only where its adapter writes one."""
+    """A routine's result is a recorded post (`source=job.source`) only where its adapter writes one."""
     writers = {
         adapter
         for adapter in ("discord", "slack", "teams")
         for path in (_ADAPTERS / adapter / "daimon" / "adapters" / adapter).rglob("*.py")
-        if 'source="routine"' in path.read_text()
+        if "source=job.source" in path.read_text()
     }
     assert writers == {"discord", "teams"}, "only Discord and Teams record a routine's result"
