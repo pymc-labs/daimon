@@ -19,10 +19,14 @@ const clone = <T,>(x: T): T => structuredClone(x)
 const LEVELS: Effort[] = ["low", "medium", "high"]
 const MODELS: CatalogModel[] = [
   { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 4, out_usd: 20, fast: true },
+  { id: "claude-opus-4-8", label: "Opus 4.8", backend: "anthropic", in_usd: 5, out_usd: 25 },
+  { id: "claude-fable-5-2", label: "Fable 5.2", backend: "anthropic", in_usd: 8, out_usd: 40 },
   { id: "claude-sonnet-5-5", label: "Sonnet 5.5", backend: "anthropic", in_usd: 2, out_usd: 10 },
   { id: "claude-haiku-5-5", label: "Haiku 5.5", backend: "anthropic", in_usd: 0.1, out_usd: 0.5 },
   { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5, efforts: LEVELS },
+  { id: "gpt-6.2-astra", label: "GPT-6.2 Astra", backend: "openai", in_usd: 10, out_usd: 50, efforts: LEVELS },
   { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "openai", in_usd: 10, out_usd: 50, efforts: LEVELS },
+  { id: "gpt-6.2-sol", label: "GPT-6.2 Sol", backend: "openai", in_usd: 15, out_usd: 75, efforts: LEVELS },
   { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75, efforts: LEVELS },
   { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
   { id: "gemini-4-carbon", label: "Gemini 4 Carbon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },

@@ -14,6 +14,7 @@ from daimon.core.agent_model_names import (
     AgentModel,
     AmbiguousModel,
     agent_catalog,
+    catalog_order,
     model_name,
     resolve_model,
 )
@@ -72,7 +73,7 @@ def claude_model_choices(*, default: str) -> tuple[ModelChoice, ...]:
     """
     if not is_priced_claude_model(default):
         raise ValueError(f"default model {default!r} is not one of {priced_claude_ids()}")
-    return tuple(
+    choices = (
         ModelChoice(
             id=model_id,
             label=MODEL_DISPLAY_NAMES.get(model_id, model_id),
@@ -81,6 +82,7 @@ def claude_model_choices(*, default: str) -> tuple[ModelChoice, ...]:
         )
         for model_id in priced_claude_ids()
     )
+    return tuple(catalog_order(tuple(choices), lambda choice: choice.model))
 
 
 def _runnable(entry: AgentModel, tenant: TenantBackendPolicy | None) -> bool:
@@ -129,7 +131,7 @@ def list_model_choices(
             provider=entry.model.provider,
             price=entry.price,
         )
-        for entry in entries
+        for entry in catalog_order(entries, lambda entry: entry.model)
         if _runnable(entry, tenant)
     )
 

@@ -133,3 +133,35 @@ def test_model_names_are_the_ones_people_say(provider, model_id, name):
     from daimon.core.agent_model_names import model_name
 
     assert model_name(ModelRef(provider=provider, id=model_id)) == name
+
+
+def test_catalog_order_groups_by_provider_then_family_newest_first() -> None:
+    """Every picker shares one order: provider, family by first appearance, newest first."""
+    from daimon.core.agent_model_names import catalog_order
+    from mux.contracts.ids import ModelRef
+
+    given = [
+        ("gemini", "gemini-4-argon"),
+        ("anthropic", "claude-sonnet-4-6"),
+        ("openai", "gpt-6-astra"),
+        ("anthropic", "claude-opus-4-7"),
+        ("anthropic", "claude-sonnet-5"),
+        ("openai", "gpt-6.2-astra"),
+        ("anthropic", "claude-opus-5-5-fast"),
+        ("anthropic", "claude-opus-5-5"),
+        ("openai", "gpt-6.2-sol"),
+        ("gemini", "gemini-3.8-flash"),
+    ]
+    refs = [ModelRef.model_validate({"provider": p, "id": i}) for p, i in given]
+    assert [ref.id for ref in catalog_order(refs, lambda ref: ref)] == [
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-opus-5-5",
+        "claude-opus-5-5-fast",
+        "claude-opus-4-7",
+        "gpt-6.2-astra",
+        "gpt-6-astra",
+        "gpt-6.2-sol",
+        "gemini-4-argon",
+        "gemini-3.8-flash",
+    ], "providers in PROVIDERS order, families as first listed, newest version first"

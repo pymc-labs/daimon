@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from daimon.core.pricing import AGENT_MODEL_PRICING, provider_prices
@@ -53,6 +53,32 @@ class AgentModel:
     output_usd: float = 0.0
 
 
+_PROVIDER_WORDS = {"claude", "gpt", "gemini"}
+
+
+def catalog_order[T](items: Sequence[T], model: Callable[[T], ModelRef]) -> list[T]:
+    """The one display order of models: provider, then family, then newest version first.
+
+    Providers follow `PROVIDERS`. A family is the id's words without numbers or the
+    provider word ("opus", "astra"); families keep the order they first appear in
+    `items`. A version is the id's numbers (`claude-opus-4-7` is 4.7); a fast preset
+    follows its base model.
+    """
+    first: dict[tuple[str, str], int] = {}
+    keys: list[tuple[int, int, tuple[int, ...], bool]] = []
+    for index, item in enumerate(items):
+        ref = model(item)
+        words = ref.id.split("-")
+        family = " ".join(
+            w for w in words if w[:1].isalpha() and w not in _PROVIDER_WORDS | {"fast"}
+        )
+        numbers = [int(n) for n in re.findall(r"\d+", ref.id)]
+        version = tuple(-n for n in (*numbers, 0, 0, 0)[:4])  # 5 sorts as 5.0, after 5.5
+        rank = first.setdefault((ref.provider, family), index)
+        keys.append((PROVIDERS.index(ref.provider), rank, version, "fast" in words))
+    return [items[i] for i in sorted(range(len(items)), key=keys.__getitem__)]
+
+
 def agent_catalog() -> tuple[AgentModel, ...]:
     """Derive availability from runtime selection AND current prices, including B2 additions."""
     entries = [
@@ -82,7 +108,7 @@ def agent_catalog() -> tuple[AgentModel, ...]:
                         float(rates.output),
                     )
                 )
-    return tuple(entries)
+    return tuple(catalog_order(entries, lambda entry: entry.model))
 
 
 def _key(value: str) -> str:
