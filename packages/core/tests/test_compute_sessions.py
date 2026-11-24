@@ -121,6 +121,8 @@ async def test_owner_tenant_origin_and_machine_token_isolation(db_engine, db_cle
         await service.stop(replace(foreign, admin=True), session.id)
     assert (await service.stop(admin, session.id)).state == "deleted"
     assert fake.deleted == [session.id]
+    # The provider is told where the session ran: Cloud Run addresses a service by region.
+    assert fake.deleted_regions == ["iad"]
 
 
 @pytest.mark.parametrize("attended,human", [(False, True), (True, False), (True, None)])

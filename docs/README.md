@@ -14,7 +14,7 @@ server](https://daimon.decision.ai/) instead.
   Discord with Docker Compose.
 - **Run it for a team:** [Self-hosting](self-hosting.md) covers a production
   install, then [Model providers](providers.md),
-  [Operations](operations.md) and [Fly compute](compute.md).
+  [Operations](operations.md) and [Compute sessions](compute.md).
 - **Add a platform or tool:** [Slack](slack.md),
   [Microsoft Teams](teams.md), the [web app](web.md), [GitHub](github.md),
   [MCP servers](mcp-servers.md) and the

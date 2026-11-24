@@ -2875,37 +2875,117 @@ class ComputeProfile(BaseModel):
     image: str = Field(
         description="Operator-reviewed thin MCP image reference, preferably a digest."
     )
-    regions: list[str] = Field(default_factory=lambda: ["iad"], description="Allowed Fly regions.")
-    cpu_kind: Literal["shared", "performance"] = Field(
-        default="shared", description="Fly CPU class."
+    regions: list[str] = Field(
+        default_factory=lambda: ["iad"],
+        description=(
+            "Allowed regions: Fly regions such as iad, or Google Cloud regions such as "
+            "us-central1 on Cloud Run."
+        ),
     )
-    cpus: int = Field(default=2, gt=0, le=16, description="Fixed CPU count for this image profile.")
-    memory_mb: int = Field(default=4096, ge=256, le=131072, description="Fixed RAM in MB.")
+    cpu_kind: Literal["shared", "performance"] = Field(
+        default="shared", description="Fly CPU class. Cloud Run ignores it."
+    )
+    cpus: int = Field(
+        default=2,
+        gt=0,
+        le=16,
+        description="Fixed CPU count for this image profile. Cloud Run allows 1, 2, 4, 6 or 8.",
+    )
+    memory_mb: int = Field(
+        default=4096,
+        ge=256,
+        le=131072,
+        description=(
+            "Fixed RAM in MB. Cloud Run allows 512 to 32768, within the range its CPU "
+            "count permits."
+        ),
+    )
+
+
+_CLOUD_RUN_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
+# Cloud Run's memory range in MiB for each CPU count it accepts. The floor is 512 MiB
+# because sessions use the second generation environment and instance-based billing.
+_CLOUD_RUN_MEMORY_MB: Mapping[int, tuple[int, int]] = {
+    1: (512, 4096),
+    2: (512, 8192),
+    4: (2048, 16384),
+    6: (4096, 24576),
+    8: (4096, 32768),
+}
+
+
+def _cloud_run_profile_error(name: str, profile: ComputeProfile) -> str | None:
+    """Why Cloud Run would refuse this profile, so a launch never finds out first."""
+    bad = [region for region in profile.regions if not _CLOUD_RUN_REGION.fullmatch(region)]
+    if not profile.regions or bad:
+        return (
+            f"compute profile {name!r} needs Google Cloud regions such as us-central1 "
+            f"when provider is cloud_run; got {profile.regions}"
+        )
+    limits = _CLOUD_RUN_MEMORY_MB.get(profile.cpus)
+    if limits is None:
+        return (
+            f"compute profile {name!r}: Cloud Run allows 1, 2, 4, 6 or 8 CPUs, not {profile.cpus}"
+        )
+    if not limits[0] <= profile.memory_mb <= limits[1]:
+        return (
+            f"compute profile {name!r}: Cloud Run allows {limits[0]} to {limits[1]} MB "
+            f"with {profile.cpus} CPUs, not {profile.memory_mb}"
+        )
+    return None
 
 
 class ComputeSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Allow attended owners to launch Fly sessions. Disabling launch does not "
+            "Allow attended owners to launch compute sessions. Disabling launch does not "
             "disable cleanup."
+        ),
+    )
+    provider: Literal["fly", "cloud_run"] = Field(
+        default="fly",
+        description=(
+            "Where sessions run: fly (Fly Machines) or cloud_run (one Google Cloud Run "
+            "service per session). Stop every session before changing it: only the "
+            "selected provider is cleaned up."
         ),
     )
     deployment_id: str = Field(
         default="",
         description=(
-            "Stable unique deployment identifier fencing Fly resources. Required to use compute."
+            "Stable unique deployment identifier fencing provider resources. Required to "
+            "use compute."
         ),
     )
     api_token: SecretStr | None = Field(
         default=None,
         repr=False,
         description=(
-            "Fly API token, control plane and scheduler only. Never mounted in compute machines."
+            "Fly API token, control plane and scheduler only. Never mounted in compute "
+            "machines. Required when provider is fly."
         ),
     )
     org_slug: str = Field(
-        default="", description="Fly organization for this deployment's disposable sessions."
+        default="",
+        description=(
+            "Fly organization for this deployment's disposable sessions. Required when "
+            "provider is fly."
+        ),
+    )
+    cloud_run_project: str = Field(
+        default="",
+        description=(
+            "Google Cloud project id that holds the session services. Required when "
+            "provider is cloud_run. Daimon signs in with application default credentials."
+        ),
+    )
+    cloud_run_service_account: str = Field(
+        default="",
+        description=(
+            "Email of the service account session containers run as. Give it no roles. "
+            "Required when provider is cloud_run."
+        ),
     )
     session_auth_key: SecretStr | None = Field(
         default=None,
@@ -2952,6 +3032,36 @@ class ComputeSettings(BaseModel):
             "No environment or credentials are copied from template apps."
         ),
     )
+
+    @property
+    def provider_configured(self) -> bool:
+        """Whether the selected provider has the settings its API calls need."""
+        if self.provider == "cloud_run":
+            return bool(self.cloud_run_project and self.cloud_run_service_account)
+        return self.api_token is not None and bool(self.org_slug)
+
+    @model_validator(mode="after")
+    def _cloud_run_is_complete(self) -> ComputeSettings:
+        """Refuse a Cloud Run selection that could not launch or clean up.
+
+        Fly settings stay unchecked here: an installation that never uses compute
+        leaves them empty.
+        """
+        if self.provider != "cloud_run":
+            return self
+        missing = [
+            "DAIMON_COMPUTE__" + field.upper()
+            for field in ("cloud_run_project", "cloud_run_service_account")
+            if not getattr(self, field)
+        ]
+        if missing:
+            raise ValueError(
+                "DAIMON_COMPUTE__PROVIDER=cloud_run also needs " + " and ".join(missing)
+            )
+        for name, profile in self.profiles.items():
+            if (error := _cloud_run_profile_error(name, profile)) is not None:
+                raise ValueError(error)
+        return self
 
 
 class LongJobsSettings(BaseModel):

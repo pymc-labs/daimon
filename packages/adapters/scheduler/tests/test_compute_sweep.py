@@ -18,13 +18,30 @@ from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import ComputeSettings
 from pydantic import SecretStr
 
+_FLY = {"api_token": SecretStr("test-only"), "org_slug": "test-org"}
+_CLOUD_RUN = {
+    "provider": "cloud_run",
+    "cloud_run_project": "test-project",
+    "cloud_run_service_account": "session@test-project.iam.gserviceaccount.com",
+}
 
-async def test_compute_sweep_skips_unconfigured_provider():
-    compute = SimpleNamespace(
-        settings=SimpleNamespace(deployment_id="", api_token=None), reconcile=AsyncMock()
-    )
+
+@pytest.mark.parametrize(
+    ("settings", "sweeps"),
+    [
+        (ComputeSettings(), False),
+        (ComputeSettings(deployment_id="d"), False),
+        (ComputeSettings(**_FLY), False),
+        (ComputeSettings(deployment_id="d", **_FLY), True),
+        # Cloud Run has no API token: cleanup must not wait for Fly's.
+        (ComputeSettings(deployment_id="d", **_CLOUD_RUN), True),
+        (ComputeSettings(**_CLOUD_RUN), False),
+    ],
+)
+async def test_compute_sweep_runs_only_for_a_configured_provider(settings, sweeps):
+    compute = SimpleNamespace(settings=settings, reconcile=AsyncMock())
     await main._sweep_compute(compute)
-    compute.reconcile.assert_not_awaited()
+    assert compute.reconcile.await_count == int(sweeps)
 
 
 async def test_dispatch_keeps_ticking_and_shutdown_cancels_stalled_compute():

@@ -1,19 +1,22 @@
-"""Fly Machines and thin MCP transport. Errors deliberately omit remote bodies and URLs."""
+"""Fly Machines control plane. Errors deliberately omit remote bodies and URLs."""
 
 from __future__ import annotations
 
-import asyncio
-import json
 import re
 import uuid
 
 import httpx
 from daimon.core.compute_models import ComputeResource, ComputeSession
-from daimon.core.compute_provider import ComputeProviderError, app_name, app_prefix
+from daimon.core.compute_provider import (
+    OTHER_PROVIDER,
+    ComputeProviderError,
+    app_name,
+    app_prefix,
+    region_provider,
+)
+from daimon.core.compute_thin_mcp import call_thin_mcp
 from daimon.core.config import ComputeSettings
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
-
-_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 
 
 class _Config(BaseModel):
@@ -82,6 +85,10 @@ class FlyComputeProvider:
             self.settings.deployment_id, resource.session_id
         ):
             raise ComputeProviderError("Fly resource ownership does not match this deployment.")
+        if resource.region is not None and region_provider(resource.region) != "fly":
+            # A missing Fly app would read as deleted while the other provider's
+            # resource kept running and billing.
+            raise ComputeProviderError(OTHER_PROVIDER)
 
     async def _machines(self, name: str) -> list[_Machine]:
         response = await self._request("GET", f"/apps/{name}/machines")
@@ -103,7 +110,10 @@ class FlyComputeProvider:
 
     async def ensure(self, session: ComputeSession, token: str) -> ComputeResource:
         resource = ComputeResource(
-            app_name=session.app_name, deployment_id=session.deployment_id, session_id=session.id
+            app_name=session.app_name,
+            deployment_id=session.deployment_id,
+            session_id=session.id,
+            region=session.region,
         )
         self._check(resource)
         response = await self._request("GET", f"/apps/{session.app_name}")
@@ -180,7 +190,10 @@ class FlyComputeProvider:
 
     async def inspect(self, session: ComputeSession) -> ComputeResource:
         resource = ComputeResource(
-            app_name=session.app_name, deployment_id=session.deployment_id, session_id=session.id
+            app_name=session.app_name,
+            deployment_id=session.deployment_id,
+            session_id=session.id,
+            region=session.region,
         )
         self._check(resource)
         machines = await self._machines(resource.app_name)
@@ -226,30 +239,6 @@ class FlyComputeProvider:
             )
         return resources
 
-    async def _rpc(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-        *,
-        headers: dict[str, str],
-        json: dict[str, JsonValue],
-    ) -> httpx.Response:
-        async with client.stream("POST", url, headers=headers, json=json) as response:
-            response.raise_for_status()
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > 8 * 1024 * 1024:
-                    raise ComputeProviderError(
-                        "Session output is too large. Read a smaller file chunk."
-                    )
-            return httpx.Response(
-                response.status_code,
-                headers=response.headers,
-                content=bytes(body),
-                request=response.request,
-            )
-
     async def call(
         self, session: ComputeSession, token: str, tool: str, arguments: dict[str, JsonValue]
     ) -> JsonValue:
@@ -258,94 +247,13 @@ class FlyComputeProvider:
                 app_name=session.app_name,
                 deployment_id=session.deployment_id,
                 session_id=session.id,
+                region=session.region,
             )
         )
-        # A new thin MCP client session is safe for inline calls. PR 1 creates
-        # no detached MCP tasks and promises no background result handles.
-        headers = {
-            "Authorization": "Bearer " + token,
-            "Accept": "application/json, text/event-stream",
-        }
-        url = f"https://{session.app_name}.fly.dev/mcp/"
-        try:
-            async with (
-                asyncio.timeout(50),
-                httpx.AsyncClient(
-                    transport=self.transport, timeout=50, follow_redirects=False
-                ) as client,
-            ):
-                init = await self._rpc(
-                    client,
-                    url,
-                    headers=headers,
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2025-03-26",
-                            "capabilities": {},
-                            "clientInfo": {"name": "daimon-compute", "version": "1"},
-                        },
-                    },
-                )
-                init.raise_for_status()
-                if "mcp-session-id" in init.headers:
-                    headers["Mcp-Session-Id"] = init.headers["mcp-session-id"]
-                headers["MCP-Protocol-Version"] = "2025-03-26"
-                try:
-                    ready = await self._rpc(
-                        client,
-                        url,
-                        headers=headers,
-                        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
-                    )
-                    ready.raise_for_status()
-                    result = await self._rpc(
-                        client,
-                        url,
-                        headers=headers,
-                        json={
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "method": "tools/call",
-                            "params": {"name": tool, "arguments": arguments},
-                        },
-                    )
-                    result.raise_for_status()
-                finally:
-                    # Inline calls retain no task handles, so release stateful
-                    # MCP sessions instead of leaking one server session per call.
-                    if "Mcp-Session-Id" in headers:
-                        try:
-                            async with asyncio.timeout(2):
-                                await client.delete(url, headers=headers, timeout=2)
-                        except (httpx.HTTPError, TimeoutError):
-                            pass
-
-        except (httpx.HTTPError, TimeoutError):
-            raise ComputeProviderError(
-                "The session did not answer. Check its status before retrying a command."
-            ) from None
-        try:
-            if "text/event-stream" in result.headers.get("content-type", ""):
-                messages = [
-                    line[5:].strip()
-                    for line in result.text.splitlines()
-                    if line.startswith("data:")
-                ]
-                payload = next(
-                    json.loads(line)
-                    for line in reversed(messages)
-                    if json.loads(line).get("id") == 2
-                )
-            else:
-                payload = result.json()
-            if payload.get("error") or payload["result"].get("isError"):
-                raise ComputeProviderError("The session refused the operation.")
-            data = payload["result"]
-            if "structuredContent" in data:
-                return _JSON.validate_python(data["structuredContent"])
-            return _JSON.validate_python(data.get("content", []))
-        except (ValueError, KeyError, StopIteration, TypeError):
-            raise ComputeProviderError("The session returned an invalid result.") from None
+        return await call_thin_mcp(
+            f"https://{session.app_name}.fly.dev/mcp/",
+            token,
+            tool,
+            arguments,
+            transport=self.transport,
+        )

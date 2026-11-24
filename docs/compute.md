@@ -1,6 +1,6 @@
-# Fly compute sessions
+# Compute sessions
 
-A person can launch a temporary Fly machine from a chat conversation and run
+A person can launch a temporary cloud machine from a chat conversation and run
 commands on it. Read this to turn the feature on and keep its cost bounded. It
 is off by default.
 
@@ -11,14 +11,12 @@ Set these in the MCP service **and the scheduler**:
 - [`DAIMON_COMPUTE__ENABLED`](configuration.md#daimon_compute__enabled)
 - [`DAIMON_COMPUTE__DEPLOYMENT_ID`](configuration.md#daimon_compute__deployment_id),
   stable and unique to this installation
-- [`DAIMON_COMPUTE__ORG_SLUG`](configuration.md#daimon_compute__org_slug) and
-  [`DAIMON_COMPUTE__API_TOKEN`](configuration.md#daimon_compute__api_token)
 - [`DAIMON_COMPUTE__SESSION_AUTH_KEY`](configuration.md#daimon_compute__session_auth_key)
 - [`DAIMON_COMPUTE__PROFILES`](configuration.md#daimon_compute__profiles), the
   image profiles people may launch
+- the settings of one [provider](#choose-a-provider)
 
-Keep the deployment id and auth key the same across restarts, and give each
-installation its own Fly organisation or token scope.
+Keep the deployment id and auth key the same across restarts.
 
 > **Warning:** Removing these settings before cleanup finishes can leave paid
 > machines running. To stop new launches, turn off `DAIMON_COMPUTE__ENABLED`
@@ -36,16 +34,58 @@ run the authenticated thin MCP server on port 8080 with `run_bash`,
 `write_file`, `read_file` and `list_files`. Background commands also need
 `sh`, `setsid`, `timeout`, `base64`, `tail` and a writable `/tmp`.
 
+## Choose a provider
+
+[`DAIMON_COMPUTE__PROVIDER`](configuration.md#daimon_compute__provider) selects
+where machines run. Stop every session before you change it, because Daimon
+cleans up only the selected provider.
+
+| Provider | Value | A session is | Also set |
+| --- | --- | --- | --- |
+| Fly | `fly`, the default | one Fly app with one machine | [`DAIMON_COMPUTE__ORG_SLUG`](configuration.md#daimon_compute__org_slug), [`DAIMON_COMPUTE__API_TOKEN`](configuration.md#daimon_compute__api_token) |
+| Google Cloud Run | `cloud_run` | one private service with one instance | [`DAIMON_COMPUTE__CLOUD_RUN_PROJECT`](configuration.md#daimon_compute__cloud_run_project), [`DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT`](configuration.md#daimon_compute__cloud_run_service_account) |
+
+On Fly, give each installation its own Fly organisation or token scope.
+
+### Cloud Run
+
+Daimon signs in to Google with application default credentials: the service
+account of the machine it runs on, or the key file that
+`GOOGLE_APPLICATION_CREDENTIALS` names. Grant the account of the MCP service
+and of the scheduler these roles:
+
+- Cloud Run Developer (`roles/run.developer`) on the project
+- Service Account User (`roles/iam.serviceAccountUser`) on the session service
+  account
+- Artifact Registry Reader (`roles/artifactregistry.reader`) on the image
+  repository
+
+Give the session service account no roles, because commands in a session can
+use whatever it holds.
+
+A profile needs Google Cloud regions such as `us-central1`, and 1, 2, 4, 6 or
+8 CPUs. Memory is 512 to 32768 MB, within the range Cloud Run allows for that
+CPU count. Cloud Run ignores `cpu_kind`. Keep images in Artifact Registry or
+on Docker Hub.
+
+Each session keeps one instance running with its CPU always on, so it costs
+money for its whole life. Files a session writes use its memory. Google can
+restart the instance at any time, which ends running commands and clears its
+files. The scheduler looks for leftover sessions only in regions that a
+profile names, so keep a region listed until its sessions are gone.
+
 ## How sessions work
 
 The owner launches, extends and uses a session in the conversation it started
 in. Launching and extending need an approval card. Each machine gets only its
-own token and private network; Fly credentials stay in the control plane.
+own token, and provider credentials stay in the control plane. A Fly machine
+has a private network; a Cloud Run service refuses callers that Google IAM
+does not allow.
 
 Reads do not renew a session's lease; commands and writes do. The scheduler
-warns before expiry, deletes expired machines and retries until Fly confirms.
-Keep the scheduler running while any session remains. A Discord server admin
-can emergency-stop a session without seeing its files.
+warns before expiry, deletes expired machines and retries until the provider
+confirms. Keep the scheduler running while any session remains. A Discord
+server admin can emergency-stop a session without seeing its files.
 
 Inline bash stops after 40 seconds. Longer commands run in the background, and
 the scheduler posts one message in the conversation when each ends. A machine
@@ -61,7 +101,7 @@ and
 [`DAIMON_COMPUTE__PER_SESSION_TASKS`](configuration.md#daimon_compute__per_session_tasks)
 limit sessions, lifetimes and concurrent commands.
 
-An active session can renew again and again, and a Fly outage can delay
+An active session can renew again and again, and a provider outage can delay
 deletion. Session disks do not survive, so export results before a session
 stops. Erasing an account removes its sessions, and the scheduler deletes any
 machine left behind.

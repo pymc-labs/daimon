@@ -20,7 +20,7 @@ nav:
       - Model providers: providers.md
       - Self-hosted harness: self-hosted-harness.md
       - Operations: operations.md
-      - Fly compute: compute.md
+      - Compute sessions: compute.md
   - Connect:
       - Slack: slack.md
       - Microsoft Teams: teams.md

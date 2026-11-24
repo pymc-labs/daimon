@@ -117,7 +117,7 @@ Each tick, 30 seconds apart by default, the scheduler:
    settlement, then sleeps.
 
 The scheduler also runs [long jobs](long-jobs.md) and cleans up
-[Fly compute sessions](compute.md), each on its own loop.
+[compute sessions](compute.md), each on its own loop.
 
 The tick does not wait for the runs. A dispatcher bounds concurrency, so a slow
 routine cannot hold up later ticks or overlap itself. A crash after a claim can

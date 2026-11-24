@@ -50,6 +50,8 @@ class ComputeResource(BaseModel):
     session_id: uuid.UUID
     machine_state: str = "unknown"
     machine_id: str | None = None
+    # Where the provider holds it, when known. Cloud Run addresses a service by region.
+    region: str | None = None
 
 
 ComputeTaskState = Literal[

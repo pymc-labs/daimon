@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Compute sessions can run on Google Cloud Run.** `DAIMON_COMPUTE__PROVIDER=cloud_run`,
+  with `DAIMON_COMPUTE__CLOUD_RUN_PROJECT` and `DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT`,
+  runs each session as one private Cloud Run service with one always-on instance. Fly
+  stays the default and needs no change. Stop every session before changing the provider.
 - **Production deploys no longer pin both backend switches off.** `DAIMON_TURN__CHANNEL_BACKENDS` and `DAIMON_TURN__AGENT_BACKENDS` come from each environment's own config, like any other setting.
 - **The web app no longer turns blank after a deploy, and works on phones in desktop mode.**
   A tab left open or restored after a deploy asked for files of the previous build and

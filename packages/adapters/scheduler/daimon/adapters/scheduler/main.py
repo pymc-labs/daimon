@@ -59,7 +59,7 @@ from daimon.core.channel_backend import (
     channel_provider,
     effective_thread_backend,
 )
-from daimon.core.compute_fly import FlyComputeProvider
+from daimon.core.compute_provider import compute_provider_for
 from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
     Settings,
@@ -279,7 +279,7 @@ async def _run_one_tick_step(
 @scheduler_step
 async def _sweep_compute(compute: ComputeSessions) -> None:
     # Cleanup is independent of launch enablement and user routines.
-    if not compute.settings.deployment_id or compute.settings.api_token is None:
+    if not compute.settings.deployment_id or not compute.settings.provider_configured:
         return
     try:
         await compute.reconcile()
@@ -2271,7 +2271,7 @@ async def run(
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
-    compute = ComputeSessions(sm, settings.compute, FlyComputeProvider(settings.compute))
+    compute = ComputeSessions(sm, settings.compute, compute_provider_for(settings.compute))
     long_jobs = LongJobExecutor(
         sm,
         ManagedLongJobPort(client, sm, settings),

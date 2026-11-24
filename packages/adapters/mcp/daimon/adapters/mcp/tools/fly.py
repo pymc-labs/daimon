@@ -13,9 +13,8 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._session_access import source_metadata_readable
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.adapters.mcp.tools.watches import fresh_admin
-from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_models import ComputeSession, ComputeStatus, ComputeTask
-from daimon.core.compute_provider import ComputeProviderError
+from daimon.core.compute_provider import ComputeProviderError, compute_provider_for
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
 from daimon.core.errors import StoreError
 from daimon.core.session_seal import child_seal_ids, origin_stamp
@@ -162,7 +161,7 @@ def register_fly_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     service = ComputeSessions(
         runtime.session_factory,
         runtime.settings.compute,
-        runtime.compute_provider or FlyComputeProvider(runtime.settings.compute),
+        runtime.compute_provider or compute_provider_for(runtime.settings.compute),
     )
 
     @mcp.tool

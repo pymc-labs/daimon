@@ -120,7 +120,7 @@ Each of these is off until you set it up:
 | Service | Needs | Page |
 | --- | --- | --- |
 | Watches | the `sidecar` and `watch-executor` services and their own database login | [Watches](watches.md) |
-| Fly compute sessions | a Fly organisation and token on the MCP service and scheduler | [Fly compute](compute.md) |
+| Compute sessions | a Fly organisation and token, or a Google Cloud project, on the MCP service and scheduler | [Compute sessions](compute.md) |
 | Long jobs | a tenant policy set by an admin | [Long jobs](long-jobs.md) |
 | Repository memory | an import of existing memory, then a switch on every process | [Repository memory](repo-memory.md) |
 | Context providers | a binding per tenant and an HTTPS provider | [Context providers](context-providers.md) |
@@ -133,7 +133,7 @@ when you serve Discord. The bot must be able to read members, roles and server
 details.
 
 Keep the scheduler running even when no routine is due. It deletes expired
-lead evidence, Fly machines and watch evidence on its own schedule.
+lead evidence, compute machines and watch evidence on its own schedule.
 
 ### Upgrade with private routine data
 

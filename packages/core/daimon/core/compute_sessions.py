@@ -231,6 +231,7 @@ class ComputeSessions:
                     deployment_id=current.deployment_id,
                     session_id=current.id,
                     machine_id=current.machine_id,
+                    region=current.region,
                 )
             )
             await store.save(db, current.model_copy(update={"state": "deleted"}))
