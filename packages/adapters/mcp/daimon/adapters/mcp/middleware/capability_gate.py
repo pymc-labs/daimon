@@ -42,6 +42,7 @@ from daimon.core.stores.routines import get_routine
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
+from daimon.core.workflows.fire_store import bound_step
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
@@ -109,10 +110,25 @@ async def caller_places(
         if routine is not None and tenant is not None:
             # As its session's toolset reads it (`headless_runner.py`).
             return [routine_feature_place(routine, platform=tenant.platform)]
+    if auth.workflow_run_id is not None:
+        agent = await chat_agent_id(runtime, auth)
+        async with runtime.session_factory() as session:
+            step = await bound_step(
+                session, tenant_id=auth.tenant_id, run_id=auth.workflow_run_id, agent_id=agent or ""
+            )
+            tenant = await get_tenant(session, auth.tenant_id)
+        if step is not None and tenant is not None:
+            return [routine_feature_place(step.subject, platform=tenant.platform)]
     agent_id = None if auth.agent_id is None else await _key_agent_id(runtime, auth, auth.agent_id)
     return [
         FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth), agent_id=agent_id)
     ]
+
+
+async def chat_agent_id(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
+    """The agent id of a chat-execution credential's agent, as `_key_agent_id` finds it."""
+    derived = auth.chat_agent_id
+    return None if derived is None else await _key_agent_id(runtime, auth, derived)
 
 
 async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str | None:

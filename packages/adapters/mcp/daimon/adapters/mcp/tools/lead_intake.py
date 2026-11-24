@@ -35,6 +35,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.lead_intake import (
     IntakeConfig,
     IntakeRecord,
@@ -52,15 +53,21 @@ from daimon.core.lead_intake_access import (
     discovery_target,
     read_target,
 )
+from daimon.core.lead_intake_execution import WorkflowExecution
 from daimon.core.lead_intake_service import IntakeAccess, IntakeService, VerifiedSource
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership import Membership
 from daimon.core.permissions import home_of
 from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.domain import TurnOriginRow
-from daimon.core.stores.lead_intake import IntakeStore, execution_is_active
+from daimon.core.stores.lead_intake import (
+    IntakeStore,
+    execution_is_active,
+    workflow_execution_is_active,
+)
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.turn_origins import get_session_origin
+from daimon.core.workflows.fire_store import bound_step
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -208,6 +215,46 @@ class IntakeSession:
         return shown
 
 
+async def intake_fire(
+    runtime: McpRuntime, auth: AuthIdentity, config: IntakeConfig
+) -> tuple[RoutineFacts | None, bool]:
+    """The fire the credential's signed grant names, and whether that grant is live.
+
+    The fire is a routine, or a workflow's routine step, that intake is bound to, that runs
+    (enabled, or active) and is owned by the caller; else None.
+    """
+    async with runtime.session_factory() as session:
+        if auth.workflow_run_id is not None:
+            active = auth.execution_id is not None and await workflow_execution_is_active(
+                session, auth.tenant_id, auth.workflow_run_id, auth.execution_id
+            )
+            step = await bound_step(session, tenant_id=auth.tenant_id, run_id=auth.workflow_run_id)
+            bound = (
+                step is not None
+                and step.workflow.status == "active"
+                and config.workflow_id == step.workflow.id
+            )
+            row: RoutineFacts | None = step.subject if step is not None and bound else None
+        else:
+            routine = (
+                await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
+                if auth.routine_id
+                else None
+            )
+            active = (
+                auth.routine_id is not None
+                and auth.execution_id is not None
+                and await execution_is_active(
+                    session, auth.tenant_id, auth.routine_id, auth.execution_id
+                )
+            )
+            bound = routine is not None and routine.enabled and config.routine_id == auth.routine_id
+            row = routine if bound else None
+    if row is not None and row.created_by_user_id != auth.platform_user_id:
+        row = None
+    return row, active
+
+
 @dataclass(frozen=True)
 class _Execution:
     """The live facts of the calling execution, re-read for every check."""
@@ -216,6 +263,8 @@ class _Execution:
     facts: Membership
     routine: bool
     active: bool
+    #: The workflow whose routine step runs the call, when a workflow's does.
+    workflow_id: UUID | None
     origins: list[TurnOriginRow]
     origin_ids: frozenset[str]
     source_place: Place | None
@@ -260,28 +309,13 @@ async def service(
             raise ToolError("membership_unavailable")
         facts = await resolver.resolve(auth.tenant_id, config.guild_id, user_id, require_fresh=True)
         active = False
-        row = None
-        routine = auth.routine_id is not None or auth.execution_id is not None
+        row: RoutineFacts | None = None
+        routine = auth.fire_bound or auth.execution_id is not None
         if routine:
-            async with runtime.session_factory() as session:
-                row = (
-                    await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
-                    if auth.routine_id
-                    else None
-                )
-                active = (
-                    auth.routine_id is not None
-                    and auth.execution_id is not None
-                    and await execution_is_active(
-                        session, auth.tenant_id, auth.routine_id, auth.execution_id
-                    )
-                )
+            row, active = await intake_fire(runtime, auth, config)
             if (
                 not active
                 or row is None
-                or not row.enabled
-                or row.created_by_user_id != auth.platform_user_id
-                or config.routine_id != auth.routine_id
                 or resolve
                 or (source_ref is not None and source_ref.kind != "gmail")
             ):
@@ -336,6 +370,7 @@ async def service(
             facts=facts,
             routine=routine,
             active=active,
+            workflow_id=row.id if row is not None and auth.workflow_run_id else None,
             origins=origins,
             origin_ids=frozenset(origin_ids),
             source_place=source_place,
@@ -354,6 +389,7 @@ async def service(
                 routine_id=auth.routine_id,
                 execution_active=live.active if live.routine else False,
                 resolve=resolve,
+                workflow_id=live.workflow_id,
             )
         except PermissionError as exc:
             raise ToolError(str(exc)) from None
@@ -414,6 +450,7 @@ async def service(
             routine_id=auth.routine_id,
             execution_active=live.active if live.routine else False,
             resolve=resolve,
+            workflow_id=live.workflow_id,
         )
         async with rest_client(token) as client:
             _, member = await _resolve_member(client, config.guild_id, user_id)
@@ -448,7 +485,11 @@ async def service(
             gmail_refresh_credentials=refresh,
         )
         provenance = (
-            (auth.routine_id, auth.execution_id) if auth.routine_id and auth.execution_id else None
+            (auth.routine_id, auth.execution_id)
+            if auth.routine_id and auth.execution_id
+            else WorkflowExecution(auth.workflow_run_id, auth.execution_id)
+            if auth.workflow_run_id and auth.execution_id
+            else None
         )
         yield IntakeSession(
             IntakeService(

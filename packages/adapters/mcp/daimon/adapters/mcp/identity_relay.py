@@ -27,6 +27,7 @@ from daimon.core.config import SignedIdentityServer, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
+from daimon.core.fire.subject import Subject
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
@@ -58,6 +59,7 @@ from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, W
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
+from daimon.core.workflows.fire_store import bound_step
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -245,6 +247,28 @@ async def _routine_run(
     ):
         return None
     return row
+
+
+async def _workflow_step_run(
+    sessionmaker: async_sessionmaker[AsyncSession], binding: RelayBinding, *, tenant_id: uuid.UUID
+) -> Subject | None:
+    """The routine step a workflow run's credential names, or None, by `_routine_run`'s rule:
+    a run of this tenant whose workflow still runs the same version, owned by the user the
+    run started for, with the agent the credential was minted for (by name; the version
+    pins it)."""
+    if binding.workflow_run_id is None:
+        return None
+    async with sessionmaker() as session:
+        step = await bound_step(session, tenant_id=tenant_id, run_id=binding.workflow_run_id)
+    subject = step.subject if step else None
+    if (
+        subject is None
+        or not subject.created_by_user_id
+        or subject.created_by_user_id != binding.owner
+        or subject.agent_name != binding.agent_name
+    ):
+        return None
+    return subject
 
 
 async def _watch_poll(
@@ -632,6 +656,18 @@ def build_identity_relay_route(
                     named, conversation, kind = (
                         routine.created_by_user_id,
                         routine_conversation(routine),
+                        "routine",
+                    )
+            elif (
+                binding.workflow_run_id is not None
+                and platform in REQUESTER_PLATFORMS
+                and FOREIGN_HOME_CLAIM not in claims
+            ):
+                step = await _workflow_step_run(sessionmaker, binding, tenant_id=tenant_id)
+                if step is not None:
+                    named, conversation, kind = (
+                        step.created_by_user_id,
+                        routine_conversation(step),
                         "routine",
                     )
             elif (

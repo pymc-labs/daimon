@@ -37,7 +37,7 @@ class NeverTagStatus:
 async def _set_never_tag_impl(
     runtime: McpRuntime, auth: AuthIdentity, never_tag: bool
 ) -> NeverTagStatus:
-    if auth.platform not in _CHAT_PLATFORMS or not auth.platform_user_id or auth.routine_id:
+    if auth.platform not in _CHAT_PLATFORMS or not auth.platform_user_id or auth.fire_bound:
         raise ToolError(_PERSON_ONLY)
     # A timer, watch or relay turn speaks for nobody, so it may not opt anyone out.
     if (await turn_scope(runtime, auth)).kind == "unattended":
