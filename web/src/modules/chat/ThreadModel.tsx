@@ -4,8 +4,9 @@ import { useState } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { api } from "@/lib/api"
+import { byProvider } from "@/lib/providers"
 import type { ThreadModels } from "./types"
 
 const DEFAULT = "default"
@@ -46,12 +47,17 @@ export function ThreadModel({ sid, model }: { sid: string; model: string }) {
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {models.isPending && <div className="px-2 py-1.5 text-sm text-muted-foreground">Loading…</div>}
-        {models.data?.choices.map((c) => (
-          <DropdownMenuItem key={c.value} onSelect={() => void pick(c.value)}>
-            <span>{c.label}</span>
-            <span className="ml-2 text-xs text-muted-foreground">{c.price}</span>
-            {models.data.current === c.value && <Check className="ml-auto" />}
-          </DropdownMenuItem>
+        {byProvider(models.data?.choices ?? [], (c) => c.provider).map((g) => (
+          <DropdownMenuGroup key={g.provider}>
+            <DropdownMenuLabel>{g.name}</DropdownMenuLabel>
+            {g.models.map((c) => (
+              <DropdownMenuItem key={c.value} onSelect={() => void pick(c.value)}>
+                <span>{c.label}</span>
+                <span className="ml-2 text-xs text-muted-foreground">{c.price}</span>
+                {models.data?.current === c.value && <Check className="ml-auto" />}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuGroup>
         ))}
       </DropdownMenuContent>
     </DropdownMenu>

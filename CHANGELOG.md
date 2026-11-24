@@ -45,6 +45,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `select`, and report in a new thread or web chat per event. `artifact_db_query`
   can be a poll source. A page's managers pause or delete its watches from the
   Activity tab, and someone who does not manage a page holds one watch on it.
+- **Model pickers list models by provider, then strongest family, newest version first.** Every
+  picker (web, Discord, Slack, MCP and the CLI) shares one order: providers in their usual order,
+  each provider's families ranked by the current output price of their newest model (Fable, Opus,
+  Sonnet, Haiku), and within a family the latest version first. The web app also groups the models
+  under a provider heading instead of tagging each row
+
+- **The web chat runs an agent kept to Discord roles for people who hold them.** A person
+  whose linked Discord account holds the role now finds the agent in the web chat picker; the
+  roles come from the member list Daimon keeps and are checked live with Discord before each
+  step. A server's own role list now applies there the same way, where it refused every web
+  turn before; its admin bypass is a live Discord admin's, not the web role's. Anyone else, or
+  a person with no linked account, still can't run it there
+  ([Admins](docs/admins.md#limit-an-agent-to-roles)).
+- **The agent page shows where an agent really answers and what its servers offer.** Web
+  chat is not listed for a channel's own agent, and turning it on there is refused. The
+  Channels panel drops its Direct messages switch, which never saved; direct messages stay
+  under Features. A server behind the signed-identity relay lists its tools. A server nobody
+  signs in to no longer says Not signed in, and the token field reads `*****` when a token
+  is set and Not set otherwise ([MCP servers](docs/mcp-servers.md)).
 - **A routine that posts to a narrow Discord room reads that room.** On Anthropic agents the run
   had no way to show it ran inside the room, so its own `read_thread` and `read_channel` were
   refused. The run now reads the room or thread it posts to, as a chat there does, and no other

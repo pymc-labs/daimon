@@ -2501,14 +2501,21 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     if grant.subject.platform_user_id is not None and (
         policy.invoker_role_ids
         or agent_invoker_roles(policy, grant.agent.names)
-        or (deps.membership_resolver is not None and grant.subject.verified_membership is not None)
+        # A web chat's membership is the member mirror's: only a role rule asks again.
+        or (
+            deps.membership_resolver is not None
+            and grant.subject.verified_membership is not None
+            and grant.surface is not Surface.WEB
+        )
     ):
         subject = await resolve_subject(
             deps.sessionmaker,
             deps.membership_resolver,
             tenant_id=grant.tenant_id,
             user_id=grant.subject.platform_user_id,
+            # The web app gets no gateway events to expire its cache: it always asks.
             require_fresh=grant.act_for_creator
+            or grant.surface is Surface.WEB
             or bool(agent_invoker_roles(policy, grant.agent.names)),
         )
         if subject.verified_membership is not True:

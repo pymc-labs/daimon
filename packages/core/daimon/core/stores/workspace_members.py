@@ -188,14 +188,10 @@ async def update_member_states(
         await session.execute(statement, rows[start : start + _BATCH])
 
 
-async def member_is_internal(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    user_id: str,
-    internal_role_ids: Collection[str],
-) -> bool | None:
-    """Whether the mirror says `user_id` holds an internal role, read from the current roles.
+async def member_role_ids(
+    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
+) -> tuple[str, ...] | None:
+    """The roles the mirror says `user_id` holds now.
 
     None when the mirror cannot say: the person is not listed (the list is not loaded, or
     they joined since), or their row has no role ids yet.
@@ -208,9 +204,19 @@ async def member_is_internal(
             )
         )
     ).one_or_none()
-    if row is None or row[0] is None:
-        return None
-    return bool(set(row[0]) & set(internal_role_ids))
+    return None if row is None or row[0] is None else tuple(row[0])
+
+
+async def member_is_internal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    internal_role_ids: Collection[str],
+) -> bool | None:
+    """Whether the mirror says `user_id` holds an internal role; None when it cannot say."""
+    roles = await member_role_ids(session, tenant_id=tenant_id, user_id=user_id)
+    return None if roles is None else bool(set(roles) & set(internal_role_ids))
 
 
 async def list_member_role_ids(

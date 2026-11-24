@@ -381,6 +381,8 @@ class WebTurns:
                 channel_id=place,
                 thread_id=key,
                 role=principal.role,
+                role_ids=principal.role_ids,
+                verified_membership=principal.verified_membership,
                 now=datetime.now(UTC),
                 requester_org=principal.org,
                 requester_home_id=principal.home_id,

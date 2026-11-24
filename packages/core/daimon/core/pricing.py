@@ -166,7 +166,7 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
 }
 
-_SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
+SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
 
 
 class _ModelPricing(dict[str, ModelRates]):
@@ -178,7 +178,7 @@ class _ModelPricing(dict[str, ModelRates]):
     """
 
     def __missing__(self, key: str) -> ModelRates:
-        alias = _SNAPSHOT_SUFFIX.sub("", key)
+        alias = SNAPSHOT_SUFFIX.sub("", key)
         if alias != key and super().__contains__(alias):
             return super().__getitem__(alias)
         raise KeyError(key)
