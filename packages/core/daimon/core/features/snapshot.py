@@ -19,7 +19,7 @@ from typing import Final, cast
 import structlog
 from daimon.core.access_policy import place_thread_id
 from daimon.core.config import Settings, get_repo_memory_settings
-from daimon.core.features.deployment import deployment_value
+from daimon.core.features.deployment import deployment_value, in_workspace
 from daimon.core.features.registry import (
     FEATURES,
     FeatureSpec,
@@ -164,7 +164,10 @@ def unavailable_reason(
     """Why `spec` cannot apply at `place`, or None. `depends_on` is checked by the caller;
     without `settings` (a reader of a feature with no deployment tier) `requires` is too,
     and without `server_setup` the requirements in `SERVER_SETUP` are.
-    `support` is the workspace's own setup (`support_setup`), for the support requirements."""
+    `support` is the workspace's own setup (`support_setup`), for the support requirements.
+    A feature the workspace lacks (`in_workspace`) is judged with or without `settings`."""
+    if not in_workspace(spec, settings, place.tenant_id):
+        return "workspace"
     if not spec.on_platform(place.platform):
         return "platform"
     judged: list[Requirement] = [

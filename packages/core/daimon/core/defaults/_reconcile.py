@@ -48,6 +48,8 @@ from daimon.core.defaults.sweep import (
     sweep_removed_skills,
 )
 from daimon.core.errors import DaimonError, DefaultsError
+from daimon.core.features.deployment import in_workspace
+from daimon.core.features.registry import FEATURES, WORKSPACE_SKILLS
 from daimon.core.model_presets import model_choice_id
 from daimon.core.specs import AgentSpec, EnvironmentSpec
 from daimon.core.stores.agent_rename import list_tenants_with_selfhosted_agent
@@ -120,6 +122,24 @@ async def _channel_skill_ids(
     except SQLAlchemyError as err:
         _log.warning("defaults.channel_skills_read_failed", error=str(err))
         return None
+
+
+def _workspace_skills(
+    skill_dirs: list[Path], agent_specs: list[AgentSpec], tenant_id: uuid.UUID
+) -> tuple[list[Path], list[AgentSpec]]:
+    """The tree less the skills whose feature does not exist in the workspace
+    (`WORKSPACE_SKILLS`): never seeded there, nor on its agents."""
+    absent = {
+        name
+        for name, key in WORKSPACE_SKILLS.items()
+        if not in_workspace(FEATURES[key], None, tenant_id)
+    }
+    if not absent:
+        return skill_dirs, agent_specs
+    return [d for d in skill_dirs if d.name not in absent], [
+        spec.model_copy(update={"skills": [r for r in spec.skills if r.skill_id not in absent]})
+        for spec in agent_specs
+    ]
 
 
 def _check_skill_references(agent_specs: list[AgentSpec], skill_names_present: set[str]) -> None:
@@ -268,6 +288,7 @@ async def _reconcile_core(
     agent_specs = load_agent_specs(agents_root) if agents_root.exists() else []
     env_specs = load_environment_specs(envs_root) if envs_root.exists() else []
     skill_dirs = load_skill_paths(skills_root)
+    skill_dirs, agent_specs = _workspace_skills(skill_dirs, agent_specs, tenant_id)
     skill_names_present = {load_skill_spec(d)[0].name for d in skill_dirs}
 
     # Validate agent->skill references before any MA write.

@@ -43,10 +43,13 @@ Requirement = Literal[
     "support_channel",
     "support_credits",
     "web_public_url",
+    "artifact_workspace",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
 ``support_channel``: the platform has a request channel, the deployment's or the workspace's own.
 ``support_credits``: people have credits to ask (Everyone above 0, or any limit).
+``artifact_workspace``: the workspace has artifacts (`DAIMON_ARTIFACT_PAGES__WORKSPACES`); outside
+it the feature does not exist (`in_workspace`).
 The rest name one integration's setup: its operator switch or host address, credentials and keys."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
@@ -1179,7 +1182,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Artifacts",
         "The agent can publish web pages that people open, use and share, with data they "
         "save on the page. Off removes the artifact tools here and takes its pages offline.",
-        requires=("web_public_url",),
+        requires=("web_public_url", "artifact_workspace"),
     ),
     _capability(
         "media",
@@ -1599,6 +1602,9 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
     *_GUARDRAILS,
 )
 FEATURE_KEYS: Final[tuple[str, ...]] = tuple(FEATURES)
+WORKSPACE_SKILLS: Final[Mapping[str, str]] = {"artifacts": "artifacts"}
+"""A seeded skill (`defaults/skills/<name>`) by the feature it guides: a workspace where that
+feature does not exist (`in_workspace`) is seeded without it."""
 
 
 def feature(key: str) -> FeatureSpec | None:

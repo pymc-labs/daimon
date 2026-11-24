@@ -60,7 +60,7 @@ def hides_tools(found: ResolvedFeature) -> bool:
         return False
     if found.key == "repo_memory":
         return found.unavailable is None and not (found.tier == "deployment" and found.locked)
-    return found.tier != "default" or found.unavailable in (None, "requires")
+    return found.tier != "default" or found.unavailable in (None, "requires", "workspace")
 
 
 def gated_tools(keys: Iterable[str]) -> frozenset[str]:
