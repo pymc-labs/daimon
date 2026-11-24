@@ -43,7 +43,13 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import internal_token_label, mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import (
+    internal_token_label,
+    mint_agent_mcp_token,
+    mint_chat_mcp_token,
+    token_jti,
+)
+from daimon.core.mcp_identity import RelayBinding, relay_server_name
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.mcp_tool_listing import ListedTool, McpToolLister, McpToolListingError
@@ -754,13 +760,16 @@ async def _own_server_tools(
     lister: McpToolLister,
     *,
     name: str,
+    url: str,
+    relayed: bool,
     tenant_id: uuid.UUID,
     agent: BetaManagedAgentsAgent,
     account_id: uuid.UUID,
 ) -> tuple[ListedTool, ...] | None:
-    """The deployment's own server's tools as ``account_id`` sees them on ``agent``."""
+    """The tools of the deployment's own server, or of a server behind its signed-identity
+    relay (`daimon.core.mcp_identity`), as ``account_id`` sees them on ``agent``."""
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
-    key = (canonical_mcp_url(own.url), f"viewer:{account_id}:{agent_uuid}")
+    key = (canonical_mcp_url(url), f"viewer:{account_id}:{agent_uuid}")
     known = lister.cache.recall(key)
     if known is not None:
         return known
@@ -768,22 +777,35 @@ async def _own_server_tools(
         return None  # no token is minted to ask again at once
     jti = uuid.uuid4()
     async with deps.session_factory.begin() as db:
-        token = await mint_agent_mcp_token(
-            db,
-            account_id=account_id,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
-            label=internal_token_label(jti),
-            secret=own.secret,
-            now=own.now(),
-            ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
-            chat_execution=True,
-            surface="provider_turn",
-            jti=jti,
-        )
+        if relayed:
+            # The relay takes only a session's chat credential; this one names no
+            # session, so the server is told the agent and workspace and no person.
+            token, _, _ = await mint_chat_mcp_token(
+                db,
+                account_id=account_id,
+                agent_id=agent_uuid,
+                secret=own.secret,
+                now=own.now(),
+                relay=RelayBinding(agent_name=agent.name),
+                ttl=timedelta(seconds=900),
+            )
+        else:
+            token = await mint_agent_mcp_token(
+                db,
+                account_id=account_id,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                label=internal_token_label(jti),
+                secret=own.secret,
+                now=own.now(),
+                ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
+                chat_execution=True,
+                surface="provider_turn",
+                jti=jti,
+            )
     try:
         return await _tools_of(
-            lister, ContextServer(name, own.url, token), agent_id=agent.id, cache_as=key
+            lister, ContextServer(name, url, token), agent_id=agent.id, cache_as=key
         )
     finally:
         async with deps.session_factory.begin() as db:
@@ -818,18 +840,19 @@ async def _listed_tools(
             listed[server.name] = tools
     own = deps.own_server
     for server in agent.mcp_servers:
-        # Only the configured URL gets a minted token, whatever the server is named.
-        if (
-            own is None
-            or server.name in listed
-            or canonical_mcp_url(server.url) != canonical_mcp_url(own.url)
-        ):
+        if own is None or server.name in listed:
+            continue
+        # Only the configured URL, or its relay's, gets a minted token, whatever the name.
+        relayed = relay_server_name(server.url, own.url) is not None
+        if not relayed and canonical_mcp_url(server.url) != canonical_mcp_url(own.url):
             continue
         tools = await _own_server_tools(
             deps,
             own,
             lister,
             name=server.name,
+            url=server.url,
+            relayed=relayed,
             tenant_id=tenant_id,
             agent=agent,
             account_id=account_id,

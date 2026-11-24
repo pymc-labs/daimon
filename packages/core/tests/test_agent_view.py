@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import jwt as pyjwt
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_view
@@ -15,6 +16,7 @@ from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_view import AgentFacts, AgentViewDeps, AgentViewer, OwnMcpServer, PlaceDoc
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_identity import RELAY_CLAIM, relay_url
 from daimon.core.mcp_tool_listing import ListedTool, McpToolLister
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault
 from daimon.core.stores import (
@@ -542,6 +544,36 @@ async def test_the_deployments_own_server_is_listed_with_a_token_minted_for_the_
     assert (token.label, token.surface) == (f"internal:{token.jti}", "provider_turn"), (
         "an internal token the sweep prunes, refused what a provider turn is refused"
     )
+
+
+async def test_a_server_behind_the_identity_relay_is_listed_with_a_credential_naming_no_session(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A signed-identity server is reached only through the relay, with a chat credential."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"].removeprefix("Bearer "))
+        return _answer(request)
+
+    view, account = await _own_server_view(
+        db_session,
+        db_session_factory,
+        httpx.MockTransport(handler),
+        is_admin=True,
+        url=relay_url(_OWN, "crm"),
+    )
+    assert view is not None, "the agent exists"
+    (server,) = view.mcp_servers
+    assert ([t.name for t in server.tools], server.listed) == (["search"], True), (
+        "the viewer sees the relayed server's real tools"
+    )
+    claims = [pyjwt.decode(t, options={"verify_signature": False})[RELAY_CLAIM] for t in seen]
+    assert claims and all(c == {"agent_name": "helper"} for c in claims), (
+        "the relay is told the agent and no session"
+    )
+    (token,) = await _tokens_of(db_session, account)
+    assert token.revoked_at is not None, "the credential is revoked once the list is read"
 
 
 async def test_an_unreadable_own_server_shows_not_listed_and_logs_why(
