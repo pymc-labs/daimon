@@ -45,7 +45,12 @@ def change_deps(runtime: WebRuntime, caller: WebCaller | None = None) -> AgentCh
     base = str(public_url) if public_url is not None else None
     secret = runtime.settings.mcp.jwt_secret
     own = (
-        OwnMcpServer(url=base, secret=secret.get_secret_value().encode(), now=runtime.now)
+        OwnMcpServer(
+            url=base,
+            secret=secret.get_secret_value().encode(),
+            now=runtime.now,
+            relay_names=frozenset(s.name for s in runtime.settings.mcp_identity.servers),
+        )
         if base is not None and secret is not None
         else None
     )

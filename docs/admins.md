@@ -99,7 +99,9 @@ daimon tenants access-policy get discord GUILD_ID --json
 
 `--invoker-role` replaces the role list. The server's own id (`@everyone`) is
 refused, and Slack and Teams refuse any role list. With the bypass off, admins
-on every platform must match the lists like anyone else.
+on every platform must match the lists like anyone else. In the web chat, a
+role list and its bypass apply to the person's linked Discord account, checked
+live before each step.
 
 ## Limit an agent to roles
 
@@ -120,7 +122,8 @@ drops it.
 Membership is checked live when the agent is chosen, on queued sends and
 before each model call and approval card. A revoked role refuses the next
 step, not one already running. A handoff checks the person asking against the
-agent it moves to.
+agent it moves to. In the web chat, the person's linked Discord account must hold
+the roles; with no linked account they can't run the agent there.
 
 A person who holds the agent's roles can run it unattended. A routine for a
 role-gated agent runs as its owner, and each run (and each message it sends)
@@ -152,7 +155,7 @@ daimon routines check-roles --tenant TENANT_UUID
 
 ## How membership is checked
 
-Discord checks use `DAIMON_DISCORD__BOT_TOKEN`, so set it on the scheduler and
-MCP processes as well as the Discord service. Ordinary checks cache a positive
-answer for 30 seconds and a negative one for five. Private delivery always
-looks up live. A failed lookup never grants access.
+Discord checks use `DAIMON_DISCORD__BOT_TOKEN`, so set it on the scheduler,
+MCP and web processes as well as the Discord service. Ordinary checks cache a
+positive answer for 30 seconds and a negative one for five. Private delivery
+and the web chat always look up live. A failed lookup never grants access.
