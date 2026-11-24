@@ -127,8 +127,8 @@ Each of these is off until you set it up:
 | Lead intake | `daimon leads configure` and the encryption keys above | [Lead intake](lead-intake.md) |
 | Cold Discord DMs | a DM agent named per server | [Direct messages](direct-messages.md) |
 
-Discord role and membership checks run in the scheduler and MCP service as
-well as the Discord service. Set `DAIMON_DISCORD__BOT_TOKEN` on all three
+Discord role and membership checks run in the scheduler, MCP service and web
+app as well as the Discord service. Set `DAIMON_DISCORD__BOT_TOKEN` on all four
 when you serve Discord. The bot must be able to read members, roles and server
 details.
 

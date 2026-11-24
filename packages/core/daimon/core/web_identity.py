@@ -33,6 +33,7 @@ from daimon.core.stores.identity import (
     find_platform_principal,
     list_platform_principals_for_account,
 )
+from daimon.core.stores.workspace_members import member_role_ids
 from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -271,6 +272,10 @@ class WebPrincipal:
     # Who is spending, for allowances: every id, group and invite of the person's account.
     # None until `with_spend_person`, so listings never pay for it; the gate then resolves it.
     spend_person: SpendPerson | None = None
+    # A linked Discord account's roles, from the member mirror; unknown (None) refuses
+    # any role rule.
+    role_ids: tuple[str, ...] = ()
+    verified_membership: bool | None = None
 
     @property
     def subject(self) -> Subject:
@@ -278,6 +283,8 @@ class WebPrincipal:
             is_admin=self.role is Role.ADMIN,
             platform_user_id=self.external_id,
             client=self.org is not RequesterOrg.HOST,
+            role_ids=self.role_ids,
+            verified_membership=self.verified_membership,
         )
 
 
@@ -316,12 +323,15 @@ async def principal_of(
     *,
     groups: frozenset[str] = frozenset(),
 ) -> WebPrincipal:
-    """A linked chat account if the person has one, else their own `web` principal."""
+    """A linked chat account, with a Discord one's roles, if the person has one, else their
+    own `web` principal."""
     platform, external_id = await linked_identity(session, person)
     visitor = person.kind == "visitor"
     org = RequesterOrg.OTHER if visitor else RequesterOrg.HOST
+    roles: tuple[str, ...] | None = None
     if not visitor and platform == "discord":
         org = await _linked_member_standing(session, person, external_id)
+        roles = await member_role_ids(session, tenant_id=person.tenant_id, user_id=external_id)
     return WebPrincipal(
         platform=platform,
         external_id=external_id,
@@ -329,6 +339,8 @@ async def principal_of(
         org=org,
         home_id=f"invite:{person.invite_id}" if visitor else None,
         groups=groups,
+        role_ids=roles or (),
+        verified_membership=True if roles is not None else None,
     )
 
 

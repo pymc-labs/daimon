@@ -117,7 +117,12 @@ def _change_deps(runtime: McpRuntime, auth: AuthIdentity | None = None) -> Agent
     base = str(public_url) if public_url is not None else None
     secret = settings.mcp.jwt_secret
     own = (
-        OwnMcpServer(url=base, secret=secret.get_secret_value().encode(), now=now)
+        OwnMcpServer(
+            url=base,
+            secret=secret.get_secret_value().encode(),
+            now=now,
+            relay_names=frozenset(s.name for s in settings.mcp_identity.servers),
+        )
         if base is not None and secret is not None
         else None
     )
