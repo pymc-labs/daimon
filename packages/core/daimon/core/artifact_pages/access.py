@@ -51,6 +51,10 @@ class Viewer:
     is_admin: bool = False
     link: str | None = None
 
+    @property
+    def is_visitor(self) -> bool:
+        return self.kind == "visitor"
+
 
 class PageSettings(BaseModel):
     """Who may open a page and what it may do; the same for every viewer."""
@@ -172,10 +176,16 @@ def is_expired(artifact: ArtifactRow, now: datetime) -> bool:
     return artifact.expires_at is not None and artifact.expires_at <= now
 
 
-def role_of(artifact: ArtifactRow, account_id: uuid.UUID | None, *, is_admin: bool) -> Role:
-    """The account's role on the page, admission aside: `viewer` means listed in `people`."""
+def role_of(
+    artifact: ArtifactRow, account_id: uuid.UUID | None, *, is_admin: bool, visitor: bool
+) -> Role:
+    """The account's role on the page, admission aside: `viewer` means listed in `people`.
+    A visitor (`standing`) manages nothing: a role stored for them reads as the plain
+    `viewer` of a page that names them, and comes back if they are a member again."""
     if account_id is None:
         return "none"
+    if visitor:
+        return "viewer" if account_id in readers(artifact) else "none"
     if account_id == artifact.owner_account_id:
         return "owner"
     if is_admin:
@@ -185,12 +195,16 @@ def role_of(artifact: ArtifactRow, account_id: uuid.UUID | None, *, is_admin: bo
     return "viewer" if account_id in artifact.people else "none"
 
 
+def role_for(artifact: ArtifactRow, viewer: Viewer) -> Role:
+    return role_of(artifact, viewer.account_id, is_admin=viewer.is_admin, visitor=viewer.is_visitor)
+
+
 def admit(artifact: ArtifactRow, viewer: Viewer, now: datetime) -> Role:
     """The viewer's role if they may open the page now, else `none`. The owner, editors
     and admins always may; on a public page anyone else needs its link."""
     if is_expired(artifact, now):
         return "none"
-    role = role_of(artifact, viewer.account_id, is_admin=viewer.is_admin)
+    role = role_for(artifact, viewer)
     if role in _MANAGERS:
         return role
     if artifact.access == "public":

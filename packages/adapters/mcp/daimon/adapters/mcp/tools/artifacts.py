@@ -177,6 +177,11 @@ async def _admit(
     )
 
 
+def _role(artifact: ArtifactRow, auth: AuthIdentity, caller: Caller) -> access.Role:
+    """The caller's role on the page; `_admit` let no visitor or outsider through."""
+    return access.role_of(artifact, auth.account_id, is_admin=caller.is_admin, visitor=False)
+
+
 async def _person_origin(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> TurnOriginRow:
@@ -368,7 +373,7 @@ async def publish_impl(
         async with runtime.session_factory.begin() as db:
             existing = await store.get_by_slug(db, tenant_id=auth.tenant_id, slug=slug)
             if existing is not None:
-                role = access.role_of(existing, auth.account_id, is_admin=caller.is_admin)
+                role = _role(existing, auth, caller)
                 if not access.can_use_with_tools(existing, role):
                     raise ToolError(NO_PAGE.format(slug=slug))
             fields: dict[str, object] = {
@@ -442,7 +447,7 @@ async def _change_settings(
         change = change.model_copy(update={"title": title}, deep=False)
     if not change.model_fields_set and not new_link:
         raise ToolError("Nothing to change: pass an upload to republish or a setting to change.")
-    role = access.role_of(artifact, auth.account_id, is_admin=caller.is_admin)
+    role = _role(artifact, auth, caller)
     saved = artifact
     if change.model_fields_set:
         saved = await store.update_settings(
@@ -465,13 +470,7 @@ async def list_impl(runtime: McpRuntime, auth: AuthIdentity) -> Pages:
         visible = await store.list_visible(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id, is_admin=caller.is_admin
         )
-        usable = [
-            a
-            for a in visible
-            if access.can_use_with_tools(
-                a, access.role_of(a, auth.account_id, is_admin=caller.is_admin)
-            )
-        ]
+        usable = [a for a in visible if access.can_use_with_tools(a, _role(a, auth, caller))]
         return Pages(pages=await _pages(db, auth, caller, usable))
 
 

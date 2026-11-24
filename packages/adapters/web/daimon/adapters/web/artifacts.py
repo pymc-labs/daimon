@@ -30,7 +30,7 @@ from daimon.core.artifact_pages.access import (
     can_delete,
     can_edit,
     can_share,
-    role_of,
+    role_for,
 )
 from daimon.core.artifact_pages.documents import (
     EVENTS_COLLECTION,
@@ -78,7 +78,7 @@ def _refused(error: ArtifactError) -> HTTPException:
 def _seen_as(artifact: ArtifactRow, viewer: Viewer, now: datetime) -> Role:
     """The role a person has here; `none` hides the page. Managers see their pages even
     expired; anyone else as the page rules admit them, never a public page."""
-    role = role_of(artifact, viewer.account_id, is_admin=viewer.is_admin)
+    role = role_for(artifact, viewer)
     if can_edit(role):
         return role
     if artifact.access == "public" or admit(artifact, viewer, now) == "none":

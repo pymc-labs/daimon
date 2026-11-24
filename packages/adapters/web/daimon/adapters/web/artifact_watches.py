@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from daimon.adapters.web.caller import WebCaller, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.viewer import page_on, viewer_of
-from daimon.core.artifact_pages.access import admit, can_edit, role_of
+from daimon.core.artifact_pages.access import admit, can_edit, role_for
 from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import watches as watches_store
 from daimon.core.stores.domain import WatchRow
@@ -47,7 +47,7 @@ def artifact_watches_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail=_GONE)
         viewer = await viewer_of(db, caller)
         mine = watch.owner_account_id == caller.person.account_id
-        manages = can_edit(role_of(artifact, viewer.account_id, is_admin=viewer.is_admin))
+        manages = can_edit(role_for(artifact, viewer))
         if not manages and not (mine and admit(artifact, viewer, runtime.now()) != "none"):
             raise HTTPException(status_code=404, detail=_GONE)
         return watch, mine

@@ -15,7 +15,7 @@ from typing import Annotated
 from daimon.adapters.web.caller import WebCaller, current_caller, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.viewer import page_on, viewer_of
-from daimon.core.artifact_pages.access import admit, can_edit, role_of
+from daimon.core.artifact_pages.access import admit, can_edit, role_for
 from daimon.core.artifact_pages.content import MAX_THUMBNAIL_BYTES, check_thumbnail
 from daimon.core.artifact_pages.model import ArtifactError
 from daimon.core.stores import artifact_consents as consents_store
@@ -43,7 +43,7 @@ def artifact_viewing_router(runtime: WebRuntime) -> APIRouter:
     async def manages(db: AsyncSession, caller: WebCaller, artifact: ArtifactRow) -> bool:
         """Whether they manage it; 404 unless they may at least open it."""
         viewer = await viewer_of(db, caller)
-        manager = can_edit(role_of(artifact, viewer.account_id, is_admin=viewer.is_admin))
+        manager = can_edit(role_for(artifact, viewer))
         if not manager and admit(artifact, viewer, runtime.now()) == "none":
             raise HTTPException(status_code=404, detail=_NOT_FOUND)
         if not await page_on(runtime, db, artifact):

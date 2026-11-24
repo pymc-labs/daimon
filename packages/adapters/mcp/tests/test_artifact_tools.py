@@ -700,6 +700,65 @@ async def test_an_outsider_opens_pages_as_a_visitor_and_is_no_editor(world: Worl
     ).visible_outside_workspace
 
 
+async def test_an_owner_or_editor_turned_outsider_has_no_page_tool_until_a_member_again(
+    world: World,
+) -> None:
+    """The member's stored roles stay, but no tool acts on them while they are an outsider."""
+    await put_page(world)
+    async with world.factory.begin() as db:
+        other = await make_account(db, tenant=world.tenant)
+        await store.publish(
+            db,
+            tenant_id=world.tenant.id,
+            agent_id="agent-bound",
+            account_id=other.id,
+            is_admin=False,
+            slug="theirs",
+            title="Theirs",
+            html=HTML,
+            change=PageChange(editors=(world.account.id,)),
+            origin=None,
+            new_link=False,
+            now=datetime.now(UTC),
+            limits=LIMITS,
+        )
+    await _hold_with_outsider(world)
+
+    async def standing(*role_ids: str) -> None:
+        async with world.factory.begin() as db:
+            await upsert_member(
+                db,
+                tenant_id=world.tenant.id,
+                platform_user_id="123",
+                is_admin=False,
+                now=datetime.now(UTC),
+                role_ids=list(role_ids),
+            )
+
+    async with turn(world) as origin_id:
+        by = await person_call(world.runtime, world.auth, origin_id)
+        await standing("9002")
+        for slug in ("votes", "theirs"):
+            with pytest.raises(ToolError, match="Only members can use pages"):
+                await publish_impl(world.runtime, world.auth, by=by, slug=slug, title="Out")
+            with pytest.raises(ToolError, match="Only members can use pages"):
+                await write_impl(
+                    world.runtime,
+                    world.auth,
+                    slug=slug,
+                    collection="votes",
+                    doc_id="a",
+                    data={"n": 1},
+                    mode="set",
+                )
+        await standing(INTERNAL_ROLE)
+        back = [
+            await publish_impl(world.runtime, world.auth, by=by, slug=slug, title="Back")
+            for slug in ("votes", "theirs")
+        ]
+    assert [p.title for p in back] == ["Back", "Back"], "the stored roles come back"
+
+
 async def _admin_token(world: World, *scopes: str) -> AuthIdentity:
     """An operator token of an admin of the world's workspace."""
     async with world.factory.begin() as db:

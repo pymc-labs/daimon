@@ -69,6 +69,10 @@ _PUBLIC = {"access": "public", "link_secret": "s3cret", "expires_at": NOW + time
         (_PUBLIC, Viewer(link="wrong"), "none"),
         (_PUBLIC, Viewer(account_id=MEMBER, kind="member"), "none"),
         (_PUBLIC, Viewer(account_id=EDITOR, kind="member"), "editor"),
+        # A visitor's stored manager role reads as a visitor's.
+        ({"access": "people"}, Viewer(account_id=OWNER, kind="visitor"), "viewer"),
+        ({"access": "people"}, Viewer(account_id=EDITOR, kind="visitor"), "viewer"),
+        (_PUBLIC, Viewer(account_id=EDITOR, kind="visitor"), "none"),
         ({"expires_at": NOW}, Viewer(account_id=OWNER, kind="member"), "none"),
     ],
 )

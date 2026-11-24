@@ -206,7 +206,7 @@ async def tool_role(
         return "none"
     if await visitor_accounts(session, tenant_id=artifact.tenant_id, account_ids=[account_id]):
         return "none"
-    role = access.role_of(artifact, account_id, is_admin=is_admin(standing))
+    role = access.role_of(artifact, account_id, is_admin=is_admin(standing), visitor=False)
     if not access.can_use_with_tools(artifact, role):
         return "none"
     return "viewer" if role == "none" else role
@@ -328,7 +328,10 @@ async def publish(
         await session.flush()
     else:
         current = _row(session, orm)
-        role = access.role_of(current, account_id, is_admin=is_admin)
+        visitor = bool(
+            await visitor_accounts(session, tenant_id=tenant_id, account_ids=[account_id])
+        )
+        role = access.role_of(current, account_id, is_admin=is_admin, visitor=visitor)
         settings = access.apply_change(
             access.settings_of(current), change, owner_account_id=orm.owner_account_id
         )
