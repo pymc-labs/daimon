@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Artifacts for some workspaces only.** `DAIMON_ARTIFACT_PAGES__WORKSPACES` lists the
+  workspaces that have artifacts. Elsewhere the setting, the Artifacts section, pages,
+  API, tools, page watches and seeded skill are gone, and `daimon artifacts import`
+  refuses. Inside, `artifacts` stays on or off per workspace, agent, channel and thread.
+  `DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST` lets one workspace serve every page from a
+  single content host, with the trade-offs in the artifacts docs.
 - **Move pages in from another system.** `daimon artifacts import` reads a folder of page
   files, previews what would work here with a dry run, and keeps each page's id and link.
   People are made when missing, email-only people become visitors, and page watches

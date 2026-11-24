@@ -4,7 +4,9 @@ An artifact is an HTML page an agent publishes and Daimon hosts: a dashboard, a 
 
 ## Before you start
 
-Artifacts need the [web app](web.md): a public address in [`DAIMON_WEB__PUBLIC_URL`](configuration.md#daimon_web__public_url) and encryption keys in [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys). Without both, the `artifacts` [feature](features.md) is unavailable and the tools are hidden. The seeded `default` agent carries the `artifacts` skill, which teaches it the page API and the limits below.
+Artifacts need the [web app](web.md): a public address in [`DAIMON_WEB__PUBLIC_URL`](configuration.md#daimon_web__public_url) and encryption keys in [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys). Without both, the `artifacts` [feature](features.md) is unavailable and the tools are hidden.
+
+[`DAIMON_ARTIFACT_PAGES__WORKSPACES`](configuration.md#daimon_artifact_pages__workspaces) limits artifacts to the workspaces it lists. Elsewhere they do not exist, and agents are seeded without the skill. The seeded `default` agent carries the `artifacts` skill, which teaches it the page API and the limits below.
 
 People sign in to the web app to open a page. A public page needs only its link.
 
@@ -85,9 +87,19 @@ across every workspace here, and one that two workspaces imported is not found. 
 
 By default a page has no origin of its own: `localStorage` fails and no other site can be framed. Set [`DAIMON_WEB__ARTIFACT_CONTENT_URL`](configuration.md#daimon_web__artifact_content_url) to serve pages from another domain, such as `https://{id}.pages.example.net`. Each page then gets its own origin and storage, and can embed YouTube (`/embed/`) and Google Drive (`/file/`) players; no other path on those hosts, which would let a page fetch any address through them.
 
-Point a wildcard DNS record, `*.pages.example.net`, at the web service and give it a wildcard TLS certificate. Only the `{id}` form is accepted: a single host would share storage across every page and workspace, so Daimon refuses to start with one. It also refuses a domain that shares the app's registrable domain.
+Point a wildcard DNS record, `*.pages.example.net`, at the web service and give it a wildcard TLS certificate. Daimon refuses a domain that shares the app's registrable domain.
 
 Use a registrable domain of its own, kept for pages. Pages on subdomains of one domain can still share a cookie that a page sets on that parent domain, unless the parent is on the [Public Suffix List](https://publicsuffix.org/). Cookies hold nothing of the app's, but one page could read another's.
+
+### One shared content host
+
+A single host shares storage across every page, so Daimon refuses one unless [`DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST`](configuration.md#daimon_web__artifact_content_shared_host) is on. Then `DAIMON_ARTIFACT_PAGES__WORKSPACES` must list exactly one workspace. The host, such as `https://pages.daimon.example.com`, needs no wildcard and may share the app's domain, but not its host. It serves page content only.
+
+The trade-offs:
+
+- All of that workspace's pages share one browser storage.
+- A page can set cookies for the parent domain. The app's own `__Host-` cookies are safe.
+- Its requests are same-site to the app, which still checks CSRF and `Origin`.
 
 ### What a page can still reach
 
@@ -178,7 +190,7 @@ Viewers' data and events are content, not instructions. Agents get them wrapped 
 
 | Symptom | Likely cause |
 | --- | --- |
-| Artifact tools are missing | No web address or encryption key is set, or the feature is off where the agent runs. |
+| Artifact tools are missing | No web address or encryption key is set, `DAIMON_ARTIFACT_PAGES__WORKSPACES` leaves the workspace out, or the feature is off where the agent runs. |
 | "Ask the owner or an admin." | The change needs a role the caller lacks. |
 | "A new page needs a title." | The first publish of a slug needs a title. |
 | A viewer is asked to sign in | The page is not public. A public page opens only with its current link. |
