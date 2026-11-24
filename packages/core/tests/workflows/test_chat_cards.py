@@ -13,7 +13,7 @@ from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.posted_controls import PostedCard, card_text
 from daimon.core.stores import workflow_runs, workflows
 from daimon.core.web_links import WebAt, WebLinks
-from daimon.core.workflows import chat_cards, gate, service
+from daimon.core.workflows import chat_cards, convert, gate, service
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import tenant_agents, tenant_skills
 from daimon.core.workflows.chat_cards import ChatPlace, Presser
@@ -215,7 +215,14 @@ async def test_every_chat_entry_refuses_while_workflows_are_off(db_session: Asyn
         for name, fn in inspect.getmembers(chat_cards, inspect.iscoroutinefunction)
         if "presser" in inspect.signature(fn).parameters and name != "env_of"
     }
-    assert entries == {"press", "submit_form", "open_pressed", "list_for", "pick"}, entries
+    assert entries == {
+        "press",
+        "submit_form",
+        "open_pressed",
+        "list_for",
+        "pick",
+        "move_routine",
+    }, entries
     wid = world.workflow_id
 
     async def never(*_: object) -> Any:
@@ -236,6 +243,8 @@ async def test_every_chat_entry_refuses_while_workflows_are_off(db_session: Asyn
         card_text(await chat_cards.pick(world.sm, off, presser, str(wid), NO_LINKS)),
     ]
     assert all(gate.OFF in str(s) for s in said), said
+    moved = await chat_cards.move_routine(world.sm, off, presser, uuid.uuid4())
+    assert moved is not None and convert.ADMINS in moved, "a person who is not an admin is refused"
 
 
 async def test_a_card_links_the_web_only_where_web_awareness_is_on_at_its_place(

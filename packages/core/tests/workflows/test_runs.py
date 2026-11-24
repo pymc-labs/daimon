@@ -118,7 +118,7 @@ async def test_the_latest_plan_note_is_the_step_checklist(db_session: AsyncSessi
 
 async def test_preflight_refuses_before_anything_is_created(db_session: AsyncSession) -> None:
     world = await make_world(db_session, INLINE, "b")
-    world.settings = world.settings.model_copy(update={"features": {}})
+    world.settings = world.settings.model_copy(update={"features": {"workflows": "off"}})
     refused = await runs.start_run(
         world.sm, world.settings, tenant_id=world.tenant_id, start=world.start(), now=NOW
     )

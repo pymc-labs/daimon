@@ -504,8 +504,6 @@ _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_o
 WEB_MODULES: Final[tuple[str, ...]] = (
     "chat", "agents", "channels", "routines", "credits", "integrations", "workflows",
 )  # fmt: skip
-#: Web modules Off until an admin turns them on.
-_WEB_MODULES_OFF: Final = frozenset({"workflows"})
 _WORKFLOW_TIERS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
 
 
@@ -820,7 +818,7 @@ _WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="off" if module in _WEB_MODULES_OFF else "on",
+        default="on",
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=f"The {module} pages. Off hides them.",
@@ -1274,7 +1272,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Workflows",
         "Run workflows.",
         tiers=_WORKFLOW_TIERS,
-        default="off",
         authority=_ADMIN,
     ),
     _capability(
@@ -1301,7 +1298,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Mention runs.",
         tiers=("deployment", "workspace"),
         binds="turn",
-        default="off",
         authority=_SERVER_ADMIN,
     ),
     _capability(
@@ -1310,7 +1306,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Poll runs.",
         tiers=("deployment", "workspace"),
         binds="turn",
-        default="off",
         authority=_SERVER_ADMIN,
     ),
     _capability(

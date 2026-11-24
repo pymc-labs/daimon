@@ -9,6 +9,12 @@ from daimon.core.stores.domain import RoutineRow
 PANEL_CAP = 25
 #: A moved routine's line on every panel; the panel links the workflow and offers no changes.
 MOVED_TO_WORKFLOWS: Final = "Moved to Workflows. Change it there."
+#: A routine surface's badge: routines still run, workflows replace them.
+LEGACY: Final = "Legacy"
+#: The same, where there is room to name the replacement.
+LEGACY_USE_WORKFLOWS: Final = "Legacy, use Workflows"
+#: The admin's button, on every surface that lists routines with actions.
+MOVE_TO_WORKFLOW: Final = "Move to a workflow"
 
 Glyph = Literal["⏸", "⏳", "❌", "✅"]
 

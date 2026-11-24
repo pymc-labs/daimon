@@ -93,13 +93,12 @@ def _dicts(tools: Any) -> list[Any]:
 
 
 def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
-    """A web place with nothing set but long jobs and workflows turned On, so the baseline
-    hides nothing; `plain` leaves both at their default (Off)."""
+    """A web place with nothing set but long jobs turned On, so the baseline hides nothing;
+    `plain` leaves it at its default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
     if not plain:
         features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
-        features["workflows"] = ResolvedFeature("workflows", "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
         features[name] = features[name].__class__(name, value, "channel")
@@ -229,9 +228,7 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
     that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
     plain = agent_toolset(_snapshot(plain=True), _agent())
-    assert (
-        plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"] | CAPABILITY_TOOLS["workflows"]
-    ), "long jobs and workflows are Off"
+    assert plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "long jobs are Off"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)
@@ -298,7 +295,7 @@ def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_jud
     }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
-    expected = (unset if server_setup else set()) | {"long_jobs", "workflows"}
+    expected = (unset if server_setup else set()) | {"long_jobs"}
     assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"

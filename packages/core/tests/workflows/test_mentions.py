@@ -113,7 +113,9 @@ async def test_a_mention_that_starts_nothing_stays_chat(
         "no_match": _mention(tenant_id, "hello"),
         "stranger": _mention(tenant_id, author="u2"),
     }[case]
-    settings = _on({"workflows": "on"}) if case == "mentions_off" else _on()
+    settings = (
+        _on({"workflows": "on", "workflow_mentions": "off"}) if case == "mentions_off" else _on()
+    )
     assert await mentions.claim_mention(sm, settings, mention, NO_LINKS, NOW) is None
     assert await _counts(db_session) == (0, 0), "nothing is recorded"
     if case == "mentions_off":

@@ -45,7 +45,7 @@ _SKILLS = (
 _TRIGGERS = f"{_V}[valid mention, poll and schedule triggers]"
 _SHAPES = f"{_V}[mention, poll and schedule shapes]"
 _ROUTINE = _W + "test_convert.py::test_converted_step_decides_like_its_routine"
-_OFF = _W + "test_features.py::test_workflow_features_default_off"
+_DEFAULTS = _W + "test_features.py::test_workflow_features_defaults"
 _EDIT = _MCP + "test_edit_workflow_draft_when_edits_add_and_connect_nodes_then_the_revision_moves"
 _INBOX = _W + "test_waits.py::test_the_inbox_lists_and_decides_for_the_addressee"
 _UNTRUSTED = (
@@ -68,9 +68,8 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "publish it as a numbered version": "packages/core/tests/stores/test_workflows.py::"
     "test_a_stale_draft_save_is_refused_and_publishing_numbers_versions",
     "tamper-evident record": _W + "test_engine.py::test_ledger_chain_verifies_and_detects_edits",
-    "Workflows are Off by default.": _OFF,
-    "An admin turns on": _OFF,
-    "are separate features, also Off by default": _OFF,
+    "Workflows are On by default": _DEFAULTS,
+    "An admin turns on": _DEFAULTS,
     "every path refuses": (
         _WEB + "test_every_workflows_route_refuses_when_the_feature_is_off",
         "packages/adapters/mcp/tests/test_capability_gate.py::"

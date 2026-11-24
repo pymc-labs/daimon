@@ -27,7 +27,7 @@ from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.web_links import TenantLinks, WebAt
-from daimon.core.workflows import run_views, service, views
+from daimon.core.workflows import convert, run_views, service, views
 from daimon.core.workflows.access import who_of
 from daimon.core.workflows.catalog import tenant_agents, tenant_skills
 from daimon.core.workflows.runs import Sessions
@@ -729,6 +729,25 @@ async def list_for(
         return await service.list_workflows(env)
     except WorkflowError as err:
         return str(err)
+
+
+async def move_routine(
+    sm: Sessions,
+    settings: Settings,
+    presser: Presser,
+    routine_id: uuid.UUID,
+    *,
+    client: AsyncAnthropic | None = None,
+) -> str | None:
+    """Move a routine to a workflow as the presser; the converter's refusal, or None once moved."""
+    env = await env_of(sm, settings, presser, client=client)
+    if env is None:
+        return UNAVAILABLE
+    try:
+        await convert.from_routine(env, routine_id)
+    except WorkflowError as err:
+        return str(err)
+    return None
 
 
 async def pick(
