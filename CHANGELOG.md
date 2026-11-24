@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer deletes Fly machines. Each `fly_*` tool keeps its verb (`fly_run_bash` is
   `compute_run_bash`), and `compute_launch_session` needs a `region`.
   - Tool rules and an agent's own tool list follow the new names with no action. A rule
-    on an old name is copied to the new name and the old one is kept, so a deny holds
-    while the old and new releases run side by side. A later release removes the old
-    rules.
+    on an old name is copied to the new name and the old one is kept, so a deny set
+    before the upgrade holds while the old and new releases run side by side. Change a
+    compute tool rule only after the upgrade finishes: a change made under one name
+    during the upgrade is not copied to the other. A later release removes the old rules.
   - The old names are not kept as second names. No session can be in use across this
     upgrade, because the provider it ran on is gone. A call to an old name answers with
     the tool's new name and runs nothing.

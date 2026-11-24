@@ -49,9 +49,11 @@ def _current(rows: Sequence[AgentToolRuleRecord]) -> list[AgentToolRuleRecord]:
 
     A rule stored under a renamed tool's old key stands for the tool until the same
     agent and place has a row under the new key, set or cleared. So a deny written
-    before the rename, or by the older release during a deploy, keeps denying, and an
-    admin's later change under the new name is the one that counts. `rows` must hold
-    both keys, whatever their rule, for the places being judged.
+    before the rename keeps denying on both releases, and an admin's later change
+    under the new name is the one that counts. The two keys are not kept in step after
+    the migration copies them: a change the older release makes under the old key
+    during a deploy is not seen once the new key has a row. `rows` must hold both
+    keys, whatever their rule, for the places being judged.
     """
     held = {(row.tenant_id, row.agent_id, row.channel_id, row.tool_key) for row in rows}
     return [
