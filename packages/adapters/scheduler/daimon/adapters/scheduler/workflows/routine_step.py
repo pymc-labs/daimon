@@ -70,7 +70,7 @@ class RoutineStep:
         if status == "skipped":
             return engine.Succeeded({"skipped": "lead_intake_turned_off"})
         if status == "unreadable":
-            return engine.Failed("retryable", "Could not read this workspace's features.")
+            return engine.Failed("retryable", "Could not read the features. Try again later.")
         done, private = store.outcome, subject.destination_kind == "dm"
         if done is None or done.status == "stale":
             return engine.Failed("fatal", STALE)
