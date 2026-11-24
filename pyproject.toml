@@ -155,11 +155,12 @@ type = "forbidden"
 # drifts from the directory.
 source_modules = [
     "daimon.core._erasure_guards",
-    "daimon.core.compute_fly",
+    "daimon.core.compute_cloud_run",
     "daimon.core.compute_models",
     "daimon.core.compute_provider",
     "daimon.core.compute_sessions",
     "daimon.core.compute_tasks",
+    "daimon.core.compute_thin_mcp",
     "daimon.core.long_job_models",
     "daimon.core.long_jobs",
     "daimon.core.long_jobs_ma",

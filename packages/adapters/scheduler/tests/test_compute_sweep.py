@@ -11,20 +11,40 @@ import httpx
 import pytest
 from daimon.adapters.scheduler import main
 from daimon.core import compute_sessions as compute_module
-from daimon.core.compute_fly import FlyComputeProvider
+from daimon.core.compute_cloud_run import CloudRunComputeProvider, deployment_label
 from daimon.core.compute_models import ComputeSession
 from daimon.core.compute_provider import app_name
 from daimon.core.compute_sessions import ComputeSessions
-from daimon.core.config import ComputeSettings
+from daimon.core.config import ComputeProfile, ComputeSettings
 from pydantic import SecretStr
 
+_CLOUD_RUN = {
+    "cloud_run_project": "test-project",
+    "cloud_run_service_account": "session@test-project.iam.gserviceaccount.com",
+}
 
-async def test_compute_sweep_skips_unconfigured_provider():
-    compute = SimpleNamespace(
-        settings=SimpleNamespace(deployment_id="", api_token=None), reconcile=AsyncMock()
-    )
+
+class _Tokens:
+    async def access_token(self) -> str:
+        return "google-access-token"
+
+    async def id_token(self, audience: str) -> str:
+        return "google-identity-token"
+
+
+@pytest.mark.parametrize(
+    ("settings", "sweeps"),
+    [
+        (ComputeSettings(), False),
+        (ComputeSettings(deployment_id="d"), False),
+        (ComputeSettings(**_CLOUD_RUN), False),
+        (ComputeSettings(deployment_id="d", **_CLOUD_RUN), True),
+    ],
+)
+async def test_compute_sweep_runs_only_for_a_configured_provider(settings, sweeps):
+    compute = SimpleNamespace(settings=settings, reconcile=AsyncMock())
     await main._sweep_compute(compute)
-    compute.reconcile.assert_not_awaited()
+    assert compute.reconcile.await_count == int(sweeps)
 
 
 async def test_dispatch_keeps_ticking_and_shutdown_cancels_stalled_compute():
@@ -115,8 +135,8 @@ async def test_many_expired_apps_are_deleted_without_delaying_dispatch(monkeypat
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     settings = ComputeSettings(
         deployment_id="test-deployment",
-        api_token=SecretStr("test-only"),
-        org_slug="test-org",
+        profiles={"test": ComputeProfile(image="registry.example/test", regions=["us-central1"])},
+        **_CLOUD_RUN,
     )
     rows = {}
     for _ in range(40):
@@ -136,10 +156,9 @@ async def test_many_expired_apps_are_deleted_without_delaying_dispatch(monkeypat
             app_name=app_name(settings.deployment_id, session_id),
             profile="test",
             image="registry.example/test",
-            region="iad",
-            cpu_kind="shared",
+            region="us-central1",
             cpus=1,
-            memory_mb=256,
+            memory_mb=512,
             state="running",
             ttl_hours=1,
             expires_at=now - timedelta(hours=1),
@@ -147,49 +166,38 @@ async def test_many_expired_apps_are_deleted_without_delaying_dispatch(monkeypat
         )
     apps = {row.app_name: row.id for row in rows.values()}
     inventory_started, inventory_finished = asyncio.Event(), asyncio.Event()
-    inventory_requests = 0
+
+    def service_json(name):
+        return {
+            "name": f"projects/test-project/locations/us-central1/services/{name}",
+            "uid": "uid-" + name,
+            "etag": '"etag"',
+            "labels": {
+                "daimon_deployment": deployment_label(settings.deployment_id),
+                "daimon_session": apps[name].hex,
+            },
+        }
 
     async def handler(request):
-        nonlocal inventory_requests
         path = request.url.path
-        # Reproduce 1+N sequential inventory requests taking over ten seconds.
-        # Deletion requests remain fast, including the ownership rechecks.
-        if not inventory_finished.is_set():
+        if path.endswith("/services"):
+            # The listing is the inventory. Deletion requests stay fast, including
+            # the ownership rechecks.
             inventory_started.set()
-            inventory_requests += 1
-            if inventory == "timeout":
+            try:
+                if inventory == "timeout":
+                    raise TimeoutError("remote-secret-body")
+                if inventory == "unexpected_error":
+                    raise RuntimeError("remote-secret-body")
+                await asyncio.sleep(0.1)
+                return httpx.Response(200, json={"services": [service_json(n) for n in apps]})
+            finally:
                 inventory_finished.set()
-                raise TimeoutError("remote-secret-body")
-            if inventory == "unexpected_error":
-                inventory_finished.set()
-                raise RuntimeError("remote-secret-body")
-            await asyncio.sleep(0.3)
-            if inventory_requests == 41:
-                inventory_finished.set()
-        if path == "/v1/apps":
-            return httpx.Response(200, json={"apps": [{"name": name} for name in apps]})
-        name = path.split("/")[3]
-        if path.endswith("/machines"):
-            return httpx.Response(
-                200,
-                json=[
-                    {
-                        "id": "machine",
-                        "state": "started",
-                        "config": {
-                            "metadata": {
-                                "daimon_deployment": settings.deployment_id,
-                                "daimon_session": str(apps[name]),
-                            }
-                        },
-                    }
-                ],
-            )
+        name = path.split("/")[-1]
         if request.method == "DELETE":
             apps.pop(name)
-            return httpx.Response(200)
-        assert name not in apps
-        return httpx.Response(404)
+            return httpx.Response(200, json={"done": True})
+        return httpx.Response(200, json=service_json(name)) if name in apps else httpx.Response(404)
 
     @asynccontextmanager
     async def transaction():
@@ -215,7 +223,9 @@ async def test_many_expired_apps_are_deleted_without_delaying_dispatch(monkeypat
     monkeypatch.setattr(compute_module.store, "save", save)
     log = Mock()
     monkeypatch.setattr(compute_module, "log", log)
-    provider = FlyComputeProvider(settings, transport=httpx.MockTransport(handler))
+    provider = CloudRunComputeProvider(
+        settings, transport=httpx.MockTransport(handler), tokens=_Tokens()
+    )
     service = ComputeSessions(
         SimpleNamespace(begin=transaction), settings, provider, clock=lambda: now
     )
@@ -249,7 +259,6 @@ async def test_many_expired_apps_are_deleted_without_delaying_dispatch(monkeypat
     assert all(row.state == "deleted" for row in rows.values())
     assert apps == {}
     if inventory == "slow":
-        assert inventory_requests == 41
         assert ticks_during_inventory >= 3
         log.warning.assert_not_called()
     else:

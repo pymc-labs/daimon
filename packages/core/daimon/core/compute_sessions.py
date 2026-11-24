@@ -130,7 +130,7 @@ class ComputeSessions:
         source_metadata: dict[str, str],
     ) -> ComputeSession:
         if not self.settings.enabled:
-            raise StoreError("Fly session launches are disabled. Ask an admin.")
+            raise StoreError("Starting a machine is turned off. Ask an admin.")
         image = self.settings.profiles.get(profile)
         if image is None or region not in image.regions:
             raise StoreError("Choose an available image profile and region.")
@@ -158,7 +158,6 @@ class ComputeSessions:
             profile=profile,
             image=image.image,
             region=region,
-            cpu_kind=image.cpu_kind,
             cpus=image.cpus,
             memory_mb=image.memory_mb,
             ttl_hours=ttl,
@@ -231,6 +230,7 @@ class ComputeSessions:
                     deployment_id=current.deployment_id,
                     session_id=current.id,
                     machine_id=current.machine_id,
+                    region=current.region,
                 )
             )
             await store.save(db, current.model_copy(update={"state": "deleted"}))
@@ -599,7 +599,10 @@ class ComputeSessions:
                     )
             else:
                 # The process ended without an exit file (machine restart) or never
-                # started. It is reported, never run again.
+                # started. It is reported, never run again. A probe that finds no
+                # files at all has no output to report: the machine was replaced, so
+                # the owner keeps the output the last poll saved.
+                kept = probe.status == "missing"
                 await task_store.finish(
                     db,
                     task,
@@ -607,6 +610,6 @@ class ComputeSessions:
                     state="lost",
                     now=now,
                     wake=wake,
-                    output_bytes=probe.output_bytes,
-                    output_tail=probe.tail,
+                    output_bytes=None if kept else probe.output_bytes,
+                    output_tail=None if kept else probe.tail,
                 )

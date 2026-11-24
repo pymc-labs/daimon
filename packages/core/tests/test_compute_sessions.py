@@ -7,9 +7,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-import httpx
 import pytest
-from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_models import ComputeResource
 from daimon.core.compute_provider import ComputeProviderError, app_name
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
@@ -31,10 +29,12 @@ def settings(**kwargs):
     return ComputeSettings(
         enabled=True,
         deployment_id="test-deployment",
-        api_token=SecretStr("fly-secret-test-only"),
-        org_slug="test-org",
+        cloud_run_project="test-project",
+        cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
         session_auth_key=SecretStr("session-secret-test-only"),
-        profiles={"mmm": ComputeProfile(image="registry.example/mmm@sha256:abc")},
+        profiles={
+            "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+        },
         **kwargs,
     )
 
@@ -78,7 +78,12 @@ async def caller(sm, *, tenant=None, account=None, attended=True, human=True):
 
 async def launch(service, owner, key="approved"):
     return await service.launch(
-        owner, profile="mmm", region="iad", ttl_hours=24, approval_key=key, source_metadata={}
+        owner,
+        profile="mmm",
+        region="us-central1",
+        ttl_hours=24,
+        approval_key=key,
+        source_metadata={},
     )
 
 
@@ -110,7 +115,7 @@ async def test_owner_tenant_origin_and_machine_token_isolation(db_engine, db_cle
     assert await service.list(foreign) == []
     env = fake.machine_env[session.id]
     assert set(env) == {"MCP_AUTH_TOKEN"}
-    assert env["MCP_AUTH_TOKEN"] not in {"fly-secret-test-only", "session-secret-test-only"}
+    assert env["MCP_AUTH_TOKEN"] != "session-secret-test-only"
     assert "secret-test" not in session.model_dump_json()
     admin = replace(other, admin=True)
     with pytest.raises(StoreError):
@@ -121,6 +126,8 @@ async def test_owner_tenant_origin_and_machine_token_isolation(db_engine, db_cle
         await service.stop(replace(foreign, admin=True), session.id)
     assert (await service.stop(admin, session.id)).state == "deleted"
     assert fake.deleted == [session.id]
+    # The provider is told where the session ran: Cloud Run addresses a service by region.
+    assert fake.deleted_regions == ["us-central1"]
 
 
 @pytest.mark.parametrize("attended,human", [(False, True), (True, False), (True, None)])
@@ -147,7 +154,7 @@ async def test_caps_ttl_disabled_and_expiry(db_engine, db_clean):
             await service.launch(
                 owner,
                 profile="mmm",
-                region="iad",
+                region="us-central1",
                 ttl_hours=hours,
                 approval_key="approved",
                 source_metadata={},
@@ -251,29 +258,6 @@ async def test_renew_and_delete_are_serialized(db_committing_engine, db_clean):
     await write
     assert (await stop).state == "deleted"
     assert session.id not in fake.resources
-
-
-async def test_provider_never_exposes_remote_errors_or_cross_deployment_calls():
-    seen = []
-
-    async def handler(request):
-        seen.append(request)
-        return httpx.Response(500, text="fly-secret-test-only session-secret-test-only")
-
-    provider = FlyComputeProvider(settings(), transport=httpx.MockTransport(handler))
-    with pytest.raises(ComputeProviderError) as error:
-        await provider.inventory()
-    assert "secret-test" not in str(error.value)
-    assert "secret-test" not in repr(error.value)
-    before = len(seen)
-    other_id = uuid.uuid4()
-    with pytest.raises(ComputeProviderError):
-        await provider.delete(
-            ComputeResource(
-                session_id=other_id, deployment_id="other", app_name=app_name("other", other_id)
-            )
-        )
-    assert len(seen) == before
 
 
 async def test_concurrent_admission_cannot_exceed_the_person_cap(db_committing_engine, db_clean):
@@ -538,7 +522,12 @@ async def test_task_limits_cap_and_lease_ceiling(db_engine, db_clean):
         sm, settings(max_ttl_hours=2, per_session_tasks=1), fake, clock=lambda: now
     )
     session = await service.launch(
-        owner, profile="mmm", region="iad", ttl_hours=1, approval_key="a", source_metadata={}
+        owner,
+        profile="mmm",
+        region="us-central1",
+        ttl_hours=1,
+        approval_key="a",
+        source_metadata={},
     )
     for minutes in (0, 121):
         with pytest.raises(StoreError):
@@ -594,11 +583,16 @@ async def test_lost_start_restart_and_overdue_tasks_are_reported_never_rerun(db_
     overdue = await service.start_task(
         owner, session.id, command="sleep 9999", timeout_minutes=1, request_key="overdue"
     )
+    fake.tasks[restarted.id.hex].output = "epoch 3 of 9 done\n"
+    await service.poll_tasks()
     del fake.tasks[restarted.id.hex]  # a machine restart wipes /tmp
     now += timedelta(minutes=10)
     await service.poll_tasks()
     assert (await service.task_result(owner, pending.id)).state == "lost"
-    assert (await service.task_result(owner, restarted.id)).state == "lost"
+    lost = await service.task_result(owner, restarted.id)
+    # The restart took the output file; the owner still gets what the last poll saved.
+    assert (lost.state, lost.output_tail, lost.output_bytes) == ("lost", "epoch 3 of 9 done\n", 18)
+    assert any("epoch 3 of 9 done" in wake.requested_work for wake in await wakes_for(sm, owner))
     timed = await service.task_result(owner, overdue.id)
     assert timed.state == "timed_out"
     assert any(

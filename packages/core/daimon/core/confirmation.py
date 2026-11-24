@@ -875,7 +875,8 @@ async def confirmed_tools_for_tenant(
     deps: TurnDeps, tenant_id: uuid.UUID, agent_id: str | None = None
 ) -> frozenset[str]:
     """`confirmed_tools_for_turn` plus the tenant's own gates, less the watch tools the
-    agent's `watch_approval` setting skips (long jobs, key rotation and Fly still ask)."""
+    agent's `watch_approval` setting skips. Long jobs, key rotation and machine launches
+    still ask."""
     from daimon.core.stores.lead_intake import confirmation_tools
 
     base = confirmed_tools_for_turn(deps)

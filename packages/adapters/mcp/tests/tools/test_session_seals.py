@@ -1221,7 +1221,7 @@ async def test_long_job_cancel_survives_unavailable_source_proof(world, monkeypa
 async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
     world: _World, monkeypatch, hold_kind, readable
 ):
-    """`fly_task_result` and `get_long_job` read a stored row through the source check.
+    """`compute_task_result` and `get_long_job` read a stored row through the source check.
 
     A relay hold reads none, though the row ran in its own channel; a plain hold
     and an unheld turn read exactly what they did before.
@@ -1232,7 +1232,7 @@ async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
 
     from daimon.adapters.mcp.tools import _long_job_access as access_tools
     from daimon.adapters.mcp.tools._long_job_access import LongJobCaller, long_job_access
-    from daimon.adapters.mcp.tools.fly import _readable  # pyright: ignore[reportPrivateUsage]
+    from daimon.adapters.mcp.tools.compute import _readable  # pyright: ignore[reportPrivateUsage]
     from daimon.core.turn_hold import TurnHold
 
     stamps = dict(daimon_channel=_SEALED, daimon_thread="thread")
@@ -1245,7 +1245,7 @@ async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
     runtime = world.runtime()
     monkeypatch.setattr(access_tools, "fresh_admin", AsyncMock(return_value=False))
     try:
-        # The stored compute row behind fly_task_result, status and the rest.
+        # The stored compute row behind compute_task_result, status and the rest.
         session = SimpleNamespace(source_metadata=stamps)
         if readable:
             await _readable(runtime, auth, "", session)  # pyright: ignore[reportArgumentType]

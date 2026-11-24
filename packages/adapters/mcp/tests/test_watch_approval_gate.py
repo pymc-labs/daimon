@@ -63,7 +63,7 @@ async def test_skip_lets_the_watch_tools_run_without_a_card(
 
 
 @pytest.mark.parametrize("tool", sorted(WATCH_CONFIRMED_TOOLS - WATCH_APPROVAL_TOOLS))
-async def test_skip_never_relaxes_key_rotation_long_jobs_or_fly(
+async def test_skip_never_relaxes_key_rotation_long_jobs_or_machine_launches(
     monkeypatch: pytest.MonkeyPatch, tool: str
 ) -> None:
     seen = _skip(monkeypatch, skipped=True)

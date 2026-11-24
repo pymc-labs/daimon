@@ -5187,7 +5187,10 @@ class ComputeSessionRecord(Base):
     profile: Mapped[str]
     image: Mapped[str]
     region: Mapped[str]
-    cpu_kind: Mapped[str]
+    # The removed Fly provider's CPU class. Nothing reads it. It is still written, as
+    # `shared`, so a release that reads it and a schema without the default both work;
+    # a later release drops the column.
+    cpu_kind: Mapped[str] = mapped_column(default="shared", server_default="shared")
     cpus: Mapped[int]
     memory_mb: Mapped[int]
     state: Mapped[str] = mapped_column(server_default="launching")

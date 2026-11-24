@@ -33,10 +33,10 @@ cancellation audit rows cascade from the job. Worker sessions carry the same
 account/tenant stamps as other owned sessions and use the existing upstream
 session-deletion work item. No separate retained job-content exception applies.
 
-Fly registrations, their conversation metadata and background command rows
+Compute session registrations, their conversation metadata and background command rows
 (including stored output tails) cascade on account deletion.
-The compute reconciler deletes the remaining tagged apps as unregistered orphans;
-upstream machine/file deletion requires the scheduler and Fly to be available.
+The compute reconciler deletes the remaining labelled services as unregistered orphans;
+upstream machine/file deletion requires the scheduler and the provider to be available.
 
 Deliberate carve-outs:
 - Sessions at other model providers: an OpenAI session an account's private slot named is

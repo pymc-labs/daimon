@@ -43,3 +43,15 @@ class ComputeProvider(Protocol):
     async def call(
         self, session: ComputeSession, token: str, tool: str, arguments: dict[str, JsonValue]
     ) -> JsonValue: ...
+
+
+def compute_provider_for(settings: ComputeSettings) -> ComputeProvider:
+    """The compute provider of this deployment: the only place one is built.
+
+    Every process that launches, uses or cleans up sessions builds its provider here,
+    so they cannot disagree about where a session runs.
+    """
+    # Imported here because the provider module imports this boundary.
+    from daimon.core.compute_cloud_run import CloudRunComputeProvider
+
+    return CloudRunComputeProvider(settings)

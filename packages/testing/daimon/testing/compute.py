@@ -29,6 +29,7 @@ class FakeComputeProvider:
         self.machine_env: dict[uuid.UUID, dict[str, str]] = {}
         self.calls: list[tuple[uuid.UUID, str, dict[str, JsonValue]]] = []
         self.deleted: list[uuid.UUID] = []
+        self.deleted_regions: list[str | None] = []
         self.fail_create = False
         self.fail_delete = False
         self.result: JsonValue = {"exit_code": 0, "stdout": "done", "timed_out": False}
@@ -68,6 +69,7 @@ class FakeComputeProvider:
         self.resources.pop(resource.session_id, None)
         self.machine_env.pop(resource.session_id, None)
         self.deleted.append(resource.session_id)
+        self.deleted_regions.append(resource.region)
 
     async def inventory(self) -> list[ComputeResource]:
         return list(self.resources.values())

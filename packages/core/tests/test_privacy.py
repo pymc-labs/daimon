@@ -1154,7 +1154,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
             # Owner records cascade with account erasure, including conversation
-            # metadata. Tagged Fly apps then have no registration and are deleted
+            # metadata. Labelled machines then have no registration and are deleted
             # by the scheduler orphan sweep; Daimon calls lose their owner authority.
             "compute_sessions",
             # Background command rows (with their output tail) cascade with the

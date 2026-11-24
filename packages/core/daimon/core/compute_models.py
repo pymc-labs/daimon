@@ -29,7 +29,6 @@ class ComputeSession(BaseModel):
     profile: str
     image: str
     region: str
-    cpu_kind: Literal["shared", "performance"]
     cpus: int
     memory_mb: int
     state: Literal["launching", "running", "stopping", "deleted"] = "launching"
@@ -50,6 +49,8 @@ class ComputeResource(BaseModel):
     session_id: uuid.UUID
     machine_state: str = "unknown"
     machine_id: str | None = None
+    # Where the provider holds it, when known: a Cloud Run service is addressed by region.
+    region: str | None = None
 
 
 ComputeTaskState = Literal[
