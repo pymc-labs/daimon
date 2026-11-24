@@ -89,7 +89,7 @@ NOTICE_TITLE: Final[str] = "Workflow run failed"
 #: A templated address outside the spec's destinations, the run's origin and its own threads.
 NOT_A_DESTINATION: Final[str] = "not_a_destination"
 _KEYWORDS: Final = frozenset({"home", "owner", "run_as", "origin"})
-PostKind = Literal["finish", "post", "notice"]
+PostKind = Literal["finish", "post", "notice", "result"]
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"([CG][A-Z0-9]{2,}):([0-9]+\.[0-9]+)")
 _TEAMS_THREAD: Final[str] = ";messageid="
 
@@ -230,10 +230,15 @@ async def queue_post(
     mention: Sequence[str] = (),
     step_id: uuid.UUID | None = None,
     wait_id: uuid.UUID | None = None,
+    extra: Mapping[str, Any] | None = None,
+    status: Literal["pending", "skipped"] = "pending",
+    note: str | None = None,
 ) -> tuple[uuid.UUID, list[Event]]:
-    """The one writer of a run's own posts (Finish, post step, notice): the first target is the
-    post, any others its `also` DMs. Returns the post's id and the ledger events."""
+    """The one writer of a run's own posts (Finish, post step, notice, a routine step's result):
+    the first target is the post, any others its `also` DMs. `extra` adds payload fields.
+    Returns the post's id and the ledger events."""
     payload: dict[str, Any] = {
+        **(extra or {}),
         "text": text,
         "files": files,
         "workflow": workflow.name,
@@ -254,6 +259,8 @@ async def queue_post(
                 kind=kind,
                 target=target,
                 payload=payload if index == 0 else payload | {"mention": []},
+                status=status,
+                note=note,
             )
         )
     events = [Event("delivery.queued", None, {"delivery_id": str(i), "kind": kind}) for i in ids]

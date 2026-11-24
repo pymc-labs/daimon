@@ -254,7 +254,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nobody watching when its arguments fit a stated scope. Workflows, their pages,
   mentions (`workflow_mentions`) and polls (`workflow_polls`) are on; webhooks, code
   steps and scoped writes (`workflow_scoped_writes`) stay off until an admin turns
-  them on. Routines still work but are marked Legacy, and every routines list
+  them on. The routine result header and routine sandbox tools have a Workflow level, for a
+  workflow's routine steps. Routines still work but are marked Legacy, and every routines list
   offers an admin "Move to a workflow"; see [Workflows](docs/workflows.md) and
   [Advanced workflows](docs/workflows-advanced.md).
 

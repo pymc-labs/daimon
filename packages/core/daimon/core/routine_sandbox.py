@@ -34,6 +34,7 @@ from daimon.core.features.service import (
     clear_pinned_on,
 )
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_one
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 from daimon.core.rule_views import routine_destination_channel
@@ -273,7 +274,7 @@ async def builtins_allowed(
     return found.on
 
 
-def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
+def routine_place(row: RoutineFacts, platform: str) -> FeaturePlace:
     """Where a routine's runs resolve features: its destination, its agent and itself."""
     return FeaturePlace.of(
         row.tenant_id,
@@ -284,19 +285,31 @@ def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
     )
 
 
+def _own_tier(row: RoutineFacts, workflow_id: uuid.UUID | None) -> FeatureTarget:
+    """A fire's own tier: its workflow's for a workflow's routine step, else its routine's."""
+    if workflow_id is not None:
+        return FeatureTarget("workflow", workflow_id=workflow_id)
+    return FeatureTarget("routine", routine_id=row.id)
+
+
 def _decision(
-    row: RoutineRow,
+    row: RoutineFacts,
     settings: Settings | None,
     platform: str,
     values: Sequence[FeatureValueRow],
+    *,
+    workflow_id: uuid.UUID | None = None,
 ) -> FeatureValueRow | None:
-    """The agent's or the routine's own row that decides an On for the routine, from the
-    stored `values` of its feature (those of other places are ignored). A DM routine runs as
-    its owner's private conversation, so only its agent's On reaches it, never a routine tier."""
+    """The agent's or the routine's (or workflow's) own row that decides an On for its fire,
+    from the stored `values` of its feature (those of other places are ignored). A DM routine
+    runs as its owner's private conversation, so only its agent's On reaches it, never its own."""
     dm = row.destination_kind == "dm"
-    place = routine_place(row, platform)
-    if dm:
-        place = replace(place, routine_id=None)
+    mine = _own_tier(row, workflow_id)
+    place = replace(
+        routine_place(row, platform),
+        routine_id=None if dm else mine.routine_id,
+        workflow_id=None if dm else mine.workflow_id,
+    )
     own = [
         value
         for value in values
@@ -304,29 +317,38 @@ def _decision(
         and (
             value.tier == "workspace"
             or (value.tier == "agent" and value.agent_id == row.agent_id)
-            or (value.tier == "routine" and not dm and value.routine_id == row.id)
+            or (
+                value.tier == mine.tier
+                and not dm
+                and (value.routine_id, value.workflow_id) == (mine.routine_id, mine.workflow_id)
+            )
         )
     ]
     found = resolve_one(FEATURES["routine_sandbox_tools"], settings, place, own)
-    if not found.on or found.tier not in ("agent", "routine"):
+    if not found.on or found.tier not in ("agent", mine.tier):
         return None
     return next((value for value in own if value.tier == found.tier), None)
 
 
 async def _deciding(
-    session: AsyncSession, settings: Settings | None, row: RoutineRow, platform: str
+    session: AsyncSession,
+    settings: Settings | None,
+    row: RoutineFacts,
+    platform: str,
+    workflow_id: uuid.UUID | None,
 ) -> FeatureValueRow | None:
-    """`_decision` for one routine, from one read of its place."""
+    """`_decision` for one fire, from one read of its place."""
     stored = await place_values(
         session,
         tenant_id=row.tenant_id,
         agent_id=row.agent_id,
         channel_id=None,
         thread_key=None,
-        routine_id=row.id,
+        routine_id=None if workflow_id else row.id,
+        workflow_id=workflow_id,
         keys=(SANDBOX_KEY,),
     )
-    return _decision(row, settings, platform, stored)
+    return _decision(row, settings, platform, stored, workflow_id=workflow_id)
 
 
 async def opted_in_by_many(
@@ -413,9 +435,13 @@ async def clear_agent_opt_ins(session: AsyncSession, *, tenant_id: uuid.UUID, ag
     cleared = 0
     for found in await list_feature_values(session, tenant_id=tenant_id, keys=[SANDBOX_KEY]):
         pinned_to = found.agent_id if found.tier == "agent" else (found.pin or {}).get("agent_id")
-        if found.value == "on" and found.tier in ("agent", "routine") and pinned_to == agent_id:
+        mine = found.tier in ("agent", "routine", "workflow")
+        if found.value == "on" and mine and pinned_to == agent_id:
             target = FeatureTarget(
-                found.tier, agent_id=found.agent_id or None, routine_id=found.routine_id
+                found.tier,
+                agent_id=found.agent_id or None,
+                routine_id=found.routine_id,
+                workflow_id=found.workflow_id,
             )
             cleared += await clear_pinned_on(
                 session,
@@ -431,19 +457,22 @@ async def clear_agent_opt_ins(session: AsyncSession, *, tenant_id: uuid.UUID, ag
 async def routine_sandbox(
     sessions: async_sessionmaker[AsyncSession],
     settings: Settings | None,
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     platform: str,
+    workflow_id: uuid.UUID | None = None,
 ) -> RoutineSandbox | None:
     """The opt-in for this fire, or None when `routine_sandbox_tools` is off for it.
+    `workflow_id` names the workflow whose routine step fires, whose tier is then its own.
 
     When the run no longer matches the deciding pin it goes ahead without built-ins. A
-    routine's own On is then cleared, so an admin approves the new agent or environment;
-    an agent's is kept, as its other routines may still match.
+    routine's (or workflow's) own On is then cleared, so an admin approves the new agent or
+    environment; an agent's is kept, as its other routines may still match.
     """
+    mine = _own_tier(row, workflow_id)
     try:
         async with sessions() as session:
-            found = await _deciding(session, settings, row, platform)
+            found = await _deciding(session, settings, row, platform, workflow_id)
         pin = None if found is None else stored_pin(found)
     except Exception:  # unreadable: no opt-in
         log.exception("routine.sandbox_pin_unreadable", routine_id=str(row.id))
@@ -457,7 +486,7 @@ async def routine_sandbox(
 
     async def on_drift() -> None:
         log.info("routine.sandbox_pin_mismatched", routine_id=str(row.id), tier=decided.tier)
-        if decided.tier != "routine":
+        if decided.tier != mine.tier:
             return
         try:
             async with sessions.begin() as session:
@@ -466,7 +495,7 @@ async def routine_sandbox(
                     settings,
                     tenant_id=row.tenant_id,
                     key=SANDBOX_KEY,
-                    target=FeatureTarget("routine", routine_id=row.id),
+                    target=mine,
                     seen=decided,
                 )
         except Exception:  # the run already went ahead without built-ins

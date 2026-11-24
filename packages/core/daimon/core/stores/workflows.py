@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Any, Literal, TypedDict, Unpack, cast
 
 from daimon.core._models import (
+    LeadIntakeConfig,
     Workflow,
     WorkflowAccess,
     WorkflowRun,
@@ -30,7 +31,7 @@ from daimon.core.stores import workflow_triggers
 from daimon.core.workflows.state import merged, oversized
 from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy import delete, func, or_, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -40,6 +41,25 @@ VersionSource = Literal["web", "chat", "import", "routine"]
 AccessRole = Literal["editor", "runner", "viewer"]
 #: What erasure leaves in a run's `triggered_by` for an erased person.
 ERASED_PERSON: dict[str, Any] = {"kind": "person", "erased": True}
+
+
+class MadeIn(TypedDict):
+    """Where a workflow was made: the provenance a DM destination is checked against."""
+
+    known: bool
+    channel_id: str | None
+    thread_id: str | None
+
+
+class ConvertedFrom(TypedDict, total=False):
+    """The routine a workflow was converted from, to convert it back; `last` is its last fire
+    (`at`, `error`), the failure streak's start before the first run."""
+
+    routine_id: str
+    source_routine_id: str | None
+    made_in_channel_id: str | None
+    created_at: str
+    last: dict[str, Any] | None
 
 
 class _Row(BaseModel):
@@ -64,6 +84,8 @@ class WorkflowRow(_Row):
     monthly_cap_usd: Decimal | None
     state: dict[str, Any]
     state_updated_at: datetime | None
+    made_in: MadeIn | None
+    converted_from: ConvertedFrom | None
     created_at: datetime
     updated_at: datetime
 
@@ -100,8 +122,12 @@ async def create_workflow(
     spec: dict[str, Any],
     home_channel_id: str | None = None,
     visibility: Visibility = "private",
+    made_in: MadeIn | None = None,
+    converted_from: ConvertedFrom | None = None,
 ) -> WorkflowRow:
     orm = Workflow(
+        made_in=made_in,
+        converted_from=converted_from,
         visibility=visibility,
         tenant_id=tenant_id,
         owner_account_id=owner_account_id,
@@ -236,16 +262,59 @@ async def set_status(
     )
 
 
+async def is_live(
+    session: AsyncSession,
+    *,
+    workflow_id: uuid.UUID,
+    version: int,
+    owner_account_id: uuid.UUID | None,
+) -> bool:
+    """Whether `version` is still the live one, under the same owner."""
+    found = await session.scalar(
+        select(Workflow.id).where(
+            Workflow.id == workflow_id,
+            Workflow.live_version == version,
+            Workflow.owner_account_id.is_not_distinct_from(owner_account_id),
+        )
+    )
+    return found is not None
+
+
+async def pause_active(session: AsyncSession, *, workflow_id: uuid.UUID) -> bool:
+    """Pause the workflow if it is active; whether this call paused it."""
+    paused = await session.execute(
+        update(Workflow)
+        .where(Workflow.id == workflow_id, Workflow.status == "active")
+        .values(status="paused")
+        .returning(Workflow.id)
+    )
+    return paused.first() is not None
+
+
 async def delete_workflow(
     session: AsyncSession, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID
 ) -> bool:
-    """Delete the workflow with its versions, triggers and runs; usage rows keep their money."""
+    """Delete the workflow with all its state (FK cascades) and unbind lead intake from it;
+    usage rows keep their money."""
     result = await session.execute(
         delete(Workflow)
         .where(Workflow.tenant_id == tenant_id, Workflow.id == workflow_id)
         .returning(Workflow.id)
     )
-    return result.first() is not None
+    gone = result.scalars().all()
+    await _unbind_intake(session, gone)
+    return bool(gone)
+
+
+async def _unbind_intake(session: AsyncSession, workflow_ids: Sequence[uuid.UUID]) -> None:
+    """Clear `IntakeConfig.workflow_id` where it names a deleted workflow."""
+    if workflow_ids:
+        config = LeadIntakeConfig.config
+        await session.execute(
+            update(LeadIntakeConfig)
+            .where(config["workflow_id"].astext.in_([str(i) for i in workflow_ids]))
+            .values(config=config.op("-", return_type=JSONB)("workflow_id"))
+        )
 
 
 async def publish_version(
@@ -424,10 +493,12 @@ async def count_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> 
 
 async def erase_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     """Erase the person from every workspace's workflows (module docstring); returns the count."""
+    erased = await session.execute(
+        delete(Workflow).where(_private_owned(account_id)).returning(Workflow.id)
+    )
+    gone = erased.scalars().all()
+    await _unbind_intake(session, gone)
     results = [
-        await session.execute(
-            delete(Workflow).where(_private_owned(account_id)).returning(Workflow.id)
-        ),
         await session.execute(
             update(Workflow)
             .where(_shared_held(account_id))
@@ -468,4 +539,4 @@ async def erase_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> 
         .where(Workflow.owner_account_id == account_id)
         .values(owner_account_id=None)
     )
-    return sum(len(r.all()) for r in results)
+    return len(gone) + sum(len(r.all()) for r in results)

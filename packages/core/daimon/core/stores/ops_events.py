@@ -55,6 +55,8 @@ class OpsEventRecord:
     subject_key: str | None = None
     release: str | None = None
     note: str | None = None
+    workflow_id: uuid.UUID | None = None
+    workflow_run_id: uuid.UUID | None = None
 
 
 async def record_ops_events(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -714,6 +714,36 @@ def _effect_state(row: LeadIntakeEffect) -> LeadEffectState:
 
 
 @asynccontextmanager
+async def _grant(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    lifetime_s: float,
+    **holder: UUID,
+) -> AsyncIterator[UUID]:
+    """A grant row for `holder` (a routine or a workflow run) while the block runs."""
+    identity = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            LeadIntakeExecution(
+                tenant_id=tenant_id,
+                id=identity,
+                expires_at=datetime.now(UTC) + timedelta(seconds=lifetime_s),
+                **holder,
+            )
+        )
+    try:
+        yield identity
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(LeadIntakeExecution).where(
+                    LeadIntakeExecution.tenant_id == tenant_id,
+                    LeadIntakeExecution.id == identity,
+                )
+            )
+
+
+@asynccontextmanager
 async def routine_execution(
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: UUID,
@@ -727,28 +757,24 @@ async def routine_execution(
     (`execution_is_active`). `lifetime_s` is the fire's own outer bound, so a grant
     a dead process left behind expires no later than its fire would have been stopped.
     """
-    identity = uuid4()
-    async with sessions() as session, session.begin():
-        session.add(
-            LeadIntakeExecution(
-                tenant_id=tenant_id,
-                id=identity,
-                routine_id=routine_id,
-                expires_at=datetime.now(UTC) + timedelta(seconds=lifetime_s),
-            )
-        )
-    token = current_intake_execution.set((routine_id, identity))
-    try:
-        yield
-    finally:
-        current_intake_execution.reset(token)
-        async with sessions() as session, session.begin():
-            await session.execute(
-                delete(LeadIntakeExecution).where(
-                    LeadIntakeExecution.tenant_id == tenant_id,
-                    LeadIntakeExecution.id == identity,
-                )
-            )
+    async with _grant(sessions, tenant_id, lifetime_s, routine_id=routine_id) as identity:
+        token = current_intake_execution.set((routine_id, identity))
+        try:
+            yield
+        finally:
+            current_intake_execution.reset(token)
+
+
+def workflow_execution(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    run_id: UUID,
+    *,
+    lifetime_s: float,
+) -> AbstractAsyncContextManager[UUID]:
+    """`routine_execution` for a workflow run's routine step; yields the grant's id. Deleting
+    the run (or its workflow) deletes the grant."""
+    return _grant(sessions, tenant_id, lifetime_s, workflow_run_id=run_id)
 
 
 async def execution_is_active(
@@ -756,6 +782,13 @@ async def execution_is_active(
 ) -> bool:
     row = await session.get(LeadIntakeExecution, (tenant_id, execution_id))
     return row is not None and row.routine_id == routine_id and row.expires_at > datetime.now(UTC)
+
+
+async def workflow_execution_is_active(
+    session: AsyncSession, tenant_id: UUID, run_id: UUID, execution_id: UUID
+) -> bool:
+    row = await session.get(LeadIntakeExecution, (tenant_id, execution_id))
+    return row is not None and row.workflow_run_id == run_id and row.expires_at > datetime.now(UTC)
 
 
 async def purge_expired(session: AsyncSession, now: datetime) -> None:
@@ -862,18 +895,33 @@ async def count_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> 
     )
 
 
-async def configured_routines(
-    session: AsyncSession, tenant_ids: set[UUID]
-) -> set[tuple[UUID, UUID]]:
+async def _configs(session: AsyncSession, tenant_ids: set[UUID]) -> list[tuple[UUID, IntakeConfig]]:
     rows = await session.execute(
         select(LeadIntakeConfig.tenant_id, LeadIntakeConfig.config).where(
             LeadIntakeConfig.tenant_id.in_(tenant_ids)
         )
     )
+    return [(tenant, IntakeConfig.model_validate(payload)) for tenant, payload in rows]
+
+
+async def configured_routines(
+    session: AsyncSession, tenant_ids: set[UUID]
+) -> set[tuple[UUID, UUID]]:
     return {
         (tenant, config.routine_id)
-        for tenant, payload in rows
-        if (config := IntakeConfig.model_validate(payload)).routine_id is not None
+        for tenant, config in await _configs(session, tenant_ids)
+        if config.routine_id is not None
+    }
+
+
+async def configured_workflows(
+    session: AsyncSession, tenant_ids: set[UUID]
+) -> set[tuple[UUID, UUID]]:
+    """The (tenant, workflow) pairs lead intake is bound to."""
+    return {
+        (tenant, config.workflow_id)
+        for tenant, config in await _configs(session, tenant_ids)
+        if config.workflow_id is not None
     }
 
 

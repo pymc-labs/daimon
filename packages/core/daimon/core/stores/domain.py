@@ -1232,7 +1232,7 @@ class FileUploadRow(BaseModel):
     created_at: datetime
 
 
-FeatureTier = Literal["workspace", "agent", "channel", "thread", "routine"]
+FeatureTier = Literal["workspace", "agent", "channel", "thread", "routine", "workflow"]
 """The tiers `feature_values` stores; the deployment tier is the `features` setting."""
 FeatureSurface = Literal["web", "chat", "panel", "cli", "system", "spec", "migration"]
 """Where a feature was set: a `ChangeSurface`, an agent spec, or the 0187 migration."""
@@ -1247,6 +1247,7 @@ class FeatureTarget:
     channel_id: str | None = None
     thread_key: str | None = None
     routine_id: uuid.UUID | None = None
+    workflow_id: uuid.UUID | None = None
 
 
 class FeatureValueRow(BaseModel):
@@ -1260,6 +1261,7 @@ class FeatureValueRow(BaseModel):
     channel_id: str
     thread_key: str
     routine_id: uuid.UUID | None = None
+    workflow_id: uuid.UUID | None = None
     key: str
     value: str
     locked: bool

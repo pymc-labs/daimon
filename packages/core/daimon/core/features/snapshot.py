@@ -47,7 +47,8 @@ log = structlog.get_logger(__name__)
 @dataclass(frozen=True)
 class FeaturePlace:
     """Where a turn or session runs. `thread_key` is the stores' key (Slack: ``<channel>:<ts>``).
-    A routine's run also has the routine's own tier (`routine_id`)."""
+    A routine's run also has the routine's own tier (`routine_id`), a workflow's routine step
+    the workflow's (`workflow_id`)."""
 
     tenant_id: uuid.UUID
     platform: str
@@ -56,6 +57,7 @@ class FeaturePlace:
     agent_id: str | None = None
     backend: str | None = None
     routine_id: uuid.UUID | None = None
+    workflow_id: uuid.UUID | None = None
 
     @classmethod
     def of(
@@ -384,6 +386,7 @@ async def _place_rows(
         place.channel_id,
         place.thread_key,
         place.routine_id,
+        place.workflow_id,
     )
     rows = cache.get(key)
     if rows is None:
@@ -394,6 +397,7 @@ async def _place_rows(
             channel_id=place.channel_id,
             thread_key=place.thread_key,
             routine_id=place.routine_id,
+            workflow_id=place.workflow_id,
         )
         cache.put(key, rows)
     return revision, rows
@@ -567,6 +571,7 @@ async def feature_in(
         channel_id=place.channel_id,
         thread_key=place.thread_key,
         routine_id=place.routine_id,
+        workflow_id=place.workflow_id,
         keys=(key,),
     )
     spec = FEATURES[key]

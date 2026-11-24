@@ -16,7 +16,8 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-DeliveryKind = Literal["finish", "post", "ask", "reminder", "ask_update", "notice"]
+#: `result` is a routine step's output (text, files, header, hold, identity, DM fallback).
+DeliveryKind = Literal["finish", "post", "ask", "reminder", "ask_update", "notice", "result"]
 SettledStatus = Literal["sent", "skipped", "refused", "failed"]
 
 
@@ -54,8 +55,13 @@ async def queue_delivery(
     payload: dict[str, Any],
     wait_id: uuid.UUID | None = None,
     step_id: uuid.UUID | None = None,
+    status: Literal["pending", "skipped"] = "pending",
+    note: str | None = None,
 ) -> uuid.UUID:
+    """Queue a post; `skipped` settles it at once (a result the agent already posted)."""
     orm = WorkflowDelivery(
+        status=status,
+        note=note,
         tenant_id=tenant_id,
         workflow_id=workflow_id,
         run_id=run_id,

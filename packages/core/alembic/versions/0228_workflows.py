@@ -6,10 +6,13 @@ ledger (`workflow_run_events`, hash-chained, append-only by trigger) onto steps,
 waits with their answers and posts, proposals, activity lines and deliveries; the threads
 its posts opened are kept by title. Every table cascades with its tenant.
 `web_threads.subject` names what a thread is about (one per person and subject).
+Routine state has workflow homes too: the `workflow` feature tier, an execution grant
+keyed by run, `made_in` and `converted_from`, workflow ids on ops events, `result`
+deliveries and `workflow` posts.
 `usage_events` gains the run and step that spent it: nullable, foreign keys added NOT VALID
 (every existing row is NULL) and ON DELETE SET NULL, with partial indexes built
 concurrently, outside the migration transaction, so turns keep writing usage meanwhile.
-Downgrading drops the workflow tables and their data.
+Downgrading drops the workflow tables and their data, with the rows only a workflow holds.
 
 downgrade: destructive
 """
@@ -82,6 +85,80 @@ BEFORE UPDATE OR DELETE ON workflow_run_events
 FOR EACH ROW EXECUTE FUNCTION workflow_run_events_append_only()""",
 )
 LEDGER_GUARD_REMOVAL = ("DROP FUNCTION IF EXISTS workflow_run_events_append_only() CASCADE",)
+#: Constraints the workflow homes of routine state widen: (table, name, before, after).
+WIDENED = (
+    (
+        "feature_values",
+        "ck_feature_values_tier",
+        "tier IN ('workspace', 'agent', 'channel', 'thread', 'routine')",
+        "tier IN ('workspace', 'agent', 'channel', 'thread', 'routine', 'workflow')",
+    ),
+    (
+        "feature_values",
+        "ck_feature_values_lock",
+        "NOT (locked AND tier IN ('thread', 'routine'))",
+        "NOT (locked AND tier IN ('thread', 'routine', 'workflow'))",
+    ),
+    (
+        "agent_posted_messages",
+        "ck_agent_posted_messages_source",
+        "source IN ('tool', 'turn', 'auto_thread', 'routine')",
+        "source IN ('tool', 'turn', 'auto_thread', 'routine', 'workflow')",
+    ),
+)
+
+
+def home_routine_state() -> None:
+    """The workflow tier of features, the execution grant keyed by run, and the workflow ids
+    on ops events. A widened check is added NOT VALID: every existing row met the narrower one."""
+    for table, name, _, after in WIDENED:
+        op.drop_constraint(name, table, type_="check")
+        op.execute(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({after}) NOT VALID")
+    op.add_column(
+        "feature_values",
+        sa.Column("workflow_id", sa.UUID(), sa.ForeignKey("workflows.id", ondelete="CASCADE")),
+    )
+    op.create_check_constraint(
+        "ck_feature_values_workflow",
+        "feature_values",
+        "(tier = 'workflow') = (workflow_id IS NOT NULL)"
+        " AND (workflow_id IS NULL OR channel_id = workflow_id::text)",
+    )
+    op.create_index(
+        "uq_feature_values_workflow", "feature_values", ["workflow_id", "key"], unique=True
+    )
+    op.alter_column("lead_intake_executions", "routine_id", nullable=True)
+    op.add_column(
+        "lead_intake_executions",
+        sa.Column(
+            "workflow_run_id", sa.UUID(), sa.ForeignKey("workflow_runs.id", ondelete="CASCADE")
+        ),
+    )
+    op.create_check_constraint(
+        "ck_lead_intake_executions_holder",
+        "lead_intake_executions",
+        "num_nonnulls(routine_id, workflow_run_id) = 1",
+    )
+    for column in ("workflow_id", "workflow_run_id"):
+        op.add_column("ops_events", sa.Column(column, sa.UUID(), nullable=True))
+
+
+def unhome_routine_state() -> None:
+    """Undo `home_routine_state`, deleting the rows only a workflow could hold."""
+    for column in ("workflow_id", "workflow_run_id"):
+        op.drop_column("ops_events", column)
+    op.execute("DELETE FROM lead_intake_executions WHERE workflow_run_id IS NOT NULL")
+    op.drop_constraint("ck_lead_intake_executions_holder", "lead_intake_executions", type_="check")
+    op.drop_column("lead_intake_executions", "workflow_run_id")
+    op.alter_column("lead_intake_executions", "routine_id", nullable=False)
+    op.execute("DELETE FROM feature_values WHERE tier = 'workflow'")
+    op.execute("DELETE FROM agent_posted_messages WHERE source = 'workflow'")
+    op.drop_index("uq_feature_values_workflow", table_name="feature_values")
+    op.drop_constraint("ck_feature_values_workflow", "feature_values", type_="check")
+    op.drop_column("feature_values", "workflow_id")
+    for table, name, before, _ in WIDENED:
+        op.drop_constraint(name, table, type_="check")
+        op.create_check_constraint(name, table, before)
 
 
 def create_tables() -> None:
@@ -146,6 +223,8 @@ def create_tables() -> None:
             nullable=False,
         ),
         sa.Column("state_updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("made_in", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("converted_from", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -952,7 +1031,7 @@ def create_tables() -> None:
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("placed", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.CheckConstraint(
-            "kind IN ('finish', 'ask', 'reminder', 'ask_update', 'notice', 'post')",
+            "kind IN ('finish', 'ask', 'reminder', 'ask_update', 'notice', 'post', 'result')",
             name="ck_workflow_deliveries_kind",
         ),
         sa.CheckConstraint(
@@ -1095,6 +1174,7 @@ def create_tables() -> None:
             f"ALTER TABLE usage_events ADD CONSTRAINT {name} FOREIGN KEY ({column}) "
             f"REFERENCES {table} (id) ON DELETE SET NULL NOT VALID"
         )
+    home_routine_state()
 
 
 def create_usage_indexes(*, concurrently: bool = True) -> None:
@@ -1117,6 +1197,7 @@ def create_usage_indexes(*, concurrently: bool = True) -> None:
 
 
 def drop_all(*, concurrently: bool = True) -> None:
+    unhome_routine_state()
     for name in USAGE_INDEXES:
         op.drop_index(
             name, table_name="usage_events", if_exists=True, postgresql_concurrently=concurrently

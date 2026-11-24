@@ -275,6 +275,8 @@ class IntakeConfig(BaseModel):
     crm_connection_id: str
     portal_id: str
     routine_id: UUID | None = None
+    #: The workflow that runs intake instead of a routine; at most one of the two is set.
+    workflow_id: UUID | None = None
     recipients: tuple[str, ...] = ()
     notifier_user_ids: tuple[str, ...] = ()
     resolver_user_ids: tuple[str, ...] = ()
@@ -290,6 +292,8 @@ class IntakeConfig(BaseModel):
     def raw_ttl_is_shorter(self) -> IntakeConfig:
         if self.raw_retention_days >= self.retention_days:
             raise ValueError("Raw source retention must be shorter than lead retention")
+        if self.routine_id is not None and self.workflow_id is not None:
+            raise ValueError("Intake is bound to a routine or a workflow, not both")
         return self
 
 

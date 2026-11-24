@@ -16,10 +16,11 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.stores.domain import CHAT_PLATFORMS
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 
-Tier = Literal["deployment", "workspace", "agent", "channel", "thread", "routine"]
+Tier = Literal["deployment", "workspace", "agent", "channel", "thread", "routine", "workflow"]
 TIER_ORDER: Final[tuple[Tier, ...]] = get_args(Tier)
-"""Every tier, broadest first; a routine's own tier is the most specific of its runs."""
-TIERS: Final[tuple[Tier, ...]] = TIER_ORDER[:-1]
+"""Every tier, broadest first; a routine's (or workflow's) own tier is the most specific of its
+runs. A place has at most one of the two."""
+TIERS: Final[tuple[Tier, ...]] = TIER_ORDER[:-2]
 """The tiers of a chat place, every feature's unless narrowed."""
 LOCKABLE: Final[frozenset[Tier]] = frozenset({"deployment", "workspace", "agent", "channel"})
 Effect = Literal["model", "display", "capability", "guardrail", "limit"]
@@ -664,7 +665,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "routine_result_header",
         "Routine result header",
         'Off drops the "Result from" line above a routine\'s result.',
-        tiers=("deployment", "workspace", "agent", "channel", "routine"),
+        tiers=("deployment", "workspace", "agent", "channel", "routine", "workflow"),
         default="on",
     ),
     _shown(
@@ -920,7 +921,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values={"on": "On", "off": "Off"},
         default="off",
-        tiers=("workspace", "agent", "routine"),
+        tiers=("workspace", "agent", "routine", "workflow"),
         binds="turn",
         doc=(
             "On gives an agent's or one routine's runs its built-in tools, for the agent and "
