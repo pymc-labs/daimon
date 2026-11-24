@@ -189,6 +189,10 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         its fixed CPU/RAM, image and the regions you may pass. No shared credentials are
         mounted. Sessions are deleted after their idle lease; export files before
         stopping or expiry.
+
+        The result's state is `running` once the machine has started. `launching` means
+        it is still starting: read compute_get_session_status until it says `running`
+        before you run a command, and do not tell the owner it is ready before then.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         key, metadata = await _approved(
@@ -411,7 +415,11 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def compute_get_session_status(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, session_id: uuid.UUID, origin_context_id: str
     ) -> ComputeStatus:
-        """Read your session's machine state, capacity and expiry without renewing it."""
+        """Read your session's machine state, capacity and expiry without renewing it.
+
+        State `launching` means the machine is still starting and cannot run commands
+        yet. `running` means it has started.
+        """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         try:
             session = await service.get(caller, session_id)

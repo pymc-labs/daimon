@@ -1399,7 +1399,12 @@
       }),
     }),
     'compute_get_session_status': dict({
-      'description': "Read your session's machine state, capacity and expiry without renewing it.",
+      'description': '''
+        Read your session's machine state, capacity and expiry without renewing it.
+        <blank line>
+        State `launching` means the machine is still starting and cannot run commands
+        yet. `running` means it has started.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -1426,6 +1431,10 @@
         its fixed CPU/RAM, image and the regions you may pass. No shared credentials are
         mounted. Sessions are deleted after their idle lease; export files before
         stopping or expiry.
+        <blank line>
+        The result's state is `running` once the machine has started. `launching` means
+        it is still starting: read compute_get_session_status until it says `running`
+        before you run a command, and do not tell the owner it is ready before then.
       ''',
       'parameters': dict({
         'additionalProperties': False,

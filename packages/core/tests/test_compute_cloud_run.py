@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import get_args
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from daimon.core.compute_cloud_run import (
     CloudRunComputeProvider,
     deployment_label,
 )
-from daimon.core.compute_models import ComputeResource, ComputeSession
+from daimon.core.compute_models import ComputeResource, ComputeSession, MachineState
 from daimon.core.compute_provider import ComputeProviderError, app_name
 from daimon.core.config import ComputeProfile, ComputeSettings
 from fastmcp import FastMCP
@@ -217,6 +218,7 @@ async def test_status_maps_cloud_run_readiness_to_machine_states(service, expect
         body = {**service_json(owned), **service}
         return httpx.Response(200, json={k: v for k, v in body.items() if v is not None})
 
+    assert expected in get_args(MachineState), "a provider reports only the documented states"
     assert (await provider(handler).inspect(owned)).machine_state == expected
 
 
