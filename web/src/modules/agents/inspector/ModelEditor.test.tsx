@@ -30,9 +30,9 @@ const show = (model: AgentConfig["model"], update = vi.fn()) => {
 beforeEach(() => vi.clearAllMocks())
 
 describe("ModelEditor", () => {
-  it("lists every model in one list with its provider as a tag and the picked one selected", () => {
+  it("lists the models under their provider's heading and the picked one selected", () => {
     show({ id: "gpt-6-luna", backend: "openai", speed: "standard", effort: "medium" })
-    expect(screen.getByRole("button", { name: /Opus 5\.5/ })).toHaveTextContent("Anthropic")
+    expect(screen.getAllByRole("heading", { level: 4 }).map((h) => h.textContent), "providers in server order").toEqual(["Anthropic", "OpenAI", "Self-hosted"])
     expect(screen.getByRole("button", { name: /GPT-6 Luna/ })).toHaveClass("border-primary")
     expect(screen.getByRole("button", { name: /Opus 5\.5/ }), "other provider not selected").not.toHaveClass("border-primary")
   })

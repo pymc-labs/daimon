@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Model pickers list models by provider, then strongest family, newest version first.** Every
+  picker (web, Discord, Slack, MCP and the CLI) shares one order: providers in their usual order,
+  each provider's families ranked by the current output price of their newest model (Fable, Opus,
+  Sonnet, Haiku), and within a family the latest version first. The web app also groups the models
+  under a provider heading instead of tagging each row
+
 - **The web chat runs an agent kept to Discord roles for people who hold them.** A person
   whose linked Discord account holds the role now finds the agent in the web chat picker; the
   roles come from the member list Daimon keeps and are checked live with Discord before each

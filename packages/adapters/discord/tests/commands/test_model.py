@@ -407,7 +407,7 @@ async def test_the_menus_switch_the_thread_and_redraw_the_emoji_the_last_turn_sh
     await _run(shown, None)
     picker = shown.edit_original_response.call_args.kwargs["view"]
     models, efforts = picker.children
-    assert [o.value for o in models.options] == ["haiku", "sonnet", "opus", "default"]
+    assert [o.value for o in models.options] == ["opus", "sonnet", "haiku", "default"]
     assert [o.value for o in efforts.options][-2:] == ["max", "default"]
 
     picked = _interaction(runtime, guild_id=guild_id)
