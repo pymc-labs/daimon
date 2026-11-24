@@ -93,8 +93,7 @@ BuiltinToolName = Literal[
 ]
 BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
 WEB_CHAT_BARRED: Final = (
-    "The web chat can't run an agent kept to certain roles or to one channel. "
-    "Nothing was saved."
+    "The web chat can't run an agent kept to certain roles or to one channel. Nothing was saved."
 )
 
 AgentEditRefusal = Literal[
