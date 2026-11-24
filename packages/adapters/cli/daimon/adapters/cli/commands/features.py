@@ -43,7 +43,7 @@ from daimon.core.features.service import (
     read_features,
 )
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import source_text, view_json
+from daimon.core.features.surface import present, source_text, view_json
 from daimon.core.routine_sandbox import routine_place
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -177,8 +177,8 @@ async def _read(
         if agent_id
         else None
     )
-    return await read_features(
-        rt.sessionmaker, rt.settings, place, keys=keys, agent_builtins=builtins
+    return present(
+        await read_features(rt.sessionmaker, rt.settings, place, keys=keys, agent_builtins=builtins)
     )
 
 

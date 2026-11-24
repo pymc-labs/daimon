@@ -13,6 +13,8 @@ from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.artifact_pages.importing import Bundle
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.features.deployment import in_workspace
+from daimon.core.features.registry import FEATURES
 from daimon.core.stores.artifact_import import ImportTarget, PageReport, import_page
 from daimon.core.stores.tenants import get_tenant
 from pydantic import ValidationError
@@ -122,6 +124,10 @@ async def _target(
         tenant = await get_tenant(db, tenant_id)
     if tenant is None or tenant.platform != "discord" or tenant.archived_at is not None:
         raise typer.BadParameter(f"{tenant_id} is not a live Discord server")
+    if not in_workspace(FEATURES["artifacts"], runtime.settings, tenant_id):
+        raise typer.BadParameter(
+            f"{tenant_id} has no artifacts: DAIMON_ARTIFACT_PAGES__WORKSPACES leaves it out"
+        )
     if guilds != {tenant.external_id}:
         raise typer.BadParameter(
             f"The files are for server {', '.join(sorted(guilds))}, not {tenant.external_id}"

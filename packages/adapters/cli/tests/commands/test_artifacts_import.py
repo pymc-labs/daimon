@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,7 +70,7 @@ async def operator(db_nullpool_engine, db_clean, monkeypatch):
     monkeypatch.setattr(commands, "build_runtime", runtime)
     monkeypatch.setattr(commands, "load_settings", lambda: None)
     monkeypatch.setattr(commands, "find_agent_by_daimon_tag", agent)
-    return SimpleNamespace(tenant=tenant, factory=factory)
+    return SimpleNamespace(tenant=tenant, factory=factory, settings=settings)
 
 
 async def run(operator, folder: Path, *extra: str):
@@ -116,6 +117,13 @@ async def test_files_for_another_server_or_a_bad_file_write_nothing(operator, tm
     assert bad.exit_code != 0 and LINK not in bad.output, bad.output
     async with operator.factory() as db:
         assert await get_by_public_id(db, "abcdefgh23") is None
+
+
+async def test_a_server_the_deployment_leaves_out_of_artifacts_is_refused(operator, tmp_path):
+    (tmp_path / "a.json").write_text(json.dumps(_bundle()))
+    operator.settings.artifact_pages = ArtifactPagesSettings(workspaces=(uuid.uuid4(),))
+    refused = await run(operator, tmp_path)
+    assert refused.exit_code != 0 and "DAIMON_ARTIFACT_PAGES__WORKSPACES" in refused.output
 
 
 async def test_a_provisional_export_can_be_previewed_but_not_applied(operator, tmp_path):
