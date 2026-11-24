@@ -39,15 +39,39 @@ class ComputeSession(BaseModel):
     warned_for: datetime | None = None
 
 
+#: Every state a provider may report for a session's machine:
+#: `starting` it exists but cannot answer a call yet; `started` it answers calls;
+#: `failed` it will never start as it is; `destroying` it is being removed;
+#: `no_machines` the provider holds nothing for the session; `unknown` not read.
+MachineState = Literal["starting", "started", "failed", "destroying", "no_machines", "unknown"]
+MachineReadiness = Literal["ready", "starting", "failed", "gone"]
+
+
+def machine_readiness(machine_state: str) -> MachineReadiness:
+    """What a machine state means for using the session: the one place that decides.
+
+    Only `started` is ready. A state this does not know, from a provider that says
+    more than `MachineState`, counts as starting: a machine is never taken for ready
+    by accident.
+    """
+    if machine_state == "started":
+        return "ready"
+    if machine_state == "failed":
+        return "failed"
+    if machine_state in ("destroying", "no_machines"):
+        return "gone"
+    return "starting"
+
+
 class ComputeStatus(ComputeSession):
-    machine_state: str
+    machine_state: MachineState
 
 
 class ComputeResource(BaseModel):
     app_name: str
     deployment_id: str
     session_id: uuid.UUID
-    machine_state: str = "unknown"
+    machine_state: MachineState = "unknown"
     machine_id: str | None = None
     # Where the provider holds it, when known: a Cloud Run service is addressed by region.
     region: str | None = None

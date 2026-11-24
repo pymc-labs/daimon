@@ -15,7 +15,7 @@ from typing import Protocol, cast
 
 import httpx
 import structlog
-from daimon.core.compute_models import ComputeResource, ComputeSession
+from daimon.core.compute_models import ComputeResource, ComputeSession, MachineState
 from daimon.core.compute_provider import ComputeProviderError, app_name, app_prefix
 from daimon.core.compute_thin_mcp import call_thin_mcp
 from daimon.core.config import ComputeSettings
@@ -135,7 +135,7 @@ class _Service(BaseModel):
     terminal_condition: _Condition = Field(default_factory=_Condition, alias="terminalCondition")
 
     @property
-    def machine_state(self) -> str:
+    def machine_state(self) -> MachineState:
         """Cloud Run's readiness as the machine state a status reports."""
         if self.delete_time:
             return "destroying"

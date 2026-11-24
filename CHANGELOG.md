@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The old names are not kept as second names. No session can be in use across this
     upgrade, because the provider it ran on is gone. A call to an old name answers with
     the tool's new name and runs nothing.
+- **A machine is reported ready only after it has started.** A new compute session stays
+  `launching` until its machine answers, and becomes `running` then. A command sent
+  earlier gets "The machine is still starting. Try again in about 10 seconds." and starts
+  nothing. A machine that cannot start, for example from a wrong image, is removed, and
+  its owner is told to ask an admin.
 - **A background command lost to a machine restart keeps its last output.** The message
   that reports it, and `compute_task_result`, show what Daimon last saved.
 - **`compute_read_file` reads at most 512 KiB a call.** Its old 4 MiB maximum never fitted in
