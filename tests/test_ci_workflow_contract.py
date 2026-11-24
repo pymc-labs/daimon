@@ -126,6 +126,9 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "mux",
         "harness",
         "harness-conformance",
+        # Core's compute caller and task scripts against the session server. The image
+        # build itself is a docker-build step, which a deploy does not wait for.
+        "compute-session",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))

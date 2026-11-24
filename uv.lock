@@ -24,6 +24,7 @@ members = [
     "daimon-adapter-slack",
     "daimon-adapter-teams",
     "daimon-adapter-web",
+    "daimon-compute-session",
     "daimon-core",
     "daimon-harness",
     "daimon-mux",
@@ -1207,6 +1208,21 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2" },
     { name = "structlog", specifier = ">=24" },
     { name = "uvicorn", specifier = ">=0.30" },
+]
+
+[[package]]
+name = "daimon-compute-session"
+version = "0.2.0"
+source = { editable = "apps/compute-session" }
+dependencies = [
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "starlette", specifier = ">=0.40" },
+    { name = "uvicorn", specifier = ">=0.34" },
 ]
 
 [[package]]
