@@ -1,7 +1,7 @@
 """Google Cloud Run control plane: one private service per session.
 
-The service runs the same thin MCP image as a Fly machine, with one instance that
-keeps its CPU between requests. Errors deliberately omit remote bodies and URLs.
+The service runs the thin MCP image with one instance that keeps its CPU between
+requests. Errors deliberately omit remote bodies and URLs.
 """
 
 from __future__ import annotations
@@ -16,13 +16,7 @@ from typing import Protocol, cast
 import httpx
 import structlog
 from daimon.core.compute_models import ComputeResource, ComputeSession
-from daimon.core.compute_provider import (
-    OTHER_PROVIDER,
-    ComputeProviderError,
-    app_name,
-    app_prefix,
-    region_provider,
-)
+from daimon.core.compute_provider import ComputeProviderError, app_name, app_prefix
 from daimon.core.compute_thin_mcp import call_thin_mcp
 from daimon.core.config import ComputeSettings
 from google import auth as google_auth
@@ -142,7 +136,7 @@ class _Service(BaseModel):
 
     @property
     def machine_state(self) -> str:
-        """Cloud Run's readiness in the words Fly uses for a machine."""
+        """Cloud Run's readiness as the machine state a status reports."""
         if self.delete_time:
             return "destroying"
         if self.terminal_condition.state == "CONDITION_FAILED":
@@ -238,10 +232,6 @@ class CloudRunComputeProvider:
             raise ComputeProviderError(
                 "Cloud Run resource ownership does not match this deployment."
             )
-        if resource.region is not None and region_provider(resource.region) != "cloud_run":
-            # A missing service would read as deleted while the other provider's
-            # machine kept running and billing.
-            raise ComputeProviderError(OTHER_PROVIDER)
 
     async def _get(self, region: str, name: str) -> _Service | None:
         response = await self._request("GET", self._path(region, name))

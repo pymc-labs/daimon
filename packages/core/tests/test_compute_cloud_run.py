@@ -41,7 +41,6 @@ class Tokens:
 
 def config(**kwargs):
     return ComputeSettings(
-        provider="cloud_run",
         deployment_id="deployment-a",
         cloud_run_project="test-project",
         cloud_run_service_account=SERVICE_ACCOUNT,
@@ -71,7 +70,6 @@ def session(deployment="deployment-a", region="us-central1"):
         profile="mmm",
         image="mmm@sha256:abc",
         region=region,
-        cpu_kind="shared",
         cpus=2,
         memory_mb=4096,
         ttl_hours=24,

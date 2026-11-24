@@ -67,6 +67,7 @@ from daimon.core.tool_safety import (
     heal_reserved_server,
     session_tools_for_policy,
     trusted_servers_for,
+    with_current_tool_names,
 )
 from pydantic import (
     BaseModel,
@@ -647,9 +648,11 @@ def session_tools(
     agent, hidden_mcp_server_names = _with_toolset(agent, hidden_mcp_server_names, toolset)
     visible = visible_tools(agent, hidden_mcp_server_names)
     dumped = _dumped(visible)
+    # An agent written before a daimon tool was renamed still names the old one.
+    named = with_current_tool_names(dumped) or dumped
     gated = session_tools_for_policy(
         tool_safety,
-        dumped,
+        named,
         trusted_servers=trusted_servers_for(
             public_url, {s.name: s.url for s in visible_mcp_servers(agent, hidden_mcp_server_names)}
         ),
@@ -657,10 +660,10 @@ def session_tools(
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
     )
-    payload = gated if gated is not None else dumped
+    payload = gated if gated is not None else named
     hidden_tools = frozenset[str]() if toolset is None else toolset.hidden_daimon_tools
     if not legacy_memory_servers and not hidden_tools:
-        return visible if gated is None else _retyped(visible, dumped, gated)
+        return visible if payload is dumped else _retyped(visible, dumped, payload)
     if legacy_memory_servers:
         payload = suppress_legacy_readers(payload, legacy_memory_servers)
     if hidden_tools:

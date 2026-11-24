@@ -59,7 +59,10 @@ def _set_up() -> Settings:
                 host_url=HttpUrl("http://report-host:8002"), admin_secret=SecretStr("r" * 32)
             ),
             "compute": ComputeSettings(
-                enabled=True, deployment_id="d", api_token=SecretStr("c" * 32), org_slug="o"
+                enabled=True,
+                deployment_id="d",
+                cloud_run_project="p",
+                cloud_run_service_account="s@p.iam.gserviceaccount.com",
             ),
         }
     )

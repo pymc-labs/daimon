@@ -2876,29 +2876,20 @@ class ComputeProfile(BaseModel):
         description="Operator-reviewed thin MCP image reference, preferably a digest."
     )
     regions: list[str] = Field(
-        default_factory=lambda: ["iad"],
-        description=(
-            "Allowed regions: Fly regions such as iad, or Google Cloud regions such as "
-            "us-central1 on Cloud Run."
-        ),
-    )
-    cpu_kind: Literal["shared", "performance"] = Field(
-        default="shared", description="Fly CPU class. Cloud Run ignores it."
+        default_factory=lambda: list[str](),
+        description="Allowed Google Cloud regions, such as us-central1. At least one.",
     )
     cpus: int = Field(
         default=2,
         gt=0,
         le=16,
-        description="Fixed CPU count for this image profile. Cloud Run allows 1, 2, 4, 6 or 8.",
+        description="Fixed CPU count for this image profile: 1, 2, 4, 6 or 8.",
     )
     memory_mb: int = Field(
         default=4096,
         ge=256,
         le=131072,
-        description=(
-            "Fixed RAM in MB. Cloud Run allows 512 to 32768, within the range its CPU "
-            "count permits."
-        ),
+        description="Fixed RAM in MB: 512 to 32768, within the range its CPU count permits.",
     )
 
 
@@ -2919,8 +2910,8 @@ def _cloud_run_profile_error(name: str, profile: ComputeProfile) -> str | None:
     bad = [region for region in profile.regions if not _CLOUD_RUN_REGION.fullmatch(region)]
     if not profile.regions or bad:
         return (
-            f"compute profile {name!r} needs Google Cloud regions such as us-central1 "
-            f"when provider is cloud_run; got {profile.regions}"
+            f"compute profile {name!r} needs Google Cloud regions such as us-central1; "
+            f"got {profile.regions}"
         )
     limits = _CLOUD_RUN_MEMORY_MB.get(profile.cpus)
     if limits is None:
@@ -2943,48 +2934,25 @@ class ComputeSettings(BaseModel):
             "disable cleanup."
         ),
     )
-    provider: Literal["fly", "cloud_run"] = Field(
-        default="fly",
-        description=(
-            "Where sessions run: fly (Fly Machines) or cloud_run (one Google Cloud Run "
-            "service per session). Stop every session before changing it: only the "
-            "selected provider is cleaned up."
-        ),
-    )
     deployment_id: str = Field(
         default="",
         description=(
-            "Stable unique deployment identifier fencing provider resources. Required to "
+            "Stable unique deployment identifier fencing session resources. Required to "
             "use compute."
-        ),
-    )
-    api_token: SecretStr | None = Field(
-        default=None,
-        repr=False,
-        description=(
-            "Fly API token, control plane and scheduler only. Never mounted in compute "
-            "machines. Required when provider is fly."
-        ),
-    )
-    org_slug: str = Field(
-        default="",
-        description=(
-            "Fly organization for this deployment's disposable sessions. Required when "
-            "provider is fly."
         ),
     )
     cloud_run_project: str = Field(
         default="",
         description=(
-            "Google Cloud project id that holds the session services. Required when "
-            "provider is cloud_run. Daimon signs in with application default credentials."
+            "Google Cloud project id that holds the session services. Required to use "
+            "compute. Daimon signs in with application default credentials."
         ),
     )
     cloud_run_service_account: str = Field(
         default="",
         description=(
             "Email of the service account session containers run as. Give it no roles. "
-            "Required when provider is cloud_run."
+            "Required to use compute."
         ),
     )
     session_auth_key: SecretStr | None = Field(
@@ -3027,36 +2995,30 @@ class ComputeSettings(BaseModel):
     )
     profiles: dict[str, ComputeProfile] = Field(
         default_factory=dict,
-        description=(
-            "Operator-managed image profiles. Empty means no images can be launched. "
-            "No environment or credentials are copied from template apps."
-        ),
+        description=("Operator-managed image profiles. Empty means no images can be launched."),
     )
 
     @property
     def provider_configured(self) -> bool:
-        """Whether the selected provider has the settings its API calls need."""
-        if self.provider == "cloud_run":
-            return bool(self.cloud_run_project and self.cloud_run_service_account)
-        return self.api_token is not None and bool(self.org_slug)
+        """Whether the provider has the settings its API calls need."""
+        return bool(self.cloud_run_project and self.cloud_run_service_account)
 
     @model_validator(mode="after")
     def _cloud_run_is_complete(self) -> ComputeSettings:
-        """Refuse a Cloud Run selection that could not launch or clean up.
+        """Refuse a half-configured provider, or a profile Cloud Run could not run.
 
-        Fly settings stay unchecked here: an installation that never uses compute
-        leaves them empty.
+        Nothing is checked until a Cloud Run setting is given: an installation that
+        does not use compute, or still carries settings of a removed provider, starts.
         """
-        if self.provider != "cloud_run":
+        fields = ("cloud_run_project", "cloud_run_service_account")
+        given = [field for field in fields if getattr(self, field)]
+        missing = [field for field in fields if field not in given]
+        if not given:
             return self
-        missing = [
-            "DAIMON_COMPUTE__" + field.upper()
-            for field in ("cloud_run_project", "cloud_run_service_account")
-            if not getattr(self, field)
-        ]
         if missing:
             raise ValueError(
-                "DAIMON_COMPUTE__PROVIDER=cloud_run also needs " + " and ".join(missing)
+                f"DAIMON_COMPUTE__{given[0].upper()} also needs "
+                f"DAIMON_COMPUTE__{missing[0].upper()}"
             )
         for name, profile in self.profiles.items():
             if (error := _cloud_run_profile_error(name, profile)) is not None:

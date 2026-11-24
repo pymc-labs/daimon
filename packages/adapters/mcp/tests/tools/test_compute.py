@@ -1,4 +1,4 @@
-"""Fly tool admission refuses forged/unattended execution before any provider access."""
+"""Compute tool admission refuses forged/unattended execution before any provider access."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.tools import fly
+from daimon.adapters.mcp.tools import compute
 from daimon.core.compute_thin_mcp import MAX_READ_BYTES
 from daimon.core.config import ComputeSettings
 from daimon.core.stores.domain import Role, TurnOriginRow
@@ -84,17 +84,17 @@ async def test_attended_signed_owner_admission(monkeypatch, mode):
         origin = origin.model_copy(
             update={"human_invocation": False if mode == "nonhuman" else None}
         )
-    monkeypatch.setattr(fly, "_auth", AsyncMock(return_value=AuthIdentity(**kwargs)))
+    monkeypatch.setattr(compute, "_auth", AsyncMock(return_value=AuthIdentity(**kwargs)))
     verifier = AsyncMock(return_value=origin)
     if mode == "forged":
         verifier.side_effect = ToolError("Origin is forged")
-    monkeypatch.setattr(fly, "require_turn_origin", verifier)
+    monkeypatch.setattr(compute, "require_turn_origin", verifier)
     if mode == "valid":
-        _, caller = await fly._caller(SimpleNamespace(), None, str(origin.id))
+        _, caller = await compute._caller(SimpleNamespace(), None, str(origin.id))
         assert caller.account_id == origin.account_id and not caller.admin
     else:
         with pytest.raises(ToolError):
-            await fly._caller(SimpleNamespace(), None, str(origin.id))
+            await compute._caller(SimpleNamespace(), None, str(origin.id))
     if mode in {"client", "routine", "worker", "agent", "missing_session", "no_chat_agent"}:
         verifier.assert_not_called()
 
@@ -118,14 +118,14 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
         parent_channel_id="parent",
     )
     gap = AsyncMock(return_value="session_not_gated" if mode == "not_gated" else None)
-    monkeypatch.setattr(fly._session_gate, "session_card_gap", gap)
+    monkeypatch.setattr(compute._session_gate, "session_card_gap", gap)
     monkeypatch.setattr(
-        fly,
+        compute,
         "get_live_thread_session",
         AsyncMock(return_value=SimpleNamespace(ma_session_id="parent-session")),
     )
     monkeypatch.setattr(
-        fly,
+        compute,
         "retrieve_session",
         AsyncMock(
             return_value=SimpleNamespace(
@@ -133,15 +133,20 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
             )
         ),
     )
-    args = {"template": "mmm", "origin_context_id": "origin", "region": "iad", "ttl_hours": None}
-    event_args = {"template": "mmm", "origin_context_id": "origin"}
+    args = {
+        "template": "mmm",
+        "origin_context_id": "origin",
+        "region": "us-central1",
+        "ttl_hours": None,
+    }
+    event_args = {"template": "mmm", "origin_context_id": "origin", "region": "us-central1"}
     if mode == "changed":
-        event_args["region"] = "lhr"
+        event_args["region"] = "europe-west4"
     events = [
         SimpleNamespace(
             type="agent.mcp_tool_use",
-            name="fly_launch_session",
-            mcp_server_name="foreign" if mode == "foreign_tool" else fly.DAIMON_SERVER_NAME,
+            name="compute_launch_session",
+            mcp_server_name="foreign" if mode == "foreign_tool" else compute.DAIMON_SERVER_NAME,
             input=event_args,
             id="tool-call",
         )
@@ -151,23 +156,23 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
             SimpleNamespace(type="user.tool_confirmation", result="allow", tool_use_id="tool-call")
         )
     monkeypatch.setattr(
-        fly, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+        compute, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
     if mode == "approved":
-        key, metadata = await fly._approved(
-            runtime, auth, origin, "fly_launch_session", args, {"region": "iad", "ttl_hours": None}
+        key, metadata = await compute._approved(
+            runtime, auth, origin, "compute_launch_session", args, {"ttl_hours": None}
         )
         assert key == "parent-session:tool-call"
         assert metadata["daimon_thread"] == "thread"
     else:
         with pytest.raises(ToolError):
-            await fly._approved(
+            await compute._approved(
                 runtime,
                 auth,
                 origin,
-                "fly_launch_session",
+                "compute_launch_session",
                 args,
-                {"region": "iad", "ttl_hours": None},
+                {"ttl_hours": None},
             )
 
 
@@ -193,14 +198,14 @@ async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode
     )
     # Inline bash has no approval card; a background start must not demand one.
     gap = AsyncMock(return_value="session_not_gated")
-    monkeypatch.setattr(fly._session_gate, "session_card_gap", gap)
+    monkeypatch.setattr(compute._session_gate, "session_card_gap", gap)
     monkeypatch.setattr(
-        fly,
+        compute,
         "get_live_thread_session",
         AsyncMock(return_value=SimpleNamespace(ma_session_id="parent-session")),
     )
     monkeypatch.setattr(
-        fly,
+        compute,
         "retrieve_session",
         AsyncMock(
             return_value=SimpleNamespace(
@@ -226,15 +231,15 @@ async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode
     events = [
         SimpleNamespace(
             type="agent.mcp_tool_use",
-            name="fly_run_bash",
-            mcp_server_name="foreign" if mode == "foreign_tool" else fly.DAIMON_SERVER_NAME,
+            name="compute_run_bash",
+            mcp_server_name="foreign" if mode == "foreign_tool" else compute.DAIMON_SERVER_NAME,
             input={**event_input, "run_in_background": False},
             id="earlier-inline",
         ),
         SimpleNamespace(
             type="agent.mcp_tool_use",
-            name="fly_run_bash",
-            mcp_server_name="foreign" if mode == "foreign_tool" else fly.DAIMON_SERVER_NAME,
+            name="compute_run_bash",
+            mcp_server_name="foreign" if mode == "foreign_tool" else compute.DAIMON_SERVER_NAME,
             input=event_input,
             id="background-use",
         ),
@@ -242,8 +247,8 @@ async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode
     if mode == "none":
         events = []
     if mode.startswith("proxied"):
-        # The agent reaches fly_run_bash through the search interface's proxy.
-        inner = "fly_read_file" if mode == "proxied_other_tool" else "fly_run_bash"
+        # The agent reaches compute_run_bash through the search interface's proxy.
+        inner = "compute_read_file" if mode == "proxied_other_tool" else "compute_run_bash"
         events = [
             SimpleNamespace(
                 type=e.type,
@@ -255,18 +260,18 @@ async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode
             for e in events
         ]
     monkeypatch.setattr(
-        fly, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+        compute, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
     if mode in {"same", "proxied"}:
-        key, _ = await fly._approved(
-            runtime, auth, origin, "fly_run_bash", args, defaults, approval=False
+        key, _ = await compute._approved(
+            runtime, auth, origin, "compute_run_bash", args, defaults, approval=False
         )
         assert key == "parent-session:background-use"
         gap.assert_not_awaited()
     else:
         with pytest.raises(ToolError):
-            await fly._approved(
-                runtime, auth, origin, "fly_run_bash", args, defaults, approval=False
+            await compute._approved(
+                runtime, auth, origin, "compute_run_bash", args, defaults, approval=False
             )
 
 
@@ -287,15 +292,15 @@ def test_task_view_withholds_output_except_from_result():
         output_path="/tmp/daimon-tasks/x.out",
         created_at=now,
     )
-    status = fly._task_view(task, output=False)
+    status = compute._task_view(task, output=False)
     assert status["task_id"] == str(task.id) and "output_tail" not in status
     assert not {"tenant_id", "owner_account_id", "request_key"} & set(status)
-    assert fly._task_view(task, output=True)["output_tail"] == "secret output"
+    assert compute._task_view(task, output=True)["output_tail"] == "secret output"
 
 
 async def test_read_limit_is_the_largest_chunk_the_session_answer_can_carry():
     """The tool, its message and its description all take the limit from the transport."""
-    assert fly._read_arguments("/data/out.csv", 0, MAX_READ_BYTES)["limit"] == MAX_READ_BYTES
+    assert compute._read_arguments("/data/out.csv", 0, MAX_READ_BYTES)["limit"] == MAX_READ_BYTES
     for path, offset, limit in (
         ("/data/out.csv", 0, MAX_READ_BYTES + 1),
         ("/data/out.csv", 0, 0),
@@ -304,13 +309,13 @@ async def test_read_limit_is_the_largest_chunk_the_session_answer_can_carry():
         ("/nul\x00", 0, 1),
     ):
         with pytest.raises(ToolError, match=f"{MAX_READ_BYTES // 1024} KiB"):
-            fly._read_arguments(path, offset, limit)
+            compute._read_arguments(path, offset, limit)
     mcp = FastMCP("test")
     runtime = SimpleNamespace(
         session_factory=None,
         settings=SimpleNamespace(compute=ComputeSettings()),
         compute_provider=None,
     )
-    fly.register_fly_tools(mcp, runtime)
-    description = (await mcp.get_tool("fly_read_file")).description
+    compute.register_compute_tools(mcp, runtime)
+    description = (await mcp.get_tool("compute_read_file")).description
     assert f"at most {MAX_READ_BYTES // 1024} KiB" in description

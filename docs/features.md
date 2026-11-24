@@ -1295,7 +1295,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and machine launches keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |

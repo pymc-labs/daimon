@@ -248,7 +248,7 @@ NO_ORIGIN: dict[str, str] = {
 }
 
 _READS = "reads only; changes nothing"
-_LIVE = "needs live provider (a chat platform, Microsoft or Fly call); posts or edits content, not a setting. Its channel is checked by the isolation view"
+_LIVE = "needs live provider (a chat platform, Microsoft or compute provider call); posts or edits content, not a setting. Its channel is checked by the isolation view"
 _TURN = "starts or ends a turn or session; not a channel or agent setting. Access is the isolation view and the turn gate"
 _SCHEDULED = "a routine, timer, watch or long job of the caller; content side, as web SAVE_ROUTINE. The reader rule applies when it runs"
 _TENANT = "tenant-wide: people, admins, credits, allowances, promo codes, invites, support or providers; not scoped to a channel or an agent"
@@ -272,6 +272,18 @@ EXEMPT: dict[str, str] = {
     "change_issue_state": _TENANT,
     "change_workspace_settings": _TENANT,
     "check_server_skill": _NEW,
+    "compute_extend_session": _LIVE,
+    "compute_get_session_status": _READS,
+    "compute_launch_session": _LIVE,
+    "compute_list_files": _READS,
+    "compute_list_sessions": _READS,
+    "compute_list_templates": _READS,
+    "compute_read_file": _READS,
+    "compute_run_bash": _LIVE,
+    "compute_stop_session": _LIVE,
+    "compute_task_result": _READS,
+    "compute_task_status": _READS,
+    "compute_write_file": _LIVE,
     "connect_microsoft": _LIVE,
     "continue_turn": _TURN,
     "convert": _LIVE,
@@ -301,18 +313,6 @@ EXEMPT: dict[str, str] = {
     "edit_message": _LIVE,
     "explain_agent_resolution": _READS,
     "fetch_youtube_transcript": _READS,
-    "fly_extend_session": _LIVE,
-    "fly_get_session_status": _READS,
-    "fly_launch_session": _LIVE,
-    "fly_list_files": _READS,
-    "fly_list_sessions": _READS,
-    "fly_list_templates": _READS,
-    "fly_read_file": _READS,
-    "fly_run_bash": _LIVE,
-    "fly_stop_session": _LIVE,
-    "fly_task_result": _READS,
-    "fly_task_status": _READS,
-    "fly_write_file": _LIVE,
     "forget_watch_credential": _SCHEDULED,
     "fork_agent": _NEW,
     "fork_server_skill": _NEW,

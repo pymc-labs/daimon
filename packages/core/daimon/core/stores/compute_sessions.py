@@ -127,7 +127,7 @@ async def warn(db: AsyncSession, session: ComputeSession, now: datetime) -> None
         idempotency_key=uuid.uuid5(session.id, session.expires_at.isoformat()),
         available_at=now,
         attended=False,
-        requested_work=f"Tell the owner: Fly machine {session.id} expires at "
+        requested_work=f"Tell the owner: machine {session.id} expires at "
         f"{session.expires_at.isoformat()} and its files will be deleted. "
         "Ask them to extend it in an attended conversation if needed. Do not run commands.",
     )

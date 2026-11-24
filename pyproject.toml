@@ -156,7 +156,6 @@ type = "forbidden"
 source_modules = [
     "daimon.core._erasure_guards",
     "daimon.core.compute_cloud_run",
-    "daimon.core.compute_fly",
     "daimon.core.compute_models",
     "daimon.core.compute_provider",
     "daimon.core.compute_sessions",

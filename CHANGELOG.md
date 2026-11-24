@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Compute sessions can run on Google Cloud Run.** `DAIMON_COMPUTE__PROVIDER=cloud_run`,
-  with `DAIMON_COMPUTE__CLOUD_RUN_PROJECT` and `DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT`,
-  runs each session as one private Cloud Run service with one always-on instance. Fly
-  stays the default and needs no change. Stop every session before changing the provider.
-- **`fly_read_file` reads at most 512 KiB a call.** Its old 4 MiB maximum never fitted in
+- **Breaking: compute sessions run on Google Cloud Run only, and their tools are named
+  `compute_*`.** The Fly provider is gone. `DAIMON_COMPUTE__PROVIDER`,
+  `DAIMON_COMPUTE__API_TOKEN`, `DAIMON_COMPUTE__ORG_SLUG` and a profile's `cpu_kind` are
+  ignored, so a deployment that still passes them starts with compute not set up. To use
+  compute, set `DAIMON_COMPUTE__CLOUD_RUN_PROJECT` and
+  `DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT` and give every profile Google Cloud regions
+  ([Compute sessions](docs/compute.md)). Stop every Fly session before upgrading: Daimon no
+  longer deletes Fly machines. Each `fly_*` tool keeps its verb (`fly_run_bash` is
+  `compute_run_bash`). Tool rules and an agent's own tool list follow the new names with
+  no action. `compute_launch_session` needs a `region`.
+- **A background command lost to a machine restart keeps its last output.** The message
+  that reports it, and `compute_task_result`, show what Daimon last saved.
+- **`compute_read_file` reads at most 512 KiB a call.** Its old 4 MiB maximum never fitted in
   a session's answer, so the largest reads failed. Read a larger file in several calls.
 - **Production deploys no longer pin both backend switches off.** `DAIMON_TURN__CHANNEL_BACKENDS` and `DAIMON_TURN__AGENT_BACKENDS` come from each environment's own config, like any other setting.
 - **The web app no longer turns blank after a deploy, and works on phones in desktop mode.**

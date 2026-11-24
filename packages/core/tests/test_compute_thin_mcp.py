@@ -1,6 +1,6 @@
 """The read limit and the response limit are one rule: every allowed read fits.
 
-`fly_read_file` once allowed a 4 MiB chunk while the transport refused any response
+The read tool once allowed a 4 MiB chunk while the transport refused any response
 over 8 MiB. A chunk travels twice in a response, so the largest read never fitted.
 """
 
@@ -67,3 +67,27 @@ async def test_the_costliest_chunk_of_the_largest_read_is_carried():
 async def test_a_chunk_whose_cost_reaches_the_response_limit_is_refused(byte, cost):
     with pytest.raises(ComputeProviderError, match="too large"):
         await _read(byte * (MAX_RESPONSE_BYTES // cost))
+
+
+@pytest.mark.parametrize("json_response", [True, False])
+@pytest.mark.parametrize("stateless", [True, False])
+async def test_an_inline_call_works_over_every_server_transport_mode(json_response, stateless):
+    thin = FastMCP("thin-test")
+
+    @thin.tool
+    async def run_bash(command: str, timeout_s: int):
+        assert timeout_s == 40
+        return {"exit_code": 0, "stdout": command, "timed_out": False}
+
+    # task=True on the deployed image means optional task support; a normal
+    # tools/call without task augmentation uses this same inline wire path.
+    app = thin.http_app(path="/mcp/", stateless_http=stateless, json_response=json_response)
+    async with app.router.lifespan_context(app):
+        result = await call_thin_mcp(
+            "https://session.test/mcp/",
+            "per-session-token",
+            "run_bash",
+            {"command": "hello", "timeout_s": 40},
+            transport=httpx.ASGITransport(app=app),
+        )
+    assert result == {"exit_code": 0, "stdout": "hello", "timed_out": False}

@@ -5187,7 +5187,6 @@ class ComputeSessionRecord(Base):
     profile: Mapped[str]
     image: Mapped[str]
     region: Mapped[str]
-    cpu_kind: Mapped[str]
     cpus: Mapped[int]
     memory_mb: Mapped[int]
     state: Mapped[str] = mapped_column(server_default="launching")
