@@ -23,6 +23,7 @@ from daimon.core.artifact_pages.importing import (
     compat_warnings,
 )
 from daimon.core.artifact_pages.model import ArtifactError, Limits, check_title, new_link_secret
+from daimon.core.artifact_pages.standing import visitor_accounts
 from daimon.core.config import ArtifactPagesSettings
 from daimon.core.continuity.watch_projection import projection_path
 from daimon.core.stores import artifact_pages, watches, web_identities, web_people
@@ -261,6 +262,17 @@ async def import_page(
         account = await _account(session, cache, tenant_id, ref.discord_id)
         if account != owner and account not in editors:
             editors.append(account)
+    # The store's rule (`_require_members`): a visitor or outsider never edits a page.
+    barred = await visitor_accounts(session, tenant_id=tenant_id, account_ids=[owner, *editors])
+    if barred:
+        return PageReport(
+            page.slug,
+            "refused",
+            problems=(
+                f"{len(barred)} of the owner and editors are outsiders here; "
+                "only members can edit a page",
+            ),
+        )
     dropped = len(page.editors) - len(editors)
     if len(editors) > Limits.EDITORS:
         dropped += len(editors) - Limits.EDITORS

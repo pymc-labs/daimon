@@ -187,7 +187,8 @@ limit refuses the page.
 `legacy_url` is the page's address in the old system, and the page's `imported_from`.
 A rerun finds the page by it and replaces its versions, data, people and imported
 watches in place, so its threads and the settings made here stay. A page whose name or
-`public_id` is taken by another page, or that was imported under another name, is refused.
+`public_id` is taken by another page, or that was imported under another name, is refused,
+as is one whose owner or editor is an [outsider](artifacts.md#who-can-open-a-page): only members edit a page.
 
 A watch is imported as a page watch and ends any callback watch imported with the same
 `legacy_id`. One in a thread with no live conversation reports in a new thread instead.

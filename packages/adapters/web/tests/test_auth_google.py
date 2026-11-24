@@ -10,6 +10,7 @@ import httpx
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import WebPersonRow
+from daimon.testing.outsiders import hold_audience, link_discord_member
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import funded_workspace, visitor_of
@@ -127,6 +128,29 @@ async def test_a_members_email_never_signs_in_with_google(
 
     assert _refusal(back) == _NO_ACCESS, "members sign in with their chat account"
     assert await _pins(db_session_factory, "g-2") == [], "a member is never pinned"
+
+
+async def test_an_outsiders_email_never_signs_in_with_google(
+    web_client: WebClientFactory, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An outsider counts as a visitor for pages, but is a member row: no email match."""
+    ws = await funded_workspace(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await hold_audience(session, ws.tenant_id)
+        await link_discord_member(
+            session,
+            tenant_id=ws.tenant_id,
+            account_id=ws.person.account_id,
+            internal=False,
+            discord_id="7001",
+        )
+
+    back, _ = await _sign_in(
+        web_client, db_session_factory, fake_google(sub="g-3", email=ws.person.email)
+    )
+
+    assert _refusal(back) == _NO_ACCESS, "an outsider signs in with Discord, not by email"
+    assert await _pins(db_session_factory, "g-3") == [], "an outsider is never pinned"
 
 
 async def test_an_account_matching_no_guest_is_refused(

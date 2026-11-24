@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invited by that address and is tied to them; members never match by email and
   an account that matches nobody is refused. With Google on, sharing a page by
   email gives the sharer no sign-in link. See the Web app page.
+- **Outsiders count as visitors for pages.** Where `audience_hold` is on, a Discord
+  member with no internal role opens a `workspace` page only if it names them, sends
+  events with `sender` `visitor`, and cannot edit, own or use a page with tools or
+  watches. A page that names one is visible outside the workspace. Importing a page
+  whose owner or editor is an outsider refuses it.
+- **Page assets from one path of a host.** `DAIMON_WEB__ARTIFACT_ASSET_HOSTS` takes an
+  exact https host with a path ending in `/` (`https://img.example.com/account/upload/`),
+  so pages load only that service's own files. A whole host that fetches any URL is
+  still refused, wildcard hosts take no path, and `%` and dot segments are rejected.
+- **Operator tokens can reach page data.** The `artifacts:data` scope allows
+  `artifact_list`, `artifact_db_query` and `artifact_db_write` as the admin who minted
+  the token. Publishing, sources, delete, transfer and watches stay refused.
 - **Page watches report wherever their owner chats.** Slack, Teams and the web app
   can make page-event watches, and Daimon rechecks a Slack or Teams owner before
   every report. Page watches can be permanent, keep one part of each event with

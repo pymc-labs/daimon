@@ -16,7 +16,8 @@ from daimon.core.stores import artifact_pages, watches
 from daimon.core.stores.artifact_import import ImportTarget, import_page
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.outsiders import hold_audience, link_discord_member
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -338,3 +339,23 @@ async def test_a_page_in_the_way_expired_or_oversized_is_refused_or_skipped(
         expires_at=(NOW - timedelta(days=1)).isoformat(),
     )
     assert (await import_page(db, old, target, now=NOW)).action == "expired"
+
+
+async def test_an_outsider_editor_refuses_the_page_as_the_store_rule_does(
+    db_session: AsyncSession, tenant: TenantRow
+) -> None:
+    """With `audience_hold` on, a Discord member with no internal role counts as a visitor,
+    and a visitor never edits a page; the import refuses rather than grants it."""
+    db = db_session
+    await hold_audience(db, tenant.id)
+    for discord_id, internal in ((OWNER, True), (EDITOR, False)):
+        account = await make_account(db, tenant=tenant)
+        await link_discord_member(
+            db, tenant_id=tenant.id, account_id=account.id, internal=internal, discord_id=discord_id
+        )
+
+    report = await import_page(db, _page(), _target(tenant, db), now=NOW)
+
+    assert report.action == "refused", report
+    assert any("1 of the owner and editors" in p for p in report.problems), report.problems
+    assert await artifact_pages.get_by_public_id(db, "abcdefgh23") is None, "nothing written"

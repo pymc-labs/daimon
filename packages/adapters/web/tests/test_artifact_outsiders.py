@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from daimon.core.artifact_pages.events import event_matches
 from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores.domain import WebPersonRow
 from daimon.testing.outsiders import INTERNAL_ROLE, hold_audience, link_discord_member
@@ -106,6 +107,8 @@ async def test_an_outsiders_event_is_a_visitors_on_a_page_visible_outside(
     assert event is not None
     assert event.data["sender"] == "visitor" and event.data["by"] == "Out", event.data
     assert event.data["page_visible_outside_workspace"] is True, event.data
+    assert event_matches({"sender": "visitor"}, event.data), "a `where` on visitors sees them"
+    assert not event_matches({"sender": "member"}, event.data), "and not as a member"
 
 
 async def test_a_watch_is_not_fed_once_its_owner_is_an_outsider(
