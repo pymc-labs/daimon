@@ -835,8 +835,9 @@ async def test_a_launch_does_not_wait_on_a_provider_that_hangs(db_engine, db_cle
     owner, _, _ = await caller(sm)
     fake = FakeComputeProvider()
 
-    async def hang(session, token):
+    async def hang(session: ComputeSession, token: str) -> ComputeResource:
         await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
     monkeypatch.setattr(fake, "ensure", hang)
     monkeypatch.setattr("daimon.core.compute_sessions._LAUNCH_WAIT", timedelta(seconds=0.05))
