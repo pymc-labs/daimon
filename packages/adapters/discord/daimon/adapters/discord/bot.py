@@ -150,6 +150,7 @@ from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.direct_messages import sealed_among
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -178,7 +179,6 @@ from daimon.core.stores.discord_message_admissions import (
 from daimon.core.stores.domain import (
     CredentialRequestRow,
     Role,
-    RoutineRow,
     TaskContinuationRow,
     TenantRow,
     ThreadSessionRow,
@@ -933,7 +933,7 @@ class DaimonBot(commands.Bot):
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
 
-    async def _routine_agent_names(self, row: RoutineRow) -> tuple[str | None, ...]:
+    async def _routine_agent_names(self, row: RoutineFacts) -> tuple[str | None, ...]:
         agent = await find_agent_by_daimon_tag(
             self.runtime.anthropic,
             tenant_id=row.tenant_id,

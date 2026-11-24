@@ -20,15 +20,17 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daimon.core.audience_gate import audience_fact, log_shadow_refusal, read_audience_mode
 from daimon.core.channel_audience import AudienceMode, ChannelAudience, channel_has_outsiders
 from daimon.core.fire.subject import RoutineFacts
 from daimon.core.rule_views import routine_destination_channel
-from daimon.core.stores.domain import RoutineRow
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.fire.delivery import DeliveryFacts
 
 
 async def routine_hold(
@@ -48,7 +50,7 @@ async def routine_hold(
 
 async def result_is_held(
     sessionmaker: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     platform: str,
     parent_channel_id: str | None = None,
@@ -88,7 +90,7 @@ class StoredHold:
     hold: TurnHold | None = None
 
 
-def stored_delivery_hold(row: RoutineRow, *, platform: str) -> StoredHold:
+def stored_delivery_hold(row: DeliveryFacts, *, platform: str) -> StoredHold:
     """The hold the fire of `row`'s pending result ran under.
 
     A value that cannot be read is an unheld result: a contained destination refuses it.
@@ -172,7 +174,7 @@ class DeliveryGate:
 
 
 async def delivery_gate(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, *, platform: str
+    sessionmaker: async_sessionmaker[AsyncSession], row: DeliveryFacts, *, platform: str
 ) -> DeliveryGate:
     """The gate for delivering `row`'s pending result. A failed mode read raises."""
     destination = routine_destination_channel(row)

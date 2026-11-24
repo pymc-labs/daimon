@@ -1,4 +1,4 @@
-"""Discord's `RoutinePoster`: post a routine's result to its destination.
+"""Discord's `Poster`: post a routine's result (a `DeliveryJob`) to its destination.
 
 Run by the bot's delivery poller (`daimon.core.routine_delivery`). The
 destination is resolved here — a channel, or a thread, which on Discord is a
@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -43,7 +42,9 @@ from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.delivery import RoutinePoster
 from daimon.core.dm_access import roles_by_membership, sender_admits
+from daimon.core.fire.delivery import DeliveryJob, Poster, routine_poster
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.message_split import split_fenced
@@ -52,7 +53,6 @@ from daimon.core.output_delivery import DeliverableFile
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
-    claim_still_current,
     clear_creator,
     delivery_target,
     discord_creator_may_post,
@@ -63,18 +63,15 @@ from daimon.core.routine_delivery import (
     tenant_dm_still_open,
 )
 from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
-from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import DeliveryGate, delivery_gate, result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.direct_messages import dm_enabled
-from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
-__all__ = ["make_discord_routine_poster"]
+__all__ = ["make_discord_poster", "make_discord_routine_poster"]
 
 log = structlog.get_logger(__name__)
 
@@ -84,42 +81,42 @@ ChannelFetcher = Callable[[int], Awaitable[object]]
 #: Open a DM with a member of a guild: `(guild_id, user_id)` → something with
 #: `send`. Raises `discord.HTTPException` (or `LookupError`) when it cannot.
 DmOpener = Callable[[int, int], Awaitable[discord.abc.Messageable]]
-DmPolicyLookup = Callable[[RoutineRow], DirectMessagePolicy]
+DmPolicyLookup = Callable[[DeliveryJob], DirectMessagePolicy]
 
 
 async def _agent_admits(
     sessionmaker: async_sessionmaker[AsyncSession],
     resolver: MembershipResolver | None,
-    row: RoutineRow,
+    job: DeliveryJob,
     user_id: str,
 ) -> bool:
     """The routine's agent grant admits the person, by their current server roles."""
     async with sessionmaker() as session:
-        tenant = await get_tenant(session, row.tenant_id)
+        tenant = await get_tenant(session, job.tenant_id)
     if tenant is None:
         return False
     return await sender_admits(
         sessionmaker,
-        tenant_id=row.tenant_id,
-        agent_name=row.agent_name,
+        tenant_id=job.tenant_id,
+        agent_name=job.agent_name,
         user_id=user_id,
-        groups=roles_by_membership(resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id),
+        groups=roles_by_membership(resolver, tenant_id=job.tenant_id, guild_id=tenant.external_id),
     )
 
 
-#: The identity a routine's result posts under: `(row, guild_id)` → identity.
-IdentityResolver = Callable[[RoutineRow, str], Awaitable[AgentIdentity]]
-AgentNamesResolver = Callable[[RoutineRow], Awaitable[tuple[str | None, ...]]]
+#: The identity a routine's result posts under: `(job, guild_id)` → identity.
+IdentityResolver = Callable[[DeliveryJob, str], Awaitable[AgentIdentity]]
+AgentNamesResolver = Callable[[DeliveryJob], Awaitable[tuple[str | None, ...]]]
 
 _UNRESOLVED = object()
 
 
 async def _untagged(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, text: str
+    sessionmaker: async_sessionmaker[AsyncSession], job: DeliveryJob, text: str
 ) -> str:
     """``text`` with anyone who opted out of tags shown by plain name."""
     return await untag_opted_out(
-        sessionmaker, tenant_id=row.tenant_id, platform="discord", text=text
+        sessionmaker, tenant_id=job.tenant_id, platform="discord", text=text
     )
 
 
@@ -210,7 +207,37 @@ def make_discord_routine_poster(
     resolve_identity: IdentityResolver | None = None,
     membership_resolver: MembershipResolver | None = None,
     resolve_agent_names: AgentNamesResolver | None = None,
-) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
+) -> RoutinePoster:
+    """The routine outbox's poster, over `make_discord_poster`."""
+    return routine_poster(
+        sessionmaker,
+        make_discord_poster(
+            sessionmaker,
+            fetch_channel=fetch_channel,
+            open_dm=open_dm,
+            dm_policy=dm_policy,
+            client=client,
+            output_client=output_client,
+            resolve_identity=resolve_identity,
+            membership_resolver=membership_resolver,
+            resolve_agent_names=resolve_agent_names,
+        ),
+        platform="discord",
+    )
+
+
+def make_discord_poster(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    fetch_channel: ChannelFetcher,
+    open_dm: DmOpener,
+    dm_policy: DmPolicyLookup,
+    client: discord.Client | None = None,
+    output_client: AsyncAnthropic | None = None,
+    resolve_identity: IdentityResolver | None = None,
+    membership_resolver: MembershipResolver | None = None,
+    resolve_agent_names: AgentNamesResolver | None = None,
+) -> Poster:
     """A poster bound to the bot's channel lookup (cache first, then REST).
 
     Without `client` and `resolve_identity` every result posts as the bot.
@@ -220,7 +247,7 @@ def make_discord_routine_poster(
         GatewayMembershipResolver(client) if client is not None else None
     )
 
-    def refusal(row: RoutineRow, reason: str) -> DeliveryOutcome:
+    def refusal(job: DeliveryJob, reason: str) -> DeliveryOutcome:
         private_reasons = {
             "invoker_not_allowed": "The owner is no longer a verified, allowed server member.",
             "access_policy_unreadable": "The server access settings could not be read.",
@@ -232,67 +259,48 @@ def make_discord_routine_poster(
         }
         return DeliveryOutcome(
             status="skipped",
-            note=private_reasons.get(reason, reason) if row.destination_kind == "dm" else reason,
+            note=private_reasons.get(reason, reason) if job.destination_kind == "dm" else reason,
         )
 
-    async def creator_still_cleared(row: RoutineRow) -> DeliveryOutcome | None:
-        async with sessionmaker() as session:
-            current = await get_routine(session, row.id, tenant_id=row.tenant_id)
-            if current is None or (current.destination_kind, current.destination_id) != (
-                row.destination_kind,
-                row.destination_id,
-            ):
-                return DeliveryOutcome(status="skipped", note="destination_changed")
-            if row.destination_kind == "dm" and (
-                current.agent_id != row.agent_id
-                or current.agent_name != row.agent_name
-                or current.updated_at != row.updated_at
-            ):
-                return DeliveryOutcome(status="skipped", note="private_revision_changed")
-            if not claim_still_current(current, row, datetime.now(UTC)):
-                return DeliveryOutcome(
-                    status="skipped", note="Delivery was interrupted; it will not be retried."
-                )
-            if row.destination_kind == "dm":
-                if (current.destination_kind, current.destination_id) != (
-                    "dm",
-                    row.created_by_user_id,
-                ):
-                    return DeliveryOutcome(status="skipped", note="destination_changed")
-                if not await dm_enabled(session, tenant_id=row.tenant_id):
+    async def creator_still_cleared(job: DeliveryJob) -> DeliveryOutcome | None:
+        if (stale := await job.still_current()) is not None:
+            return DeliveryOutcome(status="skipped", note=stale)
+        if job.destination_kind == "dm":
+            async with sessionmaker() as session:
+                if not await dm_enabled(session, tenant_id=job.tenant_id):
                     return DeliveryOutcome(
                         status="skipped", note="Routine DMs are disabled for this server."
                     )
-        if row.destination_kind == "dm" and not (
-            dm_policy(row).allows(row.created_by_user_id or "")
+        if job.destination_kind == "dm" and not (
+            dm_policy(job).allows(job.created_by_user_id or "")
             and await _agent_admits(
-                sessionmaker, membership_resolver, row, row.created_by_user_id or ""
+                sessionmaker, membership_resolver, job, job.created_by_user_id or ""
             )
         ):
             return DeliveryOutcome(
                 status="skipped", note="The owner is not allowed to receive DMs."
             )
         cleared = await clear_creator(
-            sessionmaker, row, platform="discord", membership_resolver=membership_resolver
+            sessionmaker, job, platform="discord", membership_resolver=membership_resolver
         )
         if not isinstance(cleared, TenantAccessPolicy):
-            return refusal(row, cleared)
-        if row.destination_kind == "dm" and (any_agent_rules(cleared) or any_own_readers(cleared)):
+            return refusal(job, cleared)
+        if job.destination_kind == "dm" and (any_agent_rules(cleared) or any_own_readers(cleared)):
             if resolve_agent_names is None:
                 return DeliveryOutcome(
                     status="skipped", note="The routine agent could not be verified."
                 )
-            names = await resolve_agent_names(row)
+            names = await resolve_agent_names(job)
             # The owner, freshly resolved: a role-gated agent delivers only for
             # an owner who holds its roles. A routine with no owner holds none.
             owner = (
                 Subject()
-                if row.created_by_user_id is None
+                if job.created_by_user_id is None
                 else await resolve_subject(
                     sessionmaker,
                     membership_resolver,
-                    tenant_id=row.tenant_id,
-                    user_id=row.created_by_user_id,
+                    tenant_id=job.tenant_id,
+                    user_id=job.created_by_user_id,
                     require_fresh=True,
                 )
             )
@@ -307,14 +315,14 @@ def make_discord_routine_poster(
                 return DeliveryOutcome(
                     status="skipped", note="The agent is not allowed to deliver privately."
                 )
-        if row.destination_kind == "dm" and keeps_routine_inside(cleared, row):
+        if job.destination_kind == "dm" and keeps_routine_inside(cleared, job):
             return DeliveryOutcome(
                 status="skipped", note="A restricted source cannot deliver by DM."
             )
         return None
 
     async def attach(
-        row: RoutineRow,
+        job: DeliveryJob,
         destination: discord.abc.Messageable,
         fallback_guard: Callable[[], Awaitable[bool]] | None = None,
         gate: DeliveryGate | None = None,
@@ -322,15 +330,15 @@ def make_discord_routine_poster(
         async def may_post() -> bool:
             if fallback_guard is not None and not await fallback_guard():
                 return False
-            if await creator_still_cleared(row) is not None:
+            if await creator_still_cleared(job) is not None:
                 return False
             if isinstance(destination, discord.TextChannel | discord.Thread):
                 placement = await channel_placement(destination, fetch_channel)
-                if placement is None or row.created_by_user_id is None:
+                if placement is None or job.created_by_user_id is None:
                     return False
                 parent, category, _guild, permissions = placement
                 policy = await clear_creator(
-                    sessionmaker, row, platform="discord", membership_resolver=membership_resolver
+                    sessionmaker, job, platform="discord", membership_resolver=membership_resolver
                 )
                 try:
                     audience = (
@@ -359,7 +367,7 @@ def make_discord_routine_poster(
                         audience=audience,
                     )
                     and await creator_may_post(
-                        destination, permissions, int(row.created_by_user_id)
+                        destination, permissions, int(job.created_by_user_id)
                     )
                 )
             return True
@@ -370,12 +378,12 @@ def make_discord_routine_poster(
         async def upload(file: DeliverableFile) -> None:
             await upload_output_file(destination, file)
 
-        if output_client is None and decode_payload(payload_for(row)).files:
+        if output_client is None and decode_payload(payload_for(job)).files:
             raise RuntimeError("Generated file delivery is unavailable; it will not be retried.")
         if output_client is not None:
             await deliver_routine_files(
                 output_client,
-                payload_for(row),
+                payload_for(job),
                 max_bytes=upload_limit(destination),
                 post=upload,
                 notice=notice,
@@ -383,23 +391,23 @@ def make_discord_routine_poster(
             )
 
     async def _dm_fallback(
-        row: RoutineRow,
+        job: DeliveryJob,
         reason: str,
         guild_id: str,
         may_post: Callable[[], Awaitable[bool]],
     ) -> DeliveryOutcome:
         async with sessionmaker() as session:
-            if not await dm_enabled(session, tenant_id=row.tenant_id):
+            if not await dm_enabled(session, tenant_id=job.tenant_id):
                 return DeliveryOutcome(
                     status="skipped", note="Routine DMs are disabled for this server."
                 )
-        creator = row.created_by_user_id
+        creator = job.created_by_user_id
         if (
             creator is None
             or not creator.isdigit()
             or not guild_id.isdigit()
-            or not dm_policy(row).allows(creator)
-            or not await _agent_admits(sessionmaker, membership_resolver, row, creator)
+            or not dm_policy(job).allows(creator)
+            or not await _agent_admits(sessionmaker, membership_resolver, job, creator)
         ):
             return DeliveryOutcome(status="skipped", note=reason)
         try:
@@ -409,27 +417,27 @@ def make_discord_routine_poster(
             for chunk in split_fenced(
                 await _untagged(
                     sessionmaker,
-                    row,
-                    render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row)),
+                    job,
+                    render_fallback_dm(job, reason, await routine_agent_name(sessionmaker, job)),
                 ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
                 async with sessionmaker() as session:
-                    if not await dm_enabled(session, tenant_id=row.tenant_id):
+                    if not await dm_enabled(session, tenant_id=job.tenant_id):
                         return DeliveryOutcome(
                             status="skipped", note="Routine DMs are disabled for this server."
                         )
-                if (refused := await creator_still_cleared(row)) is not None:
+                if (refused := await creator_still_cleared(job)) is not None:
                     return refused
                 if not await may_post():
                     return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
                 await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
-            await attach(row, dm, fallback_guard=may_post)
+            await attach(job, dm, fallback_guard=may_post)
         except (discord.HTTPException, LookupError) as err:
             log.warning(
                 "routine.delivery_fallback_failed",
-                routine_id=str(row.id),
+                routine_id=str(job.id),
                 error_type=type(err).__name__,
             )
             # Closed DMs or a gone member repeat on every run: a skip, not a failure that pages.
@@ -439,98 +447,98 @@ def make_discord_routine_poster(
             )
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
-    async def _post(row: RoutineRow) -> DeliveryOutcome:
+    async def _post(job: DeliveryJob) -> DeliveryOutcome:
         async with sessionmaker() as session:
-            tenant = await get_tenant(session, row.tenant_id)
+            tenant = await get_tenant(session, job.tenant_id)
         if tenant is None or tenant.archived_at is not None:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
         # Creator first, before resolving or sending anything: a creator who
         # may no longer invoke the agent, or an unreadable policy, gets
         # nothing — no destination post and no direct message.
         cleared = await clear_creator(
-            sessionmaker, row, platform="discord", membership_resolver=membership_resolver
+            sessionmaker, job, platform="discord", membership_resolver=membership_resolver
         )
         if not isinstance(cleared, TenantAccessPolicy):
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
-            return refusal(row, cleared)
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason=cleared)
+            return refusal(job, cleared)
         policy = cleared
         # The hold the result's fire ran under, and the audience mode (`audience_hold`). A
         # failed read refuses the delivery: it never falls back to a mode.
         try:
-            gate = await delivery_gate(sessionmaker, row, platform="discord")
+            gate = await delivery_gate(sessionmaker, job, platform="discord")
         except Exception as exc:
             log.warning("routine.delivery_audience_unreadable", error_type=type(exc).__name__)
             return DeliveryOutcome(status="skipped", note="audience_unreadable")
         # An isolated or shared channel's result never leaves it, not even by DM.
-        held = await result_is_held(sessionmaker, row, platform="discord")
-        keep_inside = keeps_routine_inside(policy, row) or held or gate.keeps_inside(held)
+        held = await result_is_held(sessionmaker, job, platform="discord")
+        keep_inside = keeps_routine_inside(policy, job) or held or gate.keeps_inside(held)
         parent_channel_id: str | None = None
 
         async def fallback_guard() -> bool:
-            held_now = await result_is_held(sessionmaker, row, platform="discord")
+            held_now = await result_is_held(sessionmaker, job, platform="discord")
             if held_now or gate.keeps_inside(held_now):
                 return False
-            if await creator_still_cleared(row) is not None:
+            if await creator_still_cleared(job) is not None:
                 return False
             # Every DM send of a channel routine (the fallback and its attachments) asks
             # again whether the owner is still inside the team (`on` only).
             if (
                 await private_delivery_refusal(
-                    sessionmaker, row, membership_resolver=membership_resolver
+                    sessionmaker, job, membership_resolver=membership_resolver
                 )
                 is not None
             ):
                 return False
-            if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
+            if not await tenant_dm_still_open(sessionmaker, job, tenant.external_id):
                 return False
-            creator = row.created_by_user_id
+            creator = job.created_by_user_id
             if (
                 creator is None
-                or not dm_policy(row).allows(creator)
-                or not await _agent_admits(sessionmaker, membership_resolver, row, creator)
+                or not dm_policy(job).allows(creator)
+                or not await _agent_admits(sessionmaker, membership_resolver, job, creator)
             ):
                 return False
             current_policy = await clear_creator(
-                sessionmaker, row, platform="discord", membership_resolver=membership_resolver
+                sessionmaker, job, platform="discord", membership_resolver=membership_resolver
             )
             return isinstance(current_policy, TenantAccessPolicy) and not keeps_routine_inside(
-                current_policy, row, parent_channel_id=parent_channel_id
+                current_policy, job, parent_channel_id=parent_channel_id
             )
 
         async def fallback(reason: str) -> DeliveryOutcome:
             if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
-            return await _dm_fallback(row, reason, tenant.external_id, fallback_guard)
+            return await _dm_fallback(job, reason, tenant.external_id, fallback_guard)
 
-        if row.destination_kind == "dm":
-            if row.destination_id is None or row.destination_id != row.created_by_user_id:
+        if job.destination_kind == "dm":
+            if job.destination_id is None or job.destination_id != job.created_by_user_id:
                 return DeliveryOutcome(status="skipped", note="DM recipient must be the owner.")
-            if (refused := await creator_still_cleared(row)) is not None:
+            if (refused := await creator_still_cleared(job)) is not None:
                 return refused
             try:
-                dm = await open_dm(int(tenant.external_id), int(row.destination_id))
+                dm = await open_dm(int(tenant.external_id), int(job.destination_id))
                 text = (
-                    f"Routine {row.trigger_message[:60]}\n"
-                    f"Run {row.id} / {row.last_fired_at}\n\n"
+                    f"Routine {job.trigger_message[:60]}\n"
+                    f"Run {job.id} / {job.last_fired_at}\n\n"
                     + await _untagged(
                         sessionmaker,
-                        row,
+                        job,
                         render_fallback_post(
-                            row,
-                            agent_name=await routine_agent_name(sessionmaker, row),
-                            header=await routine_header_shown(sessionmaker, row, "discord"),
+                            job,
+                            agent_name=await routine_agent_name(sessionmaker, job),
+                            header=job.header,
                         ),
                     )
                 )
                 for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
-                    if (refused := await creator_still_cleared(row)) is not None:
+                    if (refused := await creator_still_cleared(job)) is not None:
                         return refused
                     await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
-                await attach(row, dm)
+                await attach(job, dm)
             except (discord.HTTPException, LookupError, ValueError, TypeError) as err:
                 log.info(
                     "routine.delivery_dm_failed",
-                    routine_id=str(row.id),
+                    routine_id=str(job.id),
                     error_type=type(err).__name__,
                 )
                 return DeliveryOutcome(
@@ -538,7 +546,7 @@ def make_discord_routine_poster(
                 )
             return DeliveryOutcome(status="delivered")
 
-        target = delivery_target(row, platform="discord")
+        target = delivery_target(job, platform="discord")
         if target is None or not target.channel_id.isdigit():
             return await fallback("destination_unavailable")
         try:
@@ -553,14 +561,14 @@ def make_discord_routine_poster(
         parent_channel_id, category_id, _guild_id, permission_source = placement
         # The parent is known now, also for a thread saved without it.
         held = held or await result_is_held(
-            sessionmaker, row, platform="discord", parent_channel_id=parent_channel_id
+            sessionmaker, job, platform="discord", parent_channel_id=parent_channel_id
         )
         keep_inside = (
-            keeps_routine_inside(policy, row, parent_channel_id=parent_channel_id)
+            keeps_routine_inside(policy, job, parent_channel_id=parent_channel_id)
             or held
             or gate.keeps_inside(held)
         )
-        creator = row.created_by_user_id
+        creator = job.created_by_user_id
         if (
             creator is None
             or not creator.isdigit()
@@ -569,7 +577,7 @@ def make_discord_routine_poster(
             # A routine posts on its creator's behalf: never somewhere they
             # could not post themselves. Their own DM is still fine.
             log.info(
-                "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
+                "routine.delivery_refused", routine_id=str(job.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
         try:
@@ -592,10 +600,10 @@ def make_discord_routine_poster(
         )
         if decision.reason == "audience_contained":
             # A result made outside a room that outsiders can now read stays out of it.
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason=decision.reason)
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason=decision.reason)
             return DeliveryOutcome(status="skipped", note="audience_contained")
         if not decision:
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason="protected_channel")
             return await fallback("protected_channel")
         assert isinstance(channel, discord.Thread | discord.TextChannel)
 
@@ -624,20 +632,20 @@ def make_discord_routine_poster(
                 audience=fresh,
             )
             if again.reason == "audience_contained":
-                log.info("routine.delivery_refused", routine_id=str(row.id), reason=again.reason)
+                log.info("routine.delivery_refused", routine_id=str(job.id), reason=again.reason)
                 return DeliveryOutcome(status="skipped", note="audience_contained")
             return None
 
-        delivery_id = uuid.uuid4()  # groups the chunks into one reply for delete_reply
+        delivery_id = job.delivery_id or uuid.uuid4()  # the chunks are one reply for delete_reply
 
         async def record(sent: discord.Message) -> None:
             # A reply to the result starts a turn only for a recorded post (a
             # webhook post cannot be pinged); the creator is who asked for it.
             await record_turn_post(
                 sessionmaker,
-                tenant_id=row.tenant_id,
+                tenant_id=job.tenant_id,
                 platform="discord",
-                ma_agent_id=row.agent_id,
+                ma_agent_id=job.agent_id,
                 channel_id=str(channel.id),
                 message_id=str(sent.id),
                 requester_platform_user_id=creator,
@@ -647,7 +655,7 @@ def make_discord_routine_poster(
             )
 
         identity = (
-            await resolve_identity(row, tenant.external_id)
+            await resolve_identity(job, tenant.external_id)
             if client is not None and resolve_identity is not None
             else None
         )
@@ -655,18 +663,18 @@ def make_discord_routine_poster(
             for chunk in split_fenced(
                 await _untagged(
                     sessionmaker,
-                    row,
+                    job,
                     render_fallback_post(
-                        row,
+                        job,
                         platform="discord",
-                        agent_name=await routine_agent_name(sessionmaker, row),
-                        header=await routine_header_shown(sessionmaker, row, "discord"),
+                        agent_name=await routine_agent_name(sessionmaker, job),
+                        header=job.header,
                     ),
                 ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
-                if (refused := await creator_still_cleared(row)) is not None:
+                if (refused := await creator_still_cleared(job)) is not None:
                     return refused
                 if (refused := await still_deliverable()) is not None:
                     return refused
@@ -674,7 +682,7 @@ def make_discord_routine_poster(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()
                 )
                 await record(sent)
-            await attach(row, channel, gate=gate)
+            await attach(job, channel, gate=gate)
             return DeliveryOutcome(status="delivered")
         # A bot fallback puts the name label on top, so leave room for it.
         limit = _DISCORD_MAX_CHARS - len(fallback_name_prefix(identity.name, ""))
@@ -690,20 +698,20 @@ def make_discord_routine_poster(
             split_fenced(
                 await _untagged(
                     sessionmaker,
-                    row,
+                    job,
                     render_fallback_post(
-                        row,
+                        job,
                         as_agent=True,
                         platform="discord",
                         agent_name=identity.name,
-                        header=await routine_header_shown(sessionmaker, row, "discord"),
+                        header=job.header,
                     ),
                 ),
                 limit,
                 word_boundary=True,
             )
         ):
-            if (refused := await creator_still_cleared(row)) is not None:
+            if (refused := await creator_still_cleared(job)) is not None:
                 return refused
             if (refused := await still_deliverable()) is not None:
                 return refused
@@ -713,7 +721,7 @@ def make_discord_routine_poster(
                 _prefix_if_fallback=index == 0,
             )
             await record(sent)
-        await attach(row, channel, gate=gate)
+        await attach(job, channel, gate=gate)
         return DeliveryOutcome(status="delivered")
 
     return _post

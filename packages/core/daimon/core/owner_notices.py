@@ -24,6 +24,7 @@ from daimon.core.auxiliary_calls import auxiliary_complete
 from daimon.core.config import Settings, env_admits
 from daimon.core.discord_membership import send_discord_dm, send_discord_error_dm
 from daimon.core.dm_access import groups_by_members, roles_by_membership, sender_admits
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
@@ -71,12 +72,12 @@ class OwnerNotice:
     """The agent's own words; None sends the card."""
 
 
-#: One platform's DM to the owner: None once sent, else the fixed reason it was not sent.
-OwnerDm = Callable[[RoutineRow, OwnerNotice], Awaitable[str | None]]
+#: One platform's DM to the owner of a routine or a job: None once sent, else why it was not.
+OwnerDm = Callable[[RoutineFacts, OwnerNotice], Awaitable[str | None]]
 
 
 def discord_owner_dm(bot_token: str) -> OwnerDm:
-    async def send(row: RoutineRow, notice: OwnerNotice) -> str | None:
+    async def send(row: RoutineFacts, notice: OwnerNotice) -> str | None:
         owner = row.created_by_user_id
         assert owner is not None
         if notice.text is not None:

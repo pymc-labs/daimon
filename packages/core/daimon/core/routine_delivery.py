@@ -13,7 +13,8 @@ things follow from it, and nothing changes for a routine without one:
    short failure notice the same way (`record_failure`).
 3. The post happens in the chat adapter for the tenant's platform — the
    scheduler has no platform client. Each adapter runs
-   `run_delivery_poller` with its own `RoutinePoster`; an adapter that runs
+   `run_delivery_poller` with its own `RoutinePoster`, which posts each row
+   as a `DeliveryJob` (`daimon.core.fire.delivery`); an adapter that runs
    none leaves rows `pending`, which is the safe default for a platform that
    cannot post yet. Before posting, `delivery_refusal` applies the tenant's
    access policy: a write-protected destination, or a creator no longer
@@ -106,7 +107,6 @@ __all__ = [
     "DeliveryTarget",
     "RoutinePoster",
     "agent_posted_to",
-    "claim_still_current",
     "destination_shape_error",
     "failure_notice_text",
     "record_failure",
@@ -130,6 +130,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from daimon.core.fire.delivery import DeliveryFacts
     from daimon.core.owner_notices import OwnerDm
 
 log = structlog.get_logger(__name__)
@@ -497,7 +498,7 @@ async def record_routine_failure(
 
 
 def render_fallback_post(
-    row: RoutineRow,
+    row: DeliveryFacts,
     *,
     as_agent: bool = False,
     platform: str | None = None,
@@ -527,7 +528,7 @@ def render_fallback_post(
 
 
 async def routine_requester_name(
-    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineRow, platform: str
+    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineFacts, platform: str
 ) -> str | None:
     """The routine creator's stored display name, for platforms whose tag would ping."""
     if sessionmaker is None or row.created_by_user_id is None:
@@ -540,7 +541,7 @@ async def routine_requester_name(
 
 def _attributed(
     text: str,
-    row: RoutineRow,
+    row: RoutineFacts,
     platform: str | None,
     requester_name: str | None = None,
     agent_name: str | None = None,
@@ -559,7 +560,7 @@ def _attributed(
 
 
 async def routine_agent_name(
-    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineRow
+    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineFacts
 ) -> str:
     """The routine's agent as people see it: its display name, else its name."""
     if sessionmaker is None:
@@ -574,7 +575,7 @@ async def resolve_routine_identity(
     client: AsyncAnthropic,
     settings: Settings,
     *,
-    row: RoutineRow,
+    row: RoutineFacts,
     platform: Literal["discord", "slack"],
     workspace_id: str,
     default_agent_name: str | None,
@@ -635,7 +636,7 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(row: RoutineRow, reason: str, agent_name: str | None = None) -> str:
+def render_fallback_dm(row: DeliveryFacts, reason: str, agent_name: str | None = None) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
     The agent (as people see it, `routine_agent_name`) and schedule first, then why the
@@ -719,7 +720,7 @@ def creator_refusal_for(
 
 async def clear_creator(
     sessionmaker: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     platform: str,
     membership_resolver: MembershipResolver | None = None,
@@ -800,7 +801,7 @@ async def clear_creator(
 
 
 async def _owner_is_outsider(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, *, subject: Subject
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineFacts, *, subject: Subject
 ) -> bool:
     """Whether `audience_hold` is `on` and the owner of a private result holds no internal role.
 
@@ -825,7 +826,7 @@ async def _owner_is_outsider(
 
 async def private_delivery_refusal(
     sessionmaker: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     membership_resolver: MembershipResolver | None = None,
 ) -> SkipReason | None:
@@ -912,22 +913,8 @@ def placement_unknown_is_unsafe(
     return any_writers_none(policy, categories_only=True)
 
 
-def claim_still_current(current: RoutineRow, row: RoutineRow, now: datetime) -> bool:
-    """Whether the delivery lease `row` was claimed with is still held and unexpired.
-
-    `current` is the routine as read now. A row that was not claimed has no
-    lease to lose.
-    """
-    return row.delivery_status != "claimed" or (
-        current.delivery_status == "claimed"
-        and current.delivery_lease_owner == row.delivery_lease_owner
-        and current.delivery_lease_expires_at is not None
-        and current.delivery_lease_expires_at > now
-    )
-
-
 async def tenant_dm_still_open(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, external_id: str
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineFacts, external_id: str
 ) -> bool:
     """Whether `row`'s tenant is still the live workspace `external_id` with routine DMs on."""
     async with sessionmaker() as session:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 import anthropic
 import structlog
@@ -18,8 +19,10 @@ from daimon.core.output_delivery import (
     poll_output_files,
     render_oversize_notice,
 )
-from daimon.core.stores.domain import RoutineRow
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from daimon.core.fire.delivery import DeliveryFacts
 
 log = structlog.get_logger(__name__)
 
@@ -55,7 +58,7 @@ def plain_payload(text: str | None) -> str | None:
     return text
 
 
-def payload_for(row: RoutineRow) -> str | None:
+def payload_for(row: DeliveryFacts) -> str | None:
     """Only host-tagged envelopes may supply file ids; legacy replies stay text."""
     if row.delivery_note == OUTBOX_FILES:
         return row.delivery_payload

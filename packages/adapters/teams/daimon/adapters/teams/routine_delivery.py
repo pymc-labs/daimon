@@ -1,4 +1,4 @@
-"""Teams' `RoutinePoster`: post a routine's result to its channel or thread.
+"""Teams' `Poster`: post a routine's result (a `DeliveryJob`) to its channel or thread.
 
 Run by the app's delivery poller (`daimon.core.routine_delivery`) for the
 configured organisation's routines only. A thread destination is
@@ -26,7 +26,7 @@ and the agent's context name it.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 
 import httpx
@@ -39,7 +39,10 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy, env_dm_policy
+from daimon.core.delivery import RoutinePoster
 from daimon.core.dm_access import groups_by_members, sender_admits
+from daimon.core.fire.delivery import DeliveryJob, Poster, routine_poster
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.message_split import split_fenced
 from daimon.core.native_admins import GroupMembers
 from daimon.core.owner_notices import OwnerDm, OwnerNotice
@@ -54,14 +57,12 @@ from daimon.core.routine_delivery import (
     teams_thread_id,
 )
 from daimon.core.routine_files import payload_for, unsupported_files_note
-from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.direct_messages import dm_enabled
-from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["make_teams_owner_dm", "make_teams_routine_poster"]
+__all__ = ["make_teams_owner_dm", "make_teams_poster", "make_teams_routine_poster"]
 
 log = structlog.get_logger(__name__)
 
@@ -76,7 +77,7 @@ def make_teams_owner_dm(
 ) -> OwnerDm:
     """DM a routine's owner its failure notice, under the rules of the result fallback DM."""
 
-    async def send(row: RoutineRow, notice: OwnerNotice) -> str | None:
+    async def send(row: RoutineFacts, notice: OwnerNotice) -> str | None:
         if row.tenant_id != tenant_id:
             return "other_organisation"
         owner = row.created_by_user_id
@@ -117,30 +118,54 @@ def make_teams_routine_poster(
     dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
     feed: ActivityFeed | None = None,
     team_members: GroupMembers | None = None,
-) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
-    """The poster for `tenant_id`'s routines; another organisation's rows are skipped.
+) -> RoutinePoster:
+    """The routine outbox's poster for `tenant_id`, over `make_teams_poster`."""
+    return routine_poster(
+        sessionmaker,
+        make_teams_poster(
+            sessionmaker,
+            teams,
+            tenant_id=tenant_id,
+            dm_policies=dm_policies,
+            feed=feed,
+            team_members=team_members,
+        ),
+        platform="teams",
+    )
+
+
+def make_teams_poster(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    teams: DirectChats,
+    *,
+    tenant_id: uuid.UUID,
+    dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
+    feed: ActivityFeed | None = None,
+    team_members: GroupMembers | None = None,
+) -> Poster:
+    """The poster for `tenant_id`'s results; another organisation's jobs are skipped.
 
     `feed` sends the creator a notice for a result posted in a channel; None sends none.
     `team_members` resolves the teams a DM grant names; None leaves them unknown.
     """
 
     async def record(
-        row: RoutineRow,
+        job: DeliveryJob,
         conversation: str,
         activity_id: str,
         *,
         delivery: uuid.UUID,
         parent: str | None = None,
     ) -> None:
-        assert row.created_by_user_id is not None
+        assert job.created_by_user_id is not None
         await record_turn_post(
             sessionmaker,
-            tenant_id=row.tenant_id,
+            tenant_id=job.tenant_id,
             platform="teams",
-            ma_agent_id=row.agent_id,
+            ma_agent_id=job.agent_id,
             channel_id=conversation,
             message_id=activity_id,
-            requester_platform_user_id=row.created_by_user_id,
+            requester_platform_user_id=job.created_by_user_id,
             source="routine",
             parent_channel_id=parent,
             role="routine",
@@ -148,43 +173,43 @@ def make_teams_routine_poster(
             delivery_id=delivery,
         )
 
-    async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:
-        creator = row.created_by_user_id
-        policy = env_dm_policy(dm_policies, row.tenant_id)
+    async def dm_fallback(job: DeliveryJob, reason: str) -> DeliveryOutcome:
+        creator = job.created_by_user_id
+        policy = env_dm_policy(dm_policies, job.tenant_id)
         async with sessionmaker() as session:
-            enabled = await dm_enabled(session, tenant_id=row.tenant_id)
+            enabled = await dm_enabled(session, tenant_id=job.tenant_id)
         if (
             not enabled
             or creator is None
             or not policy.allows(creator)
             or not await sender_admits(
                 sessionmaker,
-                tenant_id=row.tenant_id,
-                agent_name=row.agent_name,
+                tenant_id=job.tenant_id,
+                agent_name=job.agent_name,
                 user_id=creator,
                 groups=groups_by_members(team_members),
             )
         ):
             return DeliveryOutcome(status="skipped", note=reason)
-        target = delivery_target(row, platform="teams")
+        target = delivery_target(job, platform="teams")
         try:
             # The creator's roster id comes from the team the routine posts in.
             member = await teams.member(target.channel_id, creator) if target else None
             if member is None:
                 return DeliveryOutcome(status="skipped", note=reason)
             chat = await teams.open_chat(member)
-            delivery = uuid.uuid4()
+            delivery = job.delivery_id or uuid.uuid4()
             for chunk in split_fenced(
-                render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row))
-                + unsupported_files_note(payload_for(row)),
+                render_fallback_dm(job, reason, await routine_agent_name(sessionmaker, job))
+                + unsupported_files_note(payload_for(job)),
                 TEAMS_LIMIT,
                 word_boundary=True,
             ):
-                await record(row, chat, await teams.post(chat, chunk), delivery=delivery)
+                await record(job, chat, await teams.post(chat, chunk), delivery=delivery)
         except TEAMS_SEND_ERRORS as err:
             log.warning(
                 "routine.delivery_fallback_failed",
-                routine_id=str(row.id),
+                routine_id=str(job.id),
                 error_type=type(err).__name__,
             )
             # The app blocked or removed, or the person gone, repeats on every run: no page.
@@ -194,25 +219,25 @@ def make_teams_routine_poster(
             )
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
-    async def post(row: RoutineRow) -> DeliveryOutcome:
-        if row.destination_kind == "dm":
+    async def post(job: DeliveryJob) -> DeliveryOutcome:
+        if job.destination_kind == "dm":
             return DeliveryOutcome(status="skipped", note="DM routines are not supported here.")
-        if row.tenant_id != tenant_id:
+        if job.tenant_id != tenant_id:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
-        cleared = await clear_creator(sessionmaker, row, platform="teams")
+        cleared = await clear_creator(sessionmaker, job, platform="teams")
         if not isinstance(cleared, TenantAccessPolicy):
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
         # An isolated or shared channel's result never leaves it, not even by DM.
-        held = await result_is_held(sessionmaker, row, platform="teams")
-        keep_inside = keeps_routine_inside(cleared, row) or held
+        held = await result_is_held(sessionmaker, job, platform="teams")
+        keep_inside = keeps_routine_inside(cleared, job) or held
 
         async def fallback(reason: str) -> DeliveryOutcome:
             if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
-            return await dm_fallback(row, reason)
+            return await dm_fallback(job, reason)
 
-        target = delivery_target(row, platform="teams")
+        target = delivery_target(job, platform="teams")
         if target is None:
             return await fallback("destination_unavailable")
         if not authorize(
@@ -222,36 +247,36 @@ def make_teams_routine_poster(
             surface=Surface.ROUTINE,
             place=Place(channel_id=target.channel_id),
         ):
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason="protected_channel")
             return await fallback("protected_channel")
-        creator = row.created_by_user_id
+        creator = job.created_by_user_id
         try:
             on_roster = creator is not None and await teams.member(target.channel_id, creator)
         except TEAMS_SEND_ERRORS:
             return await fallback("destination_unavailable")
         if not on_roster:
             log.info(
-                "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
+                "routine.delivery_refused", routine_id=str(job.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
-        name = await routine_requester_name(sessionmaker, row, "teams")
+        name = await routine_requester_name(sessionmaker, job, "teams")
         text = render_fallback_post(
-            row,
+            job,
             platform="teams",
             requester_name=name,
-            agent_name=await routine_agent_name(sessionmaker, row),
-            header=await routine_header_shown(sessionmaker, row, "teams"),
-        ) + unsupported_files_note(payload_for(row))
+            agent_name=await routine_agent_name(sessionmaker, job),
+            header=job.header,
+        ) + unsupported_files_note(payload_for(job))
         conversation = teams_thread_id(target)
         ids: list[str] = []
-        delivery = uuid.uuid4()
+        delivery = job.delivery_id or uuid.uuid4()
         try:
             for chunk in split_fenced(text, TEAMS_LIMIT, word_boundary=True):
                 ids.append(activity_id := await teams.post(conversation, chunk))
                 # A post to the channel roots its own thread.
                 rooted = target if target.thread_ts else replace(target, thread_ts=activity_id)
                 await record(
-                    row,
+                    job,
                     teams_thread_id(rooted),
                     activity_id,
                     delivery=delivery,
@@ -270,7 +295,7 @@ def make_teams_routine_poster(
                 recipient_id=creator,
                 text=headline.rstrip(":"),
                 preview=body or headline,
-                chain=chain_id(row.id),
+                chain=chain_id(job.id),
             )
         return DeliveryOutcome(status="delivered")
 

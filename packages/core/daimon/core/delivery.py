@@ -42,7 +42,6 @@ if TYPE_CHECKING:
 __all__ = [
     "DELIVERY_LEASE",
     "DELIVERY_POLL_INTERVAL_S",
-    "DeliveryJob",
     "DeliveryOutcome",
     "JobPoster",
     "RoutinePoster",
@@ -103,7 +102,7 @@ class DeliveryOutcome:
 
 
 @dataclass(frozen=True)
-class DeliveryJob:
+class Claim:
     """One claimed post: a routine's pending result, or a queued workflow post."""
 
     routine: RoutineRow | None = None
@@ -146,7 +145,7 @@ def files_envelope(row: DeliveryRow) -> str:
 
 
 #: The adapter hook for a routine: post `row`'s result (or refuse) and say what happened.
-#: It resolves the destination on its platform and applies `delivery_refusal` there.
+#: `fire.delivery.routine_poster` builds it over the platform's `Poster` of `DeliveryJob`s.
 RoutinePoster = Callable[[RoutineRow], Awaitable[DeliveryOutcome]]
 #: The adapter hook for a workflow post (`daimon.core.workflows.delivery` clears it).
 WorkflowPoster = Callable[[DeliveryRow], Awaitable[DeliveryOutcome]]
@@ -161,7 +160,7 @@ class JobPoster:
     #: One round of editing chat-started runs' cards (`workflows.chat_cards.follower`).
     run_cards: Callable[[], Awaitable[int]] | None = None
 
-    async def post_job(self, job: DeliveryJob) -> DeliveryOutcome:
+    async def post_job(self, job: Claim) -> DeliveryOutcome:
         if job.routine is not None:
             return await self.routine(job.routine)
         assert job.workflow is not None and self.workflow is not None
@@ -177,7 +176,7 @@ def _settled_status(outcome: DeliveryOutcome) -> SettledStatus:
 
 
 async def _settle(
-    session: AsyncSession, job: DeliveryJob, *, owner: str, outcome: DeliveryOutcome, now: datetime
+    session: AsyncSession, job: Claim, *, owner: str, outcome: DeliveryOutcome, now: datetime
 ) -> bool:
     if job.routine is not None:
         return await settle_routine_delivery(
@@ -236,14 +235,14 @@ async def poll_once(
     lease_owner = owner or f"{platform}:{uuid.uuid4()}"
     async with sessionmaker() as session, session.begin():
         jobs = [
-            DeliveryJob(routine=row)
+            Claim(routine=row)
             for row in await claim_routine_deliveries(
                 session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
             )
         ]
         if post.workflow is not None:
             jobs += [
-                DeliveryJob(workflow=row)
+                Claim(workflow=row)
                 for row in await workflow_deliveries.claim_deliveries(
                     session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
                 )
