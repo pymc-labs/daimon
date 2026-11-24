@@ -16,12 +16,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from daimon.core.config import Settings
+from daimon.core.features.service import clear_pinned_on
 from daimon.core.routine_files import RoutineFile
 from daimon.core.stores import security_audit, workflow_waits
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflows as store
+from daimon.core.stores.domain import SANDBOX_KEY, FeatureTarget
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import GrantRow, RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow
@@ -38,7 +40,14 @@ from daimon.core.workflows.preflight import (
     uses_polls,
 )
 from daimon.core.workflows.runs import Sessions
-from daimon.core.workflows.spec import Spec, dump_spec, node_hash, parse_spec, spec_hash
+from daimon.core.workflows.spec import (
+    RoutineNode,
+    Spec,
+    dump_spec,
+    node_hash,
+    parse_spec,
+    spec_hash,
+)
 from daimon.core.workflows.taint import Catalog
 from daimon.core.workflows.templates import load_template
 from daimon.core.workflows.validate import Grant, Validation, validate_document
@@ -541,6 +550,9 @@ async def publish(
                 f"This version needs an admin's approval for {len(new)} thing(s). "
                 "Request approval instead."
             )
+        await _routine_publish(
+            session, workflow, parsed, publisher=env.who.account_id, admin=env.who.admin
+        )
         place = Place(workflow.tenant_id, workflow, parsed, 0, "live", env.who.account_id)
         reads = member_reads(env.sm, env.settings, workflow.tenant_id)
         if (private := await private_reach(session, place, env.who.account_id, reads)) is not None:
@@ -586,6 +598,54 @@ async def publish(
         fresh, access, _ = await _load(session, env, workflow_id)
         view = await _view(env, session, fresh, access=access, budget=budget)
         return view
+
+
+def _routine(spec: Spec) -> RoutineNode | None:
+    return next((n for n in spec.nodes.values() if isinstance(n, RoutineNode)), None)
+
+
+async def _routine_publish(
+    session: AsyncSession,
+    workflow: WorkflowRow,
+    spec: Spec,
+    *,
+    publisher: uuid.UUID,
+    admin: bool,
+) -> None:
+    """A new or changed routine step runs as the owner, so only they or an admin publish it;
+    a change to its agent, prompt or destination clears the workflow's sandbox opt-in, as a
+    routine edit does."""
+    node = _routine(spec)
+    live = (
+        await store.get_version(
+            session,
+            tenant_id=workflow.tenant_id,
+            workflow_id=workflow.id,
+            number=workflow.live_version,
+        )
+        if workflow.live_version
+        else None
+    )
+    before = _routine(parse_spec(live.spec)) if live is not None else None
+    if node is None or (before is not None and node_hash(before) == node_hash(node)):
+        return
+    owner = publisher if workflow.status == "needs_owner" else workflow.owner_account_id
+    if not admin and publisher != owner:
+        raise Forbidden("A routine step runs as the owner. Ask the owner or an admin to publish.")
+    if node.to is not None and node.to.kind == "dm" and owner is None:
+        raise Invalid("A routine step that DMs its owner needs one. Ask an admin to assign one.")
+    if before is None or (before.agent, before.prompt, before.to) != (
+        node.agent,
+        node.prompt,
+        node.to,
+    ):
+        await clear_pinned_on(
+            session,
+            None,
+            tenant_id=workflow.tenant_id,
+            key=SANDBOX_KEY,
+            target=FeatureTarget("workflow", workflow_id=workflow.id),
+        )
 
 
 def grant_rows(
@@ -723,6 +783,7 @@ async def decide_publish_request(
             parsed = parse_spec(request.spec)
             spec = dump_spec(parsed)
             requester = request.requested_by_account_id or env.who.account_id
+            await _routine_publish(session, workflow, parsed, publisher=requester, admin=True)
             row = await store.publish_version(
                 session,
                 tenant_id=workflow.tenant_id,

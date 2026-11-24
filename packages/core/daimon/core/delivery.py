@@ -126,9 +126,19 @@ class Claim:
     def event_prefix(self) -> str:
         return "routine" if self.routine is not None else "workflow"
 
+    @property
+    def routine_result(self) -> bool:
+        """A routine's result or a workflow routine step's: its failures page as a routine's."""
+        return self.routine is not None or (
+            self.workflow is not None and self.workflow.kind == "result"
+        )
+
 
 def job_payload(row: DeliveryRow) -> RoutinePayload:
-    """A workflow post's text and file refs. Refs that do not parse are dropped."""
+    """A workflow post's text and file refs. Refs that do not parse are dropped; a routine
+    step's result carries them in its text, as a routine's does."""
+    if row.kind == "result":
+        return decode_payload(str(row.payload.get("text") or ""))
     files: list[RoutineFile] = []
     raw_files: list[object] = row.payload.get("files") or []
     for raw in raw_files:
@@ -266,8 +276,8 @@ async def poll_once(
                     status="post_failed",
                     error_type=type(err).__name__,
                 )
-                if job.routine is not None:
-                    _report_routine_failed(sessionmaker, job.routine, platform, type(err).__name__)
+                if job.routine_result:
+                    _report_routine_failed(sessionmaker, job, platform, type(err).__name__)
                 outcome = DeliveryOutcome(
                     status="skipped", note=FILES_FAILED if payload.files else "post_failed"
                 )
@@ -286,13 +296,13 @@ async def poll_once(
             note=outcome.note,
             settled=settled,
         )
-        if job.routine is not None and outcome.status == "skipped" and not raised:
-            _log_routine_skip(sessionmaker, job.routine, platform, outcome)
+        if job.routine_result and outcome.status == "skipped" and not raised:
+            _log_routine_skip(sessionmaker, job, platform, outcome)
     return len(jobs)
 
 
 def _log_routine_skip(
-    sm: async_sessionmaker[AsyncSession], row: RoutineRow, platform: str, outcome: DeliveryOutcome
+    sm: async_sessionmaker[AsyncSession], job: Claim, platform: str, outcome: DeliveryOutcome
 ) -> None:
     # Real post failures page; deliberate skips (policy, archive, ...) only log.
     if outcome.note == "no_result":
@@ -300,30 +310,41 @@ def _log_routine_skip(
     failed = outcome.failed is not None or outcome.note in _POST_FAILURE_NOTES
     (log.warning if failed else log.info)(
         "routine.delivery_failed" if failed else "routine.delivery_skipped",
-        tenant_id=str(row.tenant_id),
-        routine_id=str(row.id),
+        **job.log_fields,
         status="skipped",
         note=outcome.note,
     )
     if failed:
-        _report_routine_failed(sm, row, platform, outcome.failed or "post_failed")
+        _report_routine_failed(sm, job, platform, outcome.failed or "post_failed")
 
 
 def _report_routine_failed(
-    sm: async_sessionmaker[AsyncSession], row: RoutineRow, platform: str, reason: str
+    sm: async_sessionmaker[AsyncSession], job: Claim, platform: str, reason: str
 ) -> None:
-    report_ops_event(
-        sm,
-        OpsEvent(
+    """Tagged with the routine, or with the workflow and run of a routine step's result."""
+    routine, row = job.routine, job.workflow
+    if routine is not None:
+        event = OpsEvent(
+            "routine.delivery_failed",
+            routine.tenant_id,
+            reason=reason,
+            routine_id=routine.id,
+            agent_id=routine.agent_id,
+            platform=platform,
+        )
+    else:
+        assert row is not None
+        agent = row.payload.get("agent_id")
+        event = OpsEvent(
             "routine.delivery_failed",
             row.tenant_id,
             reason=reason,
-            routine_id=row.id,
-            agent_id=row.agent_id,
+            agent_id=str(agent) if agent else None,
             platform=platform,
-        ),
-        logged=False,
-    )
+            workflow_id=row.workflow_id,
+            workflow_run_id=row.run_id,
+        )
+    report_ops_event(sm, event, logged=False)
 
 
 async def run_poller(

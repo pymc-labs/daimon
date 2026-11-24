@@ -57,7 +57,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver, send_discord_error_dm
-from daimon.core.fire.run import FireDeps, fire_turn
+from daimon.core.fire.run import Dispatch, FireDeps, fire_turn
 from daimon.core.fire.run import routines_unsupported_error as routines_unsupported_error
 from daimon.core.fire.subject import routine_subject
 from daimon.core.github_app_session import (
@@ -245,7 +245,7 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     return conn
 
 
-async def _build_fire(
+def _fire_deps(
     *,
     client: AsyncAnthropic,
     sm: async_sessionmaker[AsyncSession],
@@ -256,15 +256,9 @@ async def _build_fire(
     billing_config: BillingConfig | None = None,
     dm_turn_deps: TurnDeps | None = None,
     send_dm: Callable[[str, str, str], Awaitable[None]] | None = None,
-    notify_owner: OwnerNotifier | None = None,
-) -> FireFn:
-    """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
-
-    Each fire runs `fire_turn` over a `RoutineFireStore` for the claimed row. The
-    runtime clients are this module's names, read at fire time.
-    Errors propagate out of this callable into the guarded gather member's
-    named error boundary, which records ``last_error``.
-    """
+) -> Callable[[], FireDeps]:
+    """The `FireDeps` a fire's turn runs with; the runtime clients are this module's names,
+    read at fire time."""
 
     membership_resolver = membership_resolver or (
         DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
@@ -297,11 +291,8 @@ async def _build_fire(
             )
         return turn_deps[0]
 
-    async def _fire(row: RoutineRow) -> None:
-        store = RoutineFireStore(
-            sm, row, notify_owner, record=record_result, heal=update_routine_agent_id
-        )
-        deps = FireDeps(
+    def deps() -> FireDeps:
+        return FireDeps(
             client=client,
             sm=sm,
             settings=settings,
@@ -322,7 +313,46 @@ async def _build_fire(
             bot_access_wait_on=bot_access_wait_on,
             bot_access_blocked=bot_access_blocked,
         )
-        await fire_turn(routine_subject(row), store, deps)
+
+    return deps
+
+
+async def _build_fire(
+    *,
+    client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    deployment_default: DeploymentDefault,
+    resolver_cache: ResolverCache,
+    membership_resolver: MembershipResolver | None = None,
+    billing_config: BillingConfig | None = None,
+    dm_turn_deps: TurnDeps | None = None,
+    send_dm: Callable[[str, str, str], Awaitable[None]] | None = None,
+    notify_owner: OwnerNotifier | None = None,
+) -> FireFn:
+    """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
+
+    Each fire runs `fire_turn` over a `RoutineFireStore` for the claimed row.
+    Errors propagate out of this callable into the guarded gather member's
+    named error boundary, which records ``last_error``.
+    """
+    deps = _fire_deps(
+        client=client,
+        sm=sm,
+        settings=settings,
+        deployment_default=deployment_default,
+        resolver_cache=resolver_cache,
+        membership_resolver=membership_resolver,
+        billing_config=billing_config,
+        dm_turn_deps=dm_turn_deps,
+        send_dm=send_dm,
+    )
+
+    async def _fire(row: RoutineRow) -> None:
+        store = RoutineFireStore(
+            sm, row, notify_owner, record=record_result, heal=update_routine_agent_id
+        )
+        await fire_turn(routine_subject(row), store, deps())
 
     return _fire
 
@@ -1460,6 +1490,15 @@ async def run(
         dm_turn_deps=dm_turn_deps,
         notify_owner=notify_owner,
     )
+    fire_deps = _fire_deps(
+        client=client,
+        sm=sm,
+        settings=settings,
+        deployment_default=deployment_default,
+        resolver_cache=resolver_cache,
+        billing_config=billing_config,
+        dm_turn_deps=dm_turn_deps,
+    )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
     compute = ComputeSessions(sm, settings.compute, compute_provider_for(settings.compute))
@@ -1491,9 +1530,16 @@ async def run(
             "code": CodeStepExecutor(
                 sm, ManagedCodeWorker(client, sm, settings, lane_turn.targets)
             ),
+            "routine": workflows.RoutineStep(
+                sm,
+                Dispatch(sm, dispatcher.semaphore, scheduler_settings.dispatch_timeout_s),
+                lane_turn.agent_id,
+                lambda subject, store: fire_turn(subject, store, fire_deps()),
+            ),
             **workflow_waits.executors(sm),
         },
         poll_client=McpPollClient(client, sm, settings, lane_turn.agent_id),
+        max_age=timedelta(seconds=scheduler_settings.max_age_s),
     )
     loop = asyncio.get_running_loop()
 

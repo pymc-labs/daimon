@@ -26,7 +26,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PostKind = Literal["message", "thread"]
-PostSource = Literal["tool", "turn", "auto_thread", "routine"]
+PostSource = Literal["tool", "turn", "auto_thread", "routine", "workflow"]
 # A turn's progress card, answer, notice or controls card, or a routine result.
 PostRole = Literal["status", "answer", "notice", "controls", "routine"]
 

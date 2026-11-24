@@ -12,7 +12,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -31,6 +32,7 @@ from daimon.core.stores import (
 )
 from daimon.core.stores.lead_intake import workflow_execution
 from daimon.core.stores.routines import FAILURE_NOTICE
+from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.turn.termination import TerminationReason
@@ -123,9 +125,17 @@ class WorkflowFireStore:
             files=[],
             speaker=self._workflow.owner_account_id,
             step_id=self._step_id,
-            extra=extra,
+            # Who the post is for and by: the poster reads no routine row.
+            extra={"agent_id": s.agent_id, "owner": s.created_by_user_id, **(extra or {})},
             status=status,
             note=note,
+        )
+        await append_events(
+            session,
+            run_id=self._run.id,
+            events=[NewEvent(e.type, e.step, dict(e.data)) for e in outcome.events],
+            actor="engine",
+            at=datetime.now(UTC),
         )
 
     async def _tell_owner(self, session: AsyncSession, reason: str, *, channel_told: bool) -> None:
@@ -211,7 +221,8 @@ class WorkflowFireStore:
         )
 
     async def heal_agent_id(self, agent_id: str) -> bool:
-        """Nothing to heal: a routine step resolves its agent by name when it starts."""
+        """Nothing is stored: the agent the fire resolved is the one its result names."""
+        self._subject = replace(self._subject, agent_id=agent_id)
         return True
 
     async def sandbox(self, settings: Settings, *, platform: str) -> RoutineSandbox | None:
@@ -228,11 +239,7 @@ class WorkflowFireStore:
             outcome = self.outcome = StepOutcome("ok", tail=result.tail)
             if s.destination_kind is None or status is None:
                 return
-            extra = {
-                "hold": result.hold,
-                "agent_id": result.producing_agent_id,
-                "owner": s.created_by_user_id,
-            }
+            extra = {"hold": result.hold, "agent_id": result.producing_agent_id or s.agent_id}
             await self._queue(
                 session,
                 outcome,

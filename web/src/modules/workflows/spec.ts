@@ -342,7 +342,7 @@ export function newId(spec: Spec, base: string) {
 
 const DEFAULT_ID: Record<Kind, string> = {
   agent: "agent", branch: "branch", transform: "transform", code: "code", action: "action", approval: "approval",
-  wait: "wait", for_each: "each", workflow: "call", post: "post", finish: "done",
+  wait: "wait", for_each: "each", workflow: "call", post: "post", routine: "routine", finish: "done",
 }
 
 /** `ask`: an approval that takes a free-text answer from someone and carries on. */
@@ -362,6 +362,7 @@ export function blankNode(kind: Kind, next?: string, preset?: Preset): Node {
     case "for_each": return { kind, title: "For each", items: "", as: "item", do: { kind: "agent", instructions: "" }, concurrency: 3, next }
     case "workflow": return { kind, title: "Run workflow", workflow: "", version: "live", next }
     case "post": return { kind, title: "Post", to: "home", message: "", next }
+    case "routine": return { kind, title: "Routine", prompt: "", to: { kind: "dm" }, next }
     case "finish": return { kind, title: "Finish", outcome: "succeeded" }
   }
 }

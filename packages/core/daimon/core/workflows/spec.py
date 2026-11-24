@@ -36,6 +36,9 @@ MAX_ATTACHMENTS: Final = 10
 MAX_ALSO: Final = 5
 MAX_MENTIONS: Final = 10
 MAX_TITLE: Final = 100
+#: A routine step's prompt, as long as a routine's message may be.
+MAX_ROUTINE_PROMPT: Final = 4000
+MAX_ROUTINE_TITLE: Final = 120
 
 Id = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
 #: `1h30m`, or business days alone (`2bd`: Mon-Fri in the spec's timezone, no holidays).
@@ -303,6 +306,37 @@ class FinishNode(_Base):
     state: dict[Annotated[str, StringConstraints(max_length=MAX_TITLE)], Template] | None = None
 
 
+class RoutineTarget(_Model):
+    """Where a routine step's result goes: a channel or thread id, or the owner's DM."""
+
+    kind: Literal["channel", "thread", "dm"]
+    id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _id_fits(self) -> RoutineTarget:
+        if (self.kind == "dm") != (self.id is None):
+            raise ValueError(
+                "A channel or thread needs its id; a DM, which goes to the owner, none"
+            )
+        return self
+
+
+class RoutineNode(_Flow):
+    """One routine turn as the owner: `prompt` is literal, `to` where its result goes."""
+
+    kind: Literal["routine"]
+    title: str | None = Field(default=None, max_length=MAX_ROUTINE_TITLE)
+    agent: str
+    prompt: str = Field(min_length=1, max_length=MAX_ROUTINE_PROMPT)
+    to: RoutineTarget | None = None
+
+    @model_validator(mode="after")
+    def _no_retry_or_budget(self) -> RoutineNode:
+        if self.retry or self.budget_usd or self.max_visits or self.on_max_visits:
+            raise ValueError("A routine step has no retry, budget or visit limit")
+        return self
+
+
 ItemNode = Annotated[
     AgentNode | CodeNode | ActionNode | WorkflowNode | PostNode, Field(discriminator="kind")
 ]
@@ -328,6 +362,7 @@ Node = Annotated[
     | ForEachNode
     | WorkflowNode
     | PostNode
+    | RoutineNode
     | FinishNode,
     Field(discriminator="kind"),
 ]
@@ -342,6 +377,7 @@ Kind = Literal[
     "for_each",
     "workflow",
     "post",
+    "routine",
     "finish",
 ]
 
@@ -498,6 +534,7 @@ AnyNode = (
     | ForEachNode
     | WorkflowNode
     | PostNode
+    | RoutineNode
     | FinishNode
 )
 

@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Final, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
 from daimon.core.delivery import DeliveryOutcome, RoutinePoster
@@ -58,7 +58,8 @@ class DeliveryJob(Subject):
     """A queued post. `delivery_payload` is the text and file refs (`routine_files`),
     `delivery_note` marks a failure notice or a files envelope, `delivery_hold` is the stored
     hold, `header` whether the post opens with its "Result from" line. `delivery_id` keys the
-    recorded posts as one reply; None gives each post its own."""
+    recorded posts as one reply; None gives each post its own. `source` is what the posts
+    are recorded as."""
 
     header: bool
     still_current: StillCurrent = field(compare=False, repr=False)
@@ -67,6 +68,7 @@ class DeliveryJob(Subject):
     delivery_hold: dict[str, Any] | None = None
     last_fired_at: datetime | None = None
     delivery_id: uuid.UUID | None = None
+    source: Literal["routine", "workflow"] = "routine"
 
 
 #: A platform's poster: post `job` (or refuse) and say what happened.

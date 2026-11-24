@@ -28,6 +28,7 @@ from daimon.core.workflows.spec import (
     ApprovalNode,
     CodeNode,
     ForEachNode,
+    RoutineNode,
     Spec,
     WaitNode,
     WriteScope,
@@ -151,7 +152,7 @@ def untrusted_output(node: AnyNode) -> bool:
     """Steps whose output is outside data whatever they read."""
     if isinstance(node, ApprovalNode):
         return human_answer(node)
-    return isinstance(node, ActionNode | WaitNode)
+    return isinstance(node, ActionNode | WaitNode | RoutineNode)
 
 
 def _agent_tools(node: AgentNode, spec: Spec, catalog: Catalog) -> frozenset[str]:

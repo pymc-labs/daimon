@@ -55,7 +55,7 @@ DEFAULT_MAX_VISITS: Final = 3
 DEFAULT_MAX_STEPS: Final = 100
 INLINE: Final = (BranchNode, TransformNode, FinishNode)
 _FLOW_KINDS: Final = frozenset({"next", "route", "case", "else", "otherwise"})
-_DEFAULT_ATTEMPTS: Final = {"agent": 2, "code": 2}
+_DEFAULT_ATTEMPTS: Final = {"agent": 2, "code": 2, "routine": 3}
 _BACKOFF_S: Final = 20
 
 
@@ -186,7 +186,7 @@ def retry_delay_s(node: AnyNode, attempt: int, outcome: Outcome) -> int | None:
     """Seconds until the next attempt, or None when this outcome is final.
 
     Only `retryable` errors retry, up to `retry.attempts` (agent and code steps default to
-    2, others 1); the wait doubles from 20 seconds.
+    2, routine steps 3, others 1); the wait doubles from 20 seconds.
     """
     if not isinstance(outcome, Failed) or outcome.error_class != "retryable":
         return None

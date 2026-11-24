@@ -343,13 +343,14 @@ export function PostEditor(p: EditorProps) {
     { value: "owner", label: "Owner" }, { value: "run_as", label: "Person it runs as" },
     ...(catalog?.channels ?? []).map((c) => ({ value: c.id, label: `#${c.name}` })),
   ]
-  const known = places.some((o) => o.value === n.to)
+  const to = typeof n.to === "string" ? n.to : undefined
+  const known = places.some((o) => o.value === to)
   return (
     <>
       <Section>
         <div className="space-y-3">
-          <Field label="Post to"><Pick value={n.to ?? ""} ro={ro} placeholder="Choose" onChange={(v) => set((x) => { x.to = v })}
-            options={known || !n.to ? places : [...places, { value: n.to, label: n.to }]} /></Field>
+          <Field label="Post to"><Pick value={to ?? ""} ro={ro} placeholder="Choose" onChange={(v) => set((x) => { x.to = v })}
+            options={known || !to ? places : [...places, { value: to, label: to }]} /></Field>
           <Field label="Thread"><Text value={n.thread ?? ""} ro={ro} placeholder="None" onChange={(v) => set((x) => { x.thread = v || undefined }, 400)} /></Field>
         </div>
       </Section>

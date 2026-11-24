@@ -42,7 +42,7 @@ from daimon.core.direct_messages import DirectMessageAccessRevoked, DmRoutineRep
 from daimon.core.features.snapshot import FeaturePlace, place_feature_or_none
 from daimon.core.fire.failure import record_fire_error
 from daimon.core.fire.store import FireGuardStore, FireResult, FireStatus, FireStore
-from daimon.core.fire.subject import Subject
+from daimon.core.fire.subject import Subject, tier_ids
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.headless_runner import run_turn
 from daimon.core.ma_identity import derive_agent_uuid
@@ -739,6 +739,7 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
             pricing=MODEL_PRICING.get(model_id),
             channel_id=subject.channel_id,
             agent_id=resolved_agent_id,
+            workflow_run_id=subject.workflow_run_id,
         )
 
     # Resolve agent + environment by daimon-tag at fire time,
@@ -939,7 +940,8 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
         platform=platform,
         runs_as_user=subject.created_by_user_id,
         membership_resolver=membership_resolver,
-        routine_id=subject.id,
+        # A workflow's routine step binds no routine to the turn's MCP relay.
+        routine_id=tier_ids(subject)[0],
         **held_fire,
     )
 

@@ -56,6 +56,7 @@ class WorkflowEngine:
         poll_client: polls.PollClient | None = None,
         owner: str | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        max_age: timedelta = triggers.FRESHNESS,
     ) -> None:
         self.sm = sm
         self.settings = settings
@@ -63,6 +64,8 @@ class WorkflowEngine:
         self.poll_client = poll_client
         self.owner = owner or f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
         self.clock = clock
+        #: How late a schedule may still fire (the scheduler's `max_age_s`).
+        self.max_age = max_age
         self.tasks: dict[uuid.UUID, tuple[asyncio.Task[None], int]] = {}
         self.wake = {"starts": asyncio.Event(), "steps": asyncio.Event(), "waits": asyncio.Event()}
 
@@ -193,7 +196,7 @@ async def sweep_step(engine: WorkflowEngine) -> None:
 @scheduler_step
 async def schedules_step(engine: WorkflowEngine) -> None:
     """Due schedule slots become trigger events; the starts loop runs them."""
-    if await triggers.fire_schedules(engine.sm, now=engine.clock()):
+    if await triggers.fire_schedules(engine.sm, now=engine.clock(), max_age=engine.max_age):
         engine.wake["starts"].set()
 
 

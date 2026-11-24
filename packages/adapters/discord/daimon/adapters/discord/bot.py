@@ -79,7 +79,7 @@ from daimon.adapters.discord.provider_actions import (
     provider_action_options,
 )
 from daimon.adapters.discord.reactions import QUEUED, WORKING
-from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
+from daimon.adapters.discord.routine_delivery import make_discord_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
 from daimon.adapters.discord.thread_gone import ThreadStops, TurnThreadWatch, stop_reason_of
@@ -150,6 +150,7 @@ from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.direct_messages import sealed_among
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
+from daimon.core.fire.delivery import routine_poster
 from daimon.core.fire.subject import RoutineFacts
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
@@ -270,6 +271,7 @@ from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.workflows import chat_cards
+from daimon.core.workflows.delivery import result_poster
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
@@ -1308,39 +1310,46 @@ class DaimonBot(commands.Bot):
             )
             # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
+            # A workflow's routine step posts through the routine poster.
+            results = make_discord_poster(
+                self.runtime.sessionmaker,
+                fetch_channel=self._channel_by_id,
+                open_dm=self.open_member_dm,
+                dm_policy=lambda row: env_dm_policy(
+                    self.runtime.settings.direct_message_policies, row.tenant_id
+                ),
+                client=self,
+                output_client=self.runtime.anthropic,
+                membership_resolver=self.membership_resolver,
+                resolve_agent_names=self._routine_agent_names,
+                resolve_identity=lambda row, guild_id: resolve_routine_identity(
+                    self.runtime.sessionmaker,
+                    self.runtime.anthropic,
+                    self.runtime.settings,
+                    row=row,
+                    platform="discord",
+                    workspace_id=guild_id,
+                    default_agent_name=self.runtime.deployment_default.agent_name,
+                ),
+            )
             self._spawn(
                 run_delivery_poller(
                     self.runtime.sessionmaker,
                     platform="discord",
-                    post=make_discord_routine_poster(
+                    post=routine_poster(self.runtime.sessionmaker, results, platform="discord"),
+                    workflow=result_poster(
                         self.runtime.sessionmaker,
-                        fetch_channel=self._channel_by_id,
-                        open_dm=self.open_member_dm,
-                        dm_policy=lambda row: env_dm_policy(
-                            self.runtime.settings.direct_message_policies, row.tenant_id
-                        ),
-                        client=self,
-                        output_client=self.runtime.anthropic,
-                        membership_resolver=self.membership_resolver,
-                        resolve_agent_names=self._routine_agent_names,
-                        resolve_identity=lambda row, guild_id: resolve_routine_identity(
+                        results,
+                        make_discord_workflow_poster(
                             self.runtime.sessionmaker,
-                            self.runtime.anthropic,
-                            self.runtime.settings,
-                            row=row,
-                            platform="discord",
-                            workspace_id=guild_id,
-                            default_agent_name=self.runtime.deployment_default.agent_name,
+                            settings=self.runtime.settings,
+                            links=web_at(self.runtime, self._channel_by_id),
+                            fetch_channel=self._channel_by_id,
+                            open_dm=self.open_member_dm,
+                            membership_resolver=self.membership_resolver,
+                            output_client=self.runtime.anthropic,
                         ),
-                    ),
-                    workflow=make_discord_workflow_poster(
-                        self.runtime.sessionmaker,
-                        settings=self.runtime.settings,
-                        links=web_at(self.runtime, self._channel_by_id),
-                        fetch_channel=self._channel_by_id,
-                        open_dm=self.open_member_dm,
-                        membership_resolver=self.membership_resolver,
-                        output_client=self.runtime.anthropic,
+                        platform="discord",
                     ),
                     run_cards=chat_cards.follower(
                         self.runtime.sessionmaker,
@@ -3341,7 +3350,7 @@ class DaimonBot(commands.Bot):
                 reply_to_recorded_post = post is not None and (
                     post.source != "auto_thread"
                     if identity_on
-                    else post.source in ("turn", "routine")
+                    else post.source in ("turn", "routine", "workflow")
                 )
             except Exception as exc:
                 log.warning("reply_gate.lookup_failed", error_type=type(exc).__name__)

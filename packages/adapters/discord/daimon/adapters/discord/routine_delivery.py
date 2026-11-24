@@ -21,7 +21,7 @@ With agent identity on, the destination post goes through
 `DiscordPostTransport`, so it carries the agent's name and face (or, where
 webhooks are unavailable, the bot with the agent's name label) and drops the
 "from <agent>" wording. The fallback direct message stays Daimon's own notice.
-Each destination post is recorded as the agent's (`source='routine'`, the
+Each destination post is recorded as the agent's (`source='routine'`, or `'workflow'`, the
 creator as requester), so a reply to it starts a turn like a reply to an
 answer, and only the creator or an admin can have the agent tidy it.
 """
@@ -649,7 +649,7 @@ def make_discord_poster(
                 channel_id=str(channel.id),
                 message_id=str(sent.id),
                 requester_platform_user_id=creator,
-                source="routine",
+                source=job.source,
                 parent_channel_id=parent_channel_id,
                 delivery_id=delivery_id,
             )

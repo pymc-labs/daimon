@@ -20,6 +20,7 @@ export const KIND: Record<Kind, { icon: LucideIcon; label: string; strip: string
   for_each: { icon: Repeat, label: "For each", strip: "bg-chart-2", text: "text-chart-2" },
   workflow: { icon: WorkflowIcon, label: "Workflow", strip: "bg-faint", text: "text-muted-foreground" },
   post: { icon: Send, label: "Post", strip: "bg-chart-3", text: "text-chart-3" },
+  routine: { icon: Clock, label: "Routine", strip: "bg-chart-1", text: "text-chart-1" },
   finish: { icon: Flag, label: "Finish", strip: "bg-success", text: "text-success" },
 }
 
@@ -96,9 +97,14 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
     case "code": return ["Python", `Network ${n.network ?? "off"}`]
     case "workflow": return [n.workflow || "No workflow"]
     case "post": {
-      const to = n.to === "home" ? spec.home?.channel : n.to
+      const to = n.to === "home" ? spec.home?.channel : typeof n.to === "string" ? n.to : undefined
       const channel = catalog?.channels.find((c) => c.id === to)?.name
       return [channel ? `#${channel}` : to || "No target"]
+    }
+    case "routine": {
+      const to = typeof n.to === "object" ? n.to : undefined
+      const channel = catalog?.channels.find((c) => c.id === to?.id)?.name
+      return [n.agent ?? "daimon", to?.kind === "dm" ? "Owner" : channel ? `#${channel}` : to?.id || "No target"]
     }
     case "finish": {
       const to = finishDeliver(n)?.to === "home" ? spec.home?.channel : finishDeliver(n)?.to

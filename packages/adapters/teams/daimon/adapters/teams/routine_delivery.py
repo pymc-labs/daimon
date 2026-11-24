@@ -17,7 +17,7 @@ to invoke the agent gets nothing.
 A result posted in a channel also sends the creator an activity feed notice
 linking to it (`activity_feed`), one entry per routine that each run
 replaces; a 1:1 chat notifies on its own, so the fallback sends none.
-Each message of a result is recorded as it is posted (`source='routine'`, the
+Each message of a result is recorded as it is posted (`source='routine'` or `'workflow'`, the
 creator as requester), so the routine's agent can tidy it. A post to a bare
 channel roots its own thread and is keyed as that thread, as the tidy tools
 and the agent's context name it.
@@ -166,7 +166,7 @@ def make_teams_poster(
             channel_id=conversation,
             message_id=activity_id,
             requester_platform_user_id=job.created_by_user_id,
-            source="routine",
+            source=job.source,
             parent_channel_id=parent,
             role="routine",
             # Chunks in a channel each root their own thread; this keeps them one reply.

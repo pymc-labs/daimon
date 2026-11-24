@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from daimon.core.audience_gate import audience_fact, log_shadow_refusal, read_audience_mode
 from daimon.core.channel_audience import AudienceMode, ChannelAudience, channel_has_outsiders
-from daimon.core.fire.subject import RoutineFacts
+from daimon.core.fire.subject import RoutineFacts, tier_ids
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -129,6 +129,7 @@ class DeliveryGate:
     platform: str
     mode: AudienceMode
     stored: StoredHold
+    workflow_id: uuid.UUID | None = None
 
     @property
     def enforcing(self) -> bool:
@@ -170,6 +171,7 @@ class DeliveryGate:
             agent=self.agent,
             routine_id=self.routine_id,
             mode=self.mode,
+            workflow_id=self.workflow_id,
         )
 
 
@@ -178,6 +180,7 @@ async def delivery_gate(
 ) -> DeliveryGate:
     """The gate for delivering `row`'s pending result. A failed mode read raises."""
     destination = routine_destination_channel(row)
+    routine_id, workflow_id = tier_ids(row)
     mode: AudienceMode = (
         "off"
         if destination is None
@@ -186,7 +189,8 @@ async def delivery_gate(
             tenant_id=row.tenant_id,
             platform=platform,
             channel_id=destination,
-            routine_id=row.id,
+            routine_id=routine_id,
+            workflow_id=workflow_id,
         )
     )
     stored = stored_delivery_hold(row, platform=platform)
@@ -198,10 +202,11 @@ async def delivery_gate(
         sessionmaker=sessionmaker,
         tenant_id=row.tenant_id,
         agent=row.agent_name,
-        routine_id=row.id,
+        routine_id=routine_id,
         platform=platform,
         mode=mode,
         stored=stored,
+        workflow_id=workflow_id,
     )
 
 

@@ -17,6 +17,7 @@ from typing import Any, Final
 
 import structlog
 from daimon.core.config import Settings
+from daimon.core.routine_move import RoutineFreshnessSettings
 from daimon.core.stores import workflow_runs, workflows
 from daimon.core.stores import workflow_triggers as store
 from daimon.core.stores.workflow_runs import RunRow
@@ -33,8 +34,9 @@ from pydantic import JsonValue, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-#: A slot older than this when the loop sees it is missed (`catch_up` decides).
-FRESHNESS: Final = timedelta(minutes=15)
+#: A slot older than this when the loop sees it is missed (`catch_up` decides): by default
+#: the routines' window, `DAIMON_SCHEDULER__MAX_AGE_S`, which the scheduler passes.
+FRESHNESS: Final = timedelta(seconds=RoutineFreshnessSettings.model_fields["max_age_s"].default)
 #: The daily spend cap of a webhook or event trigger that names none.
 DEFAULT_SPEND_CAP_USD: Final = Decimal(20)
 _BATCH: Final = 50
@@ -80,10 +82,10 @@ def _day_start(now: datetime) -> datetime:
 # --- the schedules loop ---
 
 
-async def fire_schedules(sm: Sessions, *, now: datetime) -> int:
+async def fire_schedules(sm: Sessions, *, now: datetime, max_age: timedelta = FRESHNESS) -> int:
     """Due slots become accepted events keyed by slot, so a slot never fires twice."""
     async with sm.begin() as session:
-        due = await store.claim_due_schedules(session, now=now, max_age=FRESHNESS, limit=_BATCH)
+        due = await store.claim_due_schedules(session, now=now, max_age=max_age, limit=_BATCH)
         for trigger, slot in due:
             spec = trigger.live or {}
             given = spec.get("with")

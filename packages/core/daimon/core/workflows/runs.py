@@ -43,6 +43,7 @@ from daimon.core.workflows.spec import (
     CodeNode,
     FinishNode,
     ForEachNode,
+    RoutineNode,
     Spec,
     parse_spec,
 )
@@ -62,6 +63,7 @@ EVENT_BUFFER: Final = timedelta(hours=1)
 DEFAULT_DEADLINE: Final = timedelta(days=7)
 BLOCKED_RECHECK: Final = timedelta(minutes=15)
 BLOCKED_FOR: Final = timedelta(days=1)
+ROUTINE_LIVE_ONLY: Final = "Routine steps run only live; use Run now."
 _TERMINAL: Final = frozenset({"succeeded", "failed", "skipped", "cancelled"})
 _MESSAGE_LIMIT: Final = 500
 #: What an ask still open when its run ends says, by how the run ended.
@@ -721,6 +723,9 @@ async def _queue_posts(
             facts=loaded.facts,
             node_id=node_id,
         )
+    failed = next((v.node_id for v in views if v.key == end.step), None)
+    if failed is not None and isinstance(spec.nodes[failed], RoutineNode):
+        return []  # the fire already told the owner and the channel, once a streak
     queued = await delivery.queue_failure_notice(session, run=run, workflow=wf, spec=spec, end=end)
     return [] if queued is None else [queued]
 
@@ -1156,16 +1161,23 @@ async def execute(
     async with sm() as session:
         loaded = await _load(session, settings, claimed.run, clock())
     node = node_of(loaded.spec, claimed.step)
-    refusal = await check(
-        sm,
-        settings,
-        loaded.place(),
-        now=clock(),
-        budget_usd=loaded.run.budget_usd,
-        cost_usd=loaded.run.cost_usd,
+    # A routine step has no step preflight: the fire checks its own gates and budgets.
+    refusal = (
+        None
+        if isinstance(node, RoutineNode)
+        else await check(
+            sm,
+            settings,
+            loaded.place(),
+            now=clock(),
+            budget_usd=loaded.run.budget_usd,
+            cost_usd=loaded.run.cost_usd,
+        )
     )
     outcome: Outcome | Park | Parked | Posted
-    if isinstance(refusal, Refusal):
+    if isinstance(node, RoutineNode) and loaded.run.mode != "live":
+        outcome = engine.Failed("fatal", ROUTINE_LIVE_ONLY)
+    elif isinstance(refusal, Refusal):
         if refusal.gate:
             await _block(sm, settings, claimed, refusal, now=clock())
             return
@@ -1502,7 +1514,7 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
     attempt and is reattached to that session; a code step always does, as its worker is found
     by attempt and runs nothing before the session is saved. Nothing sent yet, or an
     idempotent node: run it again. Otherwise a write may have happened, and the step is
-    `unknown` for its owner."""
+    `unknown` for its owner. A routine step, which never reruns, fails `Interrupted`."""
     async with sm.begin() as session:
         held = await _locked_step(session, step_id, None, "running")
         if held is None or (held[1].lease_expires_at and held[1].lease_expires_at > now):
@@ -1520,6 +1532,9 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
         await workflow_runs.finish_attempt(
             session, step_id=step_id, status="abandoned", now=now, error_class="unknown"
         )
+        if isinstance(node, RoutineNode):  # never `unknown`, which holds later slots on `skip`
+            await _resolve(session, loaded, step, engine.Failed("fatal", "Interrupted"), now=now)
+            return
         sent = bool(attempts) and attempts[-1].send_intent_at is not None
         if not sent or (isinstance(node, ActionNode) and node.idempotent):
             await _retry_later(

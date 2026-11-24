@@ -70,6 +70,7 @@ class FeaturePlace:
         agent_id: str | None = None,
         backend: str | None = None,
         routine_id: uuid.UUID | None = None,
+        workflow_id: uuid.UUID | None = None,
     ) -> FeaturePlace:
         """From a turn's ids; a thread equal to its channel (or a timer's scope) is none,
         and so is an empty agent id (a blank `?agent=` is no agent, not an agent tier)."""
@@ -87,6 +88,7 @@ class FeaturePlace:
             agent_id or None,
             backend,
             routine_id,
+            workflow_id,
         )
 
     @property

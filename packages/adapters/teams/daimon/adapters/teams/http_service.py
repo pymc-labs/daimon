@@ -54,7 +54,7 @@ from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
 from daimon.adapters.teams.reactions import ReactionTarget
 from daimon.adapters.teams.restart_catch_up import RestartCatchUp
-from daimon.adapters.teams.routine_delivery import make_teams_owner_dm, make_teams_routine_poster
+from daimon.adapters.teams.routine_delivery import make_teams_owner_dm, make_teams_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.settings import VERB as SETTINGS_VERB
@@ -79,6 +79,7 @@ from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.adapters.teams.workflow_delivery import make_teams_workflow_poster
 from daimon.core.config import TeamsSettings
 from daimon.core.features.snapshot import deployment_on
+from daimon.core.fire.delivery import routine_poster
 from daimon.core.logging_setup import mark_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.outbound.opt_out import tag_opt_outs
@@ -90,6 +91,7 @@ from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
 from daimon.core.workflows import chat_cards
+from daimon.core.workflows.delivery import result_poster
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import UninstalledActivity
@@ -418,6 +420,14 @@ def create_teams_http_service(
         service_url=SERVICE_URL,
     )
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
+    results = make_teams_poster(
+        runtime.sessionmaker,
+        direct,
+        tenant_id=installs.tenant_id,
+        dm_policies=runtime.settings.direct_message_policies,
+        feed=feed,
+        team_members=team_member_lookup(runtime),
+    )
     turns = TeamsApp(
         runtime=runtime,
         sender=teams_app,
@@ -433,20 +443,18 @@ def create_teams_http_service(
         react=react,
         feed=feed,
         team_channels=billing_panel.sdk_team_channels(teams_app),
-        routine_poster=make_teams_routine_poster(
+        routine_poster=routine_poster(runtime.sessionmaker, results, platform="teams"),
+        workflow_poster=result_poster(
             runtime.sessionmaker,
-            direct,
-            tenant_id=installs.tenant_id,
-            dm_policies=runtime.settings.direct_message_policies,
-            feed=feed,
-            team_members=team_member_lookup(runtime),
-        ),
-        workflow_poster=make_teams_workflow_poster(
-            runtime.sessionmaker,
-            direct,
-            tenant_id=installs.tenant_id,
-            settings=runtime.settings,
-            links=workflow_cards.web_at(runtime),
+            results,
+            make_teams_workflow_poster(
+                runtime.sessionmaker,
+                direct,
+                tenant_id=installs.tenant_id,
+                settings=runtime.settings,
+                links=workflow_cards.web_at(runtime),
+            ),
+            platform="teams",
         ),
         run_cards=chat_cards.follower(
             runtime.sessionmaker,

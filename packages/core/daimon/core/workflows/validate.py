@@ -54,6 +54,7 @@ from daimon.core.workflows.spec import (
     MentionTrigger,
     PollTrigger,
     PostNode,
+    RoutineNode,
     ScheduleTrigger,
     SchemaField,
     Spec,
@@ -206,6 +207,7 @@ def validate_spec(
         _check_template(spec, template, None, None, report)
     _check_loops(spec, report)
     _check_spec(spec, report)
+    _check_routines(spec, report)
     _check_durations(spec, report)
     _check_triggers(spec, catalog, now, report)
     tainted = tainted_steps(spec, catalog)
@@ -679,6 +681,24 @@ def _check_spec(spec: Spec, report: _Report) -> None:
     ):
         report.error(
             "respond_result", "Answering with the result needs a workflow without agent steps"
+        )
+
+
+def _check_routines(spec: Spec, report: _Report) -> None:
+    """One routine step at most (its sandbox pin is the workflow's), run once a run, never two
+    runs at a time: as a routine fires."""
+    found = [k for k, n in spec.nodes.items() if isinstance(n, RoutineNode)]
+    if len(found) > 1:
+        report.error("routine_count", "A workflow has at most one routine step", found[1])
+    for node_id in found:
+        if node_id in ancestors(spec, node_id):
+            report.error("routine_loop", "A routine step runs once a run, never in a loop", node_id)
+    c = spec.concurrency
+    if found and (c is None or c.limit != 1 or c.on_conflict != "skip" or c.key is not None):
+        report.error(
+            "routine_concurrency",
+            "A routine step needs concurrency limit 1, on conflict skip, and no key",
+            found[0],
         )
 
 

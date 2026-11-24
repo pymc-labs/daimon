@@ -169,7 +169,7 @@ from daimon.adapters.slack.privacy_panel.submit import (
 from daimon.adapters.slack.provider_actions import ACTION_PREFIX as PROVIDER_ACTION_PREFIX
 from daimon.adapters.slack.provider_actions import SlackProviderActions, provider_action_options
 from daimon.adapters.slack.requester_org import decide_requester_org
-from daimon.adapters.slack.routine_delivery import make_slack_owner_dm, make_slack_routine_poster
+from daimon.adapters.slack.routine_delivery import make_slack_owner_dm, make_slack_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
     handle_routines_command,
@@ -280,6 +280,7 @@ from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.features.registry import limit_int
 from daimon.core.features.snapshot import FeaturePlace, place_feature
+from daimon.core.fire.delivery import routine_poster
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -362,6 +363,7 @@ from daimon.core.turn_origin import (
 )
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.workflows import answers, chat_cards
+from daimon.core.workflows.delivery import result_poster
 from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
@@ -989,12 +991,21 @@ class SlackApp:
                 should_stop=lambda: self.draining,
             )
         )
+        # A workflow's routine step posts through the routine poster.
+        results = make_slack_poster(self.runtime)
+        sm, settings = self.runtime.sessionmaker, self.runtime.settings
         return self._spawn(
             run_delivery_poller(
-                self.runtime.sessionmaker,
+                sm,
                 platform="slack",
-                post=make_slack_routine_poster(self.runtime),
-                workflow=make_slack_workflow_poster(self.runtime),
+                post=routine_poster(sm, results, platform="slack", settings=settings),
+                workflow=result_poster(
+                    sm,
+                    results,
+                    make_slack_workflow_poster(self.runtime),
+                    platform="slack",
+                    settings=settings,
+                ),
                 run_cards=chat_cards.follower(
                     self.runtime.sessionmaker,
                     platform="slack",

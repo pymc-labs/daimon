@@ -1,7 +1,7 @@
 // The workflow spec (schema daimon.workflow/v1) and the shapes the workflows API returns.
 import type { AgentRef } from "@/lib/types"
 
-export const KINDS = ["agent", "branch", "transform", "code", "action", "approval", "wait", "for_each", "workflow", "post", "finish"] as const
+export const KINDS = ["agent", "branch", "transform", "code", "action", "approval", "wait", "for_each", "workflow", "post", "routine", "finish"] as const
 export type Kind = (typeof KINDS)[number]
 
 /** A JSON Schema subset: one field of inputs, outputs and approval forms. */
@@ -50,8 +50,10 @@ export type Node = {
   // wait
   for?: string; until?: string; event?: { source: string; match?: string }
   poll?: { agent?: string; tool: string; args?: Record<string, unknown>; every: string; until: string }
-  // post (also Deliver's fields)
-  to?: string; thread?: string; also?: string[]; mention?: string[]; message?: string; files?: string
+  // routine: what it asks and where the result goes
+  prompt?: string
+  // post (also Deliver's fields); routine: a RoutineTarget
+  to?: string | RoutineTarget; thread?: string; also?: string[]; mention?: string[]; message?: string; files?: string
   // for_each
   items?: string; as?: string; do?: Node; concurrency?: number; tolerate_failures?: number
   // workflow
@@ -61,6 +63,9 @@ export type Node = {
   /** Finish: where the result goes. Approval: where the ask is posted. */
   deliver?: Deliver | AskWhere | null
 }
+
+/** Where a routine step posts: a channel or thread by id, or the owner's DMs. */
+export type RoutineTarget = { kind: "channel" | "thread" | "dm"; id?: string }
 
 /** Where an approval is asked: the inbox only, a direct message, or a thread in a channel. */
 export type AskWhere = "inbox" | "dm" | "thread"

@@ -33,11 +33,14 @@ from daimon.core.workflows.expressions import expressions_in
 from daimon.core.workflows.features import KEYS, workflow_features
 from daimon.core.workflows.spec import (
     AgentNode,
+    BranchNode,
     CodeNode,
     Deliver,
     FinishNode,
     ForEachNode,
+    RoutineNode,
     Spec,
+    TransformNode,
     WaitNode,
     node_hash,
     slug,
@@ -104,6 +107,15 @@ def uses_polls(spec: Spec) -> bool:
     )
 
 
+def routine_only(spec: Spec) -> bool:
+    """A routine step is the only work: the fire's own gates and budgets apply, not a run's."""
+    kinds = RoutineNode | BranchNode | TransformNode | FinishNode
+    nodes = spec.nodes.values()
+    return any(isinstance(n, RoutineNode) for n in nodes) and all(
+        isinstance(n, kinds) for n in nodes
+    )
+
+
 def uses_mentions(spec: Spec) -> bool:
     return any(t.kind == "mention" for t in spec.triggers or [])
 
@@ -137,6 +149,8 @@ async def check(
         )
         if not features.enabled:
             return Refusal("workflows_off", "Workflows are off here. Ask an admin to turn them on.")
+        if routine_only(place.spec):
+            return Cleared(settings.workflows.max_run_budget_usd)
         if not features.code and has_code(place.spec):
             return Refusal("code_off", "Code steps are off here. Ask an admin to turn them on.")
         if not features.polls and uses_polls(place.spec):
