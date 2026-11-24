@@ -30,7 +30,6 @@ from daimon.core.access_policy import (
     ChannelRule,
     ChannelWriters,
     TenantAccessPolicy,
-    agent_invoker_roles,
     is_discord_snowflake,
 )
 from daimon.core.errors import DaimonError
@@ -511,13 +510,8 @@ def agent_permissions(
 
 
 def is_barred_from_web_chat(policy: TenantAccessPolicy, agent_names: Iterable[str | None]) -> bool:
-    """Whether no rule on where it runs lets a web chat run the agent (`authz._decide`):
-    it needs a Discord role, which a web chat cannot check, or it is a channel's own agent."""
-    names = tuple(agent_names)
-    return (
-        bool(agent_invoker_roles(policy, names))
-        or agent_permissions(policy, names).home is not None
-    )
+    """Whether the agent is a channel's own, which answers only there (`authz._decide`)."""
+    return agent_permissions(policy, tuple(agent_names)).home is not None
 
 
 def rule_token(place_id: str | None) -> str | None:

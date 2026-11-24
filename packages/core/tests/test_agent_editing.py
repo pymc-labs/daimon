@@ -332,25 +332,30 @@ async def test_set_places_rewrites_the_rule_of_a_restricted_agent(
     )
 
 
-async def test_set_places_refuses_web_chat_for_an_agent_that_needs_a_role(
+async def test_set_places_refuses_web_chat_for_a_channels_own_agent(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     actor = await _actor(db_session, admin=True)
-    gated = TenantAccessPolicy(
-        agent_rules={"helper": AgentRule(invoker_role_ids=("111111111111111111",))}
+    own = TenantAccessPolicy(
+        agent_rules={"helper": AgentRule(runs_in=("c2",))},
+        channel_rules={"c2": ChannelRule(readers="own", writers="own")},
     )
-    await set_access_policy(db_session, tenant_id=actor.tenant_id, policy=gated)
+    await set_access_policy(db_session, tenant_id=actor.tenant_id, policy=own)
     await db_session.commit()
     deps = _deps(_router(actor.tenant_id, []), db_session_factory)
     agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id="ag_x")
     with pytest.raises(AgentEditError) as refused:
         await agent_editing.set_places(
-            deps, actor=actor, agent=agent, before=[], after=[PlaceEdit("web")]
+            deps,
+            actor=actor,
+            agent=agent,
+            before=[PlaceEdit("c2")],
+            after=[PlaceEdit("c2"), PlaceEdit("web")],
         )
-    assert refused.value.kind == "invalid", "a web chat cannot check a Discord role"
+    assert refused.value.kind == "invalid", "a channel's own agent never answers in a web chat"
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
-    assert policy.agent_rules == gated.agent_rules, "the rule is unchanged"
+    assert policy.agent_rules == own.agent_rules, "the rule is unchanged"
 
 
 async def test_set_places_refuses_an_owner_who_is_not_an_admin_and_writes_nothing(

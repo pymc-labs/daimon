@@ -187,14 +187,17 @@ def test_a_rule_that_leaves_web_out_drops_the_web_chat_and_no_rule_keeps_it() ->
 def test_web_chat_is_listed_only_where_a_web_chat_may_run_the_agent(
     rule: AgentRule | None, own: tuple[str, ...]
 ) -> None:
-    """The Channels panel says web chat only where the web chat picker offers the agent."""
+    """The Channels panel says web chat only where the web chat picker offers the agent to
+    someone its rules let in."""
     policy = TenantAccessPolicy(
         agent_rules={"helper": rule} if rule is not None else {},
         channel_rules={c: ChannelRule(readers="own", writers="own") for c in own},
     )
     runs = authorize(
         policy,
-        subject=Subject(platform_user_id="u1"),
+        subject=Subject(
+            platform_user_id="u1", role_ids=("111111111111111111",), verified_membership=True
+        ),
         action=Action.RUN_AGENT,
         surface=Surface.WEB,
         agent=AgentRef.of("helper"),

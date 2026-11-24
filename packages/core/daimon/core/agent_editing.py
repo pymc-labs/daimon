@@ -92,9 +92,7 @@ BuiltinToolName = Literal[
     "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
 ]
 BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
-WEB_CHAT_BARRED: Final = (
-    "The web chat can't run an agent kept to certain roles or to one channel. Nothing was saved."
-)
+WEB_CHAT_BARRED: Final = "The web chat can't run a channel's own agent. Nothing was saved."
 
 AgentEditRefusal = Literal[
     "forbidden", "invalid", "conflict", "stale", "not_found", "taken", "unavailable"

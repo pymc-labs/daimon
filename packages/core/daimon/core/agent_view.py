@@ -533,7 +533,7 @@ def places_of(
     channel_names: Mapping[str, str],
 ) -> list[PlaceDoc]:
     """Where the agent answers: the channels it is the default of, the ones its rule lets it
-    run in, and the web chat unless its rules keep it off or bar it. Pure.
+    run in, and the web chat unless its rules keep it off or it is a channel's own. Pure.
 
     A channel kept to its own agents is confidential. A workspace-wide default and
     direct messages are not places a rule names, so they are not listed.

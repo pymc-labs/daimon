@@ -120,7 +120,8 @@ drops it.
 Membership is checked live when the agent is chosen, on queued sends and
 before each model call and approval card. A revoked role refuses the next
 step, not one already running. A handoff checks the person asking against the
-agent it moves to.
+agent it moves to. In the web chat, the person's linked Discord account must hold
+the roles; with no linked account they can't run the agent there.
 
 A person who holds the agent's roles can run it unattended. A routine for a
 role-gated agent runs as its owner, and each run (and each message it sends)
