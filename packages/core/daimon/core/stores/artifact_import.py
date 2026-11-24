@@ -470,7 +470,7 @@ async def _import_watches(
             warnings.append(f"watch {watch.legacy_id}: instructions were cut")
         if cap > ceiling:
             warnings.append(
-                f"watch {watch.legacy_id}: asks for {cap} reports a day but this workspace "
+                f"watch {watch.legacy_id}: asks for {cap} reports a day but this team "
                 f"allows {ceiling}; raise it with `daimon watches limits set`"
             )
     return made, orphans

@@ -77,7 +77,8 @@ def import_command(
     for path in files:
         bundle = _read(path)
         if apply and bundle.provisional:
-            raise typer.BadParameter(f"{path.name} is provisional: re-export with --apply first")
+            typer.echo(f"{path.name} is provisional: re-export with --apply first", err=True)
+            raise typer.Exit(1)
         slugs.add(bundle.page.slug)
         guilds.add(bundle.guild_id)
 

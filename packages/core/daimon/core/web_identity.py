@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Final, Literal
+from typing import Final, Literal, NoReturn
 
 from daimon.core.authz import Subject
 from daimon.core.channel_audience import audience_mode, requester_standing
@@ -41,11 +41,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
-_NO_WORKSPACE = "Daimon isn't in any of your workspaces yet. Ask an admin."
-
-
 class WebSignInRefused(UserFacingError):
     """The sign-in is valid but may not enter; the message is safe to show the person."""
+
+
+def _refuse_no_workspace() -> NoReturn:
+    raise WebSignInRefused("Daimon isn't in any of your workspaces yet. Ask an admin.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +99,7 @@ async def resolve_web_people(
         workspaces=identity.workspaces,
     )
     if not tenants:
-        raise WebSignInRefused(_NO_WORKSPACE)
+        _refuse_no_workspace()
     people: list[WebPersonRow] = []
     async with session_factory() as session, session.begin():
         for tenant in tenants:
@@ -162,7 +163,7 @@ async def resolve_google_visitors(
             )
             reached.append(person)
     if not reached:
-        raise WebSignInRefused(_NO_WORKSPACE)
+        _refuse_no_workspace()
     return sorted(reached, key=lambda p: (p.created_at, p.id))
 
 

@@ -52,7 +52,7 @@ class PersonRef(BaseModel):
     @model_validator(mode="after")
     def _one_kind(self) -> PersonRef:
         if (self.discord_id is None) == (self.email is None):
-            raise ValueError("a person has a discord_id or an email, not both or neither")
+            raise ValueError("a person has one id or an email, not both or neither")
         if self.google_sub is not None and self.email is None:
             raise ValueError("google_sub goes with an email")
         return self
@@ -225,7 +225,7 @@ def compat_warnings(
             blocked.add(url)
     warnings: list[str] = []
     if blocked:
-        warnings.append(f"loads from hosts this deployment blocks: {_hosts(blocked)}")
+        warnings.append(f"loads from blocked hosts: {_hosts(blocked)}")
     if frames:
         warnings.append(
             f"embeds frames that need a content domain or are never allowed: {_hosts(frames)}"
