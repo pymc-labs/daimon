@@ -69,6 +69,13 @@ A page runs in a sandboxed frame with no network. `fetch` and WebSocket calls fa
 
 The frame cannot read the web session or another page, so a page's code cannot act as its viewer. Everything it does goes through `window.daimon`, which the server checks on every call.
 
+### Old page addresses
+
+Pages moved in from another system keep working at their old addresses. List the old host in
+[`DAIMON_WEB__ARTIFACT_LEGACY_HOSTS`](configuration.md#daimon_web__artifact_legacy_hosts) and point
+its DNS here. A request for `/a/<name>` there moves to the page's address with the query kept and
+`key` renamed to `k`; anything else on that host is not found. See [Move people in](people-migration.md#pages).
+
 ### Video and storage on a content host
 
 By default a page has no origin of its own: `localStorage` fails and no other site can be framed. Set [`DAIMON_WEB__ARTIFACT_CONTENT_URL`](configuration.md#daimon_web__artifact_content_url) to serve pages from another domain, such as `https://{id}.pages.example.net`. Each page then gets its own origin and storage, and can embed YouTube (`/embed/`) and Google Drive (`/file/`) players; no other path on those hosts, which would let a page fetch any address through them.

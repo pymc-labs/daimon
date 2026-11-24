@@ -11,10 +11,12 @@ import zlib
 from pathlib import Path
 from typing import Any
 
+from daimon.core._models import Artifact
 from daimon.core.artifact_pages.model import page_url
 from daimon.core.stores.domain import ArtifactRow
 from daimon.testing.turn_router import build_turn_router
 from httpx import AsyncClient, Response
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN
@@ -108,6 +110,33 @@ async def test_a_content_host_gives_each_page_its_own_origin_and_serves_nothing_
     )
     assert elsewhere.status_code == 308
     assert elsewhere.headers["location"] == f"https://web.example.com{_path(page)}?v=1"
+
+
+async def test_a_legacy_host_moves_an_old_page_address_to_the_page(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    t = await team(db_session_factory)
+    page = await publish(db_session_factory, t.owner)
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.id == page.id)
+            .values(imported_from="https://old.example.org/a/q3-plan")
+        )
+    web = web_settings(artifact_legacy_hosts="old.example.org")
+    old = {"Host": "old.example.org"}
+
+    async with page_client(db_session_factory, None, web=web) as client:
+        moved = await client.get("/a/q3-plan?key=abc&x=1", headers=old)
+        unknown = await client.get("/a/nope", headers=old)
+        other = await client.get("/api/me", headers=old)
+        deeper = await client.get("/a/q3-plan/_content", headers=old)
+        app = await client.get("/a/q3-plan")
+
+    assert moved.status_code == 308
+    assert moved.headers["location"] == f"https://web.example.com{_path(page)}?k=abc&x=1"
+    assert (unknown.status_code, other.status_code, deeper.status_code) == (404, 404, 404)
+    assert app.status_code != 308, "the app host does not move legacy names"
 
 
 async def test_the_opaque_sandbox_opens_no_popups_and_adds_the_operators_hosts(

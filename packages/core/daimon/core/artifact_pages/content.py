@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from daimon.core.artifact_pages.model import ArtifactError
+from daimon.core.artifact_pages.model import ArtifactError, page_url
 from pydantic import JsonValue
 
 # No host that fetches or redirects to a URL it is given (an image CDN's fetch mode):
@@ -42,7 +42,8 @@ PLAYER_FRAMES: Final = (
 SANDBOX: Final = "allow-scripts allow-forms allow-modals allow-downloads"
 _CONTENT_PATH: Final = re.compile(r"/a/([a-z2-7]{10})/_content")
 _DEFAULT_PORTS: Final = {"http": 80, "https": 443}
-HostRoute = Literal["serve", "redirect", "not_found"]
+HostRoute = Literal["serve", "redirect", "not_found", "legacy"]
+_LEGACY_PATH: Final = re.compile(r"/a/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)")
 
 
 @dataclass(frozen=True)
@@ -74,13 +75,34 @@ class ContentHost:
         return label if ok else None
 
 
+def legacy_slug(path: str) -> str | None:
+    """The page name in `/a/<name>`, the only path a legacy host answers."""
+    found = _LEGACY_PATH.fullmatch(path)
+    return found[1] if found else None
+
+
+def legacy_location(public_url: str, public_id: str, slug: str, query: str) -> str:
+    """Where a legacy address moves: the page's address with the old query, `key` renamed
+    to `k`. A fragment needs no care: a browser keeps the one it had across a redirect."""
+    pairs = [("k" if k == "key" else k, v) for k, v in parse_qsl(query, keep_blank_values=True)]
+    return page_url(public_url, public_id, slug) + (f"?{urlencode(pairs)}" if pairs else "")
+
+
 def route_host(
-    netloc: str, path: str, *, public_netloc: str, content: ContentHost | None
+    netloc: str,
+    path: str,
+    *,
+    public_netloc: str,
+    content: ContentHost | None,
+    legacy_hosts: Collection[str] = (),
 ) -> HostRoute:
     """Which host answers which path. The content host serves page HTML and nothing else:
     any other route there would share the page's origin. Pages linked on another of the
-    app's hosts move to the public one. Hosts are lowercase host[:port]."""
+    app's hosts move to the public one. A legacy host answers `/a/<name>` (`legacy`) and
+    nothing else. Hosts are lowercase host[:port]."""
     netloc = netloc.lower()
+    if netloc in legacy_hosts:
+        return "legacy" if legacy_slug(path) else "not_found"
     page = None if content is None else content.page_of(netloc)
     if page is not None:
         found = _CONTENT_PATH.fullmatch(path)
