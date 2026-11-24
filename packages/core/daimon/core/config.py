@@ -1248,10 +1248,11 @@ class WebSettings(BaseModel):
         default=(),
         description=(
             "More hosts artifact pages may load scripts, styles, fonts and images from, "
-            "comma-separated (`https://cdn.example.com`), or only a path of a host, ending "
-            "in `/` (`https://img.example.com/account/upload/`). Never list a whole host "
-            "that fetches or redirects to any URL it is given: pages could send data out "
-            "through it. List only the path that serves your own files."
+            "comma-separated (`https://cdn.example.com`), or a path of a host, ending in `/`. "
+            "List only a source that never fetches other URLs, or pages could send data out "
+            "through it: a path is no barrier, since a service can fetch through its URL "
+            "options and browsers ignore the path after a redirect. On Cloudinary, turn on "
+            "strict transformations and turn off fetched URLs."
         ),
     )
     artifact_legacy_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
@@ -1260,7 +1261,9 @@ class WebSettings(BaseModel):
             "Hosts that used to serve imported pages, comma-separated "
             "(`pages.old.example.com`). A request for `/a/<name>` on one redirects to the "
             "page imported from that address, keeping its query and renaming `key` to `k`; "
-            "anything else there is not found. Point the host's DNS and certificate here."
+            "anything else there is not found. The lookup spans every workspace, and an "
+            "address two workspaces imported is not found. Point the host's DNS and "
+            "certificate here."
         ),
     )
     artifact_db_pool_size: int = Field(

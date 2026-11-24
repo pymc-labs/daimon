@@ -69,7 +69,7 @@ A page runs in a sandboxed frame with no network. `fetch` and WebSocket calls fa
 - `cdn.jsdelivr.net`, `cdnjs.cloudflare.com` and `unpkg.com`
 - any the operator adds with [`DAIMON_WEB__ARTIFACT_ASSET_HOSTS`](configuration.md#daimon_web__artifact_asset_hosts): a host, or one path of a host
 
-An image service whose host also fetches any URL it is given must not be listed whole: pages could send data out through it. List only the path that serves your own files, ending in `/`, such as `https://img.example.com/account/upload/`. A path takes no wildcard host, `%` or `..`.
+List only a source that never fetches other URLs, or pages could send data out through it. A path such as `https://img.example.com/account/upload/` is no barrier: an image service can fetch other addresses through its URL options, and browsers ignore the path after a redirect. On Cloudinary, turn on strict transformations and turn off fetched URLs. A path takes no wildcard host, `%` or `..`.
 
 The frame cannot read the web session or another page, so a page's code cannot act as its viewer. Everything it does goes through `window.daimon`, which the server checks on every call.
 
@@ -78,7 +78,8 @@ The frame cannot read the web session or another page, so a page's code cannot a
 Pages moved in from another system keep working at their old addresses. List the old host in
 [`DAIMON_WEB__ARTIFACT_LEGACY_HOSTS`](configuration.md#daimon_web__artifact_legacy_hosts) and point
 its DNS here. A request for `/a/<name>` there moves to the page's address with the query kept and
-`key` renamed to `k`; anything else on that host is not found. See [Move people in](people-migration.md#pages).
+`key` renamed to `k`; anything else on that host is not found. The old address is looked up
+across every workspace here, and one that two workspaces imported is not found. See [Move people in](people-migration.md#pages).
 
 ### Video and storage on a content host
 
