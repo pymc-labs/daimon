@@ -52,13 +52,25 @@ class MadeIn(TypedDict):
 
 
 class ConvertedFrom(TypedDict, total=False):
-    """The routine a workflow was converted from, to convert it back; `last` is its last fire
-    (`at`, `error`), the failure streak's start before the first run."""
+    """The routine a workflow was converted from (`routine_translation`), to convert it back:
+    its row's fields the workflow does not hold, and `last`, its last fire (`at`, `status`,
+    `text`) for the page and the failure streak's start before the first run."""
 
     routine_id: str
     source_routine_id: str | None
     made_in_channel_id: str | None
-    created_at: str
+    created_at: str | None
+    agent_id: str
+    agent_name: str
+    name: str | None
+    owner: str | None
+    owner_account_id: str | None
+    to: dict[str, Any] | None
+    fired_at: str | None
+    finished_at: str | None
+    error: str | None
+    tail: str | None
+    migrated_at: str | None
     last: dict[str, Any] | None
 
 
@@ -329,7 +341,6 @@ async def publish_version(
     note: str = "",
     approved_by: uuid.UUID | None = None,
     now: datetime | None = None,
-    cursors: Mapping[str, workflow_triggers.Cursor] | None = None,
     agent_tools: Mapping[str, Sequence[str]] | None = None,
     skills: Mapping[str, Mapping[str, str]] | None = None,
 ) -> WorkflowVersionRow:
@@ -368,7 +379,6 @@ async def publish_version(
         workflow_id=workflow_id,
         triggers=[cast("dict[str, Any]", t) for t in triggers if isinstance(t, dict)],
         now=now or datetime.now(UTC),
-        cursors=cursors,
     )
     await session.refresh(orm)
     return WorkflowVersionRow.model_validate(orm)

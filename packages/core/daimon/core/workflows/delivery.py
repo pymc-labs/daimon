@@ -618,6 +618,10 @@ def _uuid(raw: object) -> uuid.UUID | None:
         return None
 
 
+def _at(raw: object) -> datetime | None:
+    return datetime.fromisoformat(raw) if isinstance(raw, str) else None
+
+
 async def post_refusal(
     post: WorkflowPost,
     *,
@@ -763,32 +767,35 @@ async def result_job(
     settings: Settings | None = None,
 ) -> DeliveryJob | None:
     """A routine step's claimed `result` as the job its platform's poster takes, from the run's
-    version, fenced on that version staying live under the owner it was queued for and on the
-    claim. None when the workflow, run or step is gone."""
+    version (a result a routine's move carried names its own), fenced on that version staying
+    live under the owner it was queued for and on the claim. None when the workflow, run or
+    step is gone."""
+    payload = row.payload
     async with sessionmaker() as session:
         flow = await workflows.get_workflow(
             session, tenant_id=row.tenant_id, workflow_id=row.workflow_id
         )
         run = None if row.run_id is None else await workflow_runs.get_run(session, row.run_id)
+        number = run.version if run is not None else payload.get("version")
         version = (
             None
-            if flow is None or run is None
+            if flow is None or not isinstance(number, int) or (row.run_id and run is None)
             else await workflows.get_version(
-                session, tenant_id=row.tenant_id, workflow_id=flow.id, number=run.version
+                session, tenant_id=row.tenant_id, workflow_id=flow.id, number=number
             )
         )
     spec = None if version is None else parse_spec(version.spec)
     node = next(
         (n for n in (spec.nodes if spec else {}).values() if isinstance(n, RoutineNode)), None
     )
-    if flow is None or run is None or spec is None or node is None:
+    if flow is None or version is None or spec is None or node is None:
         return None
     payload = row.payload
     subject = workflow_subject(
         flow,
         spec,
         node,
-        run_id=run.id,
+        run_id=None if run is None else run.id,
         owner=payload.get("owner"),
         agent_id=str(payload.get("agent_id") or ""),
     )
@@ -797,7 +804,7 @@ async def result_job(
     async def still_current() -> str | None:
         async with sessionmaker() as session:
             live = await workflows.is_live(
-                session, workflow_id=flow.id, version=run.version, owner_account_id=owner
+                session, workflow_id=flow.id, version=version.number, owner_account_id=owner
             )
             held = await workflow_deliveries.still_claimed(
                 session, row.id, owner=lease, now=datetime.now(UTC)
@@ -811,7 +818,7 @@ async def result_job(
         delivery_payload=str(payload.get("text") or ""),
         delivery_note=row.note,
         delivery_hold=payload.get("hold"),
-        last_fired_at=run.started_at,
+        last_fired_at=run.started_at if run else _at(payload.get("fired_at")),
         delivery_id=row.id,
         source="workflow",
     )

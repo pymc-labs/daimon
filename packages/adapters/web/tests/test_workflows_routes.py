@@ -443,8 +443,7 @@ async def test_an_admin_moves_a_routine_to_a_workflow_and_back(rig: Rig) -> None
         assert flow["migration"]["routine"]["id"] == str(routine), "the page links it too"
         again = await r.client.post(f"/api/workflows/from-routine/{routine}")
         assert again.status_code == 409, "a routine moves once"
-        [row] = (await r.client.get("/api/routines")).json()
-        assert row["workflow"]["id"] == flow["id"], "the routine links its workflow"
+        assert (await r.client.get("/api/routines")).json() == [], "the routine is the workflow"
         paused = await r.client.post(f"/api/routines/{routine}/resume")
         assert paused.status_code == 422 and "Workflows" in paused.text, paused.text
         await r.sign_in("member")

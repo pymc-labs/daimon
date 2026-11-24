@@ -256,7 +256,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   steps and scoped writes (`workflow_scoped_writes`) stay off until an admin turns
   them on. The routine result header and routine sandbox tools have a Workflow level, for a
   workflow's routine steps. Routines still work but are marked Legacy, and every routines list
-  offers an admin "Move to a workflow"; see [Workflows](docs/workflows.md) and
+  offers an admin "Move to a workflow". A moved routine becomes the workflow, with its
+  pending post, owner notice, settings and intake binding; `daimon routines translate
+  --dry-run` checks every routine. See [Workflows](docs/workflows.md) and
   [Advanced workflows](docs/workflows-advanced.md).
 
 - **A setting for rooms with outside people.** Server admins on Discord can set

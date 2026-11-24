@@ -65,13 +65,12 @@ async def apply_routine_action(
     """
     row = await load(session, routine_id, tenant_id=tenant_id)
     if row is None:
-        return "gone"
+        # A card shown before the move still offers the buttons; either way nothing changes.
+        return "moved" if await migrated_workflows(session, [routine_id]) else "gone"
     if check_tenant and row.tenant_id != tenant_id:
         return "wrong_tenant"
     if not await allowed(row):
         return "not_owner"
-    if await migrated_workflows(session, [row.id]):
-        return "moved"  # a card shown before the move still offers the buttons
     if op == "toggle":
         op = "pause" if row.enabled else "resume"
     if op == "pause":

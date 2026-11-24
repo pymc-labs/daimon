@@ -58,8 +58,12 @@ async def seed_routines(
         assert orm.source_routine_id is not None
         rows.setdefault(orm.source_routine_id, []).append(RoutineRow.model_validate(orm))
     planned: list[tuple[RoutineRow, datetime]] = []
+    converted = await migrated_workflows(session, ids, tenant_id=tenant_id, key="source_routine_id")
     for entry in entries:
         matches = rows.get(entry.source_routine_id, [])
+        if entry.source_routine_id in converted:
+            errors.append(f"{entry.source_routine_id}: runs as a workflow, not a routine")
+            continue
         if len(matches) != 1:
             reason = (
                 "no Daimon routine has this id in the selected team"
@@ -73,9 +77,6 @@ async def seed_routines(
             planned.append((row, seed_first_slot(entry, row, now=now)))
         except ValueError as exc:
             errors.append(f"{entry.source_routine_id}: {exc}")
-    for row, _ in planned:
-        if await migrated_workflows(session, [row.id]):
-            errors.append(f"{row.source_routine_id}: runs as a workflow, not a routine")
     if errors:
         raise StoreError("\n".join(errors) + "\nNothing was changed.")
     if apply:
@@ -113,6 +114,23 @@ async def seed_routines(
     return planned
 
 
+async def _refuse_converted(
+    session: AsyncSession, tenant_id: UUID, source_routine_ids: list[UUID] | None
+) -> None:
+    """A handback selection (None: the whole team) holds no routine that runs as a workflow."""
+    origin = Workflow.converted_from["source_routine_id"].astext
+    stmt = select(origin, Workflow.id, Workflow.name).where(
+        Workflow.tenant_id == tenant_id, origin.is_not(None)
+    )
+    if source_routine_ids is not None:
+        stmt = stmt.where(origin.in_([str(r) for r in source_routine_ids]))
+    for rid, workflow_id, name in sorted((await session.execute(stmt)).tuples()):
+        raise StoreError(
+            f"{rid}: runs as workflow {name}. "
+            f"Move it back first: daimon workflows to-routine {workflow_id}. Nothing was changed."
+        )
+
+
 async def rollback_rows(
     session: AsyncSession, *, tenant_id: UUID, source_routine_ids: list[UUID] | None = None
 ) -> list[RoutineRow]:
@@ -124,6 +142,7 @@ async def rollback_rows(
         if len(set(source_routine_ids)) != len(source_routine_ids):
             raise StoreError("Duplicate routine id in rollback selection.")
         statement = statement.where(Routine.source_routine_id.in_(source_routine_ids))
+    await _refuse_converted(session, tenant_id, source_routine_ids)
     rows = [
         RoutineRow.model_validate(row)
         for row in (
@@ -149,11 +168,12 @@ async def moved_routines(session: AsyncSession, rows: list[RoutineRow]) -> dict[
     moved = await migrated_workflows(session, [row.id for row in rows])
     if not moved:
         return {}
+    routine_of = {workflow_id: routine_id for routine_id, (workflow_id, _) in moved.items()}
     found = (
         await session.execute(
             select(WorkflowTrigger, Workflow.name, Workflow.status)
             .join(Workflow, Workflow.id == WorkflowTrigger.workflow_id)
-            .where(WorkflowTrigger.from_routine_id.in_(moved))
+            .where(WorkflowTrigger.workflow_id.in_(routine_of), WorkflowTrigger.kind == "schedule")
         )
     ).all()
     open_runs = set(
@@ -178,7 +198,7 @@ async def moved_routines(session: AsyncSession, rows: list[RoutineRow]) -> dict[
         )
     )
     return {
-        trigger.from_routine_id: MovedRoutine(
+        routine_of[trigger.workflow_id]: MovedRoutine(
             workflow_name=name,
             active=status == "active" and trigger.enabled,
             run_in_flight=trigger.id in waiting
@@ -187,7 +207,6 @@ async def moved_routines(session: AsyncSession, rows: list[RoutineRow]) -> dict[
             seeded_after=trigger.seeded_after,
         )
         for trigger, name, status in found
-        if trigger.from_routine_id is not None
     }
 
 
@@ -217,6 +236,7 @@ async def pause_for_handback(
             await session.scalars(statement.execution_options(populate_existing=True))
         ).all()
     ]
+    await _refuse_converted(session, tenant_id, source_routine_ids)
     for rid in source_routine_ids:
         matches = [row for row in rows if row.source_routine_id == rid]
         if len(matches) != 1:
@@ -226,13 +246,6 @@ async def pause_for_handback(
                 else "several routines match"
             )
             raise StoreError(f"{rid}: {reason}. Nothing was changed.")
-    for row in rows:
-        if row.id in (running := await migrated_workflows(session, [row.id])):
-            raise StoreError(
-                f"{row.source_routine_id}: runs as workflow {running[row.id][1]}. "
-                f"Move it back first: daimon workflows to-routine {running[row.id][0]}. "
-                "Nothing was changed."
-            )
     if apply:
         for row in rows:
             if row.handback_paused_at is not None:

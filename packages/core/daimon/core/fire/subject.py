@@ -72,11 +72,13 @@ class Subject:
     source_channel_id: str | None = None
     source_thread_id: str | None = None
     workflow_run_id: uuid.UUID | None = None
+    #: A workflow's routine step: `id` is the workflow's (a result carried by a move has no run).
+    workflow: bool = False
 
 
 def tier_ids(facts: RoutineFacts) -> tuple[uuid.UUID | None, uuid.UUID | None]:
     """The fire's own feature tier and tag, as `(routine_id, workflow_id)`."""
-    if isinstance(facts, Subject) and facts.workflow_run_id is not None:
+    if isinstance(facts, Subject) and facts.workflow:
         return None, facts.id
     return facts.id, None
 
@@ -86,7 +88,7 @@ def workflow_subject(
     spec: Spec,
     node: RoutineNode,
     *,
-    run_id: uuid.UUID,
+    run_id: uuid.UUID | None,
     owner: str | None,
     agent_id: str,
 ) -> Subject:
@@ -112,6 +114,7 @@ def workflow_subject(
         source_channel_id=made_in["channel_id"] if made_in else None,
         source_thread_id=made_in["thread_id"] if made_in else None,
         workflow_run_id=run_id,
+        workflow=True,
     )
 
 

@@ -6236,11 +6236,6 @@ class WorkflowTrigger(Base):
     __table_args__ = (
         UniqueConstraint("workflow_id", "trigger_key", name="uq_workflow_triggers_key"),
         Index(
-            "ix_workflow_triggers_routine",
-            "from_routine_id",
-            postgresql_where=text("from_routine_id IS NOT NULL"),
-        ),
-        Index(
             "ix_workflow_triggers_due",
             "next_fire_at",
             postgresql_where=text("enabled AND next_fire_at IS NOT NULL"),
@@ -6264,9 +6259,6 @@ class WorkflowTrigger(Base):
     last_fired_slot: Mapped[datetime | None]
     seeded_after: Mapped[datetime | None]
     listening_until: Mapped[datetime | None]
-    from_routine_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("routines.id", ondelete="SET NULL")
-    )
     #: Channels a mention trigger listens in.
     places: Mapped[list[str] | None]
     #: A poll's seen items, by key.

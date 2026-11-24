@@ -132,16 +132,16 @@ Each step's spend counts against the allowance of the person the run is for.
 ## Routines and workflows
 
 An admin can move a routine to a workflow and back, from the web app or the CLI.
-The workflow takes over the routine's schedule, and a paused routine moves
-paused. A routine that posts to its owner's direct messages becomes a step in
-that conversation, which is skipped while the owner is busy. A routine that is
+The workflow takes over the routine's schedule, posts waiting to go out and
+settings, and a paused routine moves paused. A routine that posts to its
+owner's direct messages keeps posting there. A routine that is
 running, or already moved, stays. A copy made while migrating from another
 system moves like any other and keeps its link to its source. A workflow on a
 one-time or multi-week schedule cannot move back.
 
-A moved routine's step writes as the routine did, under the same tool policy.
-The preview lists what the admin approves by moving it, including a waiver when
-the step reads outside content.
+A moved routine's step writes as the routine did: it runs the routine's own
+turn, under the same tool policy. The preview lists what the admin approves by
+moving it, which for a routine step is nothing.
 
 ## CLI
 
@@ -160,6 +160,7 @@ daimon workflows verify <run> --tenant <id>
 daimon workflows from-routine --tenant <id>
 daimon workflows from-routine --tenant <id> --routine <routine> --apply
 daimon workflows to-routine <workflow> --tenant <id>
+daimon routines translate --dry-run --all-tenants
 ```
 
 An import arrives as a draft owned by `--owner`, who must be a member. `verify`

@@ -719,11 +719,13 @@ async def _set_routine_sandbox_tools_impl(
     viewer = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
-        moved = row is not None and bool(await routines_store.migrated_workflows(session, [row.id]))
-    if row is None or not routine_service.sees_routine(viewer, row):
-        raise ToolError(routine_service.NOT_FOUND)
+        moved = row is None and bool(
+            await routines_store.migrated_workflows(session, [routine_id], tenant_id=auth.tenant_id)
+        )
     if moved:
         raise ToolError(str(RoutineMoved()))
+    if row is None or not routine_service.sees_routine(viewer, row):
+        raise ToolError(routine_service.NOT_FOUND)
 
     async def admin_for(_action: DelegatedAction | None) -> bool:
         return True  # `_sandbox_admin` re-checked the live admin above

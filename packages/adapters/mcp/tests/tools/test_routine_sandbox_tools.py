@@ -27,8 +27,7 @@ from daimon.core.stores.domain import (
     RoutineRow,
     SandboxPin,
 )
-from daimon.core.stores.routines import create_routine
-from daimon.core.stores.workflow_triggers import Cursor, sync_live
+from daimon.core.stores.routines import create_routine, delete_routine
 from daimon.core.stores.workflows import create_workflow
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.membership import FixtureMembershipResolver
@@ -276,16 +275,14 @@ async def test_a_moved_routine_shows_its_workflow_and_refuses_the_opt_in(
 ) -> None:
     tenant_id, moved, other, account_id = await _setup(db_session)
     flow = await create_workflow(
-        db_session, tenant_id=tenant_id, owner_account_id=account_id, name="Nightly", spec={}
-    )
-    await sync_live(
         db_session,
         tenant_id=tenant_id,
-        workflow_id=flow.id,
-        triggers=[{"id": "t", "kind": "schedule", "cron": "0 9 * * *"}],
-        now=datetime.now(UTC),
-        cursors={"t": Cursor(moved.id, None, None, None)},
+        owner_account_id=account_id,
+        name="Nightly",
+        spec={},
+        converted_from={"routine_id": str(moved.id)},  # pyright: ignore[reportArgumentType]
     )
+    await delete_routine(db_session, moved.id, tenant_id=tenant_id)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _resolver())
     admin = _auth(tenant_id, ADMIN, is_admin=True, account_id=account_id)

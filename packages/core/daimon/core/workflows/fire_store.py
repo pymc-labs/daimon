@@ -103,7 +103,7 @@ class WorkflowFireStore:
         )
         if ended is None:
             last = (self._workflow.converted_from or {}).get("last") or {}
-            return not last.get("error")
+            return last.get("status") != "failed"
         return ended == "succeeded"
 
     async def _queue(

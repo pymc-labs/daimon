@@ -521,7 +521,6 @@ def create_tables() -> None:
         sa.Column("last_fired_slot", sa.DateTime(timezone=True), nullable=True),
         sa.Column("seeded_after", sa.DateTime(timezone=True), nullable=True),
         sa.Column("listening_until", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("from_routine_id", sa.UUID(), nullable=True),
         sa.Column("places", postgresql.ARRAY(sa.Text()), nullable=True),
         sa.Column("state", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column(
@@ -540,7 +539,6 @@ def create_tables() -> None:
             "kind IN ('manual', 'schedule', 'webhook', 'event', 'call', 'mention', 'poll')",
             name="ck_workflow_triggers_kind",
         ),
-        sa.ForeignKeyConstraint(["from_routine_id"], ["routines.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["workflow_id"], ["workflows.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -552,13 +550,6 @@ def create_tables() -> None:
         ["next_fire_at"],
         unique=False,
         postgresql_where=sa.text("enabled AND next_fire_at IS NOT NULL"),
-    )
-    op.create_index(
-        "ix_workflow_triggers_routine",
-        "workflow_triggers",
-        ["from_routine_id"],
-        unique=False,
-        postgresql_where=sa.text("from_routine_id IS NOT NULL"),
     )
     op.create_index(
         "ix_workflow_triggers_places",

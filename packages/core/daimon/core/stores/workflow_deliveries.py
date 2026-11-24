@@ -180,6 +180,20 @@ async def deliveries_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[
     return [DeliveryRow.model_validate(o) for o in found]
 
 
+async def unsent_routine_posts(session: AsyncSession, workflow_id: uuid.UUID) -> list[DeliveryRow]:
+    """A workflow's `result` and `notice` posts not yet sent (pending or claimed), oldest first."""
+    found = await session.scalars(
+        select(WorkflowDelivery)
+        .where(
+            WorkflowDelivery.workflow_id == workflow_id,
+            WorkflowDelivery.kind.in_(("result", "notice")),
+            WorkflowDelivery.status.in_(("pending", "claimed")),
+        )
+        .order_by(WorkflowDelivery.created_at, WorkflowDelivery.id)
+    )
+    return [DeliveryRow.model_validate(o) for o in found]
+
+
 async def post_of_step(session: AsyncSession, step_id: uuid.UUID) -> DeliveryRow | None:
     """The post a post step queued, so a step claimed again does not post twice."""
     orm = await session.scalar(

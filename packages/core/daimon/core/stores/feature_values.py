@@ -66,7 +66,8 @@ def _match(target: FeatureTarget) -> ColumnElement[bool]:
     )
 
 
-async def _bump(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+async def bump_revision(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Make cached feature snapshots of the workspace stale."""
     await session.execute(
         update(Tenant)
         .where(Tenant.id == tenant_id)
@@ -218,7 +219,7 @@ async def set_feature_value(
             set_=changes,
         )
     row = (await session.scalars(stmt.returning(FeatureValue))).one()
-    await _bump(session, tenant_id)
+    await bump_revision(session, tenant_id)
     await session.flush()
     return FeatureValueRow.model_validate(row)
 
@@ -235,7 +236,7 @@ async def clear_feature_value(
     )
     existed = cast(CursorResult[Any], result).rowcount == 1
     if existed:
-        await _bump(session, tenant_id)
+        await bump_revision(session, tenant_id)
     await session.flush()
     return existed
 
@@ -309,5 +310,5 @@ async def replace_agent_values(
             set_by=None, surface="spec",
         )  # fmt: skip
     if changed:
-        await _bump(session, tenant_id)
+        await bump_revision(session, tenant_id)
     await session.flush()

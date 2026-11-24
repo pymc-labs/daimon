@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from cryptography.fernet import MultiFernet
@@ -911,6 +912,19 @@ async def _configs(session: AsyncSession, tenant_ids: set[UUID]) -> list[tuple[U
         )
     )
     return [(tenant, IntakeConfig.model_validate(payload)) for tenant, payload in rows]
+
+
+async def bound_config(
+    session: AsyncSession, tenant_id: UUID, *, key: str, holder: UUID
+) -> dict[str, Any] | None:
+    """The tenant's intake config, locked, when its `key` (`routine_id` or `workflow_id`) is
+    `holder`; else None."""
+    config = await session.scalar(
+        select(LeadIntakeConfig.config)
+        .where(LeadIntakeConfig.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    return dict(config) if config and config.get(key) == str(holder) else None
 
 
 async def configured_routines(
