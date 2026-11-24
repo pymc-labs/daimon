@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -33,7 +33,7 @@ from daimon.core.lead_intake import (
     normalize_project,
 )
 from daimon.core.lead_intake_access import LeadReadDenied, LeadReadTarget, read_target
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
 from pydantic import BaseModel, Field
 from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
@@ -136,6 +136,7 @@ class IntakeStore:
         actor_id: str | None,
         provenance: tuple[UUID, UUID] | None = None,
     ) -> IntakeRecord:
+        run = isinstance(provenance, WorkflowExecution)
         connection = "gmail" if submission.source.kind == "gmail" else "discord"
         digest = hashlib.sha256(
             f"{self.tenant_id}:{connection}:{submission.source.key}".encode()
@@ -152,7 +153,9 @@ class IntakeStore:
             submission=submission,
             actor_id=actor_id,
             agent_id=config.agent_id,
-            routine_id=provenance[0] if provenance else None,
+            routine_id=provenance[0] if provenance and not run else None,
+            workflow_id=config.workflow_id if run else None,
+            workflow_run_id=provenance[0] if run else None,
             execution_id=provenance[1] if provenance else None,
             config_revision=config.revision,
             created_at=now,
@@ -765,16 +768,22 @@ async def routine_execution(
             current_intake_execution.reset(token)
 
 
-def workflow_execution(
+@asynccontextmanager
+async def workflow_execution(
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: UUID,
     run_id: UUID,
     *,
     lifetime_s: float,
-) -> AbstractAsyncContextManager[UUID]:
+) -> AsyncIterator[UUID]:
     """`routine_execution` for a workflow run's routine step; yields the grant's id. Deleting
     the run (or its workflow) deletes the grant."""
-    return _grant(sessions, tenant_id, lifetime_s, workflow_run_id=run_id)
+    async with _grant(sessions, tenant_id, lifetime_s, workflow_run_id=run_id) as identity:
+        token = current_intake_execution.set(WorkflowExecution(run_id, identity))
+        try:
+            yield identity
+        finally:
+            current_intake_execution.reset(token)
 
 
 async def execution_is_active(

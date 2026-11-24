@@ -31,7 +31,13 @@ from anthropic.types.beta.vaults.beta_managed_agents_credential import (
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import (
+    EXECUTION_METADATA_KEYS,
+    WorkflowExecution,
+    current_intake_execution,
+    execution_from_metadata,
+    execution_metadata,
+)
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_hold import hold_from_metadata, hold_metadata_value, hold_vault_suffix
 from daimon.core.mcp_identity import RelayBinding
@@ -88,6 +94,7 @@ RELAY_METADATA_KEY = "daimon_chat_relay"
 RELAY_AGENT_NAME_METADATA_KEY = "daimon_relay_agent_name"
 RELAY_SESSION_METADATA_KEY = "daimon_relay_session"
 RELAY_ROUTINE_METADATA_KEY = "daimon_relay_routine"
+RELAY_WORKFLOW_RUN_METADATA_KEY = "daimon_relay_workflow_run"
 RELAY_OWNER_METADATA_KEY = "daimon_relay_owner"
 RELAY_GRANT_METADATA_KEY = "daimon_relay_grant"
 #: Display-name prefix of a session's own relay vault.
@@ -234,8 +241,7 @@ async def chat_mcp_credential(
         "daimon_chat_expires_at": expires_at.isoformat(),
     }
     if execution is not None:
-        metadata["daimon_routine_id"] = str(execution[0])
-        metadata["daimon_routine_execution"] = str(execution[1])
+        metadata.update(execution_metadata(execution))
     if chat_session_id is not None:
         metadata["daimon_chat_session"] = chat_session_id
 
@@ -252,6 +258,8 @@ async def chat_mcp_credential(
             metadata[RELAY_SESSION_METADATA_KEY] = str(relay.session_key)
         if relay.routine_id is not None:
             metadata[RELAY_ROUTINE_METADATA_KEY] = str(relay.routine_id)
+        if relay.workflow_run_id is not None:
+            metadata[RELAY_WORKFLOW_RUN_METADATA_KEY] = str(relay.workflow_run_id)
         if relay.owner is not None:
             metadata[RELAY_OWNER_METADATA_KEY] = relay.owner
         if relay.grant is not None:
@@ -297,12 +305,12 @@ async def _refresh_chat_credential_locked(
         metadata = cred.metadata or {}
         if preserve_context:
             chat_session_id = metadata.get("daimon_chat_session")
-        if chat_session_id and metadata.get("daimon_routine_execution"):
-            saved_execution = (
-                uuid.UUID(metadata["daimon_routine_id"]),
-                uuid.UUID(metadata["daimon_routine_execution"]),
-            )
-            if execution is not None and execution != saved_execution:
+        if chat_session_id and (saved_execution := execution_from_metadata(metadata)):
+            if execution is not None and (
+                execution != saved_execution
+                or isinstance(execution, WorkflowExecution)
+                != isinstance(saved_execution, WorkflowExecution)
+            ):
                 raise ValueError("routine_execution_grant_mismatch")
             execution = saved_execution
         if chat_session_id is None:
@@ -405,8 +413,7 @@ async def _refresh_chat_credential_locked(
                 HOLD_METADATA_KEY,
                 SEAL_METADATA_KEY,
                 "daimon_chat_session",
-                "daimon_routine_id",
-                "daimon_routine_execution",
+                *EXECUTION_METADATA_KEYS,
             }
         },
         **registered_payload["metadata"],
@@ -657,6 +664,7 @@ async def refresh_relay_vault(
         return
     raw_key = metadata.get(RELAY_SESSION_METADATA_KEY)
     raw_routine = metadata.get(RELAY_ROUTINE_METADATA_KEY)
+    raw_run = metadata.get(RELAY_WORKFLOW_RUN_METADATA_KEY)
     context = metadata.get("daimon_chat_context")
     # No vault lock: only the session that mounts this vault refreshes it, while
     # preparing its own turn.
@@ -676,6 +684,7 @@ async def refresh_relay_vault(
                 routine_id=None if raw_routine is None else uuid.UUID(raw_routine),
                 owner=metadata.get(RELAY_OWNER_METADATA_KEY),
                 grant=metadata.get(RELAY_GRANT_METADATA_KEY) if raw_key is not None else None,
+                workflow_run_id=None if raw_run is None else uuid.UUID(raw_run),
             ),
         )
     # Registered before the provider write, as for the shared vault.

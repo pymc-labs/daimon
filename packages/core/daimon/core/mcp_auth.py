@@ -42,7 +42,7 @@ from daimon.core.authz import (
     build_subject,
     build_turn_place,
 )
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim, parse_hold_claim
 from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
@@ -241,6 +241,7 @@ def mint_jwt(
     relay: RelayBinding | None = None,
     anthropic_disabled: bool = False,
     seal_ids: Collection[str] = (),
+    workflow_run_id: uuid.UUID | None = None,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -293,6 +294,9 @@ def mint_jwt(
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
     if routine_id is not None and execution_id is not None:
         claims["routine_id"] = str(routine_id)
+        claims["execution_id"] = str(execution_id)
+    elif workflow_run_id is not None and execution_id is not None:
+        claims["workflow_run_id"] = str(workflow_run_id)
         claims["execution_id"] = str(execution_id)
     if chat_session_id is not None:
         claims["chat_session_id"] = chat_session_id
@@ -400,8 +404,10 @@ async def mint_chat_mcp_token(
         channel_id=None if hold is None else hold.channel_id,
     )
     execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
+    run = isinstance(execution, WorkflowExecution)
     token = mint_jwt(
-        routine_id=execution[0] if execution else None,
+        routine_id=execution[0] if execution and not run else None,
+        workflow_run_id=execution[0] if execution and run else None,
         execution_id=execution[1] if execution else None,
         account_id=account_id,
         chat_agent_id=agent_id,

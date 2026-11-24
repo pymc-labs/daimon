@@ -279,6 +279,7 @@ async def run_turn(
     routine_id: uuid.UUID | None = None,
     session_id: str | None = None,
     step: StepTurn | None = None,
+    routine_step_run_id: uuid.UUID | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -321,6 +322,7 @@ async def run_turn(
             routine_id=routine_id,
             session_id=session_id,
             step=step,
+            routine_step_run_id=routine_step_run_id,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -363,6 +365,7 @@ async def run_turn(
                 routine_id=routine_id,
                 session_id=session_id,
                 step=step,
+                routine_step_run_id=routine_step_run_id,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -433,6 +436,7 @@ async def run_turn_impl(
     routine_id: uuid.UUID | None = None,
     session_id: str | None = None,
     step: StepTurn | None = None,
+    routine_step_run_id: uuid.UUID | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -524,7 +528,8 @@ async def run_turn_impl(
     assembled, and the gate and decider read it as it is now. ``step`` runs the
     turn as a workflow step (`StepTurn`): the `workflow_step` entry point with the
     step's tools, its decider, its stamps on a new session, and its brief sent as
-    is, without the routine framing.
+    is, without the routine framing. ``routine_step_run_id`` is the workflow run of a
+    routine step's turn, bound to the identity relay as ``routine_id`` binds a routine's.
 
     ``hold`` runs the turn held to a shared channel (`routine_hold.routine_hold`):
     the channel's own store replaces the agent-wide and personal ones, and the
@@ -709,7 +714,10 @@ async def run_turn_impl(
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
             relay_routine_id=routine_id if relay_routine else None,
-            relay_owner=runs_as_user if relay_routine and routine_id else None,
+            relay_workflow_run_id=routine_step_run_id if relay_routine else None,
+            relay_owner=(
+                runs_as_user if relay_routine and (routine_id or routine_step_run_id) else None
+            ),
             identity=identity,
             workflow_run_id=step.workflow_run_id if step is not None else None,
             workflow_step_id=step.workflow_step_id if step is not None else None,

@@ -137,7 +137,11 @@ async def fire(
         async with dispatch.semaphore:
             try:
                 place = FeaturePlace(
-                    subject.tenant_id, "", subject.channel_id, agent_id=subject.agent_id
+                    subject.tenant_id,
+                    "",
+                    subject.channel_id,
+                    agent_id=subject.agent_id,
+                    workflow_id=tier_ids(subject)[1],
                 )
                 if routines_gate:
                     routines = await place_feature_or_none(sm, None, place, "routines")
@@ -901,8 +905,10 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
         )
     final_state: list[TurnState] = []
     output_sessions: list[str] = []
-    # Passed only when held, so an ordinary fire's call stays what it was.
+    # Passed only when held (or a workflow run), so an ordinary fire's call stays what it was.
     held_fire: dict[str, Any] = {} if fire_hold is None else {"hold": fire_hold}
+    if subject.workflow_run_id is not None:
+        held_fire["routine_step_run_id"] = subject.workflow_run_id
 
     result = await deps.run_turn(
         anthropic=client,
@@ -943,7 +949,7 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
         platform=platform,
         runs_as_user=subject.created_by_user_id,
         membership_resolver=membership_resolver,
-        # A workflow's routine step binds no routine to the turn's MCP relay.
+        # A workflow's routine step binds its run instead (`routine_step_run_id`).
         routine_id=tier_ids(subject)[0],
         **held_fire,
     )

@@ -38,7 +38,8 @@ from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import origin_place
 
 if TYPE_CHECKING:
-    from daimon.core.stores.domain import RoutineRow, WatchRow
+    from daimon.core.fire.subject import RoutineFacts
+    from daimon.core.stores.domain import WatchRow
 
 #: Relay path under the app root; the server's configured name follows it.
 RELAY_PATH: Final = "/mcp-identity"
@@ -164,6 +165,8 @@ class RelayBinding:
     owner: str | None = None
     #: The watch a poll reads for; at most one of `session_key`, `routine_id` and this.
     watch_id: uuid.UUID | None = None
+    #: The workflow run a routine step belongs to, bound as `routine_id` is; never beside it.
+    workflow_run_id: uuid.UUID | None = None
     #: The session's execution grant (`chat_session_id`), only with `session_key`. The
     #: turn holding it (`bind_origin_session`) is the one making the call, so the relay
     #: names that turn even beside a queued one or after the session row was replaced.
@@ -179,6 +182,8 @@ class RelayBinding:
             value["routine"] = str(self.routine_id)
         if self.watch_id is not None:
             value["watch"] = str(self.watch_id)
+        if self.workflow_run_id is not None:
+            value["workflow_run"] = str(self.workflow_run_id)
         if self.owner is not None:
             value["owner"] = self.owner
         return value
@@ -191,9 +196,11 @@ def parse_relay_claim(raw: object) -> RelayBinding:
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
     owner, watch, grant = claim.get("owner"), claim.get("watch"), claim.get("grant")
-    unattended = routine is not None or watch is not None
+    run = claim.get("workflow_run")
+    unattended = routine is not None or watch is not None or run is not None
     if (
-        not set(claim) <= {"agent_name", "session", "routine", "watch", "owner", "grant"}
+        not set(claim)
+        <= {"agent_name", "session", "routine", "watch", "owner", "grant", "workflow_run"}
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not (grant is None or (isinstance(grant, str) and grant and key is not None))
         or not isinstance(name, str)
@@ -201,7 +208,8 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         or not (key is None or isinstance(key, str))
         or not (routine is None or isinstance(routine, str))
         or not (watch is None or isinstance(watch, str))
-        or sum(value is not None for value in (key, routine, watch)) > 1
+        or not (run is None or isinstance(run, str))
+        or sum(value is not None for value in (key, routine, watch, run)) > 1
     ):
         raise ValueError("relay claim has the wrong shape")
     return RelayBinding(
@@ -211,6 +219,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         owner=owner,
         watch_id=None if watch is None else uuid.UUID(watch),
         grant=grant,
+        workflow_run_id=None if run is None else uuid.UUID(run),
     )
 
 
@@ -417,7 +426,7 @@ def requester_conversation(
     return {"place_type": "channel", "channel_id": origin.thread_id, "parent_channel_id": None}
 
 
-def routine_conversation(row: RoutineRow) -> dict[str, str | None] | None:
+def routine_conversation(row: RoutineFacts) -> dict[str, str | None] | None:
     """Where a routine delivers, as `requester_conversation`; None when it has no
     destination or the destination's place is not recorded.
 

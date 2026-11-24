@@ -19,12 +19,13 @@ from typing import Any, Literal
 import structlog
 from daimon.core.config import Settings
 from daimon.core.fire.store import Fence, FireResult
-from daimon.core.fire.subject import Subject
+from daimon.core.fire.subject import Subject, workflow_subject
 from daimon.core.ops_catalog import reason_label
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.routine_delivery import failure_notice_text
 from daimon.core.routine_sandbox import RoutineSandbox, routine_sandbox
 from daimon.core.stores import (
+    identity,
     tenants,
     workflow_runs,
     workflow_triggers,
@@ -38,6 +39,7 @@ from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.workflows import delivery
 from daimon.core.workflows.engine import Event
+from daimon.core.workflows.spec import RoutineNode, parse_spec
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -248,3 +250,49 @@ class WorkflowFireStore:
                 status=status,
                 note=result.note,
             )
+
+
+@dataclass(frozen=True)
+class BoundStep:
+    """The routine step a credential's signed workflow run names: its workflow as it is now,
+    and the step's fire input as of the run's version."""
+
+    workflow: WorkflowRow
+    subject: Subject
+
+
+async def bound_step(
+    session: AsyncSession, *, tenant_id: uuid.UUID, run_id: uuid.UUID, agent_id: str = ""
+) -> BoundStep | None:
+    """The routine step of `run_id`, read as a routine-bound credential reads its routine row.
+
+    None for a run of another tenant, one with no routine step, or a workflow since deleted
+    or changed (the run's version is no longer live). `agent_id` is the step's agent when
+    the caller knows it; the owner is read live, so a handed-over workflow names its new owner.
+    """
+    run = await workflow_runs.get_run(session, run_id, tenant_id=tenant_id)
+    if run is None:
+        return None
+    flow = await workflows.get_workflow(session, tenant_id=tenant_id, workflow_id=run.workflow_id)
+    version = await workflows.get_version(
+        session, tenant_id=tenant_id, workflow_id=run.workflow_id, number=run.version
+    )
+    tenant = await tenants.get_tenant(session, tenant_id)
+    if flow is None or version is None or tenant is None or flow.live_version != run.version:
+        return None
+    spec = parse_spec(version.spec)
+    node = next((n for n in spec.nodes.values() if isinstance(n, RoutineNode)), None)
+    if node is None:
+        return None
+    owner = flow.owner_account_id
+    ids = (
+        await identity.platform_external_ids(
+            session, tenant_id=tenant_id, platform=tenant.platform, account_ids=[owner]
+        )
+        if owner
+        else {}
+    )
+    subject = workflow_subject(
+        flow, spec, node, run_id=run.id, owner=ids.get(owner) if owner else None, agent_id=agent_id
+    )
+    return BoundStep(flow, subject)
