@@ -40,8 +40,8 @@ export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
       <Section title="Model">
         <div className="space-y-4">
           {byProvider(catalog?.models ?? [], (x) => x.backend).map((g) => (
-            <div key={g.provider} className="space-y-2">
-              <h4 className="text-xs font-medium text-muted-foreground">{g.name}</h4>
+            <div key={g.provider} role="group" aria-labelledby={`model-${g.provider}`} className="space-y-2">
+              <h4 id={`model-${g.provider}`} className="text-xs text-faint">{g.name}</h4>
               {g.models.map((x) => {
                 const on = m.id === x.id && m.backend === x.backend
                 return (

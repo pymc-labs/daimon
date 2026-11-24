@@ -82,7 +82,13 @@ def claude_model_choices(*, default: str) -> tuple[ModelChoice, ...]:
         )
         for model_id in priced_claude_ids()
     )
-    return tuple(catalog_order(tuple(choices), lambda choice: choice.model))
+    return tuple(
+        catalog_order(
+            tuple(choices),
+            lambda choice: choice.model,
+            lambda choice: AGENT_MODEL_PRICING[choice.id].output,
+        )
+    )
 
 
 def _runnable(entry: AgentModel, tenant: TenantBackendPolicy | None) -> bool:
@@ -131,7 +137,7 @@ def list_model_choices(
             provider=entry.model.provider,
             price=entry.price,
         )
-        for entry in catalog_order(entries, lambda entry: entry.model)
+        for entry in catalog_order(entries, lambda e: e.model, lambda e: e.output_usd)
         if _runnable(entry, tenant)
     )
 

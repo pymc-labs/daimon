@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from daimon.core.pricing import AGENT_MODEL_PRICING, provider_prices
+from daimon.core.pricing import AGENT_MODEL_PRICING, SNAPSHOT_SUFFIX, provider_prices
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import PROVIDERS, ModelRef, Provider
 from mux.profiles import (
@@ -53,54 +53,44 @@ class AgentModel:
     output_usd: float = 0.0
 
 
-_PROVIDER_WORDS = {"claude", "gpt", "gemini"}
-
-
-def _output_usd(ref: ModelRef) -> float | None:
-    """The model's current list output price per million tokens, None where unpriced."""
-    if ref.provider == MANAGED_AGENTS.provider:
-        rates = AGENT_MODEL_PRICING.get(ref.id)
-        return None if rates is None else float(rates.output)
-    if not any(profile.provider == ref.provider for profile in PROFILES.values()):
-        return None
-    prices = provider_prices(backend_selection(ref.provider).profile)
-    return max((float(r.output) for (_, name), r in prices.items() if name == ref.id), default=None)
-
-
-def catalog_order[T](items: Sequence[T], model: Callable[[T], ModelRef]) -> list[T]:
+def catalog_order[T](
+    items: Sequence[T], model: Callable[[T], ModelRef], output_usd: Callable[[T], float | None]
+) -> list[T]:
     """The one display order of models: provider, then family strength, then newest version.
 
-    Providers follow `PROVIDERS`. A family is the id's words without numbers or the
-    provider word ("opus", "astra"). Families rank by the current output price of their
-    newest model, highest first, so the strongest sits on top; equal prices keep the order
-    the families first appear in `items`, and an unpriced family ranks last. A version is
-    the id's numbers (`claude-opus-4-7` is 4.7), newest first; a fast preset follows its
-    base model.
+    Providers follow `PROVIDERS`. A family is the id's words that are not version numbers
+    ("opus", "astra"). A version is the id's purely numeric `-` words, dated snapshot
+    suffix aside (`claude-opus-4-7` is 4.7, `gpt-6.2-sol` is 6.2; the `480b` of a size is
+    not one), newest first; a fast preset follows its base model.
+
+    Families rank by `output_usd` (the item's list output price per million tokens) of
+    their newest model, highest first, so the strongest sits on top. Equal prices go to the
+    family with the newer model, then to the one first in `items`; an unpriced family
+    ranks last.
     """
     first: dict[tuple[str, str], int] = {}
-    newest: dict[tuple[str, str], tuple[tuple[int, ...], bool, ModelRef]] = {}
+    newest: dict[tuple[str, str], tuple[tuple[int, ...], bool, T]] = {}
     keys: list[tuple[tuple[str, str], tuple[int, ...], bool]] = []
     for index, item in enumerate(items):
         ref = model(item)
-        words = ref.id.split("-")
-        family = " ".join(
-            w for w in words if w[:1].isalpha() and w not in _PROVIDER_WORDS | {"fast"}
-        )
-        numbers = [int(n) for n in re.findall(r"\d+", ref.id)]
-        version = tuple(-n for n in (*numbers, 0, 0, 0)[:4])  # 5 sorts as 5.0, after 5.5
+        words = SNAPSHOT_SUFFIX.sub("", ref.id).split("-")
+        numbers = [w for w in words if re.fullmatch(r"\d+(\.\d+)*", w)]
+        family = " ".join(w for w in words if w not in numbers and w != "fast")
+        parts = [int(n) for number in numbers for n in number.split(".")]
+        version = tuple(-n for n in (*parts, 0, 0, 0)[:4])  # 5 sorts as 5.0, after 5.5
         fast = "fast" in words
         slot = (ref.provider, family)
         first.setdefault(slot, index)
         if slot not in newest or (version, fast) < newest[slot][:2]:
-            newest[slot] = (version, fast, ref)
+            newest[slot] = (version, fast, item)
         keys.append((slot, version, fast))
     # Negated so the highest price sorts first; no price sorts after every price.
     cost = {
-        slot: float("inf") if (usd := _output_usd(found[2])) is None else -usd
+        slot: float("inf") if (usd := output_usd(found[2])) is None else -usd
         for slot, found in newest.items()
     }
     ranked = [
-        (PROVIDERS.index(slot[0]), cost[slot], first[slot], version, fast)
+        (PROVIDERS.index(slot[0]), cost[slot], newest[slot][0], first[slot], version, fast)
         for slot, version, fast in keys
     ]
     return [items[i] for i in sorted(range(len(items)), key=ranked.__getitem__)]
@@ -135,7 +125,7 @@ def agent_catalog() -> tuple[AgentModel, ...]:
                         float(rates.output),
                     )
                 )
-    return tuple(catalog_order(entries, lambda entry: entry.model))
+    return tuple(catalog_order(entries, lambda e: e.model, lambda e: e.output_usd))
 
 
 def _key(value: str) -> str:

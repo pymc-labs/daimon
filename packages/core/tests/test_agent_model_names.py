@@ -140,30 +140,39 @@ def test_catalog_order_ranks_families_by_price_then_newest_version() -> None:
     from daimon.core.agent_model_names import catalog_order
     from mux.contracts.ids import ModelRef
 
-    given = [
-        ("gemini", "gemini-4-hydrogen"),
-        ("anthropic", "claude-haiku-4-5"),
-        ("openai", "gpt-6-luna"),
-        ("anthropic", "claude-sonnet-4-6"),
-        ("anthropic", "claude-opus-4-7"),
-        ("openai", "gpt-6-astra"),
-        ("anthropic", "claude-opus-5-5-fast"),
-        ("anthropic", "claude-opus-5-5"),
-        ("anthropic", "claude-fable-5-2"),
-        ("openai", "gpt-6.2-astra"),
-        ("openai", "gpt-6.2-sol"),
-        ("gemini", "gemini-4-argon"),
-        ("gemini", "gemini-3.8-flash"),
-        ("gemini", "gemini-9-unpriced"),
-    ]
-    refs = [ModelRef.model_validate({"provider": p, "id": i}) for p, i in given]
-    assert [ref.id for ref in catalog_order(refs, lambda ref: ref)] == [
+    priced = {  # (provider, id): output price, fixed here so the rule is date-independent
+        ("gemini", "gemini-4-hydrogen"): 7.5,
+        ("anthropic", "claude-haiku-4-5"): 5.0,
+        ("openai", "gpt-6-luna"): 0.5,
+        ("anthropic", "claude-sonnet-4-20250514"): 15.0,
+        ("anthropic", "claude-opus-4-7"): 25.0,
+        ("openai", "gpt-6-astra"): 50.0,
+        ("anthropic", "claude-opus-5-5-fast"): 40.0,
+        ("anthropic", "claude-opus-5-5"): 20.0,
+        ("anthropic", "claude-fable-5-2"): 40.0,
+        ("openai", "gpt-6.2-astra"): 40.0,
+        ("openai", "gpt-7-astra"): 60.0,
+        ("openai", "gpt-6.2-sol"): 10.0,
+        ("gemini", "gemini-4-argon"): 10.0,
+        ("gemini", "gemini-3.8-flash"): 7.5,
+        ("selfhosted", "qwen3-coder-480b"): 1.0,
+        ("selfhosted", "mystery"): 0.0,
+    }
+    refs = [ModelRef.model_validate({"provider": p, "id": i}) for p, i in priced]
+    unpriced = {"mystery"}
+    ordered = catalog_order(
+        refs,
+        lambda ref: ref,
+        lambda ref: None if ref.id in unpriced else priced[(ref.provider, ref.id)],
+    )
+    assert [ref.id for ref in ordered] == [
         "claude-fable-5-2",
         "claude-opus-5-5",
         "claude-opus-5-5-fast",
         "claude-opus-4-7",
-        "claude-sonnet-4-6",
+        "claude-sonnet-4-20250514",
         "claude-haiku-4-5",
+        "gpt-7-astra",
         "gpt-6.2-astra",
         "gpt-6-astra",
         "gpt-6.2-sol",
@@ -171,5 +180,6 @@ def test_catalog_order_ranks_families_by_price_then_newest_version() -> None:
         "gemini-4-argon",
         "gemini-4-hydrogen",
         "gemini-3.8-flash",
-        "gemini-9-unpriced",
-    ], "providers in PROVIDERS order, families by price high to low, newest version first"
+        "qwen3-coder-480b",
+        "mystery",
+    ], "providers in PROVIDERS order, families by price, ties by newer model, newest version first"
