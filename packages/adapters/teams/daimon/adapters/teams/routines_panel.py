@@ -63,6 +63,7 @@ from daimon.core.routines import (
 )
 from daimon.core.stores import routines as store
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.workflows.chat_cards import Presser, move_routine
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -186,7 +187,17 @@ class RoutinesPanel:
             except ValueError:
                 return toast(GONE)
             tenant_id = actor.tenant_id
-            if op == "confirm_delete":
+            if op == "move":
+                refusal = await move_routine(
+                    self._runtime.sessionmaker,
+                    self._runtime.settings,
+                    Presser(tenant_id, "teams", actor.user_id),
+                    routine_id,
+                    client=self._runtime.anthropic,
+                )
+                if refusal is not None:
+                    return toast(refusal)
+            elif op == "confirm_delete":
                 try:
                     await routine_service.delete_routine(
                         self._service_env(tenant_id),

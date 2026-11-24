@@ -20,6 +20,8 @@ from daimon.adapters.teams.card_actions import (
 )
 from daimon.core.cron_words import schedule_words
 from daimon.core.routines import (
+    LEGACY_USE_WORKFLOWS,
+    MOVE_TO_WORKFLOW,
     MOVED_TO_WORKFLOWS,
     can_manage_routine,
     derive_glyph,
@@ -60,7 +62,7 @@ _CREATE_HINT = (
 # Core caps the panel at 25 rows; 18 fit Teams' 28 KB with emoji labels and a status line.
 _ROWS_SHOWN = 18
 
-Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete"]
+Op = Literal["refresh", "pause", "resume", "output", "delete", "confirm_delete", "move"]
 
 # Cron has no length limit; a long one must not push the panel past a message.
 _CRON_MAX_CHARS = 100
@@ -79,9 +81,15 @@ def _button(
 
 
 def _routine(
-    row: RoutineRow, *, can_manage: bool, moved: bool = False, url: str | None = None
+    row: RoutineRow,
+    *,
+    can_manage: bool,
+    is_admin: bool = False,
+    moved: bool = False,
+    url: str | None = None,
 ) -> Container:
-    """One row; a routine `moved` to Workflows is read-only, with its workflow's `url`."""
+    """One row; a routine `moved` to Workflows is read-only, with its workflow's `url`. An
+    admin may move one that has not."""
     schedule = schedule_words(clip(row.cron_expr, _CRON_MAX_CHARS), row.timezone)
     items: list[CardElement] = [
         TextBlock(text=f"{derive_glyph(row)} {routine_label(row)}", weight="Bolder", wrap=True),
@@ -116,7 +124,10 @@ def _routine(
     elif can_manage:
         toggle = _button("Pause", "pause", row) if row.enabled else _button("Resume", "resume", row)
         delete = _button("Delete", "delete", row, "destructive")
-        items.append(ActionSet(actions=[toggle, output, delete]))
+        actions = [toggle, output, delete]
+        if is_admin:
+            actions.insert(2, _button(MOVE_TO_WORKFLOW, "move", row))
+        items.append(ActionSet(actions=actions))
     return Container(items=items, separator=True)
 
 
@@ -132,14 +143,25 @@ def panel_card(
 ) -> AdaptiveCard:
     """The routines the caller passed; buttons show only where the viewer may act. `moved`
     holds each routine moved to Workflows, with its workflow link: read-only here."""
-    body: list[CardElement] = [TextBlock(text="Routines", weight="Bolder", size="Medium")]
+    body: list[CardElement] = [
+        TextBlock(text="Routines", weight="Bolder", size="Medium"),
+        TextBlock(text=LEGACY_USE_WORKFLOWS, is_subtle=True, size="Small", wrap=True),
+    ]
     if notice:
         body.append(TextBlock(text=notice, wrap=True))
     hidden += max(0, len(rows) - _ROWS_SHOWN)
     for row in rows[:_ROWS_SHOWN]:
         manage = can_manage_routine(row, user_id=user_id, is_admin=is_admin)
         links = moved or {}
-        body.append(_routine(row, can_manage=manage, moved=row.id in links, url=links.get(row.id)))
+        body.append(
+            _routine(
+                row,
+                can_manage=manage,
+                is_admin=is_admin,
+                moved=row.id in links,
+                url=links.get(row.id),
+            )
+        )
     if not rows:
         body.append(TextBlock(text=_EMPTY_HINT, wrap=True))
     if hidden:
