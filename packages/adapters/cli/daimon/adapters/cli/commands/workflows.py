@@ -297,7 +297,7 @@ async def to_routine(
     env = await operator_env(rt, tenant_id)
     routine_id = await _say(convert.to_routine(env, workflow_id))
     console.print(
-        f"Routine {routine_id} has its schedule back; the workflow is paused.", highlight=False
+        f"Routine {routine_id} has its schedule back; the workflow is deleted.", highlight=False
     )
     return routine_id
 

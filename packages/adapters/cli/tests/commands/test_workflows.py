@@ -10,8 +10,10 @@ from typing import Any
 import pytest
 import yaml
 from daimon.adapters.cli.commands import workflows as cli
+from daimon.adapters.cli.commands.routines import run_translate
 from daimon.core.config import Settings
 from daimon.core.errors import UserFacingError
+from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.core.workflows import engine, service
 from daimon.core.workflows.access import Who
 from daimon.testing import ma_agent, tenant_metadata
@@ -154,3 +156,25 @@ async def test_from_routine_previews_without_moving_then_moves_and_moves_back(
     await cli.from_routine(rt, console, world.tenant_id, [routine.id], apply=False)
     assert f"Routine {routine.id} stays:" in out.getvalue(), "a moved routine is not offered again"
     assert await cli.to_routine(rt, console, world.tenant_id, made) == routine.id
+
+
+async def test_routines_translate_previews_each_routine_then_moves_them(
+    db_session: AsyncSession,
+) -> None:
+    world = await make_world(db_session, AGENT, "a")
+    ok = await new_routine(db_session, world.tenant_id, created_by_user_id="o", channel_id="c1")
+    blank = await new_routine(db_session, world.tenant_id, trigger_message=" ", enabled=False)
+    await db_session.commit()
+    rt, out, console = _rig(world)
+    tenants = [world.tenant_id]
+    assert await run_translate(rt=rt, console=console, tenant_ids=tenants, dry_run=True) == 1
+    assert f"{world.tenant_id} {ok.id}: exact" in out.getvalue(), out.getvalue()
+    assert f"{blank.id}: stays: This routine's message is empty" in out.getvalue()
+    assert "1 would move, 1 stay." in out.getvalue()
+    async with world.sm() as s:
+        assert len(await list_routines_for_tenant(s, tenant_id=world.tenant_id)) == 2, "dry"
+    assert await run_translate(rt=rt, console=console, tenant_ids=tenants, dry_run=False) == 1
+    assert "1 moved, 1 stay." in out.getvalue()
+    async with world.sm() as s:
+        [left] = await list_routines_for_tenant(s, tenant_id=world.tenant_id)
+    assert left.id == blank.id

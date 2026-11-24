@@ -21,6 +21,7 @@ from typing import Annotated, Literal, cast
 import httpx
 import typer
 from anthropic import APIStatusError
+from daimon.adapters.cli.commands.workflows import operator_env
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import agent_invoker_roles
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
@@ -84,7 +85,9 @@ from daimon.core.stores.routines import (
     list_routines_for_tenant,
     validate_dm_source,
 )
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import get_tenant, list_all_tenant_ids
+from daimon.core.workflows import convert
+from daimon.core.workflows.service import WorkflowError
 from pydantic import JsonValue, ValidationError
 from rich.console import Console
 from sqlalchemy import text
@@ -833,6 +836,71 @@ async def run_seed_first_run(
             markup=False,
         )
     console.print("Applied atomically." if apply else "Dry run: nothing written.")
+
+
+@routines_app.command("translate")
+def translate_command(
+    tenant: Annotated[uuid.UUID | None, typer.Option("--tenant")] = None,
+    all_tenants: Annotated[bool, typer.Option("--all-tenants", help="Every tenant.")] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print each outcome; write nothing.")
+    ] = False,
+) -> None:
+    """Operator only: move every routine onto a one-step workflow, as an admin.
+
+    Prints each routine's outcome; exits 1 when any routine stays.
+    """
+    if (tenant is None) != all_tenants:
+        raise UserFacingError("Pass --tenant or --all-tenants.")
+    settings = load_settings()
+
+    async def run() -> int:
+        async with build_runtime(settings) as rt:
+            return await run_translate(
+                rt=rt,
+                console=Console(highlight=False),
+                tenant_ids=None if tenant is None else [tenant],
+                dry_run=dry_run,
+            )
+
+    if asyncio.run(run()):
+        raise typer.Exit(code=1)
+
+
+async def run_translate(
+    *, rt: CliRuntime, console: Console, tenant_ids: list[uuid.UUID] | None, dry_run: bool
+) -> int:
+    """Each routine's move, applied or rolled back; returns how many stay."""
+    async with rt.sessionmaker() as session:
+        tenants = sorted(tenant_ids or await list_all_tenant_ids(session))
+    stays = moved = 0
+    for tenant_id in tenants:
+        try:
+            if not dry_run:
+                await operator_env(rt, tenant_id)
+        except UserFacingError as err:
+            console.print(f"{tenant_id}: stays: {err}", markup=False)
+            stays += 1
+            continue
+        async with rt.sessionmaker() as session:
+            routines = await list_routines_for_tenant(session, tenant_id=tenant_id)
+        for routine_id in sorted(r.id for r in routines):
+            async with rt.sessionmaker() as session:
+                try:
+                    plan = await convert.move_routine(
+                        session, tenant_id, routine_id, datetime.now(UTC)
+                    )
+                except WorkflowError as err:
+                    console.print(f"{tenant_id} {routine_id}: stays: {err}", markup=False)
+                    stays += 1
+                    continue
+                await (session.rollback() if dry_run else session.commit())
+            notes = "".join(f", {n}" for n in plan.move.notes)
+            console.print(f"{tenant_id} {routine_id}: {plan.move.outcome}{notes}", markup=False)
+            moved += 1
+    verb = "would move" if dry_run else "moved"
+    console.print(f"{moved} {verb}, {stays} stay.")
+    return stays
 
 
 @routines_app.command("export-rollback")
