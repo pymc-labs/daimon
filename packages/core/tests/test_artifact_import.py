@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from typing import Any
 import pytest
 from cryptography.fernet import Fernet
 from daimon.core._models import Artifact, ArtifactDocument, ArtifactVersion, Watch, WebIdentity
+from daimon.core.artifact_pages import events
 from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.documents import DocumentWrite
 from daimon.core.artifact_pages.events import MAX_WATCHES_PER_PAGE
@@ -378,21 +380,56 @@ async def _data(db: AsyncSession, page: ArtifactRow) -> object:
     )
 
 
-@pytest.mark.parametrize("change", [_settings, _people, _link, _transfer, _version, _data])
+async def _event(db: AsyncSession, page: ArtifactRow) -> object:
+    event = events.build_event(
+        slug=page.slug,
+        name="vote",
+        data={},
+        sender="member",
+        by=None,
+        visible_outside_workspace=False,
+        event_id=uuid.uuid4(),
+        now=NOW,
+        max_bytes=_LIMITS.event_bytes,
+    )
+    return await artifact_pages.add_event(db, page, event, account_id=None, now=NOW, limits=_LIMITS)
+
+
+async def _pause(db: AsyncSession, page: ArtifactRow) -> object:
+    [watch] = await watches.page_watches(db, tenant_id=page.tenant_id, page_id=page.id)
+    return await watches.pause_watch(db, watch.id)
+
+
+@pytest.mark.parametrize(
+    "change", [_settings, _people, _link, _transfer, _version, _data, _event, _pause]
+)
 async def test_a_rerun_refuses_a_page_changed_here_since_its_import(
     db_session: AsyncSession, tenant: TenantRow, change: Change
 ) -> None:
     """A replace would revert what was done here, so only an unchanged page is replaced."""
     db = db_session
     target = _target(tenant, db)
-    await import_page(db, _page(people=[{"discord_id": MEMBER}]), target, now=NOW)
-    again = await import_page(db, _page(people=[{"discord_id": MEMBER}]), target, now=NOW)
+    watch = {
+        "legacy_id": "w1",
+        "instructions": "Tally.",
+        "owner": {"discord_id": OWNER},
+        "channel_id": "4241",
+        "place_type": "channel",
+        "delivery": "new_thread",
+    }
+    sends = change in (_event, _pause)  # a public page cannot both read data and send events
+    base: dict[str, Any] = (
+        {"access": "workspace", "events": True, "watches": [watch]} if sends else {}
+    )
+    await import_page(db, _page(people=[{"discord_id": MEMBER}], **base), target, now=NOW)
+    again = await import_page(db, _page(people=[{"discord_id": MEMBER}], **base), target, now=NOW)
     assert again.action == "replace", "an unchanged page is replaced"
+    assert again.watches == int(sends)
 
     page = await artifact_pages.get_by_public_id(db, "abcdefgh23")
     assert page is not None
     await change(db, page)
-    report = await import_page(db, _page(title="Theirs"), target, now=NOW)
+    report = await import_page(db, _page(title="Theirs", **base), target, now=NOW)
 
     assert report.action == "refused", report
     assert report.problems == ("changed here since import",), report.problems

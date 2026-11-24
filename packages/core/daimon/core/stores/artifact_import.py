@@ -33,7 +33,7 @@ from daimon.core.continuity.watch_projection import projection_path
 from daimon.core.stores import artifact_pages, watches, web_identities, web_people
 from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _EVENTS: Final = documents.EVENTS_COLLECTION
@@ -230,9 +230,22 @@ async def _pin(
     return None
 
 
-def _state(orm: Artifact) -> str:
+async def _state(session: AsyncSession, orm: Artifact) -> str:
     """A digest of what any change here moves: a new version, settings, people, the link,
-    the owner or a data write (`data_revision`). Read from the database's own values."""
+    the owner, a data write (`data_revision`), an event, or an edit, pause or end of an
+    imported watch (its `revision` and status). Read from the database's own values."""
+    events, last_event = (
+        await session.execute(
+            select(func.count(), func.max(ArtifactDocument.updated_at)).where(
+                ArtifactDocument.artifact_id == orm.id, ArtifactDocument.collection == _EVENTS
+            )
+        )
+    ).one()
+    imported = [
+        (str(w.id), w.revision, w.status, w.expires_at)
+        for w in await watches.page_watches(session, tenant_id=orm.tenant_id, page_id=orm.id)
+        if "legacy_id" in w.source_state
+    ]
     moved = {
         name: getattr(orm, name)
         for name in (
@@ -254,6 +267,10 @@ def _state(orm: Artifact) -> str:
         "link": None if orm.link_secret is None else orm.link_secret.hex(),
         "expires_at": None if orm.expires_at is None else orm.expires_at.astimezone(UTC),
         "updated_at": orm.updated_at.astimezone(UTC),
+        "sent": [events, None if last_event is None else last_event.astimezone(UTC)],
+        "watches": [
+            [i, r, st, None if e is None else e.astimezone(UTC)] for i, r, st, e in imported
+        ],
     }
     return hashlib.sha256(json.dumps(moved, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -279,7 +296,7 @@ async def _existing(
         found.append(f"the id {page.public_id} belongs to another page")
     if same is not None and (same.slug != page.slug or same.public_id != page.public_id):
         found.append("this address was imported with another name or id")
-    if same is not None and same.imported_state != _state(same):
+    if same is not None and same.imported_state != await _state(session, same):
         found.append("changed here since import")
     return same, found
 
@@ -424,13 +441,14 @@ async def import_page(
             )
         )
     await session.flush()
-    await session.refresh(orm)
-    orm.imported_state = _state(orm)
-    await session.flush()
 
     imported, orphans = await _import_watches(
         session, page, orm.id, target, now=now, warnings=warnings
     )
+    await session.flush()
+    await session.refresh(orm)
+    orm.imported_state = await _state(session, orm)
+    await session.flush()
     warnings += compat_warnings(
         current.html,
         asset_hosts=target.asset_hosts,
