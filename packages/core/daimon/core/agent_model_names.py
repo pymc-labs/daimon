@@ -56,16 +56,30 @@ class AgentModel:
 _PROVIDER_WORDS = {"claude", "gpt", "gemini"}
 
 
+def _output_usd(ref: ModelRef) -> float | None:
+    """The model's current list output price per million tokens, None where unpriced."""
+    if ref.provider == MANAGED_AGENTS.provider:
+        rates = AGENT_MODEL_PRICING.get(ref.id)
+        return None if rates is None else float(rates.output)
+    if not any(profile.provider == ref.provider for profile in PROFILES.values()):
+        return None
+    prices = provider_prices(backend_selection(ref.provider).profile)
+    return max((float(r.output) for (_, name), r in prices.items() if name == ref.id), default=None)
+
+
 def catalog_order[T](items: Sequence[T], model: Callable[[T], ModelRef]) -> list[T]:
-    """The one display order of models: provider, then family, then newest version first.
+    """The one display order of models: provider, then family strength, then newest version.
 
     Providers follow `PROVIDERS`. A family is the id's words without numbers or the
-    provider word ("opus", "astra"); families keep the order they first appear in
-    `items`. A version is the id's numbers (`claude-opus-4-7` is 4.7); a fast preset
-    follows its base model.
+    provider word ("opus", "astra"). Families rank by the current output price of their
+    newest model, highest first, so the strongest sits on top; equal prices keep the order
+    the families first appear in `items`, and an unpriced family ranks last. A version is
+    the id's numbers (`claude-opus-4-7` is 4.7), newest first; a fast preset follows its
+    base model.
     """
     first: dict[tuple[str, str], int] = {}
-    keys: list[tuple[int, int, tuple[int, ...], bool]] = []
+    newest: dict[tuple[str, str], tuple[tuple[int, ...], bool, ModelRef]] = {}
+    keys: list[tuple[tuple[str, str], tuple[int, ...], bool]] = []
     for index, item in enumerate(items):
         ref = model(item)
         words = ref.id.split("-")
@@ -74,9 +88,22 @@ def catalog_order[T](items: Sequence[T], model: Callable[[T], ModelRef]) -> list
         )
         numbers = [int(n) for n in re.findall(r"\d+", ref.id)]
         version = tuple(-n for n in (*numbers, 0, 0, 0)[:4])  # 5 sorts as 5.0, after 5.5
-        rank = first.setdefault((ref.provider, family), index)
-        keys.append((PROVIDERS.index(ref.provider), rank, version, "fast" in words))
-    return [items[i] for i in sorted(range(len(items)), key=keys.__getitem__)]
+        fast = "fast" in words
+        slot = (ref.provider, family)
+        first.setdefault(slot, index)
+        if slot not in newest or (version, fast) < newest[slot][:2]:
+            newest[slot] = (version, fast, ref)
+        keys.append((slot, version, fast))
+    # Negated so the highest price sorts first; no price sorts after every price.
+    cost = {
+        slot: float("inf") if (usd := _output_usd(found[2])) is None else -usd
+        for slot, found in newest.items()
+    }
+    ranked = [
+        (PROVIDERS.index(slot[0]), cost[slot], first[slot], version, fast)
+        for slot, version, fast in keys
+    ]
+    return [items[i] for i in sorted(range(len(items)), key=ranked.__getitem__)]
 
 
 def agent_catalog() -> tuple[AgentModel, ...]:

@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Model pickers list models by provider, then family, newest first.** Every picker (web, Discord,
-  Slack, MCP and the CLI) now shares one order: providers in their usual order, then each provider's
-  families (Opus, Fable, Sonnet, Haiku and so on), and within a family the latest version first.
-  The web app also groups the models under a provider heading instead of tagging each row
+- **Model pickers list models by provider, then strongest family, newest version first.** Every
+  picker (web, Discord, Slack, MCP and the CLI) shares one order: providers in their usual order,
+  each provider's families ranked by the current output price of their newest model (Fable, Opus,
+  Sonnet, Haiku), and within a family the latest version first. The web app also groups the models
+  under a provider heading instead of tagging each row
 - **A routine that posts to a narrow Discord room reads that room.** On Anthropic agents the run
   had no way to show it ran inside the room, so its own `read_thread` and `read_channel` were
   refused. The run now reads the room or thread it posts to, as a chat there does, and no other
