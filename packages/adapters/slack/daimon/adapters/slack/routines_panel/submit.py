@@ -386,17 +386,19 @@ async def run_routines_delete_submission(
             return
 
         # Refresh the underlying panel in place (best-effort — the row is gone).
+        viewer = await routines_viewer(web_client, user_id=user_id, team_id=team_id)
         async with runtime.sessionmaker() as session:
             entries, over_cap_count, agent_name_map = await load_routines(
                 session,
                 runtime.anthropic,
                 tenant_id=tenant_id,
-                viewer_user_id=await routines_viewer(web_client, user_id=user_id, team_id=team_id),
+                viewer_user_id=viewer,
             )
         state = RoutinesPanelState(
             rows=entries,
             over_cap_count=over_cap_count,
             agent_name_map=agent_name_map,
+            admin=viewer is None,
             links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
         )
         if root_view_id:
