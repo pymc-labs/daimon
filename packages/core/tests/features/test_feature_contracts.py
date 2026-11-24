@@ -568,6 +568,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "TeamsSettings.enabled": _SERVICE,
     "WebSettings.manual_topup": _OPS,
     "WebSettings.dev": _OPS,
+    "WebSettings.artifact_content_shared_host": _OPS,  # how the content host is served, a trust trade-off
     "GithubSettings.mcp_router": _SERVICE,
     "CryptoSettings.allow_plaintext": _OPS,
     "HarnessAuthBinding.auth_mode": _SHAPE,

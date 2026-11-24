@@ -35,7 +35,7 @@ from daimon.adapters.mcp.tools.artifacts import (
 from daimon.core.artifact_pages.access import PageChange
 from daimon.core.artifact_pages.documents import CollectionRule, DocumentWrite
 from daimon.core.artifact_pages.keys import page_event_key
-from daimon.core.config import ArtifactPagesSettings
+from daimon.core.config import ArtifactPagesSettings, Settings
 from daimon.core.continuity.page_events import sign_page_event
 from daimon.core.membership import Membership
 from daimon.core.stores import artifact_pages as store
@@ -55,7 +55,6 @@ from daimon.testing.outsiders import INTERNAL_ROLE, hold_audience, link_discord_
 from daimon.testing.watch_fixtures import install_poll_ports
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import auth_identity, discord_turn_origin
@@ -108,13 +107,12 @@ async def world(db_session_factory: async_sessionmaker[AsyncSession], monkeypatc
         membership_resolver=SimpleNamespace(
             resolve=AsyncMock(return_value=Membership(is_member=True))
         ),
-        settings=SimpleNamespace(
-            web=SimpleNamespace(public_url=PUBLIC_URL),
-            crypto=SimpleNamespace(keys=(SecretStr(CRYPTO_KEY),)),
-            mcp=SimpleNamespace(
-                app_root_url="https://os.example", public_url="https://os.example/mcp"
-            ),
-            direct_message_policies={},
+        settings=Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+            web={"public_url": PUBLIC_URL},  # pyright: ignore[reportArgumentType]
+            crypto={"keys": [CRYPTO_KEY]},  # pyright: ignore[reportArgumentType]
+            mcp={"public_url": "https://os.example/mcp"},  # pyright: ignore[reportArgumentType]
             artifact_pages=LIMITS,
         ),
     )
