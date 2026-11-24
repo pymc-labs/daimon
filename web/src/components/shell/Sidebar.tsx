@@ -204,7 +204,7 @@ export function UserMenu() {
     location.assign("/chat")
   }
   const connected = new Set(me.accounts.map((a) => a.provider))
-  const connectable = me.role === "visitor" ? [] : (providers.data ?? []).filter((p) => p.kind === "redirect" && !connected.has(p.id))
+  const connectable = me.role === "visitor" ? [] : (providers.data ?? []).filter((p) => p.kind === "redirect" && p.connectable && !connected.has(p.id))
   return (
     <ShellCtx.Consumer>
       {({ openShortcuts }) => (

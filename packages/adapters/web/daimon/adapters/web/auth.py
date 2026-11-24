@@ -52,6 +52,7 @@ class ProviderOut(BaseModel):
     id: str
     label: str
     kind: Literal["redirect", "dev"]
+    connectable: bool
 
 
 class ConnectStart(BaseModel):
@@ -111,9 +112,12 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/auth/providers")
     async def list_providers() -> list[ProviderOut]:  # pyright: ignore[reportUnusedFunction]
-        out = [ProviderOut(id=p.id, label=p.label, kind="redirect") for p in providers.values()]
+        out = [
+            ProviderOut(id=p.id, label=p.label, kind="redirect", connectable=p.connectable)
+            for p in providers.values()
+        ]
         if web.dev:
-            out.append(ProviderOut(id="dev", label="Dev user", kind="dev"))
+            out.append(ProviderOut(id="dev", label="Dev user", kind="dev", connectable=False))
         return out
 
     @router.post("/auth/logout")
@@ -215,7 +219,7 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
         provider's URL. A POST, so the page's own header and origin check guard it: a link
         opened by a stray GET could attach someone else's account to the session."""
         provider = providers.get(provider_id)
-        if provider is None:
+        if provider is None or not provider.connectable:
             raise HTTPException(status_code=404, detail="Unknown sign-in method.")
         caller = await signed_in_caller(request)
         if caller.person.kind == "visitor":

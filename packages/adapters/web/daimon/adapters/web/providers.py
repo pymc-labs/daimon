@@ -3,8 +3,8 @@
 A redirect method builds the URL the browser is sent to, then turns the code it comes
 back with into a verified identity. Chat-platform sign-in reuses the deployment's own
 OAuth apps: the login apps of the MCP hub for Discord and Slack, and the Connect
-Microsoft app registration for Microsoft. Each needs `<public url>/auth/<id>/callback`
-registered as a redirect URI.
+Microsoft app registration for Microsoft. Google, for guests only, has an OAuth client of
+its own. Each needs `<public url>/auth/<id>/callback` registered as a redirect URI.
 """
 
 from __future__ import annotations
@@ -14,6 +14,12 @@ from typing import Protocol
 import httpx
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import MicrosoftAccountsSettings
+from daimon.core.google_sign_in import (
+    exchange_google_code,
+    fetch_google_profile,
+    google_authorize_url,
+    google_identity,
+)
 from daimon.core.microsoft_identity import build_authorize_url as microsoft_authorize_url
 from daimon.core.microsoft_identity import exchange_code as exchange_microsoft_code
 from daimon.core.platform_sign_in import (
@@ -34,6 +40,8 @@ from daimon.core.web_identity import VerifiedIdentity
 class SignInProvider(Protocol):
     id: str
     label: str
+    # Whether a signed-in member may connect it as another account.
+    connectable: bool
 
     async def authorize_url(
         self, *, state: str, code_challenge: str, redirect_uri: str, interactive: bool = False
@@ -52,6 +60,7 @@ class DiscordSignIn:
 
     id = "discord"
     label = "Discord"
+    connectable = True
 
     def __init__(self, http: httpx.AsyncClient, client_id: str, client_secret: str) -> None:
         self._http = http
@@ -99,6 +108,7 @@ class SlackSignIn:
 
     id = "slack"
     label = "Slack"
+    connectable = True
 
     def __init__(self, http: httpx.AsyncClient, client_id: str, client_secret: str) -> None:
         self._http = http
@@ -149,6 +159,7 @@ class MicrosoftSignIn:
 
     id = "microsoft"
     label = "Microsoft"
+    connectable = True
 
     def __init__(self, http: httpx.AsyncClient, config: MicrosoftAccountsSettings) -> None:
         self._http = http
@@ -198,6 +209,47 @@ class MicrosoftSignIn:
         )
 
 
+class GoogleSignIn:
+    """Sign in with Google, for guests: a confirmed address finds their invitations."""
+
+    id = "google"
+    label = "Google"
+    connectable = False
+
+    def __init__(self, http: httpx.AsyncClient, client_id: str, client_secret: str) -> None:
+        self._http = http
+        self._client_id = client_id
+        self._client_secret = client_secret
+
+    async def authorize_url(
+        self,
+        *,
+        state: str,
+        code_challenge: str,
+        redirect_uri: str,
+        interactive: bool = False,
+    ) -> str:
+        return google_authorize_url(
+            client_id=self._client_id,
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=code_challenge,
+        )
+
+    async def complete(
+        self, *, code: str, code_verifier: str, redirect_uri: str
+    ) -> VerifiedIdentity:
+        token = await exchange_google_code(
+            self._http,
+            client_id=self._client_id,
+            client_secret=self._client_secret,
+            code=code,
+            code_verifier=code_verifier,
+            redirect_uri=redirect_uri,
+        )
+        return google_identity(await fetch_google_profile(self._http, access_token=token))
+
+
 def build_providers(runtime: WebRuntime) -> dict[str, SignInProvider]:
     """The methods this deployment offers: each one whose OAuth app is set."""
     providers: dict[str, SignInProvider] = {}
@@ -215,4 +267,10 @@ def build_providers(runtime: WebRuntime) -> dict[str, SignInProvider]:
     microsoft = runtime.settings.microsoft_accounts
     if microsoft.configured:
         providers["microsoft"] = MicrosoftSignIn(http, microsoft)
+    web = runtime.web
+    if web.google_configured:
+        assert web.google_client_id is not None and web.google_client_secret is not None
+        providers["google"] = GoogleSignIn(
+            http, web.google_client_id, web.google_client_secret.get_secret_value()
+        )
     return providers

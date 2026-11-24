@@ -51,7 +51,7 @@ export type Person = {
 }
 
 /** Sign-in methods the server offers; `dev` signs in locally without leaving the page. */
-export type Provider = { id: string; label: string; kind: "redirect" | "dev" }
+export type Provider = { id: string; label: string; kind: "redirect" | "dev"; connectable: boolean }
 
 /** A cross-reference to a named object; `name` is null once it no longer exists. */
 export type EntityRef = { id: string | null; name: string | null; avatar?: string | null }

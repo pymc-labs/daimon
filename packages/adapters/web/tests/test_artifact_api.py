@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .agent_support import OWN, make_admin
 from .artifact_support import COOKIE, member_of, page_client, page_settings, publish, team
 from .chat_support import visitor_of
+from .conftest import web_settings
 
 
 async def test_a_public_page_is_listed_only_to_those_who_manage_it(
@@ -153,6 +154,36 @@ async def test_sharing_by_email_makes_a_visitor_who_reaches_only_the_page(
         assert (await client.get(f"/a/{page.public_id}/poll")).status_code == 200
         assert (await client.get(f"/a/{board.public_id}/board")).status_code == 404
         assert (await client.get("/api/artifacts")).status_code == 403
+
+
+async def test_sharing_by_email_with_google_sign_in_returns_no_link(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With Google sign-in on, a new address becomes a visitor with no sign-in link; a
+    known address behaves as before, and the inviter-or-admin rule still holds."""
+    t = await team(db_session_factory)
+    page = await publish(db_session_factory, t.owner, access="people")
+    other = await publish(db_session_factory, t.owner, slug="other", access="people")
+    cy = await member_of(db_session_factory, t.tenant_id, "Cy")
+    theirs = await publish(db_session_factory, cy, slug="theirs", access="people")
+    google = web_settings(google_client_id="gid", google_client_secret="gsecret")
+    url = f"/api/artifacts/{page.id}/people"
+    async with page_client(db_session_factory, t.owner, web=google) as client:
+        made = await client.post(url, json={"email": "New@Example.com"}, headers=OWN)
+        again = await client.post(
+            f"/api/artifacts/{other.id}/people", json={"email": "new@example.com"}, headers=OWN
+        )
+    async with page_client(db_session_factory, cy, web=google) as client:
+        refused = await client.post(
+            f"/api/artifacts/{theirs.id}/people", json={"email": "new@example.com"}, headers=OWN
+        )
+
+    assert made.status_code == 200 and made.json()["invite_link"] is None, made.text
+    assert again.status_code == 200 and again.json()["invite_link"] is None, again.text
+    assert refused.status_code == 403, "another member still cannot hand the visitor pages"
+    async with db_session_factory() as db:
+        [guest] = await web_people.list_people(db, tenant_id=t.tenant_id, search="new@example.com")
+    assert guest.kind == "visitor", "the address still becomes a visitor, one for both pages"
 
 
 async def test_only_the_inviter_or_an_admin_adds_their_visitor_in_the_page_settings(

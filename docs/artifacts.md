@@ -29,7 +29,7 @@ The agent can change settings without an upload. `artifact_source` gives a link,
 | `people` | Only the listed people. They may be visitors, invited by an admin or by email from the Share dialog. |
 | `public` | Anyone with the secret link in the address, signed in or not. |
 
-People are named by their id in the web app, a chat user id or an @mention; a chat member who never opened the web app counts. In the Share dialog of a people page, anyone who may share can add an email address. A person with that address is added. Otherwise Daimon makes a visitor with no agents, adds them, and shows a sign-in link once that opens the page; each person may invite 20 such visitors a day. A public page has a secret link; the agent can replace it with `new_link` when it leaks.
+People are named by their id in the web app, a chat user id or an @mention; a chat member who never opened the web app counts. In the Share dialog of a people page, anyone who may share can add an email address. A person with that address is added. Otherwise Daimon makes a visitor with no agents, adds them, and shows a one-time link to the page (none with [Google sign-in](web.md#google-sign-in-for-guests)); each person may invite 20 such visitors a day. A public page has a secret link; the agent can replace it with `new_link` when it leaks.
 
 Where `audience_hold` is `on`, a Discord member with no internal role is an outsider and counts as a visitor for pages. They open a `workspace` page only if it names them, and their events carry `sender` `visitor`. They cannot be an editor or owner, or use the page tools. A page that names one is visible outside the workspace.
 

@@ -12,7 +12,13 @@ from collections.abc import Collection
 from datetime import datetime
 from typing import Any, cast
 
-from daimon.core._models import PlatformPrincipal, WebPerson, WebSession, WebSessionPerson
+from daimon.core._models import (
+    PlatformPrincipal,
+    WebIdentity,
+    WebPerson,
+    WebSession,
+    WebSessionPerson,
+)
 from daimon.core.cursor import Cursor
 from daimon.core.stores.domain import WebPersonKind, WebPersonRow, WebPersonStatus
 from sqlalchemy import CursorResult, delete, func, literal, or_, select, tuple_, update
@@ -82,6 +88,25 @@ async def get_people(session: AsyncSession, *, person_ids: list[uuid.UUID]) -> l
     """The people with these ids, in no particular order; unknown ids are skipped."""
     rows = (await session.execute(select(WebPerson).where(WebPerson.id.in_(person_ids)))).scalars()
     return [WebPersonRow.model_validate(orm) for orm in rows]
+
+
+async def list_visitors_without_sign_in(
+    session: AsyncSession, *, email: str, provider: str
+) -> list[WebPersonRow]:
+    """Active visitors of every workspace with this email (any case) who have no sign-in of
+    `provider` yet, oldest first."""
+    has_sign_in = select(WebIdentity.person_id).where(WebIdentity.provider == provider)
+    query = (
+        select(WebPerson)
+        .where(
+            WebPerson.kind == "visitor",
+            WebPerson.status == "active",
+            func.lower(WebPerson.email) == email.lower(),
+            WebPerson.id.not_in(has_sign_in),
+        )
+        .order_by(WebPerson.created_at, WebPerson.id)
+    )
+    return [WebPersonRow.model_validate(orm) for orm in await session.scalars(query)]
 
 
 async def upsert_member(

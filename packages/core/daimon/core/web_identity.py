@@ -3,7 +3,9 @@ workspace) it acts as, and the principal their turns, spend and memory run as.
 
 A sign-in proves a chat account (`VerifiedIdentity`); this module maps it to person
 rows, one per workspace the account is in and Daimon is installed in, each running as
-the account's chat principal. Only the platform id ever links, never an email.
+the account's chat principal. Only the platform id ever links, never an email. The one
+exception is a guest's Google sign-in, which has no chat account: Google's confirmed
+address finds the guests invited by it (`resolve_google_visitors`).
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
+_NO_WORKSPACE = "Daimon isn't in any of your workspaces yet. Ask an admin."
+
+
 class WebSignInRefused(UserFacingError):
     """The sign-in is valid but may not enter; the message is safe to show the person."""
 
@@ -55,7 +60,7 @@ class VerifiedIdentity:
     # The chat platform's own id for the person, when `subject` also names the workspace
     # (Slack and Teams ids are only unique within one).
     platform_user_id: str | None = None
-    # Only a sign-in whose provider vouches for one (Microsoft) carries an email.
+    # Only a sign-in whose provider vouches for one (Microsoft, Google) carries an email.
     email: str | None = None
     # False when a workspace name is only a stand-in the sign-in could not look up: it
     # names a new person's row but never replaces a stored name.
@@ -84,6 +89,8 @@ async def resolve_web_people(
     The person runs as their platform principal there, the one the chat adapters use,
     so spend, memory and roles are the same on the web as in chat.
     """
+    if identity.provider == "google":
+        return await resolve_google_visitors(session_factory, identity=identity)
     tenants = await resolve_hub_tenants(
         session_factory,
         platform=PLATFORM_OF[identity.provider],
@@ -91,7 +98,7 @@ async def resolve_web_people(
         workspaces=identity.workspaces,
     )
     if not tenants:
-        raise WebSignInRefused("Daimon isn't in any of your workspaces yet. Ask an admin.")
+        raise WebSignInRefused(_NO_WORKSPACE)
     people: list[WebPersonRow] = []
     async with session_factory() as session, session.begin():
         for tenant in tenants:
@@ -117,6 +124,46 @@ async def resolve_web_people(
             )
             people.append(person)
     return people
+
+
+async def resolve_google_visitors(
+    session_factory: async_sessionmaker[AsyncSession], *, identity: VerifiedIdentity
+) -> list[WebPersonRow]:
+    """The active guests a confirmed Google account signs in as, one per workspace.
+
+    Where the account is already pinned (`web_identities`) that guest signs in. In every
+    other workspace, the oldest active guest with the account's email and no Google
+    sign-in yet is pinned to it, so a later sign-in never depends on the email again.
+    Members never match, by email or otherwise: they sign in with their chat account.
+    """
+    assert identity.email is not None, "a Google identity carries its confirmed email"
+    async with session_factory() as session, session.begin():
+        pins = await identities_store.find_identity(
+            session, provider="google", issuer="", subject=identity.subject
+        )
+        pinned = await people_store.get_people(session, person_ids=[p.person_id for p in pins])
+        reached = [p for p in pinned if p.kind == "visitor" and p.status == "active"]
+        held = {p.tenant_id for p in pins}
+        for person in await people_store.list_visitors_without_sign_in(
+            session, email=identity.email, provider="google"
+        ):
+            if person.tenant_id in held:
+                continue
+            held.add(person.tenant_id)
+            await identities_store.link_identity(
+                session,
+                tenant_id=person.tenant_id,
+                person_id=person.id,
+                provider="google",
+                issuer="",
+                subject=identity.subject,
+                label=identity.display_name,
+                groups=(),
+            )
+            reached.append(person)
+    if not reached:
+        raise WebSignInRefused(_NO_WORKSPACE)
+    return sorted(reached, key=lambda p: (p.created_at, p.id))
 
 
 async def _has_history(session: AsyncSession, person: WebPersonRow, user_id: str) -> bool:

@@ -1067,7 +1067,7 @@ def origin_of(url: str) -> str:
     return f"{parts.scheme}://{host}{suffix}"
 
 
-WebProvider = Literal["discord", "slack", "microsoft"]
+WebProvider = Literal["discord", "slack", "microsoft", "google"]
 WebModuleKey = Literal[
     "chat", "agents", "channels", "routines", "artifacts", "credits", "integrations", "admin"
 ]
@@ -1202,6 +1202,17 @@ class WebSettings(BaseModel):
         default_factory=WebNodesSettings,
         description="Connection nodes offered in the agent editor.",
     )
+    google_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Client ID of a Google OAuth client that lets guests sign in with their Google "
+            "account. Its redirect URI is `<public url>/auth/google/callback`. Members never "
+            "sign in this way. Set it with `google_client_secret`."
+        ),
+    )
+    google_client_secret: SecretStr | None = Field(
+        default=None, description="Client secret of that Google OAuth client."
+    )
     session_ttl_days: int = Field(
         default=30,
         ge=1,
@@ -1270,10 +1281,17 @@ class WebSettings(BaseModel):
         "modules", "artifact_asset_hosts", "artifact_legacy_hosts", mode="before"
     )(_split_csv)
 
-    @field_validator("artifact_content_url", mode="before")
+    @field_validator(
+        "artifact_content_url", "google_client_id", "google_client_secret", mode="before"
+    )
     @classmethod
-    def _blank_content_url(cls, value: object) -> object:
-        return None if isinstance(value, str) and not value.strip() else value
+    def _blank_is_unset(cls, value: object) -> object:
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        return None if isinstance(raw, str) and not raw.strip() else value
+
+    @property
+    def google_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
 
     @field_validator("artifact_asset_hosts")
     @classmethod
@@ -1308,6 +1326,10 @@ class WebSettings(BaseModel):
         if self.dev and not _is_loopback_host(self.public_url.host):
             raise ValueError(
                 "DAIMON_WEB__DEV needs DAIMON_WEB__PUBLIC_URL to be localhost or a loopback address"
+            )
+        if (self.google_client_id is None) != (self.google_client_secret is None):
+            raise ValueError(
+                "DAIMON_WEB__GOOGLE_CLIENT_ID and DAIMON_WEB__GOOGLE_CLIENT_SECRET go together"
             )
         if self.artifact_content_url is not None:
             self._check_content_url(self.artifact_content_url)

@@ -15,7 +15,7 @@ You need:
   [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys). Sign-in tokens
   and saved keys are stored encrypted.
 - **At least one sign-in method:** the Discord, Slack or Microsoft login apps the
-  deployment already has.
+  deployment already has. Google sign-in for guests is optional.
 
 ## Turn it on
 
@@ -59,6 +59,30 @@ in chat. Someone who leaves a Discord server or Slack workspace loses it in the
 web app at once. This needs the bot's member list, which Discord shares only
 with the Server Members intent. Until the list loads, or while the intent is
 off, the sign-in itself decides.
+
+### Google sign-in for guests
+
+Guests, such as people a page is shared with by email, can sign in with Google
+instead of a one-time link. Members never use it, so it is not a way into a
+workspace. To offer it:
+
+1. In the Google Cloud console, create an OAuth client of type **Web
+   application** (Google Auth Platform, Clients). The default scopes `openid`,
+   `email` and `profile` are all it asks for.
+2. Add the redirect URI `https://daimon.example.com/auth/google/callback`,
+   with your own address.
+3. Set [`DAIMON_WEB__GOOGLE_CLIENT_ID`](configuration.md#daimon_web__google_client_id)
+   and [`DAIMON_WEB__GOOGLE_CLIENT_SECRET`](configuration.md#daimon_web__google_client_secret),
+   then restart the web process. **Continue with Google** appears on the sign-in page.
+
+Only an email address Google has confirmed counts. A Google account tied to a
+guest signs in as them. Otherwise it signs in as the active guests with that
+address and no Google account yet, in every workspace, and is tied to each. An
+account that matches no guest is refused; members never match by email.
+
+With Google on, sharing a page by email gives no sign-in link: the guest signs
+in with Google. Only whoever invited a guest, or an admin, can share more pages
+with them.
 
 A signed-in member connects more chat accounts from the account menu. The
 workspace switcher then lists the workspaces of every connected account. A later
@@ -194,7 +218,7 @@ agent over 7, 30 or 90 days. It shows counts only, never a message or who voted.
 
 | Symptom | Fix |
 | --- | --- |
-| A sign-in button is missing | Set that method's app: `DAIMON_HUB__DISCORD_*`, `DAIMON_HUB__SLACK_*` or `DAIMON_MICROSOFT_ACCOUNTS__*` (client id, secret and, for Microsoft, tenant id). |
+| A sign-in button is missing | Set that method's app: `DAIMON_HUB__DISCORD_*`, `DAIMON_HUB__SLACK_*`, `DAIMON_MICROSOFT_ACCOUNTS__*` (client id, secret and, for Microsoft, tenant id) or, for Google, `DAIMON_WEB__GOOGLE_*`. |
 | A provider reports a redirect URI mismatch | Register the exact URI above. |
 | Sign-in works but writes fail with "Cross-site request refused." | `DAIMON_WEB__PUBLIC_URL` must match the address in the browser exactly. |
 | A data server says it didn't accept your sign-in | Check the node's client and that the server trusts the identity key. Retries wait five minutes. |
