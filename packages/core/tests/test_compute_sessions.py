@@ -12,6 +12,7 @@ from typing import get_args
 import pytest
 from daimon.core.compute_models import (
     ComputeResource,
+    ComputeSession,
     MachineReadiness,
     MachineState,
     machine_readiness,

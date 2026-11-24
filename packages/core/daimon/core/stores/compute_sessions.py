@@ -152,6 +152,7 @@ async def start_failed(db: AsyncSession, session: ComputeSession, now: datetime)
         idempotency_key=uuid.uuid5(session.id, "start-failed"),
         available_at=now,
         attended=False,
-        requested_work=f"Tell the owner: machine {session.id} could not start and is being removed. "
+        requested_work=f"Tell the owner: machine {session.id} could not start and is being "
+        f"removed. "
         f"An admin can check the image profile {session.profile}. Do not run commands.",
     )
