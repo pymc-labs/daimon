@@ -65,7 +65,9 @@ A page runs in a sandboxed frame with no network. `fetch` and WebSocket calls fa
 
 - `fonts.googleapis.com` and `fonts.gstatic.com`
 - `cdn.jsdelivr.net`, `cdnjs.cloudflare.com` and `unpkg.com`
-- any the operator adds with [`DAIMON_WEB__ARTIFACT_ASSET_HOSTS`](configuration.md#daimon_web__artifact_asset_hosts)
+- any the operator adds with [`DAIMON_WEB__ARTIFACT_ASSET_HOSTS`](configuration.md#daimon_web__artifact_asset_hosts): a host, or one path of a host
+
+An image service whose host also fetches any URL it is given must not be listed whole: pages could send data out through it. List only the path that serves your own files, ending in `/`, such as `https://img.example.com/account/upload/`. A path takes no wildcard host, `%` or `..`.
 
 The frame cannot read the web session or another page, so a page's code cannot act as its viewer. Everything it does goes through `window.daimon`, which the server checks on every call.
 
