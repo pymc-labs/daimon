@@ -6,7 +6,12 @@ import struct
 import zlib
 
 import pytest
-from daimon.core.artifact_pages.content import ContentHost, check_thumbnail, route_host
+from daimon.core.artifact_pages.content import (
+    ContentHost,
+    check_thumbnail,
+    legacy_location,
+    route_host,
+)
 from daimon.core.artifact_pages.model import ArtifactError
 
 PAGE = "/a/abcdefgh23/_content"
@@ -32,6 +37,36 @@ def test_a_per_page_content_host_serves_only_its_own_pages_content(
 ) -> None:
     host = ContentHost.parse("https://{id}.pages.example.net")
     assert route_host(netloc, path, public_netloc=APP, content=host) == route
+
+
+@pytest.mark.parametrize(
+    ("netloc", "path", "route"),
+    [
+        ("old.example.org", "/a/q3-plan", "legacy"),
+        ("old.example.org", "/a/q3-plan/", "not_found"),
+        ("old.example.org", "/a/q3-plan/_content", "not_found"),
+        ("old.example.org", "/api/me", "not_found"),
+        ("old.example.org", "/", "not_found"),
+        (APP, "/a/q3-plan", "serve"),
+    ],
+)
+def test_a_legacy_host_answers_only_a_page_name(netloc: str, path: str, route: str) -> None:
+    assert (
+        route_host(netloc, path, public_netloc=APP, content=None, legacy_hosts={"old.example.org"})
+        == route
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "location"),
+    [
+        ("", "https://web.example.com/a/abcdefgh23/q3-plan"),
+        ("key=s3cret&x=1", "https://web.example.com/a/abcdefgh23/q3-plan?k=s3cret&x=1"),
+        ("a=&key=a%26b", "https://web.example.com/a/abcdefgh23/q3-plan?a=&k=a%26b"),
+    ],
+)
+def test_a_legacy_address_moves_with_its_query_and_key_renamed(query: str, location: str) -> None:
+    assert legacy_location("https://web.example.com", "abcdefgh23", "q3-plan", query) == location
 
 
 def test_without_a_content_host_content_stays_on_the_app() -> None:

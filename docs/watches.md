@@ -17,6 +17,14 @@ from you. Discord, Slack, Teams and the web app can create one; the web app
 polls only page data. `select`, such as `.data.vote`, keeps one part of each
 event and skips events without it.
 
+`where` wakes the watch only for events
+whose top-level fields match: each key names a field (`event`, `sender`,
+`by`, `page_visible_outside_workspace`) and holds one allowed value or a list
+of up to 20, with at most 8 keys. Every key must match, as in
+`{"event": ["vote", "undo"], "sender": "member"}`. Other events cost no turn and
+count against no limit. The watch lists its filter in plain words, also in the
+page's Activity tab.
+
 A page watch may be permanent without an admin, and it still ends with its
 page. Someone who does not manage the page holds at most one watch on it.
 Whoever manages the page can pause or delete any of its watches from the

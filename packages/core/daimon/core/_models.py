@@ -5773,6 +5773,7 @@ class Artifact(Base):
     __table_args__ = (
         UniqueConstraint("public_id", name="uq_artifacts_public_id"),
         UniqueConstraint("tenant_id", "slug", name="uq_artifacts_tenant_slug"),
+        UniqueConstraint("imported_from", "tenant_id", name="uq_artifacts_imported_from"),
         Index("ix_artifacts_owner", "owner_account_id"),
         Index(
             "ix_artifacts_expires_at", "expires_at", postgresql_where=text("expires_at IS NOT NULL")
@@ -5817,6 +5818,8 @@ class Artifact(Base):
     ask: Mapped[FalseFlag]
     data_scale: Mapped[int] = mapped_column(server_default="1")
     link_secret: Mapped[bytes | None]
+    # The address this page had before it was imported, else NULL.
+    imported_from: Mapped[str | None]
     expires_at: Mapped[datetime | None]
     current_version: Mapped[int] = mapped_column(server_default="0")
     size_bytes: Mapped[int] = mapped_column(server_default="0")

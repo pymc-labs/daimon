@@ -6,8 +6,15 @@ There is no CORS: the app and its API share one origin, so a browser never needs
 
 from __future__ import annotations
 
-from daimon.core.artifact_pages.content import ContentHost, route_host
+from daimon.core.artifact_pages.content import (
+    ContentHost,
+    legacy_location,
+    legacy_slug,
+    route_host,
+)
 from daimon.core.config import WebSettings, origin_of
+from daimon.core.stores.artifact_pages import find_imported
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -120,10 +127,20 @@ def content_host_of(web: WebSettings) -> ContentHost | None:
 
 class PageHostsMiddleware:
     """Holds artifact paths to their hosts (`route_host`): the content host serves page
-    content only, and pages opened on another host move to the public one."""
+    content only, pages opened on another host move to the public one, and a legacy host
+    sends `/a/<name>` to the page imported from that address."""
 
-    def __init__(self, app: ASGIApp, *, web: WebSettings) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        web: WebSettings,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
         self._app = app
+        self._sessions = sessionmaker
+        self._legacy = frozenset(web.artifact_legacy_hosts)
+        self._public_url = str(web.public_url)
         self._public = origin_of(str(web.public_url))
         self._netloc = self._public.split("://", 1)[1]
         self._content = content_host_of(web)
@@ -133,9 +150,17 @@ class PageHostsMiddleware:
             await self._app(scope, receive, send)
             return
         host = Headers(scope=scope).get("host", "")
-        route = route_host(host, scope["path"], public_netloc=self._netloc, content=self._content)
+        route = route_host(
+            host,
+            scope["path"],
+            public_netloc=self._netloc,
+            content=self._content,
+            legacy_hosts=self._legacy,
+        )
         response: Response
         match route:
+            case "legacy":
+                response = await self._moved(host.lower(), scope)
             case "serve":
                 await self._app(scope, receive, send)
                 return
@@ -146,15 +171,33 @@ class PageHostsMiddleware:
                     f"{self._public}{path}{'?' + query if query else ''}", status_code=308
                 )
             case "not_found":
-                # Sandboxed: a page that opened this could otherwise script it, a document
-                # on its own origin without its policy.
-                response = PlainTextResponse(
-                    "Not found",
-                    status_code=404,
-                    headers={
-                        "Content-Security-Policy": "default-src 'none'; sandbox",
-                        "Cache-Control": "no-store",
-                        "X-Content-Type-Options": "nosniff",
-                    },
-                )
+                response = _not_found()
         await response(scope, receive, send)
+
+    async def _moved(self, host: str, scope: Scope) -> Response:
+        """The 308 to the page imported from `https://<host>/a/<name>`, else not found."""
+        slug = legacy_slug(scope["path"])
+        assert slug is not None, "route_host sends only /a/<name> here"
+        async with self._sessions() as db:
+            found = await find_imported(db, address=f"https://{host}/a/{slug}")
+        if found is None:
+            return _not_found()
+        public_id, name = found
+        query = scope["query_string"].decode("latin-1")
+        return RedirectResponse(
+            legacy_location(self._public_url, public_id, name, query), status_code=308
+        )
+
+
+def _not_found() -> Response:
+    # Sandboxed: a page that opened this could otherwise script it, a document on its own
+    # origin without its policy.
+    return PlainTextResponse(
+        "Not found",
+        status_code=404,
+        headers={
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

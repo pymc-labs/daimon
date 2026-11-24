@@ -1248,6 +1248,15 @@ More hosts artifact pages may load scripts, styles, fonts and images from, comma
 separated (`https://cdn.example.com`). Never list a host that fetches or redirects to
 any URL it is given: pages could send data out through it.
 
+### `DAIMON_WEB__ARTIFACT_LEGACY_HOSTS`
+
+`tuple[str, ...]` · optional · default unset
+
+Hosts that used to serve imported pages, comma-separated (`pages.old.example.com`). A
+request for `/a/&lt;name&gt;` on one redirects to the page imported from that address,
+keeping its query and renaming `key` to `k`; anything else there is not found. Point the
+host's DNS and certificate here.
+
 ### `DAIMON_WEB__ARTIFACT_DB_POOL_SIZE`
 
 `int` · optional · default `5`

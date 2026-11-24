@@ -127,6 +127,7 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
         delivery="new_thread",
         permanent=True,
         select=".data.vote",
+        where={"event": ["vote", "undo"]},
     )
     async with db_session_factory() as db:
         row = await watches.get_watch(db, made.watch_id)
@@ -141,6 +142,19 @@ async def test_a_web_member_makes_a_permanent_new_chat_page_watch_and_a_viewer_h
         "new_thread",
         {"projection": ".data.vote"},
     )
+
+    assert row.source_state == {"where": {"event": ["vote", "undo"]}}
+    assert made.where == "event is vote or undo"
+    with pytest.raises(ToolError, match="where"):
+        await tools.create_watch_impl(
+            runtime,
+            auth(owner, "d-1"),
+            origin_context_id="ctx",
+            instructions="x",
+            source="page_event",
+            page="votes",
+            where={"event": []},
+        )
 
     with pytest.raises(ToolError, match="only be made in Discord"):
         await tools.create_watch_impl(

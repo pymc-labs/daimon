@@ -27,6 +27,7 @@ from daimon.testing.builders import new_thread_session
 from daimon.testing.turn_router import build_turn_router
 from daimon.testing.watch_fixtures import install_poll_ports
 from httpx import AsyncClient
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN
@@ -232,7 +233,10 @@ async def test_collection_rules_bind_every_page_api_path_but_not_managers(
 
 
 async def _page_watch(
-    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, page: ArtifactRow
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    page: ArtifactRow,
+    where: dict[str, JsonValue] | None = None,
 ) -> uuid.UUID:
     """A Discord thread's watch on the page, with no signing key enrolled yet."""
     now = datetime.now(UTC)
@@ -271,8 +275,30 @@ async def _page_watch(
             page_id=page.id,
             expires_at=now + timedelta(days=1),
             now=now,
+            where=where,
         )
     return watch.id
+
+
+async def test_a_watch_filter_keeps_other_events_from_waking_it(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
+    t = await team(db_session_factory)
+    page = await publish(db_session_factory, t.owner, events=True)
+    watch_id = await _page_watch(
+        db_session_factory, t.tenant_id, page, {"event": ["vote", "undo"], "sender": "member"}
+    )
+    async with page_client(db_session_factory, t.member) as client:
+        api = f"/a/{page.public_id}/_api/notify"
+        wake = await client.post(api, json={"event": "undo", "data": {}}, headers=OWN)
+        skip = await client.post(api, json={"event": "poke", "data": {}}, headers=OWN)
+    async with db_session_factory() as db:
+        woke = await artifact_store.get_doc(db, page.id, "_events", wake.json()["id"])
+        skipped = await artifact_store.get_doc(db, page.id, "_events", skip.json()["id"])
+    assert woke is not None and woke.data["delivered"] == 1, woke
+    assert skipped is not None and skipped.data["delivered"] == 0, "saved, but nobody woke"
+    assert watch_id is not None
 
 
 async def test_notify_saves_the_event_and_wakes_the_pages_watch(

@@ -45,7 +45,7 @@ from daimon.core.artifact_pages.documents import (
     may_read,
     rule_of,
 )
-from daimon.core.artifact_pages.events import build_event
+from daimon.core.artifact_pages.events import build_event, event_matches
 from daimon.core.artifact_pages.model import ArtifactError, ErrorCode, page_url
 from daimon.core.artifact_pages.tickets import Ticket, link_digest, open_ticket, seal
 from daimon.core.config import origin_of
@@ -566,6 +566,8 @@ def pages_router(runtime: WebRuntime) -> APIRouter:
         for watch in await watches_store.page_watches(
             db, tenant_id=artifact.tenant_id, page_id=artifact.id
         ):
+            if not event_matches(watch.source_state.get("where"), event.document):
+                continue  # filtered out: no key, signature, queue slot or turn
             # The rule creating a watch applies: its owner must still be able to use the page.
             owner = watch.owner_account_id
             if await artifact_store.tool_role(db, artifact, owner, chat_admin=False) == "none":

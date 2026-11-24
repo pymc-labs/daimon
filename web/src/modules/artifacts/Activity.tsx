@@ -85,6 +85,7 @@ function Watch({ a, w }: { a: ArtifactDetail; w: ArtifactWatch }) {
         <span className="truncate">{w.owner}, {w.agent}</span>
         <span className="ml-auto shrink-0 tabular">{exact(w.turns_today)} of {exact(w.max_turns_per_day)} turns today</span>
       </div>
+      {w.where && <div className="mt-0.5 truncate text-xs text-muted-foreground">{w.where}</div>}
       <div className="mt-2 flex items-center gap-2">
         {w.thread_url && <Link to={w.thread_url} className="text-xs text-link hover:underline">Open thread</Link>}
         <div className="ml-auto flex gap-2">

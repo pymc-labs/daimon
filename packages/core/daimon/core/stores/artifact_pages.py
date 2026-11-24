@@ -96,6 +96,11 @@ def _fernet(session: AsyncSession) -> MultiFernet:
     return cipher
 
 
+def seal_link_secret(session: AsyncSession, secret: str) -> bytes:
+    """A public page's link secret as it is stored: Fernet ciphertext."""
+    return encrypt_token(_fernet(session), secret)
+
+
 def _row(session: AsyncSession, orm: Artifact) -> ArtifactRow:
     secret = None if orm.link_secret is None else decrypt_token(_fernet(session), orm.link_secret)
     return ArtifactRow(
@@ -115,6 +120,7 @@ def _row(session: AsyncSession, orm: Artifact) -> ArtifactRow:
         ask=orm.ask,
         data_scale=orm.data_scale,
         link_secret=secret,
+        imported_from=orm.imported_from,
         expires_at=orm.expires_at,
         current_version=orm.current_version,
         size_bytes=orm.size_bytes,
@@ -237,7 +243,7 @@ def _set_settings(
     if settings.access != "public":
         orm.link_secret = None
     elif rotate or orm.link_secret is None:
-        orm.link_secret = encrypt_token(_fernet(session), new_link_secret())
+        orm.link_secret = seal_link_secret(session, new_link_secret())
 
 
 async def _add_version(
@@ -385,6 +391,19 @@ async def get_by_slug(
         select(Artifact).where(Artifact.tenant_id == tenant_id, Artifact.slug == slug)
     )
     return None if orm is None else _row(session, orm)
+
+
+async def find_imported(session: AsyncSession, *, address: str) -> tuple[str, str] | None:
+    """`(public_id, slug)` of the one page imported from `address`; None when there is
+    none or two workspaces imported it."""
+    found = (
+        await session.execute(
+            select(Artifact.public_id, Artifact.slug)
+            .where(Artifact.imported_from == address)
+            .limit(2)
+        )
+    ).all()
+    return (found[0][0], found[0][1]) if len(found) == 1 else None
 
 
 async def list_visible(

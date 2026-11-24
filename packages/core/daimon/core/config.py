@@ -1096,6 +1096,7 @@ def _split_csv(value: object) -> object:
 # `https://{id}.pages.example.com`: a host per page.
 _CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
 # A CSP host source an operator adds: scheme, host (a leading `*.` allowed), optional port.
+_LEGACY_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
 _ASSET_HOST = re.compile(r"https://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
 
 
@@ -1236,6 +1237,15 @@ class WebSettings(BaseModel):
             "or redirects to any URL it is given: pages could send data out through it."
         ),
     )
+    artifact_legacy_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "Hosts that used to serve imported pages, comma-separated "
+            "(`pages.old.example.com`). A request for `/a/<name>` on one redirects to the "
+            "page imported from that address, keeping its query and renaming `key` to `k`; "
+            "anything else there is not found. Point the host's DNS and certificate here."
+        ),
+    )
     artifact_db_pool_size: int = Field(
         default=5,
         ge=4,
@@ -1250,7 +1260,9 @@ class WebSettings(BaseModel):
         ),
     )
 
-    _split_lists = field_validator("modules", "artifact_asset_hosts", mode="before")(_split_csv)
+    _split_lists = field_validator(
+        "modules", "artifact_asset_hosts", "artifact_legacy_hosts", mode="before"
+    )(_split_csv)
 
     @field_validator("artifact_content_url", mode="before")
     @classmethod
@@ -1268,6 +1280,17 @@ class WebSettings(BaseModel):
                 )
         return value
 
+    @field_validator("artifact_legacy_hosts")
+    @classmethod
+    def _check_legacy_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for host in value:
+            if not _LEGACY_HOST.fullmatch(host):
+                raise ValueError(
+                    f"DAIMON_WEB__ARTIFACT_LEGACY_HOSTS: {host!r} is not a lowercase host "
+                    "such as pages.old.example.com"
+                )
+        return value
+
     @model_validator(mode="after")
     def _check_deployment(self) -> WebSettings:
         if not self.dev and self.public_url.scheme != "https":
@@ -1279,6 +1302,8 @@ class WebSettings(BaseModel):
             )
         if self.artifact_content_url is not None:
             self._check_content_url(self.artifact_content_url)
+        if origin_of(str(self.public_url)).split("://", 1)[1] in self.artifact_legacy_hosts:
+            raise ValueError("DAIMON_WEB__ARTIFACT_LEGACY_HOSTS cannot list the public URL's host")
         return self
 
     def _check_content_url(self, url: str) -> None:

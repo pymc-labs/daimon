@@ -114,7 +114,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.add_middleware(SecurityMiddleware, web=runtime.web)
     app.add_middleware(_Compress)
     # Outermost: a request on the wrong host never reaches a route.
-    app.add_middleware(PageHostsMiddleware, web=runtime.web)
+    app.add_middleware(PageHostsMiddleware, web=runtime.web, sessionmaker=runtime.sessionmaker)
     app.include_router(_health_router(runtime))
     app.include_router(auth_router(runtime))
     app.include_router(avatars_router(runtime))

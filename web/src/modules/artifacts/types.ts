@@ -36,4 +36,4 @@ export type ArtifactChange = Partial<{
 export type EmailShare = ArtifactDetail & { invite_link: string | null }
 
 /** A watch on a page; `mine` when the caller made it, the only one who may resume it. */
-export type ArtifactWatch = { id: string; name: string; owner: string; mine: boolean; agent: string; status: "active" | "paused"; turns_today: number; max_turns_per_day: number; thread_url: string | null }
+export type ArtifactWatch = { id: string; name: string; owner: string; mine: boolean; agent: string; status: "active" | "paused"; turns_today: number; max_turns_per_day: number; where?: string | null; thread_url: string | null }

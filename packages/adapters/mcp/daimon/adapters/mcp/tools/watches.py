@@ -45,6 +45,7 @@ from daimon.adapters.mcp.watch_polling import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
+from daimon.core.artifact_pages.events import describe_where
 from daimon.core.config import Settings, env_dm_policy, load_watches_settings
 from daimon.core.confirmation import watch_card_skipped
 from daimon.core.continuity.continuation import ContinuationRequest
@@ -101,6 +102,8 @@ class WatchSummary(BaseModel):
     permanent: bool = False
     max_turns_per_day: int = watches.DEFAULT_WATCH_CAP
     revision: int = 0
+    # A page watch's event filter in plain words.
+    where: str | None = None
 
 
 def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
@@ -121,6 +124,7 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
         permanent=row.expires_at is None,
         max_turns_per_day=row.max_turns_per_day,
         revision=row.revision,
+        where=describe_where(row.source_state.get("where")),
     )
 
 
@@ -530,6 +534,7 @@ async def create_watch_impl(
     max_turns_per_day: int | None = None,
     page: str | None = None,
     select: str | None = None,
+    where: dict[str, JsonValue] | None = None,
 ) -> WatchSummary:
     origin = await require_attended_owner(
         runtime, auth, origin_context_id, tool_name="create_watch"
@@ -544,8 +549,8 @@ async def create_watch_impl(
             raise ToolError("Name the page to watch in `page`.")
         if delivery == "dm":
             raise ToolError("A page watch reports in this thread or a new one.")
-    elif select is not None:
-        raise ToolError("`select` is for page watches; polls use `projection`.")
+    elif select is not None or where is not None:
+        raise ToolError("`select` and `where` are for page watches; polls use `projection`.")
     principal_platform, owner_id = await owner_principal(runtime, auth, origin)
     await require_skip_defaults(
         runtime,
@@ -605,6 +610,7 @@ async def create_watch_impl(
                 now=now,
                 delivery=delivery,
                 select_path=select,
+                where=where,
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
@@ -1285,6 +1291,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         max_turns_per_day: int | None = None,
         page: str | None = None,
         select: str | None = None,
+        where: dict[str, JsonValue] | None = None,
     ) -> WatchSummary:
         """Watch a listed read tool from this conversation, wake on posts to a secret link, or
         wake on a page's events.
@@ -1300,7 +1307,11 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         With source "page_event", `page` names a page you can use that sends events: each
         event its viewers send wakes the agent, and no key is shown or needed. `select` (such
         as `.data.vote`) keeps only that part of each event and skips events where it is
-        empty. A page watch reports in this thread, or with "new_thread" in a new thread
+        empty. `where` wakes it only for events whose top-level fields match: each key
+        maps to one allowed value or a list of up to 20, at most 8 keys, and every key must
+        match, as in `{"event": ["vote", "undo"], "sender": "member"}`. The event's fields
+        are `event`, `data`, `by`, `sender`, `page_visible_outside_workspace` and `at`.
+        A page watch reports in this thread, or with "new_thread" in a new thread
         per report. `permanent=true` needs no admin for a page watch, which still ends
         with its page. A page holds up to 5 watches; someone who does not manage it holds
         one. Page watches work in every chat. Other sources are offered only where the
@@ -1367,6 +1378,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             max_turns_per_day=max_turns_per_day,
             page=page,
             select=select,
+            where=where,
         )
 
     @mcp.tool(tags={"discord"})

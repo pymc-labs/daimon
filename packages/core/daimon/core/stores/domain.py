@@ -1902,6 +1902,7 @@ class ArtifactRow(BaseModel):
     ask: bool
     data_scale: int
     link_secret: str | None = Field(default=None, repr=False)
+    imported_from: str | None = None
     expires_at: datetime | None
     current_version: int
     size_bytes: int
