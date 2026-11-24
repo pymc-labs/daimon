@@ -28,6 +28,18 @@ def test_lists_parse_from_comma_separated_env(monkeypatch: pytest.MonkeyPatch) -
     assert web.modules == ("chat", "credits"), "modules should split on commas"
 
 
+def test_google_sign_in_needs_both_its_client_id_and_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://web.example.com")
+    monkeypatch.setenv("DAIMON_WEB__GOOGLE_CLIENT_ID", "gid")
+    with pytest.raises(ValidationError, match="go together"):
+        load_settings(_env_file=None)
+    monkeypatch.setenv("DAIMON_WEB__GOOGLE_CLIENT_SECRET", "gsecret")
+    web = load_settings(_env_file=None).web
+    assert web is not None and web.google_configured, "both set turns Google sign-in on"
+
+
 def test_public_url_must_be_https_unless_dev(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "http://localhost:5174")
     with pytest.raises(ValidationError, match="https"):

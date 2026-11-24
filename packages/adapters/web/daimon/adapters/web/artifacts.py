@@ -311,7 +311,8 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
     ) -> dict[str, Any]:
         """Add the workspace's person with this email, or a new visitor who can open only
         the pages shared with them. A new visitor's sign-in link is returned once; an
-        existing person gets none, since it would sign in as them."""
+        existing person gets none, since it would sign in as them. With Google sign-in on,
+        a new visitor gets none either: they sign in with the Google account of that email."""
         address, now = email.strip().lower(), runtime.now()
         if not _EMAIL.fullmatch(address):
             raise HTTPException(status_code=422, detail="Enter an email address.")
@@ -354,17 +355,18 @@ def artifacts_router(runtime: WebRuntime) -> APIRouter:
                 assert claimed is not None, "a link just made is open"
                 person = await join_invite(db, claimed, now)
                 await web_invites.set_accepted_by(db, invite_id=invite.id, person_id=person.id)
-                _, token = await issue_link(
-                    db,
-                    tenant_id=tenant_id,
-                    kind="sign_in",
-                    expires_at=now + SIGN_IN_LINK_TTL,
-                    email=address,
-                    person_id=person.id,
-                    created_by_account_id=sharer,
-                )
-                page = page_url("", artifact.public_id, artifact.slug)
-                link = f"{link_url(runtime.web, token)}?next={quote(page, safe='')}"
+                if not runtime.web.google_configured:
+                    _, token = await issue_link(
+                        db,
+                        tenant_id=tenant_id,
+                        kind="sign_in",
+                        expires_at=now + SIGN_IN_LINK_TTL,
+                        email=address,
+                        person_id=person.id,
+                        created_by_account_id=sharer,
+                    )
+                    page = page_url("", artifact.public_id, artifact.slug)
+                    link = f"{link_url(runtime.web, token)}?next={quote(page, safe='')}"
                 await audit(
                     db,
                     tenant_id=tenant_id,

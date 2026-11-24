@@ -1200,6 +1200,20 @@ Secret of that client. Required by the web service.
 
 Scopes asked for in the token exchange.
 
+### `DAIMON_WEB__GOOGLE_CLIENT_ID`
+
+`str | None` · optional · default unset
+
+Client ID of a Google OAuth client that lets guests sign in with their Google account.
+Its redirect URI is `&lt;public url&gt;/auth/google/callback`. Members never sign in
+this way. Set it with `google_client_secret`.
+
+### `DAIMON_WEB__GOOGLE_CLIENT_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Client secret of that Google OAuth client.
+
 ### `DAIMON_WEB__SESSION_TTL_DAYS`
 
 `int` · optional · default `30`

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Guests can sign in with Google.** Set `DAIMON_WEB__GOOGLE_CLIENT_ID` and
+  `DAIMON_WEB__GOOGLE_CLIENT_SECRET` and the sign-in page offers Continue with
+  Google. A Google account whose email is confirmed signs in as the active guests
+  invited by that address and is tied to them; members never match by email and
+  an account that matches nobody is refused. With Google on, sharing a page by
+  email gives the sharer no sign-in link. See the Web app page.
+
 - **Page watches report wherever their owner chats.** Slack, Teams and the web app
   can make page-event watches, and Daimon rechecks a Slack or Teams owner before
   every report. Page watches can be permanent, keep one part of each event with

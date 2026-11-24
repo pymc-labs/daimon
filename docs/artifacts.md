@@ -29,7 +29,7 @@ The agent can change settings without an upload. `artifact_source` gives a link,
 | `people` | Only the listed people. They may be visitors, invited by an admin or by email from the Share dialog. |
 | `public` | Anyone with the secret link in the address, signed in or not. |
 
-People are named by their id in the web app, a chat user id or an @mention; a chat member who never opened the web app counts. In the Share dialog of a people page, anyone who may share can add an email address. A person with that address is added. Otherwise Daimon makes a visitor with no agents, adds them, and shows a sign-in link once that opens the page; each person may invite 20 such visitors a day. A public page has a secret link; the agent can replace it with `new_link` when it leaks.
+People are named by their id in the web app, a chat user id or an @mention; a chat member who never opened the web app counts. In the Share dialog of a people page, anyone who may share can add an email address. A person with that address is added. Otherwise Daimon makes a visitor with no agents, adds them, and shows a one-time link to the page (none with [Google sign-in](web.md#google-sign-in-for-guests)); each person may invite 20 such visitors a day. A public page has a secret link; the agent can replace it with `new_link` when it leaks.
 
 A page going public expires after 30 days unless the owner sets another expiry; `expires_in_days=0` or Never keeps it for good. Other pages never expire unless asked to. An expired page is hidden and is deleted 30 days later.
 
