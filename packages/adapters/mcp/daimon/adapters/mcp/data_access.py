@@ -4,8 +4,8 @@
 execution grant (one live origin, `matching_turn`), a routine by its destination, and a
 key, the hub or the CLI as a private place or the room the key was minted in. The model
 passes nothing. `data_audience_for` applies the rule (`daimon.core.data_audience`) and
-refuses when no data may be read. `register_data_tools` registers `DATA_TOOLS`; each
-result goes through `mark_data_result`, so transcripts read elsewhere redact it.
+refuses when no data may be read; the tools (`daimon.adapters.mcp.tools.data`) call it first.
+Readers are subjects in the form the store's identities take (`user_subject`).
 """
 
 from __future__ import annotations
@@ -27,9 +27,9 @@ from daimon.core.data_audience import (
     Reader,
     RefusalReason,
     data_audience,
+    user_subject,
 )
 from daimon.core.data_seal import reads_data
-from daimon.core.data_tools import DATA_TOOLS
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.mcp_identity import matching_turn
 from daimon.core.stores.agent_owners import owner_of
@@ -38,7 +38,6 @@ from daimon.core.stores.identity import accounts_of
 from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
-from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -76,7 +75,9 @@ async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime)
         return await _turn_origin(runtime, auth, now=now)
     if platform is None or auth.platform_user_id is None:
         return DataOrigin("none")
-    asker = Reader(f"{platform}:{auth.platform_user_id}", auth.account_id)
+    asker = Reader(
+        user_subject(platform, auth.external_id or "", auth.platform_user_id), auth.account_id
+    )
     if auth.routine_id is not None:
         async with runtime.session_factory() as session:
             routine = await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
@@ -130,7 +131,10 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
         )
     if turn is None or (turn.helper_of is not None and parent is None):
         return DataOrigin("none")
-    asker = Reader(f"{turn.platform}:{auth.platform_user_id}", turn.account_id)
+    asker = Reader(
+        user_subject(turn.platform, auth.external_id or "", auth.platform_user_id),
+        turn.account_id,
+    )
     if turn.sender_foreign or turn.shared_channel:
         return DataOrigin("room", asker, contained=True)
     if is_dm_thread(turn.platform, turn.thread_id) or turn.platform == "web":
@@ -167,6 +171,7 @@ async def _room(
 ) -> DataOrigin:
     """A room or thread: contained when outsiders may read it; its viewers, or None."""
     platform = cast(str, auth.platform)
+    workspace = auth.external_id or ""
     async with runtime.session_factory() as session:
         audience = await channel_has_outsiders(
             session,
@@ -178,12 +183,14 @@ async def _room(
         )
         if audience.contained:
             return DataOrigin("room", asker, contained=True)
+        users = None
         if platform == "discord":
-            users = await read_viewers(
+            stored = await read_viewers(
                 session, tenant_id=auth.tenant_id, channel_id=thread_id or channel_id, now=now
             )
-        else:
-            users = None
+            # Stored as subjects of this tenant's server: back to its user ids.
+            prefix = user_subject(platform, workspace, "")
+            users = None if stored is None else frozenset(s.removeprefix(prefix) for s in stored)
     if platform == "slack" and auth.external_id is not None:
         users = await _slack_viewers(runtime, auth.external_id, channel_id)
     if users is None:
@@ -196,7 +203,9 @@ async def _room(
         users = await _slack_people(runtime, auth.external_id, users, linked)
         if users is None:
             return DataOrigin("room", asker, None)
-    viewers = frozenset(Reader(f"{platform}:{user}", linked.get(user)) for user in users)
+    viewers = frozenset(
+        Reader(user_subject(platform, workspace, user), linked.get(user)) for user in users
+    )
     return DataOrigin("room", asker, viewers if len(viewers) <= CAP else None)
 
 
@@ -241,12 +250,3 @@ async def _slack_people(
     except SlackApiError:
         return None
     return frozenset(people)
-
-
-def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    """Register the `data_*` tools behind `data_reads`. None until the store's read
-    functions land: each then calls `data_audience_for` first and returns its text through
-    `mark_data_result`."""
-    del mcp, runtime
-    if DATA_TOOLS:
-        raise RuntimeError("register each data tool here, through data_audience_for")

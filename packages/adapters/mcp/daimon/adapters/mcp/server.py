@@ -26,7 +26,6 @@ from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, agent_converted
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
-from daimon.adapters.mcp.data_access import register_data_tools
 from daimon.adapters.mcp.hub.app import mount_hub_apps
 from daimon.adapters.mcp.middleware.call_origin import CallOriginMiddleware
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware
@@ -80,6 +79,7 @@ from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.credit_reports import register_credit_report_tools
+from daimon.adapters.mcp.tools.data import register_data_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
 from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
