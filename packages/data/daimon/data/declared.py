@@ -24,6 +24,10 @@ id>` resolved to the tenant here, so one file serves every deployment; an unknow
 `redaction_sets` entries are rule sets, inline or a repo file pinned by sha
 (`daimon.data.redaction`); a source names one in `redaction_set`.
 
+`connections` entries are shared MCP connections (`daimon.core.shared_connections`): `id` is
+the name, with `url`, a `token` reference and a `scope`. The web app keeps their address, token
+and scope read-only; admins still read and approve their tools there.
+
 Sections are handlers registered by name (`register_section`), so other features add theirs;
 a section nobody handles is logged and kept in `declared_state.unknown`.
 """
@@ -39,7 +43,9 @@ from typing import Annotated, Final, Literal
 
 import structlog
 import yaml
+from cryptography.fernet import InvalidToken
 from daimon.core.config import Settings
+from daimon.core.ports import mcp_connections as shared
 from daimon.data import audit, parity, pool, redaction
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
@@ -483,10 +489,69 @@ async def _redaction_sets(ctx: Ctx, raw: object) -> list[Result]:
     return await _each(ctx, "redaction_sets", raw, RedactionSetEntry, _redaction_set)
 
 
+# ---- shared MCP connections ---------------------------------------------------------------
+
+
+class ConnectionEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=f"^{shared.NAME_PATTERN.pattern}$")
+    url: str = Field(min_length=1, max_length=2048)
+    token: str | None = Field(default=None, pattern=r"^(env|file):.+$")
+    """A reference to the server's bearer token, never the token."""
+    scope: str | None = Field(default=None, pattern=f"^{shared.SCOPE_PATTERN.pattern}$")
+
+
+async def _connection(ctx: Ctx, e: ConnectionEntry) -> Result:
+    try:
+        url = shared.checked_address(e.url)
+        token = None if e.token is None else _resolve(e.token)
+        if e.token is not None and token is None:
+            raise DeclaredError("the token cannot be read")
+        if token is not None and not ctx.env.crypto_keys:
+            raise DeclaredError("DAIMON_CRYPTO__KEYS is required to keep a token")
+        fernet = shared.build_multifernet(ctx.env.crypto_keys) if token is not None else None
+        sealed = None if fernet is None or token is None else shared.encrypt_auth(fernet, token)
+    except shared.SharedConnectionError as err:
+        raise DeclaredError(str(err)) from None
+    cur = await ctx.conn.execute(
+        b"select url, encrypted_auth, scope, declared from mcp_connections"
+        b" where tenant_id = %s and name = %s",
+        (ctx.tenant_id, e.id),
+    )
+    row = await cur.fetchone()
+    if row is not None and not row["declared"]:
+        raise DeclaredError("a connection with this name exists and is not declared")
+    held = None
+    if row is not None and row["encrypted_auth"] is not None and fernet is not None:
+        try:
+            held = shared.decrypt_token(fernet, row["encrypted_auth"])
+        except InvalidToken:
+            held = None
+    if (
+        row is not None
+        and (row["url"], row["scope"], held) == (url, e.scope, token)
+        and (token is not None or row["encrypted_auth"] is None)
+    ):
+        return {"action": "unchanged"}
+    await ctx.conn.execute(
+        b"insert into mcp_connections (tenant_id, name, url, encrypted_auth, scope, declared)"
+        b" values (%s, %s, %s, %s, %s, true) on conflict (tenant_id, name) do update set"
+        b" url = excluded.url, encrypted_auth = excluded.encrypted_auth,"
+        b" scope = excluded.scope, updated_at = now()",
+        (ctx.tenant_id, e.id, url, sealed, e.scope),
+    )
+    return {"action": "create" if row is None else "update"}
+
+
+async def _connections(ctx: Ctx, raw: object) -> list[Result]:
+    return await _each(ctx, "connections", raw, ConnectionEntry, _connection)
+
+
 register_section("scopes", _scopes)
 register_section("grants", _grants)
 register_section("sources", _sources)
 register_section("redaction_sets", _redaction_sets)
+register_section("connections", _connections)
 
 
 # ---- apply ---------------------------------------------------------------------------------

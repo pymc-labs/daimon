@@ -112,6 +112,9 @@ read-only in the app. Daimon never deletes one: a removed entry stays, and
 `retire: true` retires a source for good. A source is created in shadow and published only
 with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
 below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
+A `connections` entry (`{id: crm, url: ..., token: "env:CRM_TOKEN"}`) declares a
+[shared MCP connection](mcp-servers.md#share-a-server-with-the-workspace); admins still
+approve its tools in the app.
 
 ## Who can read a record
 
