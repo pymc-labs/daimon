@@ -1525,6 +1525,22 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
+        key="data_sources",
+        name="Data sources",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "The data store, with its connected sources and search. Turned on for the "
+            "deployment first; a workspace can turn it off for itself."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
         key="context_provider",
         name="Context provider",
         category="capabilities",

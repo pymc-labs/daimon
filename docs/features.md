@@ -69,6 +69,7 @@ Where each feature can be set, and its default.
 | /new in threads | `thread_new` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Data sources | `data_sources` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
@@ -185,6 +186,18 @@ Each message starts with the notes in the agent's repository memory, and the age
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+
+## Data sources
+
+The data store, with its connected sources and search. Turned on for the deployment first; a workspace can turn it off for itself.
+
+| | |
+| --- | --- |
+| Key | `data_sources` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
 ## Context provider
