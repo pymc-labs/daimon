@@ -2815,6 +2815,8 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=endless_pass,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -2846,6 +2848,8 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
     async with asyncio.timeout(5):
         await _run_loops(
             tick=slow_tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=usage_pass,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -2871,6 +2875,8 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
                 tick=tick,
+                housekeeping=unittest.mock.AsyncMock(),
+                github_sessions=unittest.mock.AsyncMock(),
                 usage_sweep=crashing_pass,
                 compute_sweep=unittest.mock.AsyncMock(),
                 compute_task_poll=unittest.mock.AsyncMock(),
@@ -2903,6 +2909,8 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
                 tick=crashing_tick,
+                housekeeping=unittest.mock.AsyncMock(),
+                github_sessions=unittest.mock.AsyncMock(),
                 usage_sweep=endless_pass,
                 compute_sweep=unittest.mock.AsyncMock(),
                 compute_task_poll=unittest.mock.AsyncMock(),
@@ -2915,6 +2923,52 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         "the tick's error propagates out of the loops"
     )
     assert pass_cancelled.is_set(), "the usage pass in flight is cancelled"
+
+
+@pytest.mark.parametrize("slow", ["housekeeping", "github_sessions"])
+async def test_run_loops_keeps_ticking_while_a_background_pass_is_in_flight(slow: str) -> None:
+    """Slow housekeeping or GitHub session upkeep never holds up routine claims or the
+    other, and a stop lets the pass in flight finish."""
+    stop = asyncio.Event()
+    slow_started = asyncio.Event()
+    ticks = 0
+    other_passes = 0
+    finished = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await slow_started.wait()
+        ticks += 1
+        if ticks >= 3 and other_passes >= 3:
+            stop.set()
+
+    async def slow_pass() -> None:
+        nonlocal finished
+        slow_started.set()
+        await stop.wait()
+        await asyncio.sleep(0.02)
+        finished = True
+
+    async def other_pass() -> None:
+        nonlocal other_passes
+        other_passes += 1
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            housekeeping=slow_pass if slow == "housekeeping" else other_pass,
+            github_sessions=slow_pass if slow == "github_sessions" else other_pass,
+            usage_sweep=unittest.mock.AsyncMock(),
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks >= 3
+    assert other_passes >= 3
+    assert finished, "a pass in flight finishes before the loops end"
 
 
 async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
@@ -2942,6 +2996,8 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=unittest.mock.AsyncMock(),
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -3579,6 +3635,8 @@ async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> N
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=None,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),

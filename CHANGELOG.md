@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routines start on time when many sessions are live.** The scheduler's check for due routines
+  shared one loop with the GitHub token refresh, which takes about a second for each live
+  session. With hundreds of sessions a check came more than 15 minutes after the one before, and
+  routines due in between were skipped. The check now has its own loop. Two new log events,
+  `scheduler.housekeeping_completed` and `scheduler.github_sessions_completed`, show how long the
+  other work takes ([Operations](docs/operations.md)).
+
 - **An operator can give each cloud computer profile a description that the agent sees when it
   lists profiles and starts a session.** Set `description` on a profile in
   `DAIMON_COMPUTE__PROFILES`, up to 1,000 characters: what the image holds and how to use it

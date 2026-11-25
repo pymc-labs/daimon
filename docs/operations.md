@@ -234,7 +234,9 @@ These events carry identifiers, counts and durations, never message text:
 | --- | --- | --- |
 | `runtime.started` | info | `process`, `release`; once per process start |
 | `runtime.health` | info | `process` and the window's measurements, every [`DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`](configuration.md#daimon_observability__health_interval_s) seconds |
-| `scheduler.tick_completed` | info | `duration_ms`; at most once a minute |
+| `scheduler.tick_completed` | info | `duration_ms` of one check for due routines; at most once a minute |
+| `scheduler.housekeeping_completed` | info | `duration_ms` of one clean-up pass; at most once a minute |
+| `scheduler.github_sessions_completed` | info | `duration_ms` of one GitHub token pass over live sessions; at most once a minute |
 | `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `provider`, `release`, `turn_id`, `tenant_id`, `is_dm`, `agent_id`; once for a turn that ended without an answer |
 | `turn.finished` | info | `tenant_id`, `platform`, `origin`, `reason`, `failed`, `is_dm`, `agent_id`, `duration_ms`, `recovered`, `tool_errors`; once per answered turn, so a failure rate has its denominator |
 | `turn.shed` | warning | `tenant_id`, `reason`, `channel_id` or `path`; a turn turned away at a concurrency cap or a full queue |
