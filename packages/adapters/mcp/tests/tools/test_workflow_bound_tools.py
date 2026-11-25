@@ -16,7 +16,6 @@ from daimon.adapters.mcp.identity_relay import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import routine_run
 from daimon.adapters.mcp.tools.lead_intake import intake_fire
-from daimon.core._models import OpsEvent, PlatformPrincipal
 from daimon.core.config import DiscordSettings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.lead_intake import IntakeConfig
@@ -30,13 +29,14 @@ from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.mcp_identity import RelayBinding, parse_relay_claim
 from daimon.core.membership import Membership
 from daimon.core.ops_events import drain_ops_events
+from daimon.core.stores import identity
+from daimon.core.stores import ops_events as ops_events_store
 from daimon.core.stores.lead_intake import workflow_execution
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.workflows import World, make_world
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..harness import production_identity_middleware
@@ -66,14 +66,10 @@ async def _world(db_session: AsyncSession, workspace: str = "999999999999999999"
         spec_fields={"concurrency": {"limit": 1, "on_conflict": "skip"}},
     )
     async with world.sm.begin() as s:
-        s.add(
-            PlatformPrincipal(
-                tenant_id=world.tenant_id,
-                platform="discord",
-                external_id=OWNER,
-                account_id=world.owner,
-            )
-        )
+        await identity.create_platform_principal(
+            s, tenant_id=world.tenant_id, platform="discord", external_id=OWNER,
+            account_id=world.owner,
+        )  # fmt: skip
     return world
 
 
@@ -177,12 +173,13 @@ async def test_intake_and_problem_report_bind_the_step_and_refuse_another_run_or
     assert (out.routine_id, out.workflow_id) == (None, str(world.workflow_id))
     await drain_ops_events()
     async with world.sm() as s:
-        rows = (
-            await s.execute(select(OpsEvent.code, OpsEvent.workflow_run_id, OpsEvent.note))
-        ).all()
-    assert [tuple(r) for r in rows] == [
-        ("routine.goal_unmet", run.id, "The inbox is not shared.")
-    ], "one event, for its own run only"
+        groups = await ops_events_store.list_issue_groups(
+            s, tenant_id=world.tenant_id, since=datetime(2000, 1, 1, tzinfo=UTC)
+        )
+    rows = [(g.latest.code, g.latest.workflow_run_id, g.latest.note) for g in groups]
+    assert rows == [("routine.goal_unmet", run.id, "The inbox is not shared.")], (
+        "one event, for its own run only"
+    )
     with pytest.raises(ToolError):
         await routine_run._report_routine_problem_impl(runtime, auth, "other", "late")
 

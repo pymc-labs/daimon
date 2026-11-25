@@ -2040,6 +2040,7 @@ class OpsEventRow(BaseModel):
     subject_key: str | None
     release: str | None
     note: str | None
+    workflow_run_id: uuid.UUID | None = None
 
 
 class OpsIssueStateRow(BaseModel):
