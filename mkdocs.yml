@@ -21,6 +21,7 @@ nav:
       - Self-hosted harness: self-hosted-harness.md
       - Operations: operations.md
       - Compute sessions: compute.md
+      - Data sources: data-sources.md
   - Connect:
       - Slack: slack.md
       - Microsoft Teams: teams.md
