@@ -71,6 +71,10 @@ class NotApproved(Exception):
 Term = Field(min_length=2, max_length=200)
 
 
+# A quantified group that holds a quantifier, like `(a+)+`: it backtracks exponentially.
+_NESTED = re.compile(r"\([^)]*[+*}]\)[+*{]")
+
+
 class Pattern(BaseModel):
     model_config = ConfigDict(extra="forbid")
     pattern: str = Field(min_length=1, max_length=500)
@@ -83,6 +87,8 @@ class Pattern(BaseModel):
             re.compile(value)
         except re.error as e:
             raise ValueError(f"not a regular expression: {e.msg}") from None
+        if _NESTED.search(value):
+            raise ValueError("a repeated group can't hold a repeat; it can run forever")
         return value
 
 

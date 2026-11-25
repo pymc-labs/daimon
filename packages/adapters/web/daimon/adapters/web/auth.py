@@ -22,6 +22,7 @@ from daimon.adapters.web.cookies import (
     set_cookie,
     token_sha256,
 )
+from daimon.adapters.web.data_sign_in import prove_sign_in
 from daimon.adapters.web.providers import SignInProvider, build_providers
 from daimon.adapters.web.redirects import (
     safe_next,
@@ -152,6 +153,7 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
         except WebSignInRefused as refused:
             log.warning("web.connect.refused", provider=identity.provider, reason=str(refused))
             return fail(str(refused))
+        await prove_sign_in(runtime, identity, result.added)
         log.info(
             "web.account.connected",
             provider=identity.provider,
@@ -274,6 +276,7 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
             )
             return fail(str(refused))
         token, people = await open_session(identity, people)
+        await prove_sign_in(runtime, identity, people)
         response = _redirect(workspaces_url(flow.next) if len(people) > 1 else flow.next)
         give_session(response, token)
         clear_cookie(response, web, name=flow_cookie_name(web))

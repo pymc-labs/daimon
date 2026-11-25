@@ -298,7 +298,8 @@ platform verified: the person's own chat account, a GitHub link, Sign in with Sl
 Microsoft, or the person signing in to the source (Bluedot and Notion).
 
 A data admin can link someone else's account, never their own. The person gets a notice
-and the audit trail records it. An email the source and the person both verified makes a
+and the audit trail records it. A link a data admin ends or rejects stays ended when the
+person signs in again. An email the source and the person both verified makes a
 suggested link, and a source can link those itself for one email domain. A Microsoft email
 never counts, since a directory user can set it.
 
@@ -328,9 +329,10 @@ publish after a complete sync.
 
 With the feature on, the web app has a Data section for search and browsing, which shows each
 person only what they may read. Owners and admins add, pause, publish and retire sources under
-Integrations > Data sources, and manage scopes, grants, identity links, data admins and
-redaction sets under Admin > Data access. Declared sources show as bound and are read-only
-there. People link and connect their own accounts on their Profile.
+Integrations > Data sources. Data admins, named by the owner or another data admin, manage
+scopes, grants, identity links and redaction sets under Admin > Data access, but never grant
+themselves a scope. Declared sources show as bound and are read-only there. People link and
+connect their own accounts on their Profile.
 
 ## Declared config
 
@@ -398,28 +400,34 @@ bounds a search; it returns what the arms have found when time runs out, and not
 cut.
 
 Callers browse a source's records, read one with its text and files, and run read-only SQL
-over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views and nothing
-else, so it never sees an access list, a credential or another workspace's rows. Like any
-role, it can read the system catalogs, so it can see roughly how many rows each of the
-store's tables holds across every workspace, though not what they say.
+over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views only: no access
+list, credential or other team's rows. Like any role it reads the system catalogs, so it sees
+rough row counts of the store's tables, not what they say. SQL leaves out sources that check
+reads with the source. While names are hidden from someone the answer is for, files and SQL
+are refused, and a search naming a hidden name finds nothing.
 
 ## Evals and probes
 
 `daimon data eval GOLD...` runs a gold set (JSON or YAML) through search. Each question names
 its caller (`tenant_id`, and an `account_id` or explicit `scopes` and `readers`) and the
 records that answer it (`source` name or id, `external_id`, a `grade` of 1 to 3). The search
-runs as that caller, and recall and nDCG at 5 and 10 are scored for the fused list and for
-each arm (`fts`, `vec`, `time`, read from the hits' ranks before any rerank) on the expected
-records the caller can read; a record they cannot read is not a miss, and a question with
-none readable is left out and counted. The estimated spend prints first and the run refuses
-above `--max-usd`; it stops once the metered spend reaches that cap. Query spend bills the
-caller's tenant. `--out` writes the JSON report; the text summary prints either way.
+runs as that caller.
 
-`daimon data probe NAME --tenant ID` runs one read-only check and prints JSON: `grants` (each
-scope's holders), `scopes` (records by source and scope, and those in a scope nobody defined),
-`person` (`--account`: what that person holds and reads), `health` (each source's state, last
-sync and embedding coverage) and `drift` (chunks off their record, records without chunks,
-sources not synced in 48 hours or failing). Probes never write the store.
+Recall and nDCG at 5 and 10 are scored for the fused list and for each arm (`fts`, `vec`,
+`time`, read from the hits' ranks before any rerank). Only records the caller can read count.
+An unreadable record is not a miss, and a question with none readable is left out and counted.
+The estimated spend prints first and the run refuses above `--max-usd`. It stops once the
+metered spend reaches that cap. Query spend bills the caller's tenant. `--out` writes the
+JSON report; the text summary prints either way.
+
+`daimon data probe NAME --tenant ID` runs one read-only check and prints JSON. It never
+writes the store. The checks:
+
+- `grants`: each scope's holders.
+- `scopes`: records by source and scope, and those in a scope nobody defined.
+- `person` (`--account`): what that person holds and reads.
+- `health`: each source's state, last sync and embedding coverage.
+- `drift`: chunks off their record, records without chunks, sources not synced in 48 hours or failing.
 
 ## After a restore
 

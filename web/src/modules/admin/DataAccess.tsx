@@ -191,41 +191,18 @@ function Identities({ admin }: { admin: boolean }) {
   const redact = useMutation({ mutationFn: (b: { id: string; redacted: boolean }) => api.put(`${BASE}/people/${b.id}/redacted`, { redacted: b.redacted }), onSuccess: ok })
   return (
     <Section title="Identity links">
-      {!!cands.data?.length && (
-        <Table className="mb-6">
-          <TableHeader>
-            <TableRow className="hover:bg-transparent"><TableHead>Candidate</TableHead><TableHead className="max-sm:hidden">Source</TableHead><TableHead>Person</TableHead><TableHead className="w-48" /></TableRow>
-          </TableHeader>
-          <TableBody>
-            {cands.data.map((c) => (
-              <TableRow key={`${idOf(c)}|${c.account_id}`}>
-                <TableCell className="font-medium">{c.name}</TableCell>
-                <TableCell className="text-muted-foreground max-sm:hidden">{c.provider}</TableCell>
-                <TableCell>{c.account_name ?? c.email}</TableCell>
-                <TableCell className="text-right">
-                  {admin && (
-                    <span className="inline-flex gap-1.5">
-                      <Button size="sm" variant="ghost" disabled={reject.isPending} onClick={() => reject.mutate({ ...refOf(c), account_id: c.account_id })}>Reject</Button>
-                      <Button size="sm" disabled={link.isPending} onClick={() => link.mutate({ ...refOf(c), account_id: c.account_id })}>Link</Button>
-                    </span>
-                  )}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
       <QueryState query={all} empty="No source account yet">
         {(rows) => (
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead>Account</TableHead><TableHead className="max-sm:hidden">Source</TableHead><TableHead>Person</TableHead>
-                <TableHead className="max-md:hidden">Linked</TableHead><TableHead className="w-12" />
+                <TableHead className="max-md:hidden">Linked</TableHead><TableHead className="w-48" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.map((i) => {
+                const cand = i.account_id ? undefined : cands.data?.find((c) => idOf(c) === idOf(i))
                 const person = i.account_id ? (i.account_name ?? "Unknown person") : null
                 const menu: MenuAction[] = !admin || !i.account_id ? [] : [
                   { label: i.redacted ? "Stop redacting" : "Redact for this person", icon: <EyeOff />, onSelect: () => redact.mutate({ id: i.account_id!, redacted: !i.redacted }) },
@@ -239,11 +216,16 @@ function Identities({ admin }: { admin: boolean }) {
                     <TableCell className="text-muted-foreground max-sm:hidden">{i.provider}</TableCell>
                     <TableCell>
                       {person ? <span className="inline-flex items-center gap-1.5"><CircleCheck className="size-3.5 text-success" />{person}{i.redacted && <Pill className="ml-1 gap-1"><EyeOff className="size-3" />Redacted</Pill>}</span>
-                        : <span className="inline-flex items-center gap-1.5 text-muted-foreground"><CircleAlert className="size-3.5" />Unlinked</span>}
+                        : <span className="inline-flex items-center gap-1.5 text-muted-foreground"><CircleAlert className="size-3.5" />{cand ? (cand.account_name ?? cand.email) : "Unlinked"}</span>}
                     </TableCell>
                     <TableCell className="text-muted-foreground max-md:hidden">{i.linked_at ? <Ago iso={i.linked_at} /> : ""}</TableCell>
                     <TableCell className="text-right">
-                      {admin && !i.account_id
+                      {!admin ? null : cand ? (
+                        <span className="inline-flex gap-1.5">
+                          <Button size="sm" variant="ghost" disabled={reject.isPending} onClick={() => reject.mutate({ ...refOf(i), account_id: cand.account_id })}>Reject</Button>
+                          <Button size="sm" disabled={link.isPending} onClick={() => link.mutate({ ...refOf(i), account_id: cand.account_id })}>Link</Button>
+                        </span>
+                      ) : !i.account_id
                         ? <PersonPick label="Link" variant="ghost" icon={<Link2 />} onPick={(p) => link.mutate({ ...refOf(i), account_id: p.account_id })} />
                         : <PanelMenu items={menu} />}
                     </TableCell>
@@ -268,19 +250,26 @@ function DataAdmins({ a }: { a: Admins }) {
   return (
     <Section title="Data admins" add={a.can_grant ? <PersonPick label="Add" icon={<UserPlus />} onPick={(p) => add.mutate(p.account_id)} /> : undefined}>
       {!a.admins.length ? <div className="rounded-lg border px-4 py-6 text-center text-sm text-muted-foreground">No data admin yet</div> : (
-        <ul className="divide-y rounded-lg border">
-          {a.admins.map((x) => (
-            <li key={x.account_id} className="flex min-h-11 items-center gap-3 px-4 py-1.5 text-sm">
-              <span className="min-w-0 flex-1 truncate font-medium">{x.name ?? "Unknown person"}</span>
-              <span className="text-xs text-muted-foreground"><Ago iso={x.created_at} /></span>
-              {a.can_grant && (
-                <Button variant="ghost" size="sm" disabled={remove.isPending} aria-label={`Remove ${x.name ?? "data admin"}`} onClick={async () => {
-                  if (await confirm({ title: `Remove ${x.name ?? "this person"} as a data admin?`, action: "Remove", destructive: true })) remove.mutate(x.account_id)
-                }}>Remove</Button>
-              )}
-            </li>
-          ))}
-        </ul>
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent"><TableHead>Person</TableHead><TableHead className="max-sm:hidden">Added</TableHead><TableHead className="w-24" /></TableRow>
+          </TableHeader>
+          <TableBody>
+            {a.admins.map((x) => (
+              <TableRow key={x.account_id}>
+                <TableCell className="font-medium">{x.name ?? "Unknown person"}</TableCell>
+                <TableCell className="text-muted-foreground max-sm:hidden"><Ago iso={x.created_at} /></TableCell>
+                <TableCell className="text-right">
+                  {a.can_grant && (
+                    <Button variant="ghost" size="sm" disabled={remove.isPending} aria-label={`Remove ${x.name ?? "data admin"}`} onClick={async () => {
+                      if (await confirm({ title: `Remove ${x.name ?? "this person"} as a data admin?`, action: "Remove", destructive: true })) remove.mutate(x.account_id)
+                    }}>Remove</Button>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       )}
     </Section>
   )
@@ -315,7 +304,7 @@ function Redaction() {
                 {rows.map((s) => (
                   <TableRow key={s.name} {...rowProps(() => setSet(s.name))}>
                     <TableCell className="font-medium">{s.name}</TableCell>
-                    <TableCell className="max-w-0 truncate text-muted-foreground max-sm:hidden">{s.repo ? `${s.repo}/${s.path ?? ""}` : "Declared"}</TableCell>
+                    <TableCell className="break-all text-muted-foreground max-sm:hidden">{s.repo ? `${s.repo}/${s.path ?? ""}` : "Declared"}</TableCell>
                     <TableCell><SetState s={s} /></TableCell>
                     <TableCell className="text-muted-foreground max-md:hidden"><Ago iso={s.checked_at} /></TableCell>
                   </TableRow>

@@ -902,15 +902,6 @@ async def _prepare_session_for_turn_locked(
         # (`daimon.core.relay_scope`). Channel history still gives continuity.
         relay_fresh = admission.relay_scoped and admission.hold is not None
         fresh_start = fresh_start or relay_fresh
-        # A session that read data keeps that posture until `/new`, whatever `data_reads`
-        # says now: its context holds what it read.
-        if (
-            row.effective_config is not None
-            and row.effective_config.data_read
-            and row.fresh_start_requested_at is None
-            and not admission.data_reading
-        ):
-            admission = replace(admission, data_reading=True)
 
         await _heal_lineage(deps, db, row=row)
 

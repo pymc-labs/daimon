@@ -26,6 +26,8 @@ DEFINERS = {
 }
 CALLER_SQL = "caller_sql"
 """The one definer that takes arguments: the text of a caller's query (tested in test_sync)."""
+PARITY = "parity_visible"
+"""Takes a source and a person; only the parity role may run it (`0005_grants.sql`)."""
 
 
 def now() -> datetime:
@@ -196,11 +198,11 @@ async def test_another_tenants_source_is_never_visible_in_rows_or_through_any_de
         " from pg_proc p where p.pronamespace = %s::regnamespace and p.prosecdef",
         (store.d,),
     )
-    assert {r["name"] for r in definers} == DEFINERS | {CALLER_SQL}, (
+    assert {r["name"] for r in definers} == DEFINERS | {CALLER_SQL, PARITY}, (
         "a new definer needs a case here"
     )
     async with scoped(store.conn, store.schemas, ctx) as c:
-        for fn in (f for f in definers if f["name"] != CALLER_SQL):
+        for fn in (f for f in definers if f["name"] not in (CALLER_SQL, PARITY)):
             assert fn["args"] == 0, f"{fn['name']} takes arguments: call it here with hostile ones"
             got = [
                 v
@@ -218,6 +220,16 @@ async def test_another_tenants_source_is_never_visible_in_rows_or_through_any_de
                 assert got == [["public"]], f"{fn['name']} returns more than the context's scopes"
             else:
                 assert fn["type"] in ("text", "double precision"), f"{fn['name']}: unchecked type"
+
+
+async def test_caller_sql_never_reads_a_records_payload(store: Store) -> None:
+    """Ingest redaction never touches the payload, so the reader views leave it out."""
+    cols = await store.rows(
+        "select column_name from information_schema.columns"
+        " where table_schema = %s and table_name = 'records'",
+        (store.schemas.views,),
+    )
+    assert cols and "payload" not in {c["column_name"] for c in cols}
 
 
 async def test_a_shadow_retired_or_disabled_source_shows_nothing(store: Store) -> None:

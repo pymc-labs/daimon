@@ -23,7 +23,7 @@ from daimon.adapters.web.data_common import (
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.data import identity, manage, redaction
 from daimon.data.identity import IdentityError, IdentityKey
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 ACCOUNT_PREFIX = "account:"
@@ -166,6 +166,11 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         async with runtime.sessionmaker() as db:
             return await names_by_account(db, caller.person.tenant_id)
 
+    async def member(caller: WebCaller, account_id: uuid.UUID | None) -> None:
+        """Refuse an account outside the caller's workspace."""
+        if account_id is not None and account_id not in await names(caller):
+            raise HTTPException(404, "No such person here.")
+
     @router.get("/people")
     async def people(  # pyright: ignore[reportUnusedFunction]
         caller: Manager, q: Annotated[str, Query(max_length=100)] = ""
@@ -220,6 +225,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/scopes/{scope_id}/grants", status_code=204)
     async def grant(caller: Manager, scope_id: str, body: Holder) -> None:  # pyright: ignore[reportUnusedFunction]
         p = caller.person
+        await member(caller, _account_of(body.holder))
         async with store(runtime) as conn:
             try:
                 await manage.grant(
@@ -250,8 +256,24 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         caller: Manager, linked: bool | None = None
     ) -> list[IdentityOut]:
         who = await names(caller)
+        tenant = caller.person.tenant_id
         async with store(runtime) as conn:
-            found = await manage.identities(conn, schemas, caller.person.tenant_id, linked=linked)
+            found = await manage.identities(conn, schemas, tenant, linked=linked)
+            if linked is not True:
+                # Every open candidate's identity is listed, past the page's limit too.
+                have = {(i.provider, i.workspace, i.subject) for i in found}
+                wanted = {
+                    (c.key.provider, c.key.workspace, c.key.subject)
+                    for c in await identity.list_candidates(conn, schemas, tenant)
+                } - have
+                if wanted:
+                    found += [
+                        i
+                        for i in await manage.identities(
+                            conn, schemas, tenant, linked=False, limit=1000
+                        )
+                        if (i.provider, i.workspace, i.subject) in wanted
+                    ]
         return [
             IdentityOut(
                 provider=i.provider, workspace=i.workspace, subject=i.subject, name=i.name,
@@ -284,6 +306,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/links", status_code=204)
     async def link(caller: Manager, body: Link) -> None:  # pyright: ignore[reportUnusedFunction]
         p = caller.person
+        await member(caller, body.account_id)
         async with store(runtime) as conn:
             try:
                 await identity.admin_link(
@@ -324,6 +347,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         caller: Manager, account_id: uuid.UUID, body: Redacted
     ) -> None:
         p = caller.person
+        await member(caller, account_id)
         async with store(runtime) as conn:
             try:
                 await redaction.set_redacted(
@@ -351,6 +375,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/admins", status_code=204)
     async def add_admin(caller: Manager, body: Account) -> None:  # pyright: ignore[reportUnusedFunction]
         p = caller.person
+        await member(caller, body.account_id)
         async with store(runtime) as conn:
             try:
                 await identity.grant_data_admin(
