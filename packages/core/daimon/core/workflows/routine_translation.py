@@ -24,13 +24,11 @@ DONE: Final = "done"
 TRIGGER: Final = "schedule"
 NOTE: Final = "Moved from a routine"
 MAX_TITLE: Final = 120
-MAX_PROMPT: Final = 4000
 _FEATURE_NOTES: Final = {"routine_sandbox_tools": "sandbox pin", "routine_result_header": "header"}
 
 Reason = Literal[
     "handback_paused",
     "invalid_schedule",
-    "invalid_prompt",
     "owner_unlinked",
     "busy",
     "not_a_routine",
@@ -216,8 +214,6 @@ def translate(snap: RoutineSnapshot, *, now: datetime) -> Move | Refusal:
         return Refusal("handback_paused")
     if snap.next_slot is None:
         return Refusal("invalid_schedule")
-    if not snap.trigger_message.strip() or len(snap.trigger_message) > MAX_PROMPT:
-        return Refusal("invalid_prompt")
     if snap.created_by_user_id is not None and snap.owner_account_id is None:
         return Refusal("owner_unlinked")
     if snap.delivery_status == "claimed" or (

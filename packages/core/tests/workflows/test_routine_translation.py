@@ -103,6 +103,9 @@ SHAPES: dict[str, tuple[dict[str, Any], str, tuple[str, ...]]] = {
         "exact",
         ("owner notice",),
     ),
+    "long message": ({"trigger_message": "x" * 9000, "name": None}, "exact", ()),
+    "empty message": ({"trigger_message": "", "name": None}, "exact", ()),
+    "blank message": ({"trigger_message": "  "}, "exact", ()),
     "source-linked": ({"source_routine_id": uuid.UUID(int=9)}, "exact", ()),
     # The fire core refuses another backend per fire, so the move does not look at it.
     "other backend": ({}, "exact", ()),
@@ -153,13 +156,11 @@ def test_dm_text_stays_private_and_source_links_are_kept() -> None:
     [
         ({"handback_paused_at": NOW}, "handback_paused"),
         ({"next_slot": None}, "invalid_schedule"),
-        ({"trigger_message": "  "}, "invalid_prompt"),
-        ({"trigger_message": "x" * 4001}, "invalid_prompt"),
         ({"owner_account_id": None}, "owner_unlinked"),
         ({"delivery_status": "claimed"}, "busy"),
         ({"last_finished_at": None}, "busy"),
     ],
-    ids=["handback", "schedule", "blank", "long", "unlinked", "posting", "running"],
+    ids=["handback", "schedule", "unlinked", "posting", "running"],
 )
 def test_routines_that_cannot_translate_are_refused(fields: dict[str, Any], reason: str) -> None:
     assert translate(replace(BASE, **fields), now=NOW) == Refusal(reason)  # pyright: ignore[reportArgumentType]

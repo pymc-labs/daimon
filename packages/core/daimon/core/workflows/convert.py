@@ -44,7 +44,6 @@ MOVED: Final = "This routine already runs as a workflow."
 REFUSALS: Final[dict[Reason, str]] = {
     "handback_paused": "This routine is paused for handback to another system, so it stays.",
     "invalid_schedule": "This routine's schedule isn't valid. Fix it first.",
-    "invalid_prompt": "This routine's message is empty or over 4,000 characters. Change it first.",
     "owner_unlinked": "This routine's owner has no account. Create it again first.",
     "busy": "This routine is running or posting. Try again once it finishes.",
     "not_a_routine": "This workflow does more than a routine can: one schedule, one step.",

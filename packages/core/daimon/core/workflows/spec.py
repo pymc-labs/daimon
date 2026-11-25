@@ -36,8 +36,6 @@ MAX_ATTACHMENTS: Final = 10
 MAX_ALSO: Final = 5
 MAX_MENTIONS: Final = 10
 MAX_TITLE: Final = 100
-#: A routine step's prompt, as long as a routine's message may be.
-MAX_ROUTINE_PROMPT: Final = 4000
 MAX_ROUTINE_TITLE: Final = 120
 
 Id = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
@@ -327,7 +325,7 @@ class RoutineNode(_Flow):
     kind: Literal["routine"]
     title: str | None = Field(default=None, max_length=MAX_ROUTINE_TITLE)
     agent: str
-    prompt: str = Field(min_length=1, max_length=MAX_ROUTINE_PROMPT)
+    prompt: str  # any message a routine holds, even blank or long
     to: RoutineTarget | None = None
 
     @model_validator(mode="after")
