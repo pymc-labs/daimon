@@ -3170,6 +3170,14 @@ class DataSettings(BaseModel):
             "Postgres servers may reach. Public hosts need no entry."
         ),
     )
+    declared: str | None = Field(
+        default=None,
+        description=(
+            "Path of the YAML or JSON file that declares data sources, scopes and grants. It is "
+            "applied at start and every 10 minutes; its rows are read-only in the app. Unset: "
+            "nothing is declared."
+        ),
+    )
     google_oauth_client_id: str | None = Field(
         default=None,
         description=(

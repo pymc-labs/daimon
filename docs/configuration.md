@@ -1423,6 +1423,14 @@ Seconds a search may run before it returns what it has.
 Private hosts or ranges, comma-separated, that database connections to external Postgres
 servers may reach. Public hosts need no entry.
 
+### `DAIMON_DATA__DECLARED`
+
+`str | None` · optional · default unset
+
+Path of the YAML or JSON file that declares data sources, scopes and grants. It is
+applied at start and every 10 minutes; its rows are read-only in the app. Unset: nothing
+is declared.
+
 ### `DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`
 
 `str | None` · optional · default unset

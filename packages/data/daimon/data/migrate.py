@@ -25,13 +25,19 @@ ROLES: Final = (
     "daimon_data_parity",
 )
 
-STORE_FILES: Final[tuple[str, ...]] = ("0001_store.sql", "0002_sync.sql", "0003_identity.sql")
+STORE_FILES: Final[tuple[str, ...]] = (
+    "0001_store.sql",
+    "0002_sync.sql",
+    "0003_identity.sql",
+    "0005_ops.sql",
+)
 """Schema files `daimon data init` applies, in order. An Alembic revision pins its own copy of
 the names it applied, so this list may grow without them."""
 
 GRANT_FILES: Final[dict[str, str]] = {
     "0001_store.sql": "0001_grants.sql",
     "0002_sync.sql": "0002_grants.sql",
+    "0005_ops.sql": "0005_grants.sql",
 }
 """A store file's idempotent follow-up (grants, and parts that wait for an optional extension),
 re-run by every apply and by `--repair` once that store file is in."""
