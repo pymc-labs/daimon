@@ -1,5 +1,6 @@
-"""The Google Drive connector against a fake Google: who reads a file, what is never read, the
-change feed and the full listing, exports, groups, and delegation without a key."""
+"""The Google Drive and Calendar connectors against a fake Google: who reads a file, what is
+never read, the change feed and the full listing, exports, groups, delegation without a key, the
+live re-check of a file, and calendar events shown only to the people on them."""
 
 from __future__ import annotations
 
@@ -16,7 +17,9 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from daimon.data import federated, identity, recheck
 from daimon.data.access import ReadContext, scoped, subject
+from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS, Json, Source
 from daimon.data.sync.connectors.gdrive import GDriveConnector
@@ -87,6 +90,9 @@ class FakeGoogle:
         """Files whose content was asked for."""
         self.lists = 0
         self.signed = 0
+        self.strict = False
+        """Drive opens a file only for the people its sharing names (and the admin)."""
+        self.events: list[Json] = []
 
     def add(
         self,
@@ -150,10 +156,15 @@ class FakeGoogle:
         who = request.headers["authorization"].removeprefix("Bearer tok-")
         if path.startswith("/admin/directory/v1"):
             return self.directory(path, who)
+        if path.startswith("/calendar/v3/calendars/primary"):
+            return self.calendar(path, who)
         return self.drive(path, q, who)
 
     def directory(self, path: str, who: str) -> httpx.Response:
         assert who == ADMIN, "the directory is read as the admin"
+        if "/users/" in path:
+            found = self.users.get(path.rsplit("/", 1)[1])
+            return httpx.Response(200, json=found) if found else httpx.Response(404)
         if path.endswith("/users"):
             return httpx.Response(200, json={"users": list(self.users.values())})
         if path.endswith("/groups"):
@@ -162,6 +173,10 @@ class FakeGoogle:
         return httpx.Response(
             200, json={"members": [{"email": m, "type": "USER"} for m in self.groups[email]]}
         )
+
+    def calendar(self, path: str, who: str) -> httpx.Response:
+        mine = [e for e in self.events if who in [a["email"] for a in e.get("attendees", [])]]
+        return httpx.Response(200, json={"items": mine} if path.endswith("/events") else {})
 
     def drive(self, path: str, q: dict[str, str], who: str) -> httpx.Response:
         if path == "/drive/v3/drives":
@@ -206,6 +221,9 @@ class FakeGoogle:
         if f is None:
             return httpx.Response(404, json={"error": {"errors": [{"reason": "notFound"}]}})
         if rest == "" and q.get("alt") != "media":
+            named = [p.get("emailAddress") for p in f["perms"]]
+            if self.strict and who != ADMIN and who not in named:
+                return httpx.Response(404, json={"error": {"errors": [{"reason": "notFound"}]}})
             return httpx.Response(200, json=self.meta(f, who))
         self.read.append(fid)
         if rest != "permissions":
@@ -262,7 +280,8 @@ async def store(data_db: DataDb) -> AsyncIterator[Store]:
 def google(monkeypatch: pytest.MonkeyPatch) -> FakeGoogle:
     """A domain with four active people and a suspended one, and one shared drive."""
     fake = FakeGoogle()
-    monkeypatch.setattr(CONNECTORS["gdrive"], "transport", httpx.MockTransport(fake))
+    for kind in ("gdrive", "gcal"):
+        monkeypatch.setattr(CONNECTORS[kind], "transport", httpx.MockTransport(fake))
     return fake
 
 
@@ -425,5 +444,81 @@ async def test_delegation_without_a_key_signs_through_iam_and_a_person_can_be_ch
     ok, message = await connector.test(source)
     assert (ok, message) == (True, "4 people, 1 shared drives to read"), message
     assert google.signed >= 1, "the assertion was signed by the IAM Credentials API"
-    assert await connector.can_open(source, "f", f"alice@{DOMAIN}")
-    assert not await connector.can_open(source, "nothing", f"alice@{DOMAIN}")
+    assert await connector.can_open(source, "file:f", ["alice"])
+    assert not await connector.can_open(source, "file:nothing", ["alice"])
+    assert await connector.can_open(source, "file:f", ["gone"]) is None, "a suspended person"
+
+
+async def link(store: Store, person: str) -> str:
+    """A reader token for the Daimon account that signed in as this directory user."""
+    account = uuid.uuid4()
+    await identity.link(
+        store.conn,
+        store.schemas,
+        tenant_id=store.tenant,
+        account_id=account,
+        proof=Proof(IdentityKey("google", DOMAIN, person), "oauth"),
+    )
+    return f"account:{account}"
+
+
+async def test_a_file_the_source_no_longer_opens_to_a_person_is_dropped_at_read(
+    store: Store, google: FakeGoogle
+) -> None:
+    google.add("f", [to("alice"), to("bob")])
+    src = await add_source(store)
+    await store.run(src)
+    alice, bob = await link(store, "alice"), await link(store, "bob")
+    google.strict = True
+
+    async def shown(*readers: str) -> set[recheck.Ref]:
+        return await recheck.allowed(
+            store.conn, store.schemas, store.env, readers, [(src, "file:f")]
+        )
+
+    assert await shown(alice, bob) == {(src, "file:f")}, "Drive opens it to both"
+    google.files["f"]["perms"] = [to("alice")]
+    assert await shown(alice) == {(src, "file:f")}
+    assert await shown(alice, bob) == set(), "a grant Drive took back ends the read"
+
+
+async def test_an_event_shows_only_to_the_people_on_it(store: Store, google: FakeGoogle) -> None:
+    google.events = [
+        {
+            "id": "e1",
+            "summary": "Planning standup",
+            "start": {"dateTime": "2026-02-03T10:00:00Z"},
+            "attendees": [{"email": f"alice@{DOMAIN}"}, {"email": f"bob@{DOMAIN}"}],
+        },
+        {
+            "id": "e2",
+            "summary": "Planning review",
+            "start": {"dateTime": "2026-02-04T10:00:00Z"},
+            "attendees": [{"email": f"alice@{DOMAIN}"}],
+        },
+    ]
+    await store.conn.execute(
+        f"insert into {store.d}.sources (tenant_id, kind, name, provider, config, credential,"
+        " default_scope, mode, publication) values (%s, 'gcal', 'calendar', 'google', %s::jsonb,"
+        " %s, 'internal', 'federated', 'published')".encode(),
+        (
+            store.tenant,
+            Jsonb({"domain": DOMAIN, "admin": ADMIN}),
+            seal((KEY,), {"service_account_key": KEY_FILE}),
+        ),
+    )
+    alice = await link(store, "alice")
+    bob = await link(store, "bob")
+    carol = await link(store, "carol")
+
+    async def titles(*readers: str) -> set[str]:
+        ctx = ReadContext((store.tenant,), scopes=("internal",), readers=readers)
+        found = await federated.search(
+            store.conn, store.schemas, store.env, ctx, "planning", seconds=5
+        )
+        return {h.title for r in found for h in r.hits}
+
+    assert await titles(alice) == {"Planning standup", "Planning review"}
+    assert await titles(carol) == set(), "not on any event"
+    assert await titles(alice, bob) == {"Planning standup"}, "only what every reader may see"
+    assert await titles() == set(), "no reader, no answer"
