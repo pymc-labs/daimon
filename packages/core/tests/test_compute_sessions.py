@@ -1653,6 +1653,68 @@ async def test_a_status_read_that_settles_the_end_returns_it_with_no_read_after_
     assert await wakes_for(sm, owner) == [], "the owner saw it here, once"
 
 
+async def test_a_status_read_that_settles_the_end_opens_no_transaction_after_it(
+    db_engine, db_clean, monkeypatch
+):
+    """Saved with no message, so there is nothing to withdraw: no step may hold the answer."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, _ = _waiting(sm, fake, on_sleep=_ended(fake))
+    session = await launch(service, owner)
+    task = await _background(service, owner, session)
+    opened, settled_after = [], []
+
+    class Counting:
+        """The service's sessionmaker, counting the transactions it opens."""
+
+        def begin(self):
+            opened.append(1)
+            return sm.begin()
+
+    poll = service._poll_task
+
+    async def poll_then_count(*args, **kwargs):
+        polled = await poll(*args, **kwargs)
+        if polled.settled:
+            settled_after.append(len(opened))
+        return polled
+
+    monkeypatch.setattr(service, "sm", Counting())
+    monkeypatch.setattr(service, "_poll_task", poll_then_count)
+    seen = await service.task_status(owner, task.id, wait_seconds=40)
+    assert seen.state == "succeeded" and settled_after, "this call settled it"
+    assert len(opened) == settled_after[0], "no transaction after the settling poll"
+
+
+async def test_a_withdrawal_that_hangs_still_answers_and_keeps_the_message(
+    db_engine, db_clean, monkeypatch
+):
+    """The result is in hand before the withdrawal starts: past its bound, the answer goes
+    out and the message stays, as a late extra message beats a lost one."""
+    from daimon.core import compute_sessions
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+    task = await _background(service, owner, session)
+    await _ended(fake)()
+    await service.poll_tasks()
+
+    async def hangs(db, task):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(task_store, "withdraw_wake", hangs)
+    monkeypatch.setattr(compute_sessions, "_WITHDRAW_SECONDS", 0.05)
+    seen = await asyncio.wait_for(service.task_status(owner, task.id, wait_seconds=40), 5)
+    assert seen.state == "succeeded" and seen.output_tail == "fit done\n"
+    result = await service.task_result(owner, task.id)
+    await asyncio.wait_for(service.mark_seen(owner, result), 5)
+    assert await _runs_not_yet(sm, task), "the message stays for the scheduler to send"
+
+
 async def test_a_status_read_never_waits_on_a_held_session_lock_past_its_wait(
     db_committing_engine, db_clean
 ):

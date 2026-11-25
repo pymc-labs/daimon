@@ -86,6 +86,8 @@ _INLINE_HANDOVER = 5
 _STATUS_POLL_SECONDS = 2.0
 #: What a status read says when it could not read the command at all.
 STATUS_REFUSED = "Could not check the command right now. Try again soon."
+#: The longest a seen end's message withdrawal may hold an answer: past it, the message stays.
+_WITHDRAW_SECONDS = 2.0
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may always make.
@@ -901,11 +903,14 @@ class ComputeSessions:
         wait_seconds: float = 0,
         deadline: float | None = None,
     ) -> ComputeTask:
-        """`_task_status`, then, as its last step, the end it returns is marked seen."""
-        task = await self._task_status(
+        """`_task_status`, then, as its last step, an end another poll settled is marked
+        seen. One this call settled itself queued no message, so it returns at once, with
+        no transaction after the settling poll."""
+        task, settled_here = await self._task_status(
             caller, task_id, wait_seconds=wait_seconds, deadline=deadline
         )
-        await self.mark_seen(caller, task)
+        if not settled_here:
+            await self.mark_seen(caller, task)
         return task
 
     async def _task_status(
@@ -915,9 +920,10 @@ class ComputeSessions:
         *,
         wait_seconds: float = 0,
         deadline: float | None = None,
-    ) -> ComputeTask:
+    ) -> tuple[ComputeTask, bool]:
         """Read a task and, while it is active, probe the machine until it ends or
-        `wait_seconds` pass. A task that already ended returns at once.
+        `wait_seconds` pass, with whether this call settled it. A task that already ended
+        returns at once.
 
         Only a turn of the session's own conversation gets here (the owner present, or
         the session's own wake turn), so an end it reads is the conversation's: no wake
@@ -949,7 +955,7 @@ class ComputeSessions:
             log.warning("compute.task_status_retry", task_id=str(task_id))
             raise StoreError(STATUS_REFUSED) from None
         if task.state not in ACTIVE_TASK_STATES:
-            return task
+            return task, False
         probed = False
         while True:
             try:
@@ -958,19 +964,19 @@ class ComputeSessions:
                 )
             except TimeoutError:
                 # Rolled back before any write: this call settled nothing.
-                return task
+                return task, False
             except SQLAlchemyError:
                 # Never relay database errors; the scheduler keeps polling.
                 log.warning("compute.task_status_retry", task_id=str(task.id))
                 if not probed:
                     raise StoreError(STATUS_REFUSED) from None
-                return task
+                return task, False
             if polled.task is None:
-                return task
+                return task, False
             task = polled.task
             if polled.settled:
                 # This call saved the end: its caller gets it now, with no read after it.
-                return task
+                return task, True
             probed = True
             left = (give_up - self.clock()).total_seconds()
             if (
@@ -978,7 +984,7 @@ class ComputeSessions:
                 or left <= 0
                 or (deadline is not None and loop.time() >= deadline)
             ):
-                return task
+                return task, False
             await self.sleep(min(_STATUS_POLL_SECONDS, left))
 
     async def task_result(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
@@ -997,7 +1003,10 @@ class ComputeSessions:
         if task.state in ACTIVE_TASK_STATES or task.owner_account_id != caller.account_id:
             return
         try:
-            async with self.sm.begin() as db:
+            # Bounded, so a slow database never holds an answer already in hand. Not
+            # shielded: a request cancelled here cannot answer anyway, and the withdrawal
+            # rolls back with it, so the message stays.
+            async with asyncio.timeout(_WITHDRAW_SECONDS), self.sm.begin() as db:
                 await self._seen(db, task)
         except Exception:
             log.warning("compute.wake_withdraw_retry", task_id=str(task.id))
