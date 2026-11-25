@@ -191,7 +191,7 @@ Each message starts with the notes in the agent's repository memory, and the age
 
 ## Data sources
 
-The data store, with its connected sources and search. The operator turns it on first; a team can then turn it off for itself.
+The data store, with its connected sources and search. The operator turns it on; a team can turn it off.
 
 | | |
 | --- | --- |

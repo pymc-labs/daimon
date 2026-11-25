@@ -6,6 +6,8 @@ until you turn it on and set it up.
 
 ## Set it up
 
+The data store needs PostgreSQL 16 or later.
+
 Every release migration creates the `data` and `data_views` schemas, the store's tables
 and four cluster-wide roles, `daimon_data_reader`, `daimon_data_sql`, `daimon_data_view_owner`
 and `daimon_data_parity`, whether or not the feature is on. Nothing reads them until you
@@ -55,7 +57,8 @@ rules apply; with it, the column holds who may read each row. A row that leaves 
 removed after the next complete run, and a view that suddenly lists nothing is treated as a
 failure instead.
 
-Connections to private addresses are refused. To reach a database on your own network,
+A database off loopback needs `sslmode=require` or stronger in the DSN, and `require` is
+added when it is unset. Connections to private addresses are refused. To reach a database on your own network,
 list its host name or address range in `DAIMON_DATA__PRIVATE_HOSTS`.
 
 ## People and their accounts
@@ -140,11 +143,11 @@ router may use, comma-separated, or `openai` for OpenAI's own API; unset or `ope
 a plain request. Usage rows name `openai`, or `selfhosted` for any other.
 `DAIMON_DATA__EMBED_QUERY_PREFIX` goes before a question when it is embedded.
 
-Embedding and reranking are billed like any model call: the usage rows are
+Embedding and reranking are billed like any model call. The usage rows are
 `data_embedding` and `data_rerank`, priced from the model's entry in the rate table
 (`text-embedding-3-small`, `text-embedding-3-large`, `qwen/qwen3-embedding-8b`,
 `perplexity/pplx-embed-v1-0.6b`, `semantic-ranker-fast-005`, one query per 100 records
-reranked), and a model without an entry is never called. Ingest is billed
+reranked); a model without an entry is never called. Ingest is billed
 to the source's workspace, a question to whoever asked. A workspace out of balance gets
 full-text answers only, and its new chunks wait to be embedded until it tops up.
 
