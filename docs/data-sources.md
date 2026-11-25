@@ -137,6 +137,67 @@ shares, outside people and expiring shares grant nothing, and a file nobody insi
 not stored. Changes arrive through each scope's change feed. Everything is listed again every
 `relist_hours`, which is also how soon a new share on a folder reaches the files below it.
 
+A person's read is checked in Drive again when a record is shown: a file Drive no longer opens
+to them is left out, even before the next sync. Each request checks a limited number of files
+and shows only those that pass.
+
+### Google Calendar
+
+A source of kind `gcal` is live: it stores nothing and is created with mode `federated`. A
+search reads the asker's own primary calendar, acting as them through the same domain-wide
+delegation as Drive (add `https://www.googleapis.com/auth/calendar.readonly` to the
+authorized scopes, and the Calendar API to the project), so an event shows only to the people
+Google lists on it. Give the credential and config as for Drive (`service_account_key` or
+`service_account`; `domain`, `admin`). People are matched through their Google link, which a
+Drive source of the same domain (or Google sign-in) provides.
+
+```json
+{"domain": "example.com", "admin": "admin@example.com"}
+```
+
+With several readers an event shows only if every one of their calendars has it. A reader the
+source cannot act as (not linked, suspended) gets nothing. Events of the last 90 days and the
+future are searched.
+
+### GitHub
+
+A source of kind `github` reads an organization's issues, pull requests, discussions and
+repository files. Give the credential `{"token": "..."}`, a fine-grained token (or an App
+installation token) for the organization with read access to contents, issues, pull requests,
+discussions and metadata, to administration (to list collaborators) and to organization
+members.
+
+```json
+{"org": "your-org", "content": ["issues", "pulls", "discussions", "files"],
+ "file_paths": ["docs", "README.md"], "repos": ["site"], "relist_hours": 168}
+```
+
+`content` defaults to issues and pull requests (with their conversation comments);
+`file_paths` lists the files or folders of markdown and text files to read when `files` is
+on; `repos` limits the repositories (all when empty). A record is readable by the people
+GitHub lists as able to read its repository (collaborators with read access: owners, team
+members, direct and outside collaborators), plus every organization member while the
+repository is public or internal. The list is read again every run and each record is checked
+against it when shown, so a repository made private or a person removed takes effect at once.
+A repository whose collaborators cannot be listed publishes nobody, and its records go dark
+within three hours. GitHub verifies no address, so a data admin links each person to their
+organization account. Each run reads what changed; every `relist_hours` it reads everything, which is
+how a deleted or transferred issue goes. Review comments and reviews are not read.
+
+### GitHub markdown
+
+A source of kind `github_markdown` mirrors the markdown and text files of one repository, one
+record each, readable by the whole of the scope the source is created with. The credential
+is `{"token": "..."}`, a fine-grained token with read access to the repository's contents.
+
+```json
+{"repo": "your-org/notes", "folders": ["docs", "notes"], "branch": "main"}
+```
+
+`folders` lists files or folders to read (every text file when empty). A run compares the head
+commit with the last one read, reads only the changed files and removes those that are gone.
+The source's `redaction_set` rules are applied as the files are stored.
+
 ### Notion
 
 A source of kind `notion` reads the pages and databases that an internal integration can
