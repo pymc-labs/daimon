@@ -197,6 +197,7 @@ TAIL = (
     "0233_data_search",
     "0240_discord_room_viewers",
     "0241_data_identity",
+    "0242_data_ops",
 )
 HEAD = TAIL[-1]
 
