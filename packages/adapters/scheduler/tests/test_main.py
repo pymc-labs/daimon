@@ -3038,6 +3038,7 @@ async def _fire_with_fake_turn(
     tenant_dms: bool = True,
     ran_agent_name: str = "daimon",
     fires: int = 1,
+    final: str = "Weekly summary: all green.",
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -3090,7 +3091,7 @@ async def _fire_with_fake_turn(
         on_state = kwargs["on_state"]
         assert callable(on_state)
         on_state(TurnState(content=list(blocks)))
-        return "Weekly summary: all green."
+        return final
 
     settings = _make_test_settings(monkeypatch)
     if dm_mode is not None:
@@ -3169,6 +3170,24 @@ async def test_fire_with_destination_queues_the_tail_when_the_agent_did_not_post
     assert '"schedule": "0 9 * * 1"' in trigger
     assert trigger.endswith("</turn_controls>\nsummarize the week")
     assert after.delivery_status == "pending"
+
+
+async def test_fire_with_destination_queues_no_text_for_a_quiet_run(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, _seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+        final="I checked.\n\nNO_POST: nothing new",
+    )
+
+    assert not after.delivery_payload, "the outbox settles it as no_result"
+    assert after.last_result_tail == "nothing new", "the record keeps the reason"
 
 
 async def test_fire_with_destination_skips_the_fallback_when_the_agent_posted(

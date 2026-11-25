@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **A quiet routine run posts nothing.** Each run with a destination is told to end with no
-  text when its instructions say to stay silent or it already posted everything they ask for,
-  so its closing note is no longer posted. Files it made still go out. A routine that sends to its owner's DM can end
-  quietly too; an empty ending used to send "The reply finished without text."
-  ([Routines](docs/routines.md#delivery)).
+- **A quiet routine run posts nothing.** Each run with a destination is told to end with one
+  `NO_POST:` line when its instructions say to stay silent or it already posted everything they
+  ask for. Daimon keeps the reason in the run's record and posts no closing note; files the run
+  made still go out. A routine that sends to its owner's DM can end quietly too: an empty ending
+  used to send "The reply finished without text." ([Routines](docs/routines.md#delivery)).
 
 - **Gemini 4 Neon is a selectable Gemini model.** It joins Argon, Carbon and Hydrogen wherever a
   model is picked, as a single attempt with no fallback to Flash. It costs $3 per million input
