@@ -1,5 +1,14 @@
 {
  "routes": {
+  "DELETE /api/admin/data/admins/{account_id}": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "DELETE /api/admin/data/scopes/{scope_id}": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "DELETE /api/admin/data/scopes/{scope_id}/grants": {
+   "exempt": "data sources are a web-only feature"
+  },
   "DELETE /api/admin/dm/rules/{position}": {
    "tool": "change_workspace_settings"
   },
@@ -53,6 +62,9 @@
   "DELETE /api/me/accounts/{key}": {
    "exempt": "web sign-in and session (linked account)"
   },
+  "DELETE /api/profile/data/connections/{source_id}": {
+   "exempt": "web sign-in and session (data source sign-in)"
+  },
   "DELETE /api/profile/keys/{key_id}": {
    "tool": "remove_my_data"
   },
@@ -100,6 +112,27 @@
   },
   "PATCH /{path:path}": {
    "exempt": "serves the web app's own pages"
+  },
+  "POST /api/admin/data/admins": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "POST /api/admin/data/links": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "POST /api/admin/data/links/reject": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "POST /api/admin/data/links/unlink": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "POST /api/admin/data/redaction/{name}/approve": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "POST /api/admin/data/scopes": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "POST /api/admin/data/scopes/{scope_id}/grants": {
+   "exempt": "data sources are a web-only feature"
   },
   "POST /api/admin/dm/rules": {
    "tool": "change_workspace_settings"
@@ -243,6 +276,12 @@
     "teams": "daimon.adapters.teams.billing_panel"
    }
   },
+  "POST /api/integrations/data/sources": {
+   "exempt": "data sources are a web-only feature"
+  },
+  "POST /api/integrations/data/sources/{source_id}/{action}": {
+   "exempt": "data sources are a web-only feature"
+  },
   "POST /api/integrations/tokens": {
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",
@@ -255,6 +294,12 @@
   },
   "POST /api/profile/connections/disconnect": {
    "tool": "remove_my_data"
+  },
+  "POST /api/profile/data/connect": {
+   "exempt": "web sign-in and session (data source sign-in)"
+  },
+  "POST /api/profile/data/connect/{pending_id}/poll": {
+   "exempt": "web sign-in and session (data source sign-in)"
   },
   "POST /api/profile/delete": {
    "panel": {
@@ -305,6 +350,9 @@
   },
   "POST /{path:path}": {
    "exempt": "serves the web app's own pages"
+  },
+  "PUT /api/admin/data/people/{account_id}/redacted": {
+   "exempt": "data sources are a web-only feature"
   },
   "PUT /api/agents/environments/{environment_id}": {
    "tool": "update_environment"
