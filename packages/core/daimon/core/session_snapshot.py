@@ -153,6 +153,7 @@ class SessionSnapshot(BaseModel):
             "memory_scope",
             "model_effort",
             "identity_features",
+            "data_read",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -225,6 +226,10 @@ class SessionSnapshot(BaseModel):
     # desired `mcp_servers` follow the recorded mode, so turning the router
     # setting off later never flips a routed session (or the reverse).
     github_transport: GithubTransport = "direct"
+    # A turn of this session read data sources: every later turn keeps that posture
+    # (`tool_safety.after_data_read`), whatever `data_reads` says now. Set by
+    # `mark_data_read`, never cleared, never fingerprinted.
+    data_read: bool = False
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
