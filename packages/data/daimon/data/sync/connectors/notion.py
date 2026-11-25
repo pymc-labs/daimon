@@ -22,7 +22,7 @@ Credential `{"token": "secret_..."}`; configuration (`sources.config`):
 - `workspace`: a name for the Notion workspace (its identities are keyed by it).
 - `exclude`: page or database ids to store but never show.
 
-Changes are found by their last edit time. See `docs/data-sources.md`.
+Changes are found by their last edit time. See `docs/data-connectors-apps.md`.
 """
 
 from __future__ import annotations

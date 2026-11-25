@@ -315,6 +315,10 @@ async def test_a_markdown_mirror_is_redacted_and_follows_the_repository(
             ],
         }
     )
+    await store.conn.execute(
+        b"insert into tenants (id, platform, external_id) values (%s, 'discord', 'guild-notes')",
+        (store.tenant,),
+    )
     await declared.apply(store.conn, store.schemas, store.env, decl)
     src = await store.add(
         "github_markdown", repo=f"{ORG}/notes", folders=["docs"], redaction_set="house"

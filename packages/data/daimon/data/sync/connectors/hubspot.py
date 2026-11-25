@@ -1,7 +1,7 @@
 """HubSpot, read live: companies, deals, contacts and notes found at question time with the
 source's own private app token, nothing stored. Read-only (searches and lookups), and
 scope-gated: a caller whose scopes include the source's default scope reads everything the
-token sees; there is no per-record access list. See `docs/data-sources.md`.
+token sees; there is no per-record access list. See `docs/data-connectors-apps.md`.
 
 Credential `{"token": "..."}`: a private app token. Configuration: `objects` (the types to
 search: companies, deals, contacts, notes; default all), `portal_id` (to link each hit).

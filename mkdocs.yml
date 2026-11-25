@@ -22,6 +22,8 @@ nav:
       - Operations: operations.md
       - Compute sessions: compute.md
       - Data sources: data-sources.md
+      - Data connectors: data-connectors.md
+      - 'Data connectors: apps': data-connectors-apps.md
   - Connect:
       - Slack: slack.md
       - Microsoft Teams: teams.md

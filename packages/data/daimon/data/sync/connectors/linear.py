@@ -1,6 +1,7 @@
 """Linear, read live: issues found at question time with the source's own API key, nothing
 stored. Read-only, and scope-gated: a caller whose scopes include the source's default scope
-reads every issue the key sees; there is no per-issue access list. See `docs/data-sources.md`.
+reads every issue the key sees; there is no per-issue access list. See
+`docs/data-connectors-apps.md`.
 
 Credential `{"token": "..."}`: a personal API key (sent as it is, without `Bearer`).
 """

@@ -17,7 +17,7 @@ again every `relist_hours` (a folder's new shares reach the files below it then)
 cursor has expired or the scopes changed.
 
 Scopes of the service account's delegation: `drive.readonly`,
-`admin.directory.user.readonly`, `admin.directory.group.readonly`. See `docs/data-sources.md`.
+`admin.directory.user.readonly`, `admin.directory.group.readonly`. See `docs/data-connectors.md`.
 """
 
 from __future__ import annotations

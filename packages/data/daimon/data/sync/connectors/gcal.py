@@ -6,7 +6,7 @@ lists on it. When a search names several readers, an event shows only if every o
 calendars has it. A reader the source cannot act as (not linked, suspended) gets nothing.
 
 The delegation needs the scope `https://www.googleapis.com/auth/calendar.readonly` besides the
-directory's. See `docs/data-sources.md`.
+directory's. See `docs/data-connectors.md`.
 """
 
 from __future__ import annotations
