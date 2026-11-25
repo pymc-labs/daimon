@@ -206,7 +206,7 @@ from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TurnState, reported_routine_problem
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
@@ -594,7 +594,7 @@ async def _build_fire(
                     expected_private=row,
                 )
             return
-        run_text = split_run_text(reply.text)
+        run_text = split_run_text(reply.text, reported_problem=reply.reported_problem)
         payload = await collect_routine_files(
             client, session_id=reply.session_id, text=run_text.post
         )
@@ -1135,7 +1135,10 @@ async def _build_fire(
         # Fallback post: only when the agent did not deliver to the
         # destination itself. The chat adapter for `platform` posts it.
         posted = bool(final_state) and agent_posted_to(final_state[0], row)
-        run_text = split_run_text(result)
+        run_text = split_run_text(
+            result,
+            reported_problem=bool(final_state) and reported_routine_problem(final_state[0].content),
+        )
         payload = run_text.post
         needs_delivery = not posted
         if output_sessions:

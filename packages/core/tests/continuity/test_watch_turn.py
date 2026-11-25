@@ -775,15 +775,15 @@ async def test_watch_report_turn_also_requires_explicit_unattended():
 
 
 @pytest.mark.parametrize(
-    ("final", "may_end_empty", "answer"),
+    ("final", "may_end_empty", "answer", "reports_problem"),
     [
-        ("report", False, "report"),
-        ("", False, "The reply finished without text."),
-        ("", True, ""),
+        ("report", False, "report", True),
+        ("", False, "The reply finished without text.", False),
+        ("", True, "", False),
     ],
 )
 async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(
-    monkeypatch, final: str, may_end_empty: bool, answer: str
+    monkeypatch, final: str, may_end_empty: bool, answer: str, reports_problem: bool
 ):
     """The DM report turn hands its wake row to the shared turn, unattended: that row
     selects watch capabilities and `watch_posture` there (no daimon-mcp, no sandbox, no
@@ -796,12 +796,27 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(
         _run_admitted_dm_turn,  # pyright: ignore[reportPrivateUsage]
     )
     from daimon.core.stores.domain import Role
-    from daimon.core.turn.state import TerminationReason
+    from daimon.core.turn.state import TerminationReason, ToolUseBlock
 
     row = _report_row()
+    blocks = (
+        [
+            ToolUseBlock(
+                kind="tool_use",
+                id="tu",
+                type="agent.mcp_tool_use",
+                name="report_routine_problem",
+                input={},
+                mcp_server_name="daimon-mcp",
+                status="complete",
+            )
+        ]
+        if reports_problem
+        else []
+    )
     run = AsyncMock(
         return_value=MagicMock(
-            state=MagicMock(error=None, termination=TerminationReason.COMPLETED, content=[]),
+            state=MagicMock(error=None, termination=TerminationReason.COMPLETED, content=blocks),
             ma_session_id="sess_dm",
         )
     )
@@ -833,6 +848,7 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(
         watch_row=row,
         may_end_empty=may_end_empty,
     )
+    assert done.reported_problem is reports_problem
     assert (done.text, done.session_id) == (answer, "sess_dm"), (
         "the turn should return its reply and session"
     )
