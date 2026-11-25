@@ -945,13 +945,32 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Ask shows a card with the destination and duration before a watch is made "
             "or resumed. Skip makes it without the card, in the same thread for the "
-            "default duration. Editing a watch, long jobs, key rotation and machine launches "
-            "keep asking. Only a server admin can change it."
+            "default duration. Editing a watch, long jobs and key rotation keep asking. "
+            "Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
         # Ask is the default and the strict value, so a stricter-wins rule could never
         # be loosened. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
+        key="compute_approval",
+        name="Approval for cloud computers",
+        category="guardrails",
+        effect="guardrail",
+        values={"skip": "Skip the card", "ask": "Ask"},
+        default="ask",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Ask shows a card before a cloud computer is started or its time is extended. "
+            "Skip starts it without the card, for the default time. On OpenAI and Gemini "
+            "agents the card still shows. Only a server admin can change it."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SERVER_ADMIN,
+        # As `watch_approval`: Ask is the strict default, so the nearer tier decides.
         combine_override="most_specific",
     ),
     FeatureSpec(

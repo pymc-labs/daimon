@@ -109,6 +109,7 @@ _NARROWED: dict[str, str] = {
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
+    "compute_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "secret_sharing": "a workspace or agent choice: a share has no channel or thread",
     "bot_access_wait": "a workspace choice, read by background work with no agent or thread",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
@@ -492,6 +493,7 @@ _KEY_READERS = {
     "place_feature_or_none": 3,
     "feature_in_or_none": 3,
     "_chosen": 2,
+    "_card_skipped": 4,
     "deployment_on": 1,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""
