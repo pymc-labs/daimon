@@ -150,43 +150,33 @@ async def finish(
 async def wake_turn_of(
     db: AsyncSession, origin: TurnOriginRow, session: ComputeSession, *, now: datetime
 ) -> bool:
-    """Whether ``origin`` is the running wake turn of one of this session's finished commands.
+    """Whether ``origin`` is the turn a wake of one of this session's finished commands started.
 
-    A wake row is claimed and fenced (``started_at``) for as long as its turn runs.
-    The turn is that wake's when the row is the only wake running in the session's
-    conversation, was queued by ``finish`` for the session's owner and agent, and
-    the origin began after the fence. The row names its command by ``wake_key``.
-    Two wakes running at once in one conversation cannot be told apart, so
-    neither reads.
+    A dispatcher claims a wake row under a fresh ``lease_owner``, and the turn it
+    then starts takes that owner as its origin id (`daimon.core.turn_origin.wake_turn`).
+    So the row names its exact turn, for as long as it is claimed, started and inside
+    its lease, and it names its command by ``wake_key``. Any other turn, whatever
+    started it and whenever, has another origin id and reads nothing.
     """
     await scope(db, session.tenant_id)
-    running = (
-        await db.scalars(
-            select(TaskContinuation)
-            .where(
-                TaskContinuation.tenant_id == session.tenant_id,
-                TaskContinuation.platform == session.platform,
-                TaskContinuation.thread_id == session.thread_id,
-                TaskContinuation.status == "claimed",
-                TaskContinuation.started_at.is_not(None),
-                TaskContinuation.lease_expires_at > now,
-            )
-            .limit(2)
+    wake = await db.scalar(
+        select(TaskContinuation).where(
+            TaskContinuation.tenant_id == session.tenant_id,
+            TaskContinuation.platform == session.platform,
+            TaskContinuation.thread_id == session.thread_id,
+            TaskContinuation.lease_owner == origin.id.hex,
+            TaskContinuation.status == "claimed",
+            TaskContinuation.started_at.is_not(None),
+            TaskContinuation.lease_expires_at > now,
         )
-    ).all()
-    if len(running) != 1:
-        return False
-    wake = running[0]
+    )
     place = (session.tenant_id, session.platform, session.thread_id, session.parent_channel_id)
     if (
-        wake.reason != "timer"
-        or wake.attended
-        or wake.started_at is None
-        or origin.created_at < wake.started_at
+        wake is None
         or origin.attended
         or origin.helper_of is not None
         or (origin.tenant_id, origin.platform, origin.thread_id, origin.parent_channel_id) != place
-        or (wake.tenant_id, wake.platform, wake.thread_id, wake.parent_channel_id) != place
+        or wake.parent_channel_id != session.parent_channel_id
         or not origin.account_id == wake.requester_account_id == session.owner_account_id
         or not origin.responder_ma_agent_id == wake.target_ma_agent_id == session.agent_id
     ):

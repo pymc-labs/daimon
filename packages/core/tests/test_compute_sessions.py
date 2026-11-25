@@ -21,16 +21,12 @@ from daimon.core.compute_provider import ComputeProviderError, app_name
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
 from daimon.core.compute_tasks import WAKE_OUTPUT_CHARS, wake_key
 from daimon.core.config import ComputeProfile, ComputeSettings
+from daimon.core.continuity.wakes import WAKE_RUN_LEASE, claim_wake, settle_wake, start_wake
 from daimon.core.errors import StoreError
 from daimon.core.stores import compute_sessions as session_store
 from daimon.core.stores import compute_tasks as task_store
 from daimon.core.stores.domain import Role
-from daimon.core.stores.task_continuations import (
-    claim_wake_row,
-    record_continuation,
-    settle_wake_row,
-    start_wake_row,
-)
+from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin, get_active_origin
 from daimon.testing.compute import FakeComputeProvider
 from daimon.testing.factories import make_account, make_tenant
@@ -57,7 +53,15 @@ def settings(**kwargs):
 
 
 async def caller(
-    sm, *, tenant=None, account=None, attended=True, human=True, created=NOW, agent="agent"
+    sm,
+    *,
+    tenant=None,
+    account=None,
+    attended=True,
+    human=True,
+    agent="agent",
+    origin_id=None,
+    chat_session=None,
 ):
     async with sm.begin() as db:
         tenant = tenant or await make_tenant(db)
@@ -75,13 +79,15 @@ async def caller(
             configuration_target_name=None,
             role=Role.USER,
             expires_at=NOW + timedelta(days=30),
-            now=created,
+            now=NOW,
             sender_foreign=False,
             shared_channel=False,
             attended=attended,
+            origin_id=origin_id,
         )
+        chat_session = chat_session or str(origin.id)
         await bind_origin_session(
-            db, origin_id=origin.id, chat_session_id=str(origin.id), human_invocation=human
+            db, origin_id=origin.id, chat_session_id=chat_session, human_invocation=human
         )
         origin = await get_active_origin(
             db,
@@ -92,7 +98,7 @@ async def caller(
             now=NOW,
         )
     assert origin is not None
-    return ComputeCaller(tenant.id, account.id, origin, str(origin.id), "user"), tenant, account
+    return ComputeCaller(tenant.id, account.id, origin, chat_session, "user"), tenant, account
 
 
 async def launch(service, owner, key="approved"):
@@ -632,8 +638,6 @@ async def test_lost_start_restart_and_overdue_tasks_are_reported_never_rerun(db_
 
 # --- A finished command's wake turn reads its own session, and nothing more ----
 
-_WAKE_LEASE = timedelta(minutes=5)
-
 
 async def _finished_task(service, fake, owner, session, request_key="use"):
     task = await service.start_task(
@@ -645,20 +649,24 @@ async def _finished_task(service, fake, owner, session, request_key="use"):
     return await service.task_result(owner, task.id)
 
 
-async def _run_wake(sm, key, now=NOW):
-    """What a dispatcher does before the wake's turn: claim the row and fence its start."""
-    async with sm.begin() as db:
-        claim = dict(idempotency_key=key, owner="bot", now=now, lease=_WAKE_LEASE)
-        assert await claim_wake_row(db, **claim, max_attempts=5) is not None
-        assert await start_wake_row(db, **claim)
-
-
-async def _woken(sm, tenant, account, **kwargs):
-    """The unattended turn a wake starts: nobody sent it, nobody waits on it."""
+async def _unattended(sm, tenant, account, **kwargs):
+    """A turn nobody sent and nobody waits on: a wake, a routine, a timer."""
     turn, _, _ = await caller(
         sm, tenant=tenant, account=account, attended=False, human=False, **kwargs
     )
     return turn
+
+
+async def _wake_turn(sm, tenant, account, key, **kwargs):
+    """What a dispatcher does for a due wake: claim it, fence its start, start its turn.
+
+    The turn's origin takes the claim's owner as its id; the dispatcher tests
+    (`continuity/test_wakes.py`) show that every dispatch path does that.
+    """
+    claim = await claim_wake(sm, idempotency_key=key, now=NOW)
+    assert claim is not None and await start_wake(sm, claim, now=NOW)
+    turn = await _unattended(sm, tenant, account, origin_id=uuid.UUID(claim.owner), **kwargs)
+    return turn, claim
 
 
 def _reads(service, turn, session, task):
@@ -691,11 +699,7 @@ async def test_a_finished_command_wake_reads_its_own_session_and_does_nothing_el
     later = await service.start_task(
         owner, session.id, command="make report", timeout_minutes=60, request_key="later"
     )
-    woken = await _woken(sm, tenant, account)
-    # Queued is not running: until its turn starts, the wake reads nothing.
-    await _all_refused(_reads(service, woken, session, task))
-
-    await _run_wake(sm, wake_key(task.id))
+    woken, _ = await _wake_turn(sm, tenant, account, wake_key(task.id))
     calls = len(fake.calls)
     _, _, status, result, file, listing = [
         await read for read in _reads(service, woken, session, task)
@@ -733,11 +737,38 @@ async def test_a_finished_command_wake_reads_its_own_session_and_does_nothing_el
     assert (await service.get(owner, session.id)).state == "running"
 
 
+async def test_two_wakes_running_at_once_each_read_only_their_own_session(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, account = await caller(sm)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    machines = []
+    for name in ("first", "second"):
+        session = await launch(service, owner, name)
+        task = await _finished_task(service, fake, owner, session, name)
+        woken, _ = await _wake_turn(sm, tenant, account, wake_key(task.id))
+        machines.append((session, task, woken))
+    for session, task, woken in machines:
+        assert [await read for read in _reads(service, woken, session, task)]
+        for _, _, another in machines:
+            if another is not woken:
+                await _all_refused(_reads(service, another, session, task))
+
+
 @pytest.mark.parametrize(
     "case",
-    ["earlier_turn", "other_agent", "second_wake", "owner_timer", "delivered", "lease_lapsed"],
+    [
+        "not_started",
+        "later_turn",
+        "turn_ended",
+        "other_agent",
+        "owner_timer",
+        "delivered",
+        "lease_lapsed",
+    ],
 )
-async def test_only_the_running_wake_of_that_session_reads(db_engine, db_clean, case):
+async def test_only_the_turn_its_own_running_wake_started_reads(db_engine, db_clean, case):
+    """Every other unattended turn of the same owner, agent and conversation is refused."""
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     owner, tenant, account = await caller(sm)
     fake = FakeComputeProvider()
@@ -746,12 +777,11 @@ async def test_only_the_running_wake_of_that_session_reads(db_engine, db_clean, 
     session = await launch(service, owner)
     task = await _finished_task(service, fake, owner, session)
     key = wake_key(task.id)
-    readings = [(session, task)]
-
     if case == "owner_timer":
         # A timer the owner set fires in the conversation; the command's wake still waits.
+        key = uuid.uuid4()
         async with sm.begin() as db:
-            row = await record_continuation(
+            await record_continuation(
                 db,
                 tenant_id=tenant.id,
                 platform="discord",
@@ -762,34 +792,30 @@ async def test_only_the_running_wake_of_that_session_reads(db_engine, db_clean, 
                 target_ma_agent_id="agent",
                 target_name="Daimon",
                 reason="timer",
-                idempotency_key=uuid.uuid4(),
+                idempotency_key=key,
                 available_at=NOW,
                 requested_work="Read the machine.",
             )
-        await _run_wake(sm, row.idempotency_key)
+    if case == "not_started":
+        # Queued is not running: a turn cannot claim the wake's id before a dispatcher does.
+        turns = [await _unattended(sm, tenant, account)]
     else:
-        await _run_wake(sm, key)
-    turn = {}
-    if case == "earlier_turn":
-        turn = {"created": NOW - timedelta(seconds=1)}
-    if case == "other_agent":
-        turn = {"agent": "another-agent"}
-    if case == "second_wake":
-        # Two wakes running in one conversation cannot be told apart: neither reads.
-        other = await launch(service, owner, "second")
-        other_task = await _finished_task(service, fake, owner, other, "use-2")
-        await _run_wake(sm, wake_key(other_task.id))
-        readings.append((other, other_task))
-    woken = await _woken(sm, tenant, account, **turn)
+        agent = {"agent": "another-agent"} if case == "other_agent" else {}
+        woken, claim = await _wake_turn(sm, tenant, account, key, **agent)
+        turns = [woken]
+    if case == "later_turn":
+        # A routine, a watch or a timer that starts while the wake's turn runs.
+        turns = [await _unattended(sm, tenant, account)]
+    if case == "turn_ended":
+        # The dispatcher was interrupted: the row stays claimed inside its lease, and
+        # the conversation's next unattended turn takes over its signed session.
+        turns.append(await _unattended(sm, tenant, account, chat_session=woken.chat_session_id))
     if case == "delivered":
-        async with sm.begin() as db:
-            assert await settle_wake_row(
-                db, idempotency_key=key, owner="bot", status="delivered", now=NOW
-            )
+        assert await settle_wake(sm, claim, status="delivered", now=NOW)
     if case == "lease_lapsed":
-        now += _WAKE_LEASE
-    for machine, command in readings:
-        await _all_refused(_reads(service, woken, machine, command))
+        now += WAKE_RUN_LEASE
+    for turn in turns:
+        await _all_refused(_reads(service, turn, session, task))
     assert [tool for _, tool, _ in fake.calls if tool != "run_bash"] == []
 
 

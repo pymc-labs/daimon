@@ -367,8 +367,8 @@ async def woken(committing_sessionmaker, monkeypatch):
     from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
     from daimon.core.compute_tasks import wake_key
     from daimon.core.config import ComputeProfile
+    from daimon.core.continuity.wakes import claim_wake, start_wake
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores.task_continuations import claim_wake_row, start_wake_row
     from daimon.core.stores.turn_origins import bind_origin_session, create_origin
     from daimon.testing.compute import FakeComputeProvider
     from daimon.testing.factories import make_account, make_tenant
@@ -390,7 +390,7 @@ async def woken(committing_sessionmaker, monkeypatch):
         tenant = await make_tenant(db)
         account = await make_account(db, tenant=tenant)
 
-    async def turn(*, attended):
+    async def turn(*, attended, **fields):
         now = datetime.now(UTC)
         async with sm.begin() as db:
             origin = await create_origin(
@@ -410,6 +410,7 @@ async def woken(committing_sessionmaker, monkeypatch):
                 sender_foreign=False,
                 shared_channel=False,
                 attended=attended,
+                **fields,
             )
             await bind_origin_session(
                 db, origin_id=origin.id, chat_session_id="signed", human_invocation=attended
@@ -433,16 +434,11 @@ async def woken(committing_sessionmaker, monkeypatch):
     fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
     fake.tasks[task.id.hex].output = "sampling done\n" * 300
     await service.poll_tasks()
-    async with sm.begin() as db:
-        claim = dict(
-            idempotency_key=wake_key(task.id),
-            owner="bot",
-            now=datetime.now(UTC),
-            lease=timedelta(minutes=5),
-        )
-        assert await claim_wake_row(db, **claim, max_attempts=5) is not None
-        assert await start_wake_row(db, **claim)
-    origin = await turn(attended=False)
+    # What a dispatcher does: claim the wake, fence its start, and start its turn,
+    # whose origin takes the claim's owner as its id (`daimon.core.turn_origin.wake_turn`).
+    claim = await claim_wake(sm, idempotency_key=wake_key(task.id), now=datetime.now(UTC))
+    assert claim is not None and await start_wake(sm, claim, now=datetime.now(UTC))
+    origin = await turn(attended=False, origin_id=uuid.UUID(claim.owner))
 
     identity = dict(
         role=Role.USER,
@@ -466,18 +462,20 @@ async def woken(committing_sessionmaker, monkeypatch):
     async def call(name, **changes):
         return await tools[name].fn(ctx=None, **{**calls[name], **changes})
 
+    async def become(other):
+        """Make the caller another unattended turn of the same owner, agent and conversation."""
+        if other in {"later_turn", "helper"}:
+            # It starts while the wake's turn runs and takes over the signed session.
+            helper = {"helper_of": origin.id} if other == "helper" else {}
+            calls.update(_wake_calls(session, task, (await turn(attended=False, **helper)).id))
+        else:
+            claim = {"routine": "routine_id", "agent_key": "agent_id", "worker": "execution_id"}
+            auth.return_value = auth_identity(
+                account.id, tenant.id, **identity, **{claim[other]: uuid.uuid4()}
+            )
+
     return SimpleNamespace(
-        call=call,
-        tools=set(tools),
-        calls=calls,
-        task=task,
-        fake=fake,
-        readable=readable,
-        as_routine=lambda: setattr(
-            auth,
-            "return_value",
-            auth_identity(account.id, tenant.id, **identity, routine_id=uuid.uuid4()),
-        ),
+        call=call, tools=set(tools), calls=calls, fake=fake, readable=readable, become=become
     )
 
 
@@ -508,10 +506,12 @@ async def test_every_compute_tool_is_a_wake_read_or_refused_in_a_wake_turn(woken
             await woken.call(name)
 
 
-async def test_a_routine_is_refused_every_compute_tool(woken):
-    woken.as_routine()
+@pytest.mark.parametrize("other", ["routine", "agent_key", "worker", "helper", "later_turn"])
+async def test_every_other_unattended_caller_is_refused_every_compute_tool(woken, other):
+    """While the wake runs and inside its lease: only the wake's own turn reads."""
+    await woken.become(other)
     for name in sorted(woken.tools):
-        with pytest.raises(ToolError, match="Use a conversation where the machine owner"):
+        with pytest.raises(ToolError):
             await woken.call(name)
     assert [tool for _, tool, _ in woken.fake.calls if tool != "run_bash"] == []
 
