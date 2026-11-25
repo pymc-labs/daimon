@@ -50,6 +50,7 @@ export type Connection = {
   url: string
   status: "active" | "paused" | "error"
   error: string | null
+  note: string | null
   refreshed_at: string | null
   scope: string | null
   declared: boolean

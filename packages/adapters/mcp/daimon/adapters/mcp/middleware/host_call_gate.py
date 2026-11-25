@@ -25,7 +25,7 @@ from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, after_data_read
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import ToolResult
@@ -266,9 +266,8 @@ class HostCallGate:
                 writes=tool.served.tool.writes,
                 attended=origin.attended,
                 agent_rule=rule,
+                data_read=await self._read_data(identity, origin),
             )
-            if await self._read_data(identity, origin):
-                verdict = after_data_read(verdict, call, attended=origin.attended)
         else:
             verdict = await tool_call_verdict(
                 policy,

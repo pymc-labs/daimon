@@ -276,6 +276,22 @@ async def test_a_write_waits_on_a_card_and_does_not_run(world: World) -> None:
     assert world.upstream == [], "nothing reached the upstream before the press"
 
 
+async def test_after_a_data_read_a_read_waits_on_a_card(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the session read data, even a read asks first: its arguments leave Daimon."""
+
+    async def read_data(*_: object) -> bool:
+        return True
+
+    monkeypatch.setattr(HostCallGate, "_read_data", read_data)
+
+    text = await world.call(world.chat(), "crm_lookup")
+
+    assert text == host_calls.waiting_text("the person who asked"), f"waiting result: {text}"
+    assert world.upstream == [], "nothing reached the upstream before the press"
+
+
 async def test_a_client_with_no_card_gets_reads_only(world: World) -> None:
     """An outside client can't answer a card: its read runs and its write is refused."""
     outside = world.chat(chat_agent_id=None, chat_session_id=None, no_confirmation_surface=False)

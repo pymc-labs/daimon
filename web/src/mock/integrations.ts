@@ -77,7 +77,7 @@ export const integrationsHandlers: HttpHandler[] = [
     const body: Connections = {
       enabled: true,
       connections: [{
-        id: "c1", name: "docs", url: "https://mcp.example.com/mcp", status: "active", error: null, refreshed_at: ago(2), scope: null, declared: false, has_token: true,
+        id: "c1", name: "docs", url: "https://mcp.example.com/mcp", status: "active", error: null, note: null, refreshed_at: ago(2), scope: null, declared: false, has_token: true,
         tools: [
           { name: "search", description: "Find pages", seen_description: "Find pages", seen_schema: { type: "object", properties: { query: { type: "string" } } }, seen: "a1", changed: false, enabled: true, writes: false, scope: null },
           { name: "create_page", description: "", seen_description: "Create a page in the space.", seen_schema: { type: "object", properties: { title: { type: "string" }, body: { type: "string" } } }, seen: "b2", changed: false, enabled: false, writes: true, scope: null },

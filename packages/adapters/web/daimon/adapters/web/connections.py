@@ -55,6 +55,7 @@ class Connection(BaseModel):
     url: str
     status: Literal["active", "paused", "error"]
     error: str | None
+    note: str | None
     refreshed_at: str | None
     scope: str | None
     declared: bool
@@ -108,6 +109,7 @@ def _out(row: McpConnectionRow, tools: list[McpConnectionToolRow]) -> Connection
         url=_shown_url(row.url),
         status=row.status,
         error=row.last_error,
+        note=row.note,
         refreshed_at=row.refreshed_at.isoformat() if row.refreshed_at else None,
         scope=row.scope,
         declared=row.declared,

@@ -61,7 +61,7 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("Slack rooms: members read per call", data_access._room, "_slack_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("helper turns: the asking agent reads data here", data_access._turn_origin, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("the data tools register in one place", server.create_mcp_app, "register_data_tools"),  # pyright: ignore[reportUnknownMemberType]
-    ("shared connection calls after a data read", HostCallGate.ask, "after_data_read"),
+    ("shared connection calls after a data read", HostCallGate.ask, "_read_data"),
 ]  # fmt: skip
 
 

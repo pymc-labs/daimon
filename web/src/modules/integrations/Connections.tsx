@@ -70,6 +70,7 @@ function Item({ c, can }: { c: Connection; can: boolean }) {
           </div>
           <div className="truncate font-mono text-[12px] text-muted-foreground">{c.url}</div>
           {c.error && <div className="mt-1 text-xs text-destructive">{c.error}</div>}
+          {c.note && <div className="mt-1 text-xs text-warning">{c.note}</div>}
         </div>
         {can && (
           <div className="flex gap-1">
