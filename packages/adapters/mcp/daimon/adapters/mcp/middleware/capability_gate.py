@@ -150,6 +150,37 @@ def _lists_everything(auth: AuthIdentity) -> bool:
     return auth.chat_agent_id is not None and auth.agent_id is None
 
 
+async def require_capability(
+    runtime: McpRuntime,
+    tool: str,
+    key: str,
+    auth: AuthIdentity,
+    origin_context_id: object = None,
+) -> None:
+    """Refuse `tool` unless its capability `key` is set up on this server and On wherever
+    the caller's call may run."""
+    if not server_setup_met(FEATURES[key], runtime.settings):
+        record_denial(UNSET_REASON)
+        raise ToolError(_unset_refusal(tool, key))
+    try:
+        places = await caller_places(runtime, auth, origin_context_id)
+        found = [
+            (
+                await resolve_features(
+                    runtime.session_factory, runtime.settings, place, keys=(key,)
+                )
+            ).get(key)
+            for place in places
+        ]
+    except Exception as exc:  # named boundary: an unreadable feature refuses the call
+        log.warning("capability_gate.read_failed", tool=tool, exc_info=True)
+        record_denial(DENIAL_REASON)
+        raise ToolError(_UNREADABLE) from exc
+    if any(hides_tools(feature) for feature in found):
+        record_denial(DENIAL_REASON)
+        raise ToolError(_refusal(tool, key))
+
+
 class CapabilityGateMiddleware(Middleware):
     """Refuses a call to a tool whose capability is Off at the caller's place or not set up."""
 
@@ -172,28 +203,13 @@ class CapabilityGateMiddleware(Middleware):
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
         if key is None or not isinstance(auth, AuthIdentity):
             return await call_next(context)
-        if not server_setup_met(FEATURES[key], self._runtime.settings):
-            record_denial(UNSET_REASON)
-            raise ToolError(_unset_refusal(tool, key))
-        try:
-            places = await caller_places(
-                self._runtime, auth, (context.message.arguments or {}).get("origin_context_id")
-            )
-            found = [
-                (
-                    await resolve_features(
-                        self._runtime.session_factory, self._runtime.settings, place, keys=(key,)
-                    )
-                ).get(key)
-                for place in places
-            ]
-        except Exception as exc:  # named boundary: an unreadable feature refuses the call
-            log.warning("capability_gate.read_failed", tool=tool, exc_info=True)
-            record_denial(DENIAL_REASON)
-            raise ToolError(_UNREADABLE) from exc
-        if any(hides_tools(feature) for feature in found):
-            record_denial(DENIAL_REASON)
-            raise ToolError(_refusal(tool, key))
+        await require_capability(
+            self._runtime,
+            tool,
+            key,
+            auth,
+            (context.message.arguments or {}).get("origin_context_id"),
+        )
         return await call_next(context)
 
     async def on_list_tools(

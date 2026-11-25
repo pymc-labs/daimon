@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 245 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 248 tools Daimon's MCP server registers, plus the 16 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -286,6 +286,7 @@ The `data_*` tools: search and read the workspace's data sources, behind `data_r
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `data_context` | all callers | What you can read here: the scopes you hold and each data source with its status, how many records you may read and when the newest one happened. |
 | `data_file` | all callers | Read a file attached to a record (`index` from `data_get`'s files), fetched now from its source with the source's permissions and never stored. |
 | `data_get` | all callers | Open one record by its `record_id`: its text (12,000 characters from `start`; a `next_start` says where the rest continues) and its attached files for `data_file`. |
 | `data_search` | all callers | Search the data sources for `query`; only what everyone who will see the answer may read. |
@@ -632,6 +633,15 @@ version and restore an older one.
 | `restore_library_skill_version` | admin only | Republish an older library skill version as the next one. |
 | `save_library_skill_files` | admin only | Publish text files as a library skill's next version. |
 
+## `skill_serving`
+
+Serve the workspace library's skills to MCP clients: list them and read their files.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_library_skills` | all callers | The skills in this workspace's library you may read, each with its latest version and files. |
+| `read_library_skill` | all callers | Read one file of a library skill by its name (SKILL.md by default), as its latest version holds it. |
+
 ## `skill_uploads`
 
 add_skill: add one pasted, attached, GitHub or MCP-served skill to one agent, after a
@@ -803,6 +813,27 @@ post_wizard: the agent-facing tool that posts a multi-step form.
 | --- | --- | --- |
 | `post_wizard` | Discord callers, Teams callers | Post a multi-step form in the channel instead of asking in prose. |
 
+## Hub login mounts: `data`
+
+The `data_*` tools: search and read the workspace's data sources, behind `data_reads`.
+
+A second surface, separate from the tools above: one app per platform, mounted at
+`/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
+when the matching `DAIMON_HUB__*` client credentials are set. These tools carry no
+visibility tags, so a logged-in caller sees all of them (the data tools only where
+`data_reads` is On in one of their workspaces); each takes a `daimon_id` from
+`list_daimons`, or a `workspace` for the data and skill tools, because one person
+reaches several workspaces here.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `data_context` | all callers | What you can read here: the scopes you hold and each data source with its status, how many records you may read and when the newest one happened. |
+| `data_file` | all callers | Read a file attached to a record (`index` from `data_get`'s files), fetched now from its source with the source's permissions and never stored. |
+| `data_get` | all callers | Open one record by its `record_id`: its text (12,000 characters from `start`; a `next_start` says where the rest continues) and its attached files for `data_file`. |
+| `data_search` | all callers | Search the data sources for `query`; only what everyone who will see the answer may read. |
+| `data_sources` | all callers | The data sources you can read here, with their ids and how many records each holds, and the datasets `data_sql` can query. |
+| `data_sql` | all callers | Read-only SQL over the data views and datasets (`data_sources` lists them), by plain names. |
+
 ## Hub login mounts: `hub`
 
 Tool surface for the hub mounts: every Daimon a logged-in person can reach.
@@ -810,8 +841,10 @@ Tool surface for the hub mounts: every Daimon a logged-in person can reach.
 A second surface, separate from the tools above: one app per platform, mounted at
 `/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
 when the matching `DAIMON_HUB__*` client credentials are set. These tools carry no
-visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id` from
-`list_daimons`, because one person reaches several workspaces here.
+visibility tags, so a logged-in caller sees all of them (the data tools only where
+`data_reads` is On in one of their workspaces); each takes a `daimon_id` from
+`list_daimons`, or a `workspace` for the data and skill tools, because one person
+reaches several workspaces here.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -823,3 +856,20 @@ visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id
 | `list_events` | all callers | A session's transcript. |
 | `list_my_sessions` | all callers | Sessions you started with this Daimon, for resuming with ``handle``. |
 | `start_turn` | all callers | Start a turn without waiting. |
+
+## Hub login mounts: `skill_serving`
+
+Serve the workspace library's skills to MCP clients: list them and read their files.
+
+A second surface, separate from the tools above: one app per platform, mounted at
+`/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
+when the matching `DAIMON_HUB__*` client credentials are set. These tools carry no
+visibility tags, so a logged-in caller sees all of them (the data tools only where
+`data_reads` is On in one of their workspaces); each takes a `daimon_id` from
+`list_daimons`, or a `workspace` for the data and skill tools, because one person
+reaches several workspaces here.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_library_skills` | all callers | The skills in this workspace's library you may read, each with its latest version and files. |
+| `read_library_skill` | all callers | Read one file of a library skill by its name (SKILL.md by default), as its latest version holds it. |

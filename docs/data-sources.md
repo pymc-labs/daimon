@@ -113,6 +113,18 @@ Callers browse a source's records, read one with its text and files, and run rea
 over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views and nothing
 else, so it never sees an access list, a credential or another workspace's rows.
 
+`data_context` lists what the caller may read: their scopes, and each source with its status
+and the date of its newest record. A coding key made from an agent's coding tools reads
+data as the person who made it, bounded by the same rule as a chat there; a key made in a
+limited channel keeps that channel's rule. The hub's data tools take a `workspace`, by name
+or id, among the workspaces the caller belongs to, and are listed only where `data_reads`
+is On in one of them.
+
+A skill in the workspace library may carry a scope. `list_library_skills` and
+`read_library_skill` (on the MCP server and, with a `workspace`, on the hub) show a scoped
+skill only to someone who holds that scope in the data store. Chat turns and outside
+clients see unscoped skills only.
+
 ## After a restore
 
 A restore with `--no-privileges`, as `scripts/backup/postgres.sh` does, drops the

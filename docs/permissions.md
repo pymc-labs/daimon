@@ -145,7 +145,7 @@ even where the rule does not name the channel.
 ## Data reads
 
 [`data_reads`](features.md#data-source-reads) gives an agent `data_sources`,
-`data_search`, `data_get`, `data_file` and `data_sql`. After such a read, a write that
+`data_context`, `data_search`, `data_get`, `data_file` and `data_sql`. After such a read, a write that
 would not ask first, including sandbox `bash` and `web_fetch`, shows a card in chat
 and is refused in a routine.
 

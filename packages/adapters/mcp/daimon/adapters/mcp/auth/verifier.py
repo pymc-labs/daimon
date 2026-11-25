@@ -70,6 +70,7 @@ TOKEN_JTI_CLAIM = "daimon_token_jti"
 TOKEN_LABEL_CLAIM = "daimon_token_label"
 SCOPES_CLAIM = "daimon_scopes"
 FOREIGN_HOME_CLAIM = "daimon_foreign_home"
+CODING_KEY_CLAIM = "daimon_coding_key"
 
 #: The id an agent was converted from, read from its marker; None when it has none.
 ConvertedFrom = Callable[[uuid.UUID, str], Awaitable[str | None]]
@@ -353,6 +354,7 @@ class DaimonJWTVerifier(JWTVerifier):
             TOKEN_JTI_CLAIM,
             TOKEN_LABEL_CLAIM,
             SCOPES_CLAIM,
+            CODING_KEY_CLAIM,
             "bound_channel_id",
             "platform_role_ids",
             FOREIGN_HOME_CLAIM,
@@ -463,6 +465,7 @@ class DaimonJWTVerifier(JWTVerifier):
             access.claims[TOKEN_KIND_CLAIM] = row.kind
             access.claims[TOKEN_LABEL_CLAIM] = row.label
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)
+            access.claims[CODING_KEY_CLAIM] = is_coding_key(row)
             if row.kind == "operator":
                 access.claims[SCOPES_CLAIM] = list(row.scopes)
             if row.channel_id is not None:

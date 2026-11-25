@@ -19,13 +19,16 @@ from typing import Any
 
 import structlog
 from cryptography.fernet import MultiFernet
+from daimon.adapters.mcp.hub.data_gate import HubDataGate
 from daimon.adapters.mcp.hub.discord_provider import DaimonDiscordProvider
 from daimon.adapters.mcp.hub.identity import HubIdentityMiddleware
 from daimon.adapters.mcp.hub.slack_provider import SlackHubProvider
 from daimon.adapters.mcp.hub.storage import asyncpg_dsn, build_hub_kv_base, hub_kv_for
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools.data import register_data_tools
 from daimon.adapters.mcp.tools.hub import register_hub_tools
+from daimon.adapters.mcp.tools.skill_serving import register_skill_serving_tools
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
 from daimon.core.errors import BootstrapError
@@ -54,12 +57,16 @@ def build_hub_app(
         auth=auth,
         instructions=(
             "Every daimon reachable here belongs to a chat space. "
-            "Call list_daimons first; every other tool takes a daimon_id from that list."
+            "Call list_daimons first; every other tool takes a daimon_id from that list, "
+            "except the data and skill tools, which take a workspace."
         ),
     )
     mcp.add_middleware(HubIdentityMiddleware(platform))
     mcp.add_middleware(MaErrorMiddleware())
+    mcp.add_middleware(HubDataGate(runtime))
     register_hub_tools(mcp, runtime, billing_config=billing_config)
+    register_data_tools(mcp, runtime, hub=True)
+    register_skill_serving_tools(mcp, runtime, hub=True)
     return mcp
 
 

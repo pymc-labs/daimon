@@ -86,8 +86,12 @@ async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime)
         if routine.destination_kind in ("channel", "thread") and routine.destination_id:
             return await _room(runtime, auth, asker, routine.destination_id, None, now=now)
         return DataOrigin("private", asker)
-    if auth.agent_id is not None and auth.bound_channel_id is not None:
-        return await _room(runtime, auth, asker, auth.bound_channel_id, None, now=now)
+    if auth.agent_id is not None:
+        if not auth.coding_key:
+            return DataOrigin("none")  # only a person's coding key reads, as its maker
+        if auth.bound_channel_id is not None:
+            # Minted in a limited channel: its rule follows the key.
+            return await _room(runtime, auth, asker, auth.bound_channel_id, None, now=now)
     return DataOrigin("private", asker)
 
 

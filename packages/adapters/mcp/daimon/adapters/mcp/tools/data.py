@@ -20,6 +20,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.data_access import data_audience_for
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._hub_workspace import hub_workspace_tool
 from daimon.core.data_audience import DataAudience, scope_ceiling
 from daimon.core.data_tools import mark_data_result
 from daimon.core.ports.data_metering import SessionMeter
@@ -71,10 +72,12 @@ def _uuid(value: str) -> uuid.UUID:
         raise ToolError(NOT_FOUND) from None
 
 
-def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
+def register_data_tools(mcp: FastMCP, runtime: McpRuntime, *, hub: bool = False) -> None:
     """Register the `data_*` tools (`DATA_TOOLS`); the capability gate offers them only where
-    `data_reads` is On."""
+    `data_reads` is On. On the hub each also takes a `workspace` and is refused in a workspace
+    where it is Off."""
     settings = runtime.settings
+    add = hub_workspace_tool(mcp, runtime) if hub else mcp.tool()
     schemas = Schemas.of(settings.data)
 
     @asynccontextmanager
@@ -85,7 +88,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         async with pool.connection(settings) as conn:
             yield conn, await read_context(conn, schemas, auth, audience)
 
-    @mcp.tool()
+    @add
     async def data_sources(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
         """The data sources you can read here, with their ids and how many records each holds,
         and the datasets `data_sql` can query."""
@@ -96,7 +99,22 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return _text({"sources": [dataclasses.asdict(s) for s in found],
                       "datasets": [dataclasses.asdict(d) for d in sets]})  # fmt: skip
 
-    @mcp.tool()
+    @add
+    async def data_context(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
+        """What you can read here: the scopes you hold and each data source with its status,
+        how many records you may read and when the newest one happened. Start here."""
+        auth = await _auth(ctx)
+        async with reading(auth) as (conn, rc):
+            found = await reads.sources(conn, schemas, rc)
+            latest = await reads.freshness(conn, schemas, rc)
+        return _text({
+            "scopes": list(rc.scopes),
+            "sources": [
+                {**dataclasses.asdict(s), "latest_record": latest.get(s.id)} for s in found
+            ],
+        })  # fmt: skip
+
+    @add
     async def data_search(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         query: str,
@@ -135,7 +153,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ]
         return _text({"hits": hits, "notes": result.notes})
 
-    @mcp.tool()
+    @add
     async def data_get(ctx: Context, record_id: str, start: int = 0) -> str:  # pyright: ignore[reportUnusedFunction]
         """Open one record by its `record_id`: its text (12,000 characters from `start`; a
         `next_start` says where the rest continues) and its attached files for `data_file`."""
@@ -153,7 +171,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             "files": [dataclasses.asdict(a) for a in record.attachments],
         })  # fmt: skip
 
-    @mcp.tool()
+    @add
     async def data_file(ctx: Context, record_id: str, index: int) -> str:  # pyright: ignore[reportUnusedFunction]
         """Read a file attached to a record (`index` from `data_get`'s files), fetched now from
         its source with the source's permissions and never stored. Text files return their
@@ -170,7 +188,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         text = data.decode("utf-8", "replace")[:PAGE] if textual else None
         return _text({"content_type": content_type, "size": len(data), "text": text})
 
-    @mcp.tool()
+    @add
     async def data_sql(ctx: Context, query: str) -> str:  # pyright: ignore[reportUnusedFunction]
         """Read-only SQL over the data views and datasets (`data_sources` lists them), by plain
         names. One statement, at most 500 rows, five seconds."""
