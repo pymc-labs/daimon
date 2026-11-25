@@ -60,9 +60,13 @@ from daimon.adapters.discord.audience_rest import (
 )
 from daimon.adapters.discord.member_sync import tenant_of
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.audience_facts import AudienceChannel, AudienceMember
+from daimon.core.audience_facts import AudienceChannel, AudienceMember, compute_room_viewers
+from daimon.core.config import Settings
+from daimon.core.data_audience import CAP
+from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores import audience_facts as facts_store
+from daimon.core.stores import room_viewers
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -301,8 +305,10 @@ class AudienceSync:
         reconcile_limit_s: float = RECONCILE_LIMIT_S,
         db_wait_s: float = DB_WAIT_S,
         max_reads: int = MAX_READS,
+        settings: Settings | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
+        self._settings = settings
         self._reader = reader
         self._clock = clock
         self._fresh_for = timedelta(seconds=fresh_for_s)
@@ -615,6 +621,30 @@ class AudienceSync:
         now = self._clock()
         return all(fresh.same(e, d, now) for e, d in seen.events.values())
 
+    async def _publish_viewers(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        snapshot: GuildSnapshot,
+        generation: int,
+        now: datetime,
+    ) -> None:
+        """Who views each room, kept only while the workspace has data sources on."""
+        place = FeaturePlace(tenant_id, "discord")
+        if not (await feature_in(session, self._settings, place, "data_sources")).on:
+            await room_viewers.clear_viewers(session, tenant_id=tenant_id)
+            return
+        viewers = compute_room_viewers(
+            guild_id=snapshot.guild_id,
+            members=snapshot.members,
+            role_permissions=snapshot.role_permissions,
+            channels=snapshot.channels,
+            cap=CAP,
+        )
+        await room_viewers.publish_viewers(
+            session, tenant_id=tenant_id, generation=generation, viewers=viewers, now=now
+        )
+
     async def _publish(
         self,
         guild: discord.Guild,
@@ -673,6 +703,7 @@ class AudienceSync:
                     now=now,
                     fresh_until=min(now + self._fresh_for, limit),
                 )
+                await self._publish_viewers(session, tenant_id, snapshot, generation, now)
                 if not self._current(tenant_id, epoch, changes, fresh) or guild.unavailable:
                     raise _Crossed  # rolls the write back
         except _Crossed:

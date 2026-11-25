@@ -158,6 +158,63 @@ def compute_room_facts(
     return facts
 
 
+def compute_room_viewers(
+    *,
+    guild_id: str,
+    members: Iterable[AudienceMember],
+    role_permissions: Mapping[str, int],
+    channels: Sequence[AudienceChannel],
+    cap: int,
+) -> dict[str, frozenset[str]]:
+    """Each room's viewers (View Channel, bots left out), for rooms of at most `cap`.
+
+    A public thread or forum post has its parent's viewers. A private thread, a room over
+    `cap` and a channel of a type this rule does not know are left out: unknown.
+    """
+    people = [
+        DiscordMember(
+            m.user_id, m.role_ids - {guild_id}, is_owner=m.is_owner, timed_out=m.timed_out
+        )
+        for m in members
+        if not m.is_bot
+    ]
+    viewers: dict[str, frozenset[str]] = {}
+    for channel in channels:
+        if channel.type not in _ROOMS:
+            continue
+        found = _viewers(guild_id, role_permissions, people, channel.overwrites)
+        if len(found) <= cap:
+            viewers[channel.id] = found
+    for channel in channels:
+        parent = viewers.get(channel.parent_id or "")
+        if channel.type in _THREADS - {_PRIVATE_THREAD} and parent is not None:
+            viewers[channel.id] = parent
+    return viewers
+
+
+def _viewers(
+    guild_id: str,
+    role_permissions: Mapping[str, int],
+    people: Sequence[DiscordMember],
+    overwrites: Sequence[DiscordOverwrite],
+) -> frozenset[str]:
+    """Who of `people` can view a channel with these overwrites; one check per role set
+    for people with no overwrite of their own, as `_count` does."""
+    named = {o.id for o in overwrites if o.type == 1}
+    groups: dict[tuple[frozenset[str], bool, bool], list[DiscordMember]] = defaultdict(list)
+    found: set[str] = set()
+    for person in people:
+        if person.user_id in named:
+            if _holds(person, guild_id, role_permissions, overwrites, _VIEW):
+                found.add(person.user_id)
+        else:
+            groups[(person.role_ids, person.is_owner, person.timed_out)].append(person)
+    for group in groups.values():
+        if _holds(group[0], guild_id, role_permissions, overwrites, _VIEW):
+            found.update(p.user_id for p in group)
+    return frozenset(found)
+
+
 _VIEW = DISCORD_VIEW_CHANNEL
 _READ = DISCORD_VIEW_CHANNEL | DISCORD_READ_HISTORY
 """Permission bits a person must hold: to view a room, and to read it."""
