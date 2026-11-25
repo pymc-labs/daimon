@@ -407,7 +407,12 @@ def test_selectable_models_list_the_default_first_and_never_pro() -> None:
         "gemini-3.8-flash",
         *OPT_IN_MODELS,
     )
-    assert OPT_IN_MODELS == ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
+    assert OPT_IN_MODELS == (
+        "gemini-4-argon",
+        "gemini-4-carbon",
+        "gemini-4-hydrogen",
+        "gemini-4-neon",
+    )
     assert selectable_models("openai") == (
         "gpt-6-luna",
         "gpt-6-astra",

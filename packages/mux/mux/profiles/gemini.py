@@ -21,7 +21,12 @@ SESSION_NAMESPACE: Final = "gemini.session"
 
 #: Opt-in models, defined once: each is its own single attempt, never the Flash
 #: fallback chain, and is selectable only while the host holds a current price.
-OPT_IN_MODELS: Final = ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
+OPT_IN_MODELS: Final = (
+    "gemini-4-argon",
+    "gemini-4-carbon",
+    "gemini-4-hydrogen",
+    "gemini-4-neon",
+)
 
 # A model interaction's thinking level (agent interactions take none); names match.
 _EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}

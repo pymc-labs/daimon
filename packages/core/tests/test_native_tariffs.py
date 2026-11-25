@@ -12,6 +12,7 @@ import pytest
 from daimon.core import pricing
 from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
+from mux.profiles.gemini import OPT_IN_MODELS
 
 
 @pytest.fixture(autouse=True)
@@ -240,6 +241,28 @@ def test_hydrogen_has_one_flat_tariff(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ("gemini", "gemini-4-hydrogen") not in pricing.provider_prices("gemini.inline_reuse")
 
 
+def test_neon_has_one_flat_tariff(monkeypatch: pytest.MonkeyPatch) -> None:
+    for day in (date(2026, 11, 24), date(2026, 12, 1), date(2030, 1, 1)):
+        _clock(monkeypatch, day)
+        price = pricing.provider_prices("gemini.inline_reuse")[("gemini", "gemini-4-neon")]
+        assert (price.input, price.output, price.cache_read, price.valid_before) == (
+            Decimal("3.00"),
+            Decimal("15.00"),
+            Decimal("0.15"),
+            None,
+        ), f"flat rates on {day}"
+        assert price.cache_read == price.input * Decimal("0.05")
+        # 90 x $3 + 10 cached x $0.15 + 20 output x $15, per 1M.
+        value = usage(price, observed_at=datetime(day.year, day.month, day.day, tzinfo=UTC))
+        assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) == Decimal(
+            ".0005715"
+        )
+    _clock(monkeypatch, date(2026, 11, 17))
+    assert ("gemini", "gemini-4-neon") not in pricing.provider_prices("gemini.inline_reuse"), (
+        "no price before the model existed"
+    )
+
+
 @pytest.mark.parametrize(
     ("model", "before", "after"),
     [
@@ -265,7 +288,7 @@ def test_a_successor_row_takes_over_on_its_start_date(
         assert pricing.provider_price_on(model, day) is price, "settlement picks the same row"
 
 
-@pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"])
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
 def test_an_opt_in_model_never_lapses(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
     for day in (date(2026, 12, 1), date(2027, 1, 1), date(2035, 1, 1)):
         _clock(monkeypatch, day)

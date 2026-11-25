@@ -25,6 +25,8 @@ from mux.profiles.gemini import OPT_IN_MODELS
         ("argon", "gemini-4-argon"),
         ("carbon", "gemini-4-carbon"),
         ("hydrogen", "gemini-4-hydrogen"),
+        ("neon", "gemini-4-neon"),
+        ("gemini 4 neon", "gemini-4-neon"),
         ("gemini 4 carbon", "gemini-4-carbon"),
         ("Gemini 4 Hydrogen", "gemini-4-hydrogen"),
         ("lunaa", "gpt-6-luna"),
@@ -49,7 +51,7 @@ def test_every_opt_in_model_resolves_by_id_and_natural_name(model):
 def test_a_bare_generation_never_picks_one_of_the_opt_in_models():
     with pytest.raises(ValueError, match="could mean") as error:
         resolve_model("gemini 4")
-    for word in ("argon", "carbon", "hydrogen"):
+    for word in ("argon", "carbon", "hydrogen", "neon"):
         assert word in str(error.value).lower()
 
 
@@ -126,6 +128,7 @@ def test_family_shorthand_never_means_the_pricier_fast_preset():
         ("gemini", "gemini-4-argon", "Gemini 4 Argon"),
         ("gemini", "gemini-4-carbon", "Gemini 4 Carbon"),
         ("gemini", "gemini-4-hydrogen", "Gemini 4 Hydrogen"),
+        ("gemini", "gemini-4-neon", "Gemini 4 Neon"),
         ("gemini", "gemini-3.8-flash", "Gemini 3.8 Flash"),
     ],
 )

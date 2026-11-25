@@ -792,6 +792,16 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.075"),
                 web_search=_GEMINI_SEARCH,
             ),
+            # Neon (released 2026-11-18) has one flat standard tariff, no intro rate.
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-4-neon",
+                date(2026, 11, 24),
+                Decimal("3.00"),
+                Decimal("15.00"),
+                Decimal("0.15"),
+                web_search=_GEMINI_SEARCH,
+            ),
         ),
     }
 )
