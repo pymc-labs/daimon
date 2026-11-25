@@ -74,6 +74,7 @@ Where each feature can be set, and its default.
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
+| Shared connections | `shared_connections` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | On by default on Teams |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |  |
@@ -744,6 +745,18 @@ Every message in private and shared channels is read through Microsoft Graph, no
 | Levels | Deployment |
 | Combines | Off above is a ceiling |
 | Deprecated | `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` |
+
+## Shared connections
+
+The team's shared MCP connections: admins add a server once, approve its tools, and the agents and MCP clients of the workspace use them as tools named after the connection. A tool acts with the connection's own credential, not as the person. Off hides them all.
+
+| | |
+| --- | --- |
+| Key | `shared_connections` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
 
 ## Direct messages
 

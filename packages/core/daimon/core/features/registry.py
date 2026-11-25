@@ -718,6 +718,24 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         legacy_env=("DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED",),
     ),
     FeatureSpec(
+        key="shared_connections",
+        name="Shared connections",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "The team's shared MCP connections: admins add a server once, approve its tools, and "
+            "the agents and MCP clients of the workspace use them as tools named after the "
+            "connection. A tool acts with the connection's own credential, not as the person. "
+            "Off hides them all."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
         key="direct_messages",
         name="Direct messages",
         category="capabilities",

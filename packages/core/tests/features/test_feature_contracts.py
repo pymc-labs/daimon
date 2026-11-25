@@ -98,6 +98,7 @@ _NARROWED: dict[str, str] = {
     "direct_messages": "a workspace or agent policy for DMs, which have no channel or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_approvals": "a workspace policy for DMs, which have no agent, channel or thread to choose",
+    "shared_connections": "a workspace choice: the connections belong to the whole team",
     "dm_completion_pings": "a workspace policy for DMs, which have no channel or thread to choose",
     "thread_new": "read when /new runs, before an agent is chosen",
     "audience_hold": "a server admin's choice, read at admission once for the whole server",
