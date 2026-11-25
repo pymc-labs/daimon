@@ -32,3 +32,28 @@ export type Scope = { id: string; label: string }
 export type ApiToken = { id: string; label: string | null; scopes: string[]; created_at: string; expires_at: string | null }
 export type Tokens = { configured: boolean; scopes: Scope[]; days: number; tokens: ApiToken[] }
 export type Minted = { token: string; id: string; scopes: string[]; expires_at: string }
+
+export type ConnectionTool = {
+  name: string
+  description: string
+  seen_description: string
+  seen_arguments: string[]
+  seen: string
+  changed: boolean
+  enabled: boolean
+  writes: boolean
+  scope: string | null
+}
+export type Connection = {
+  id: string
+  name: string
+  url: string
+  status: "active" | "paused" | "error"
+  error: string | null
+  refreshed_at: string | null
+  scope: string | null
+  declared: boolean
+  has_token: boolean
+  tools: ConnectionTool[]
+}
+export type Connections = { enabled: boolean; connections: Connection[] }
