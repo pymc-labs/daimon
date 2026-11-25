@@ -33,6 +33,8 @@ from psycopg.types.json import Jsonb
 
 ProofKind = Literal["platform", "github", "oauth", "slack", "microsoft", "imported"]
 LinkProof = ProofKind | Literal["admin", "email", "auto"]
+GLOBAL_WORKSPACES = {"github": "github.com"}
+"""Providers whose ids are global: a sign-in proof there also links the same id in every roster."""
 EMAIL_PROOFS = ("oauth", "slack", "imported")
 """Links whose verified email speaks for the person: their own sign-ins, and imports."""
 
@@ -231,6 +233,8 @@ async def link(
             target=k.ref(),
             detail={"proof": proof.kind},
         )
+        if proof.kind == "github" and GLOBAL_WORKSPACES.get(k.provider) == k.workspace:
+            await _link_global(conn, schemas, tenant_id, k.provider, account=account_id)
 
 
 async def mirror_platform(
@@ -310,6 +314,8 @@ async def record_accounts(
             " and listed and not (subject = any(%s))".encode(),
             (tenant_id, provider, workspace, [a.subject for a in accounts]),
         )
+    if workspace != GLOBAL_WORKSPACES.get(provider, workspace):
+        await _link_global(conn, schemas, tenant_id, provider, workspace=workspace)
     domain = (auto_link_domain or "").strip().lower()
     return await _auto_link(conn, schemas, tenant_id, provider, workspace, domain) if domain else []
 
@@ -360,6 +366,62 @@ and not exists (select 1 from {d}.link_decisions x where x.tenant_id = %(tenant)
   and x.provider = %(provider)s and x.workspace = %(workspace)s
   and (x.subject = %(subject)s or x.account_id = %(account)s))
 """
+
+
+_GLOBAL = """
+select t.workspace, t.subject, g.account_id from {d}.identities t
+join {d}.identities g on g.tenant_id = t.tenant_id and g.provider = t.provider
+  and g.subject = t.subject and g.workspace = %(global)s and g.proof = 'github'
+where t.tenant_id = %(tenant)s and t.provider = %(provider)s and t.workspace <> %(global)s
+  and t.account_id is null and g.account_id is not null
+  and (%(workspace)s::text is null or t.workspace = %(workspace)s)
+  and (%(account)s::uuid is null or g.account_id = %(account)s)
+"""
+
+
+async def _link_global(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    tenant_id: uuid.UUID,
+    provider: str,
+    *,
+    workspace: str | None = None,
+    account: uuid.UUID | None = None,
+) -> None:
+    """Link each unlinked roster row whose id already signed in under the provider's global
+    workspace (all rosters, or one workspace, or one account); never one an admin decided on."""
+    d = schemas.data
+    args: dict[str, object] = {
+        "tenant": tenant_id,
+        "provider": provider,
+        "global": GLOBAL_WORKSPACES[provider],
+        "workspace": workspace,
+        "account": account,
+    }
+    cur = await conn.execute(_GLOBAL.format(d=d).encode(), args)
+    for found in await cur.fetchall():
+        one = {**args, "workspace": found["workspace"], "subject": found["subject"]}
+        one["account"] = found["account_id"]
+        async with conn.transaction():
+            await fence_account(conn, schemas, found["account_id"])
+            done = await conn.execute(
+                f"update {d}.identities set account_id = %(account)s, proof = 'github',"
+                " linked_at = now() where tenant_id = %(tenant)s and provider = %(provider)s"
+                " and workspace = %(workspace)s and subject = %(subject)s"
+                f" and account_id is null and {_UNDECIDED.format(d=d)} returning 1".encode(),
+                one,
+            )
+            if await done.fetchone() is None:
+                continue
+            await record_audit(
+                conn,
+                schemas,
+                tenant_id=tenant_id,
+                kind="identity.link",
+                account_id=found["account_id"],
+                target=IdentityKey(provider, found["workspace"], found["subject"]).ref(),
+                detail={"proof": "github"},
+            )
 
 
 async def _auto_link(

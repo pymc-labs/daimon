@@ -336,3 +336,28 @@ async def test_erasure_forgets_the_person_in_every_list_and_refuses_any_later_wr
             f"insert into {d}.grants (tenant_id, scope, holder) values (%s, 'x', %s)".encode(),
             (people.tenant, person(me)),
         )
+
+
+async def test_a_github_sign_in_links_the_same_id_in_every_roster_that_lists_it(
+    people: People,
+) -> None:
+    async def roster(org: str, *ids: str) -> None:
+        await identity.record_accounts(
+            people.conn,
+            people.schemas,
+            tenant_id=people.tenant,
+            provider="github",
+            workspace=org,
+            accounts=[SourceAccount(i) for i in ids],
+        )
+
+    me, late = uuid.uuid4(), uuid.uuid4()
+    await roster("acme", "11", "12")
+    await roster("other", "11")
+    await people.link(me, github_proof(11))
+    assert await people.reads(me, await people.record_for("github/acme:user:11"))
+    assert await people.reads(me, await people.record_for("github/other:user:11"))
+    assert not await people.reads(me, await people.record_for("github/acme:user:12"))
+    await people.link(late, github_proof(13))
+    await roster("acme", "11", "12", "13")
+    assert await people.reads(late, await people.record_for("github/acme:user:13")), "listed later"

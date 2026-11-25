@@ -180,8 +180,8 @@ members, direct and outside collaborators), plus every organization member while
 repository is public or internal. The list is read again every run and each record is checked
 against it when shown, so a repository made private or a person removed takes effect at once.
 A repository whose collaborators cannot be listed publishes nobody, and its records go dark
-within three hours. GitHub verifies no address, so a data admin links each person to their
-organization account. Each run reads what changed; every `relist_hours` it reads everything, which is
+within three hours. GitHub verifies no address: a person who signs in with GitHub is linked in every
+organization that lists their id; a data admin links anyone else. Each run reads what changed; every `relist_hours` it reads everything, which is
 how a deleted or transferred issue goes. Review comments and reviews are not read.
 
 ### GitHub markdown
