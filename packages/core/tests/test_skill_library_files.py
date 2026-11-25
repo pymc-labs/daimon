@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import re
 import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -20,7 +21,11 @@ from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import parse_entry
 from daimon.core.server_skills.mirror import add_server_skill
-from daimon.core.stores import server_skills, web_audit
+from daimon.core.server_skills.repo import RepoUpstream
+from daimon.core.server_skills.source import SystemWriter
+from daimon.core.skill_repos import RepoSkillOutcome, SkillRepoDecl, add_repo_skills
+from daimon.core.stores import server_skills, web_audit, workspace_skills
+from daimon.core.workspace_skills import record_published
 from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant, make_web_person
 from daimon.testing.mcp_skills import SkillsServer, skill_md
@@ -108,7 +113,8 @@ class _Library:
 
     def _create(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         self.created.append(request.content.decode("latin-1"))
-        body = skill_listed(id="sk_new", display_title="x", created_at=_TS, updated_at=_TS)
+        made = "sk_new" if len(self.created) == 1 else f"sk_new{len(self.created)}"
+        body = skill_listed(id=made, display_title="x", created_at=_TS, updated_at=_TS)
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def _content(self, _r: httpx.Request, match: re.Match[str]) -> httpx.Response:
@@ -384,3 +390,48 @@ async def test_adding_a_server_skill_mirrors_it_once(
         assert mirror.added_by_account_id == actor.account_id, "the sync asks as the adder"
         held = await server_skills.list_deployments(session, mirror.id)
     assert {p: d.version for p, d in held.items()} == {"managed_agents": "1"}
+
+
+async def test_a_declared_scope_comes_with_the_skill_stays_on_re_add_and_follows_a_fork(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    _library, deps, actor = await _setup(db_session, db_session_factory)
+    upstream = RepoUpstream(
+        tenant_id=actor.tenant_id,
+        repo="owner/skills",
+        branch="main",
+        sessionmaker=db_session_factory,
+        http=cast(httpx.AsyncClient, None),
+        app_id=None,
+        app_private_key=None,
+        now=lambda: _NOW,
+    )
+    upstream._tree = {"plots": {"SKILL.md": skill_md("plots")}}  # pyright: ignore[reportPrivateUsage]
+    decl = SkillRepoDecl(actor.tenant_id, "owner/skills", "main", scope="team")
+    writer = SystemWriter(actor.tenant_id)
+
+    added = await add_repo_skills(deps, upstream, decl, writer=writer, now=_NOW)
+    again = dataclasses.replace(decl, scope=None)
+    kept = await add_repo_skills(deps, upstream, again, writer=writer, now=_NOW)
+    await record_published(
+        db_session_factory,
+        tenant_id=actor.tenant_id,
+        skill_id="sk_1",
+        name="notes",
+        version="2",
+        files={"SKILL.md": _SKILL_MD.encode()},
+        scope="docs",
+    )
+    await _mirror_sk_1(deps, actor)
+    fork = await skill_library_files.fork_library_skill(
+        deps, actor=actor, skill_id="sk_1", name="My Notes"
+    )
+
+    assert added == [RepoSkillOutcome("plots", "added")]
+    assert kept == [RepoSkillOutcome("plots", "kept")]
+    async with db_session_factory() as session:
+        scopes = {
+            s.skill_id: s.scope
+            for s in await workspace_skills.list_skills(session, tenant_id=actor.tenant_id)
+        }
+    assert scopes == {"sk_new": "team", "sk_1": "docs", fork.id: "docs"}

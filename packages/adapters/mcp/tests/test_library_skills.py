@@ -18,7 +18,7 @@ from daimon.core.features.registry import FEATURES
 from daimon.core.features.tool_gate import server_gate_key
 from daimon.core.stores.domain import Role
 from daimon.core.workspace_skills import record_published
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_tenant, turn_on
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -43,6 +43,7 @@ async def test_a_caller_refused_data_sees_only_unscoped_skills_on_their_side(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant = await make_tenant(db_session)
+    await turn_on(db_session, tenant_id=tenant.id, key=LIBRARY_SKILLS)
     await db_session.commit()
     for skill_id, scope in (("open", None), ("team", "team"), ("across", None)):
         await record_published(

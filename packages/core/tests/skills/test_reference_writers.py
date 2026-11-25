@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.core.capability_tools import LIBRARY_SKILLS
 from daimon.core.channel_skills import add_skill_to_channel
 from daimon.core.defaults import reconcile_agents
 from daimon.core.defaults.metadata import tenant_scoped_display_title
@@ -34,7 +35,7 @@ from daimon.core.stores.workspace_skills import get_skill
 from daimon.core.workspace_skills import record_published
 from daimon.testing.archives import make_tarball
 from daimon.testing.crypto import make_fernet
-from daimon.testing.factories import make_cli_principal, make_tenant
+from daimon.testing.factories import make_cli_principal, make_tenant, turn_on
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -157,6 +158,8 @@ async def test_an_attach_after_the_final_check_is_left_pinning_the_deleted_skill
 
 async def test_a_deleted_skill_is_no_longer_served(sm: async_sessionmaker[AsyncSession]) -> None:
     tenant = await _tenant(sm)
+    async with sm.begin() as session:
+        await turn_on(session, tenant_id=tenant.id, key=LIBRARY_SKILLS)
     files = {"SKILL.md": b"x"}
     await record_published(
         sm, tenant_id=tenant.id, skill_id=SKILL, name="existing", version="1", files=files

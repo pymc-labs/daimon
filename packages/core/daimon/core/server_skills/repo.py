@@ -150,6 +150,8 @@ class RepoUpstream:
     max_tarball_decompressed_bytes: int = DEFAULT_MAX_TARBALL_DECOMPRESSED_BYTES
     _tree: dict[str, dict[str, bytes]] | None = field(default=None, init=False, repr=False)
     _token: list[str | None] = field(default_factory=list[str | None], init=False, repr=False)
+    _failed: UpstreamGone | UpstreamUnreachable | None = field(default=None, init=False, repr=False)
+    """A failed download, raised again for the rest of the pass: one fetch per repository."""
 
     async def anonymous(self) -> bool:
         """Whether the repository is read without the workspace's GitHub App: whoever
@@ -196,6 +198,8 @@ class RepoUpstream:
     async def _load(self) -> dict[str, dict[str, bytes]]:
         if self._tree is not None:
             return self._tree
+        if self._failed is not None:
+            raise self._failed
         try:
             tarball = await GitHubTarballFetcher(
                 self.http, max_tarball_bytes=self.max_tarball_bytes
@@ -210,9 +214,11 @@ class RepoUpstream:
                 )
                 self._tree = await asyncio.to_thread(_read_tree, found)
         except (GitHubAuthError, GitHubUnreachable, TarballTooLarge) as err:
-            raise UpstreamGone(type(err).__name__) from err
+            self._failed = UpstreamGone(type(err).__name__)
+            raise self._failed from err
         except (GitHubRateLimitError, httpx.HTTPError) as err:
-            raise UpstreamUnreachable(type(err).__name__) from err
+            self._failed = UpstreamUnreachable(type(err).__name__)
+            raise self._failed from err
         return self._tree
 
     async def listing(self, *, tenant_id: uuid.UUID) -> Sequence[SkillEntry]:

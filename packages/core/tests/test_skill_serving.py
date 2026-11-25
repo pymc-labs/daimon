@@ -1,9 +1,10 @@
 """Serving a library skill reads its latest version's files from the local copy."""
 
+from daimon.core.capability_tools import LIBRARY_SKILLS
 from daimon.core.skill_serving import read_served
 from daimon.core.stores import workspace_skills as store
 from daimon.core.workspace_skills import record_published
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_tenant, turn_on
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -11,6 +12,7 @@ async def test_a_read_serves_a_listed_skills_latest_files_only(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session)
+    await turn_on(db_session, tenant_id=tenant.id, key=LIBRARY_SKILLS)
     await db_session.commit()
     await record_published(
         db_session_factory,

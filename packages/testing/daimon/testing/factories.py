@@ -70,6 +70,7 @@ from daimon.core.stores.domain import (
     ChannelBudgetRow,
     CliPrincipalRow,
     ContinuationReason,
+    FeatureTarget,
     GitHubAppInstallationRow,
     McpTokenRow,
     Platform,
@@ -86,6 +87,7 @@ from daimon.core.stores.domain import (
     WebPersonRow,
     WizardSessionRow,
 )
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.security_audit import SecurityAuditRow
 from daimon.core.stores.tenant_ledger import insert_entry
 from daimon.core.stores.web_people import upsert_member
@@ -315,6 +317,19 @@ async def set_github_installation_snapshot(
     row.github_repo_full_names = repo_full_names
     row.github_refreshed_at = refreshed_at
     await session.flush()
+
+
+async def turn_on(session: AsyncSession, *, tenant_id: uuid.UUID, key: str) -> None:
+    """Turn the feature `key` On for the whole workspace."""
+    await set_feature_value(
+        session,
+        tenant_id=tenant_id,
+        target=FeatureTarget("workspace"),
+        key=key,
+        value="on",
+        set_by=None,
+        surface="cli",
+    )
 
 
 async def make_tenant_github_repo(

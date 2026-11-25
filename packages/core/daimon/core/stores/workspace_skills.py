@@ -27,8 +27,9 @@ async def record_version(
     """Keep a published version's files and make it the skill's latest, unless a newer one
     is already latest (versions order by length, then text: provider timestamps).
 
-    Recording a version again changes nothing, so a retry after a crash is safe. `scope` is
-    set only on a new skill; an existing skill keeps its own.
+    Recording a version again changes nothing, so a retry after a crash is safe. A given
+    `scope` is set (a new skill's, even when the backfill recorded it first); without one the
+    skill keeps its own.
     """
     stmt = insert(WorkspaceSkill).values(
         tenant_id=tenant_id, skill_id=skill_id, name=name, scope=scope, current_version=version
@@ -37,7 +38,12 @@ async def record_version(
     await session.execute(
         stmt.on_conflict_do_update(
             index_elements=["tenant_id", "skill_id"],
-            set_={"name": name, "current_version": version, "updated_at": func.now()},
+            set_={
+                "name": name,
+                "current_version": version,
+                "scope": func.coalesce(stmt.excluded.scope, WorkspaceSkill.scope),
+                "updated_at": func.now(),
+            },
             where=tuple_(func.length(stmt.excluded.current_version), stmt.excluded.current_version)
             >= tuple_(func.length(held), held),
         )

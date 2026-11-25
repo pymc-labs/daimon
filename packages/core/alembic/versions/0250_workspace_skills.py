@@ -3,8 +3,8 @@
 `workspace_skills` holds one row per (tenant, library skill): its name, latest version and
 an optional `scope` (NULL: visible to everyone who may use the library). Each published
 version gets a `workspace_skill_versions` row and one `workspace_skill_files` row per file,
-so a skill can be served per caller without asking the provider. The tables are empty until
-a version is published; nothing reads them unless a scope checker is wired in.
+so a skill can be served per caller without asking the provider. Versions are kept only for
+workspaces with `library_skills` On, and for scoped skills; only that feature's tools read them.
 
 Downgrading drops the tables; the library skills at the provider are unchanged.
 

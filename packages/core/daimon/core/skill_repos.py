@@ -220,13 +220,14 @@ async def add_repo_skills(
 
 
 async def _keep_scope(deps: AgentEditDeps, decl: SkillRepoDecl, skill_id: str) -> None:
+    """Set the declared scope on a kept skill. One not recorded yet is not served either: the
+    backfill records it before the next declared pass sets the scope."""
     if decl.scope is None:
         return
     async with deps.session_factory() as session, session.begin():
-        if not await workspace_skills_store.set_scope(
+        await workspace_skills_store.set_scope(
             session, tenant_id=decl.tenant_id, skill_id=skill_id, scope=decl.scope
-        ):
-            raise AgentEditError("The skill's scope could not be saved.", kind="unavailable")
+        )
 
 
 async def sync_declared_skill_repos(
@@ -250,6 +251,14 @@ async def sync_declared_skill_repos(
             )
         except (UpstreamGone, UpstreamUnreachable) as err:
             log.warning("skill_repo.declared_unreadable", repo=decl.repo, err=type(err).__name__)
+            continue
+        for failed in (o for o in out[key] if o.action == "failed"):
+            log.warning(
+                "skill_repo.declared_skill_failed",
+                repo=decl.repo,
+                skill=failed.name,
+                detail=failed.detail,
+            )
     return out
 
 

@@ -170,31 +170,48 @@ async def _library_skills_tenants(runtime: WebRuntime) -> list[uuid.UUID]:
     ]
 
 
-async def sync_source_skills(runtime: WebRuntime) -> None:
-    """One pass: add declared repositories' skills, check every mirror whose source runs in
-    process (each repository downloaded once) and record library skills not yet kept. A
-    failing one is retried on the next pass."""
-    upstreams: Upstreams = {}
-    edit = change_deps(runtime).edit
+async def _declared_repos(runtime: WebRuntime, upstreams: Upstreams) -> None:
     settings = runtime.settings
     loader = skill_repo_loader(settings)
-    if loader is not None:
-        await sync_declared_skill_repos(
-            loader,
-            edit=edit,
-            upstream_for=lambda decl: repo_upstream(
-                settings.github,
-                settings.github_app,
-                edit,
-                tenant_id=decl.tenant_id,
-                repo=decl.repo,
-                branch=decl.branch,
-                http=runtime.http_client,
-                now=runtime.now,
-                upstreams=upstreams,
-            ),
+    if loader is None:
+        return
+    edit = change_deps(runtime).edit
+    await sync_declared_skill_repos(
+        loader,
+        edit=edit,
+        upstream_for=lambda decl: repo_upstream(
+            settings.github,
+            settings.github_app,
+            edit,
+            tenant_id=decl.tenant_id,
+            repo=decl.repo,
+            branch=decl.branch,
+            http=runtime.http_client,
             now=runtime.now,
-        )
+            upstreams=upstreams,
+        ),
+        now=runtime.now,
+    )
+
+
+async def sync_source_skills(runtime: WebRuntime) -> None:
+    """One pass: record library skills not yet kept, add declared repositories' skills (after
+    the backfill, so a declared scope lands on the kept record), then check every mirror whose
+    source runs in process, each repository downloaded once. A failing step is logged and
+    retried on the next pass."""
+    upstreams: Upstreams = {}
+    edit = change_deps(runtime).edit
+    for tenant_id in await _library_skills_tenants(runtime):
+        try:
+            await record_library_skills(edit, writer=SystemWriter(tenant_id))
+        # Boundary: one workspace's library must not stop the others or the loop.
+        except Exception:
+            log.warning("workspace_skill.backfill_failed", tenant_id=str(tenant_id), exc_info=True)
+    try:
+        await _declared_repos(runtime, upstreams)
+    # Boundary: the declared file must not stop the mirror checks.
+    except Exception:
+        log.warning("skill_repo.declared_failed", exc_info=True)
     async with runtime.sessionmaker() as session:
         mirrors = await store.list_mirrors(session)
     for mirror in mirrors:
@@ -206,12 +223,6 @@ async def sync_source_skills(runtime: WebRuntime) -> None:
         # Boundary: one mirror's surprise must not stop the others or the loop.
         except Exception:
             log.warning("server_skill.check_failed", mirror_id=str(mirror.id), exc_info=True)
-    for tenant_id in await _library_skills_tenants(runtime):
-        try:
-            await record_library_skills(edit, writer=SystemWriter(tenant_id))
-        # Boundary: one workspace's library must not stop the others or the loop.
-        except Exception:
-            log.warning("workspace_skill.backfill_failed", tenant_id=str(tenant_id), exc_info=True)
 
 
 async def sync_source_skills_forever(runtime: WebRuntime) -> None:
@@ -219,7 +230,8 @@ async def sync_source_skills_forever(runtime: WebRuntime) -> None:
     while True:
         try:
             await sync_source_skills(runtime)
-        except SQLAlchemyError:
+        # Boundary: one failed pass must never end mirror polling.
+        except Exception:
             log.warning("server_skill.sync_failed", exc_info=True)
         await asyncio.sleep(CHECK_INTERVAL_S)
 

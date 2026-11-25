@@ -12,10 +12,13 @@ import uuid
 from collections.abc import Collection, Mapping
 
 import structlog
+from daimon.core.capability_tools import LIBRARY_SKILLS
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.server_skills.gate import manifest_digest
 from daimon.core.skills.ingest import retained_archive_files
 from daimon.core.stores import workspace_skills as store
 from daimon.core.stores.domain import WorkspaceSkillRow
+from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["ScopeUnsaved", "files_digest", "may_read", "record_published", "record_zip"]
@@ -33,6 +36,19 @@ def files_digest(files: Mapping[str, bytes]) -> str:
     return manifest_digest({path: hashlib.sha256(body).hexdigest() for path, body in files.items()})
 
 
+async def _served_here(
+    session_factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> bool:
+    """Whether the workspace serves its library (`library_skills`), so versions are kept."""
+    async with session_factory() as session:
+        tenant = await get_tenant(session, tenant_id)
+    if tenant is None:
+        return False
+    place = FeaturePlace(tenant_id, tenant.platform)
+    found = await resolve_features(session_factory, None, place, keys=(LIBRARY_SKILLS,))
+    return found.on(LIBRARY_SKILLS)
+
+
 async def record_published(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -43,7 +59,8 @@ async def record_published(
     files: Mapping[str, bytes],
     scope: str | None = None,
 ) -> None:
-    """Keep what was just published at the provider; `scope` is a new skill's scope.
+    """Keep what was just published at the provider, where `library_skills` is On; `scope`
+    is a new skill's scope, kept wherever it is set.
 
     The provider already holds the version, so a failure here is logged and the publish
     stands; the next publish or the backfill records it. A new skill given a scope is the
@@ -52,6 +69,8 @@ async def record_published(
     if not version or version == "latest":
         return
     try:
+        if scope is None and not await _served_here(session_factory, tenant_id):
+            return
         async with session_factory() as session, session.begin():
             await store.record_version(
                 session,
