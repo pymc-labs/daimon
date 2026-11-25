@@ -45,11 +45,11 @@ async def read_context(
     conn: AsyncConnection[DictRow], schemas: Schemas, auth: AuthIdentity, audience: DataAudience
 ) -> ReadContext:
     """What `audience` may read together: the scopes they all hold, and their access lists."""
-    scopes_of: dict[uuid.UUID, frozenset[str]] = {}
-    for account in audience.people:
-        holders = await identity.list_holders(conn, schemas, auth.tenant_id, account)
-        held = await access.effective_scopes(conn, schemas, auth.tenant_id, holders)
-        scopes_of[account] = frozenset(held)
+    holders = await identity.holders_of(conn, schemas, auth.tenant_id, list(audience.people))
+    scopes_of: dict[uuid.UUID, frozenset[str]] = {
+        account: frozenset(await access.effective_scopes(conn, schemas, auth.tenant_id, held))
+        for account, held in holders.items()
+    }
     readers = [*map(person, audience.people), *audience.guests] if audience.list_rows else []
     return ReadContext(
         tenant_ids=(auth.tenant_id,),
