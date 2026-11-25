@@ -79,7 +79,10 @@ async def forget_viewer(session: AsyncSession, *, tenant_id: uuid.UUID, viewer: 
     until the next publish, which only names people still in the server."""
     found = await session.execute(
         delete(DiscordRoomViewers)
-        .where(DiscordRoomViewers.tenant_id == tenant_id, DiscordRoomViewers.user_ids.any(viewer))
+        .where(
+            DiscordRoomViewers.tenant_id == tenant_id,
+            DiscordRoomViewers.user_ids.contains([viewer]),
+        )
         .returning(DiscordRoomViewers.channel_id)
     )
     return len(found.all())
@@ -89,6 +92,9 @@ async def count_viewer(session: AsyncSession, *, tenant_id: uuid.UUID, viewer: s
     found = await session.execute(
         select(func.count())
         .select_from(DiscordRoomViewers)
-        .where(DiscordRoomViewers.tenant_id == tenant_id, DiscordRoomViewers.user_ids.any(viewer))
+        .where(
+            DiscordRoomViewers.tenant_id == tenant_id,
+            DiscordRoomViewers.user_ids.contains([viewer]),
+        )
     )
     return found.scalar_one()
