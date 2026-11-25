@@ -32,7 +32,13 @@ from daimon.core.stores.domain import DiscoveredTool, Role
 from daimon.core.stores.host_call_cards import list_cards
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_ledger_entry,
+    make_platform_principal,
+    make_tenant,
+)
+from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -143,6 +149,7 @@ async def world(
     async with committing_sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id=_GUILD)
         account = await make_account(session, tenant=tenant)
+        await make_ledger_entry(session, tenant=tenant)  # the hub's spend gate
         await make_platform_principal(
             session, platform="discord", external_id=_USER, tenant=tenant, account=account
         )
@@ -195,7 +202,10 @@ async def world(
         mcp=McpSettings(jwt_secret=SecretStr("s" * 32), public_url=HttpUrl(_URL)),
     )
     runtime = SimpleNamespace(
-        session_factory=committing_sessionmaker, settings=settings, fernet=fernet
+        session_factory=committing_sessionmaker,
+        settings=settings,
+        fernet=fernet,
+        membership_resolver=FixtureMembershipResolver(_USER),
     )
     middleware = IdentityMiddleware(
         subject_resolver=_none,

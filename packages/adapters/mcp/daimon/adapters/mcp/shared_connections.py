@@ -5,12 +5,13 @@ Each approved tool of a connection appears as `<connection>_<tool>` to a caller 
 first: the agent's tool rules refuse a name, a write is carded for a chat credential and
 refused for a client with no way to answer one, and every call leaves a security audit row.
 The description and schema shown are the ones an admin approved, never the upstream's live text.
+What a caller sees is read once per request; a Daimon tool's name is never looked up here.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -31,6 +32,8 @@ log = structlog.get_logger(__name__)
 
 #: The operation the security audit row names for a call of a shared tool.
 OPERATION = "shared_connection.call"
+_SEEN = "shared_connections.visible"
+"""Request state: what this request's caller sees (`SharedConnectionProvider._visible`)."""
 
 
 def caller_of(auth: AuthIdentity) -> shared.SharedCaller:
@@ -95,23 +98,26 @@ class SharedConnectionProvider(Provider):
             ctx = get_context()
         except RuntimeError:
             return []
+        seen = await ctx.get_state(_SEEN)
+        if isinstance(seen, list):
+            return cast("list[shared.SharedTool]", seen)
         auth = await ctx.get_state("auth")
         if not isinstance(auth, AuthIdentity):
             return []
         runtime = self._runtime
+        found: list[shared.SharedTool] = []
         places = await caller_places(runtime, auth, None)
-        if not await shared.shared_connections_on(
-            runtime.session_factory, runtime.settings, places
-        ):
-            return []
-        async with runtime.session_factory() as session:
-            return await shared.served_tools(session, caller_of(auth))
+        if await shared.shared_connections_on(runtime.session_factory, runtime.settings, places):
+            async with runtime.session_factory() as session:
+                found = await shared.served_tools(session, caller_of(auth))
+        await ctx.set_state(_SEEN, found, serializable=False)
+        return found
 
     async def _list_tools(self) -> Sequence[Tool]:
         return [tool_of(self._runtime, found) for found in await self._visible()]
 
     async def _get_tool(self, name: str, version: VersionSpec | None = None) -> Tool | None:
-        if not shared.is_served_name(name):
+        if name in shared.DAIMON_TOOL_NAMES or not shared.is_served_name(name):
             return None
         found = next((s for s in await self._visible() if s.name == name), None)
         return None if found is None else tool_of(self._runtime, found)

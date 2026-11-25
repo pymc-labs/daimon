@@ -1,21 +1,26 @@
 """The hub's view of a workspace's shared MCP connections, for an outside client.
 
 A hub caller is one platform user across several workspaces, so both tools name the
-workspace. The feature, the tool's scope and the safety rules are the ones `/mcp` applies; a
-hub client has no card to answer, so a read runs and a write is refused. Every call leaves a
-security audit row, the hub having no identity middleware of its own to write it.
+workspace. Each call first passes the checks every hub tool runs (`_auth_for`, `_admit`): the
+workspace is live, the account exists, and the access policy admits the caller now. The
+feature, the tool's scope and the safety rules are the ones `/mcp` applies; a hub client has
+no card to answer, so it gets reads only. Every call leaves a security audit row, the hub
+having no identity middleware of its own to write it.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from daimon.adapters.mcp.hub.identity import (
     HubIdentity,
     _hub_auth,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.middleware.host_call_gate import schema_problem
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.shared_connections import OPERATION
+from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.hub import _auth_for  # pyright: ignore[reportPrivateUsage]
 from daimon.core import shared_connections as shared
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.hub_identity import HubTenant
@@ -28,6 +33,7 @@ from pydantic import BaseModel, JsonValue
 from mcp.types import TextContent
 
 _UNKNOWN = "No such workspace. Call list_daimons to see the ones you can reach."
+_NAME_MAX = 128
 _OFF = "Shared connections are turned off in that workspace."
 _NO_WRITES = (
     "This tool changes things and needs a person's approval, which this client can't ask "
@@ -50,7 +56,18 @@ def _tenant(hub: HubIdentity, workspace_id: str) -> HubTenant:
 
 
 def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    async def _served(hub: HubIdentity, tenant: HubTenant) -> list[shared.SharedTool]:
+    async def _served(
+        hub: HubIdentity, tenant: HubTenant, tool_name: str
+    ) -> list[shared.SharedTool]:
+        auth = await _auth_for(runtime, hub, tenant, None)
+        await _admit(
+            auth,
+            sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
+            billing_config=None,
+            markup=runtime.settings.billing.markup,
+            tool_name=tool_name,
+        )
         place = FeaturePlace(tenant.tenant_id, hub.platform)
         if not await shared.shared_connections_on(
             runtime.session_factory, runtime.settings, [place]
@@ -61,7 +78,11 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             return await shared.served_tools(session, caller)
 
     async def _audit(
-        hub: HubIdentity, tenant: HubTenant, name: str, outcome: str, reason: str
+        hub: HubIdentity,
+        tenant: HubTenant,
+        name: str,
+        outcome: Literal["allowed", "denied", "error"],
+        reason: str,
     ) -> None:
         async with runtime.session_factory.begin() as session:
             await append_event(
@@ -72,9 +93,9 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                     agent_id=None,
                     platform=hub.platform,
                     platform_user_id=hub.platform_user_id,
-                    tool_name=name,
+                    tool_name=name[:_NAME_MAX],
                     operation=OPERATION,
-                    outcome="allowed" if outcome == "allowed" else "denied",
+                    outcome=outcome,
                     reason=reason,
                 ).model_dump(),
             )
@@ -90,7 +111,7 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         and can't be called from here.
         """
         hub = await _hub_auth(ctx)
-        found = await _served(hub, _tenant(hub, workspace_id))
+        found = await _served(hub, _tenant(hub, workspace_id), "list_shared_tools")
         return [
             SharedToolInfo(
                 name=t.name,
@@ -109,11 +130,14 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         list_shared_tools. Only tools that don't change anything run from here."""
         hub = await _hub_auth(ctx)
         tenant = _tenant(hub, workspace_id)
-        found = next((t for t in await _served(hub, tenant) if t.name == name), None)
+        served = await _served(hub, tenant, "call_shared_tool")
+        found = next((t for t in served if t.name == name), None)
         if found is None:
             await _audit(hub, tenant, name, "denied", "not_served")
-            raise ToolError(f"No shared tool named {name}.")
+            raise ToolError("No shared tool by that name.")
         args = arguments or {}
+        if (problem := schema_problem(found.tool.input_schema, args)) is not None:
+            raise ToolError(problem)
         verdict = shared.decide_shared_call(
             runtime.settings.tool_safety,
             found.name,
@@ -121,6 +145,7 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             writes=found.tool.writes,
             attended=False,
             agent_rule=None,
+            outside=True,
         )
         if verdict.outcome != "allow":
             await _audit(hub, tenant, name, "denied", f"verdict_{verdict.reason}")
@@ -130,7 +155,7 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         try:
             result = await shared.call_upstream(runtime.fernet, found, dict[str, JsonValue](args))
         except shared.SharedConnectionError as err:
-            await _audit(hub, tenant, name, "denied", "upstream_failed")
+            await _audit(hub, tenant, name, "error", "upstream_failed")
             raise ToolError(str(err)) from err
         await _audit(hub, tenant, name, "allowed", "policy_allow")
         if result.is_error:

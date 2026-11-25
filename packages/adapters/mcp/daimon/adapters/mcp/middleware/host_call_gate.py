@@ -16,14 +16,16 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.core import host_calls
-from daimon.core.features.snapshot import deployment_on
+from daimon.core.data_seal import reads_data
+from daimon.core.features.snapshot import FeaturePlace, deployment_on
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import record_denial
 from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
+from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, after_data_read
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import ToolResult
@@ -33,6 +35,7 @@ from mcp.types import TextContent
 if TYPE_CHECKING:
     from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.core.stores.domain import TurnOriginRow
 
 log = structlog.get_logger()
 
@@ -139,12 +142,37 @@ class HostCallGate:
         """Whether the host call gate is off on this credential's platform."""
         return not deployment_on(self._runtime.settings, "host_call_gate", identity.platform or "")
 
+    async def _read_data(self, identity: AuthIdentity, origin: TurnOriginRow) -> bool:
+        """Whether the turn's session reads data sources, now or in an earlier turn
+        (`SessionSnapshot.data_read`), as the driver's `data_read` reads it."""
+        place = FeaturePlace.of(
+            identity.tenant_id,
+            origin.platform,
+            origin.parent_channel_id,
+            origin.thread_id,
+            agent_id=origin.responder_ma_agent_id,
+        )
+        if await reads_data(self._runtime.session_factory, self._runtime.settings, place):
+            return True
+        async with self._runtime.session_factory() as session:
+            row = await get_live_thread_session(
+                session,
+                tenant_id=identity.tenant_id,
+                platform=origin.platform,
+                thread_id=origin.session_thread_id,
+                account_id=origin.account_id,
+            )
+        return (
+            row is not None and row.effective_config is not None and row.effective_config.data_read
+        )
+
     async def ask(
         self, context: MiddlewareContext, identity: AuthIdentity, run: CallNext
     ) -> object:
         """Record the gated call and post its card; fail closed on anything missing.
         A call Claude's session runs without a card runs through `run` here too, and so does
-        a shared-connection tool's: it is decided as a third party's, not as Daimon's own."""
+        a shared-connection tool's: it is decided as a third party's, not as Daimon's own, after
+        a data read as every other write is, and only its card waits on the gate being on."""
         from daimon.adapters.mcp.shared_connections import SharedConnectionTool
         from daimon.adapters.mcp.tools._own_card import post_own_card
         from daimon.core.confirmation import reach_title
@@ -162,7 +190,10 @@ class HostCallGate:
         name, args = _call_of(context)
         settings = self._runtime.settings
         platform = identity.platform or ""
-        if self.off_for(identity):
+        fastmcp_ctx = context.fastmcp_context
+        tool = None if fastmcp_ctx is None else await fastmcp_ctx.fastmcp.get_tool(name)
+        off = self.off_for(identity)
+        if off and not isinstance(tool, SharedConnectionTool):
             raise _refuse("off")
         # A held turn gets here only with a held-allowlisted tool, as Claude's card asks.
         if (
@@ -189,8 +220,6 @@ class HostCallGate:
             != identity.chat_agent_id
         ):
             raise _refuse("no_origin")
-        fastmcp_ctx = context.fastmcp_context
-        tool = None if fastmcp_ctx is None else await fastmcp_ctx.fastmcp.get_tool(name)
         if tool is None:
             raise _refuse("no_tool")
         if (problem := schema_problem(tool.parameters, args)) is not None:
@@ -238,6 +267,8 @@ class HostCallGate:
                 attended=origin.attended,
                 agent_rule=rule,
             )
+            if await self._read_data(identity, origin):
+                verdict = after_data_read(verdict, call, attended=origin.attended)
         else:
             verdict = await tool_call_verdict(
                 policy,
@@ -255,6 +286,8 @@ class HostCallGate:
         if verdict.outcome != "ask":
             # An unattended or operator refusal, as on Claude.
             raise _refuse(f"verdict_{verdict.reason}")
+        if off:
+            raise _refuse("off")
         expires_at = now + timedelta(seconds=min(policy.confirmation_timeout_s, SWITCH_CARD_MAX_S))
         async with self._runtime.session_factory.begin() as session:
             created = await cards.create_card(

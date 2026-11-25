@@ -737,11 +737,11 @@ class IdentityMiddleware(Middleware):
     async def _shared_tool(self, context: MiddlewareContext) -> SharedTool | None:
         """The shared-connection tool this call names, if it is one (never a static tool)."""
         from daimon.adapters.mcp.shared_connections import SharedConnectionTool
-        from daimon.core.shared_connections import is_served_name
+        from daimon.core.shared_connections import DAIMON_TOOL_NAMES, is_served_name
 
         name = str(getattr(context.message, "name", ""))
         fastmcp_ctx = context.fastmcp_context
-        if fastmcp_ctx is None or not is_served_name(name):
+        if fastmcp_ctx is None or name in DAIMON_TOOL_NAMES or not is_served_name(name):
             return None
         tool = await fastmcp_ctx.fastmcp.get_tool(name)
         return tool.served if isinstance(tool, SharedConnectionTool) else None
@@ -754,8 +754,8 @@ class IdentityMiddleware(Middleware):
         served: SharedTool,
     ) -> object:
         """A third-party tool's rules: a chat credential is asked or carded as its agent's rules
-        say; a client with no card to answer is treated as unattended, so a read runs and a
-        write is refused unless the operator allows unattended writes."""
+        say; a client with no card to answer gets reads only."""
+        from daimon.adapters.mcp.middleware.host_call_gate import schema_problem
         from daimon.adapters.mcp.shared_connections import refuse
         from daimon.core.shared_connections import decide_shared_call
 
@@ -770,6 +770,8 @@ class IdentityMiddleware(Middleware):
             return await self._require_host_call_gate().ask(context, identity, run)
         raw: object = getattr(context.message, "arguments", None)
         args = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
+        if (problem := schema_problem(served.tool.input_schema, args)) is not None:
+            raise ToolError(problem)
         verdict = decide_shared_call(
             self._tool_safety or ToolSafetyPolicy(),
             served.name,
@@ -777,6 +779,7 @@ class IdentityMiddleware(Middleware):
             writes=served.tool.writes,
             attended=False,
             agent_rule=None,
+            outside=True,
         )
         if verdict.outcome == "allow":
             return await run(context)
