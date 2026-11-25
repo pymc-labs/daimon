@@ -3,13 +3,15 @@
 Only the authenticated session owner, through the attended conversation the session
 started in, may execute in, write to or extend it, within the configured caps. The
 owner lists and stops their sessions from any of their attended conversations; a
-tenant admin or the fenced reconciler may stop one too.
+tenant admin who is present, or the fenced reconciler, may stop one too.
 
 Only the session owner, through an authorized attended conversation, can start a
 background command; its status and result go only to that owner; its completion
 wake goes only to the originating conversation, once. The turn that wake starts
-may read the command's session and nothing more (`turn_may_read`). An inline
-command is a background command that its caller waits for (`run`).
+may read the command's session (`turn_may_read`). Where a server admin turned on
+`compute_wake_runs`, it may also run commands on it, write to it and stop it, for a
+limited number of wake turns in a row (`turn_may_act`); it never launches, extends or
+lists. An inline command is a background command that its caller waits for (`run`).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
+from typing import Literal
 
 import structlog
 from daimon.core import compute_tasks as scripts
@@ -81,7 +84,7 @@ _INLINE_EXTRA_TASKS = 4
 _INLINE_HANDOVER = 5
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
-#: The machine operations that only read: the ones a completion wake's turn may make.
+#: The machine operations that only read: the ones a completion wake's turn may always make.
 READ_OPERATIONS = frozenset({"read_file", "list_files"})
 
 
@@ -106,9 +109,55 @@ async def turn_may_read(
 
     The owner is present, or the turn is the completion wake of one of the session's
     own background commands (`stores.compute_tasks.wake_turn_of`). Such a wake reads
-    and reports; it never launches, extends, runs, writes or stops.
+    and reports; only `turn_may_act` lets it run, write or stop, and it never launches
+    or extends.
     """
     return owner_present(origin) or await task_store.wake_turn_of(db, origin, session, now=now)
+
+
+async def turn_may_act(
+    db: AsyncSession, origin: TurnOriginRow, session: ComputeSession, *, now: datetime, limit: int
+) -> bool | Literal["limit"]:
+    """Whether this turn may run commands, write files or stop this session.
+
+    The owner is present; or the turn is the completion wake of one of the session's
+    own commands in a thread, `compute_wake_runs` is on at the session's place, and
+    fewer than `limit` wake turns acted since the owner last ran a command or wrote a
+    file (`ComputeSession.wake_turns`, read from the locked row). A wake turn already on
+    that list may act again. `"limit"` says the list stopped it.
+    """
+    if owner_present(origin):
+        return True
+    if not task_store.wake_reads_in(session) or not await task_store.wake_turn_of(
+        db, origin, session, now=now
+    ):
+        return False
+    if not await task_store.wake_runs_on(db, session):
+        return False
+    turns = session.wake_turns
+    return True if origin.id.hex in turns or len(turns) < limit else "limit"
+
+
+async def note_act(
+    db: AsyncSession, caller_account_id: uuid.UUID, origin: TurnOriginRow, session: ComputeSession
+) -> ComputeSession:
+    """Record an act on `session`, in the transaction that holds its lock: the one rule
+    for every act path (a command, inline or background, a file write and a stop).
+
+    The owner acting here empties the list; a wake turn `turn_may_act` let through joins
+    it once. A chat message alone changes nothing, and neither does a read.
+    """
+    if owner_present(origin) and caller_account_id == session.owner_account_id:
+        turns: list[str] = []
+    elif owner_present(origin) or origin.id.hex in session.wake_turns:
+        return session
+    else:
+        turns = [*session.wake_turns, origin.id.hex]
+    if turns == session.wake_turns:
+        return session
+    noted = session.model_copy(update={"wake_turns": turns})
+    await store.save(db, noted)
+    return noted
 
 
 @dataclass(frozen=True)
@@ -164,9 +213,10 @@ class ComputeSessions:
         return value
 
     async def _origin(
-        self, db: AsyncSession, caller: ComputeCaller, *, read: bool = False
+        self, db: AsyncSession, caller: ComputeCaller, *, absent_ok: bool = False
     ) -> TurnOriginRow:
-        """The caller's live origin; ``read`` leaves an absent owner to `turn_may_read`."""
+        """The caller's live origin. ``absent_ok`` leaves a turn with no owner present to
+        `turn_may_read` or `turn_may_act`."""
         origin = await get_active_origin(
             db,
             tenant_id=caller.tenant_id,
@@ -180,7 +230,7 @@ class ComputeSessions:
             or not caller.chat_session_id
             or origin.chat_session_id != caller.chat_session_id
             or origin != caller.origin
-            or not (read or owner_present(origin))
+            or not (absent_ok or owner_present(origin))
         ):
             raise StoreError("Use an active attended conversation with the session owner.")
         return origin
@@ -193,12 +243,16 @@ class ComputeSessions:
         *,
         stop: bool = False,
         read: bool = False,
+        act: bool = False,
     ) -> ComputeSession:
-        origin = await self._origin(db, caller, read=read)
+        """The caller's session. ``read`` and ``act`` let a turn with no owner present
+        through when `turn_may_read` or `turn_may_act` allows it."""
+        origin = await self._origin(db, caller, absent_ok=read or act)
         session = await store.get(db, caller.tenant_id, session_id, lock=True)
         if session is None or session.deployment_id != self.settings.deployment_id:
             raise StoreError("Session not found")
-        if stop and caller.admin:
+        # The emergency stop needs the admin here: a wake turn never stops another's machine.
+        if stop and caller.admin and owner_present(origin):
             return session
         if stop and session.owner_account_id == caller.account_id and owner_present(origin):
             # The owner may stop their machine from any of their conversations.
@@ -207,9 +261,22 @@ class ComputeSessions:
             # As for a missing one: another person's machine is not shown to exist.
             raise StoreError("Session not found")
         if not made_here(session, caller.origin):
+            if act and not owner_present(origin):
+                # Today's words for a turn with nobody here: it cannot stop it from here.
+                raise StoreError("The machine owner must be here in an active conversation.")
             raise StoreError(ELSEWHERE)
         if read and not await turn_may_read(db, origin, session, now=self.clock()):
             raise StoreError("The machine owner must be here in an active conversation.")
+        if act:
+            limit = self.settings.wake_run_limit
+            allowed = await turn_may_act(db, origin, session, now=self.clock(), limit=limit)
+            if allowed == "limit":
+                raise StoreError(
+                    f"This machine ran {limit} times with nobody here. Tell the owner what "
+                    "happened. It continues after the owner runs a command on it."
+                )
+            if not allowed:
+                raise StoreError("The machine owner must be here in an active conversation.")
         return session
 
     async def launch(
@@ -341,6 +408,7 @@ class ComputeSessions:
         *,
         refuse_starting: bool = True,
         read: bool = False,
+        act: bool = False,
     ) -> None:
         """Let a call through only to a machine that has started.
 
@@ -350,7 +418,7 @@ class ComputeSessions:
         `refuse_starting` is off for a status read, which reports the wait instead.
         """
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id, read=read)
+            session = await self._owned(db, caller, session_id, read=read, act=act)
             if session.state != "launching" or session.expires_at <= self.clock():
                 return
             session = await self._settle(db, session, tell_owner=False)
@@ -384,7 +452,8 @@ class ComputeSessions:
 
     async def stop(self, caller: ComputeCaller, session_id: uuid.UUID) -> ComputeSession:
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id, stop=True)
+            session = await self._owned(db, caller, session_id, stop=True, act=True)
+            session = await note_act(db, caller.account_id, caller.origin, session)
             if session.state != "deleted":
                 session = session.model_copy(update={"state": "stopping"})
                 await store.save(db, session)
@@ -413,9 +482,13 @@ class ComputeSessions:
             )
             await store.save(db, current.model_copy(update={"state": "deleted"}))
 
-    async def get(self, caller: ComputeCaller, session_id: uuid.UUID) -> ComputeSession:
+    async def get(
+        self, caller: ComputeCaller, session_id: uuid.UUID, *, act: bool = False
+    ) -> ComputeSession:
+        """The session, for a turn that may read it; with ``act``, one that may also act
+        on it, so a refusal comes before anything else the call does."""
         async with self.sm.begin() as db:
-            return await self._owned(db, caller, session_id, read=True)
+            return await self._owned(db, caller, session_id, read=not act, act=act)
 
     async def status(self, caller: ComputeCaller, session_id: uuid.UUID) -> ComputeStatus:
         """The session and its machine as they are now.
@@ -452,9 +525,11 @@ class ComputeSessions:
         if tool not in {"write_file"} | READ_OPERATIONS:
             raise StoreError("Unsupported session operation")
         read = tool in READ_OPERATIONS
-        await self._started(caller, session_id, read=read)
+        await self._started(caller, session_id, read=read, act=not read)
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id, read=read)
+            session = await self._owned(db, caller, session_id, read=read, act=not read)
+            if not read:
+                session = await note_act(db, caller.account_id, caller.origin, session)
             if session.state != "running" or session.expires_at <= self.clock():
                 raise StoreError("The session is expired or stopping. Launch a new session.")
             result = await self.provider.call(
@@ -596,9 +671,10 @@ class ComputeSessions:
             seconds = timeout_seconds
         # Before the task row exists: a task registered for a machine that cannot
         # answer would be reported lost.
-        await self._started(caller, session_id)
+        await self._started(caller, session_id, act=True)
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id)
+            session = await self._owned(db, caller, session_id, act=True)
+            session = await note_act(db, caller.account_id, caller.origin, session)
             now = self.clock()
             if session.state != "running" or session.expires_at <= now:
                 raise StoreError("The session is expired or stopping. Launch a new session.")
@@ -628,7 +704,9 @@ class ComputeSessions:
         # The row commits before the machine is touched. If this call is lost, the
         # task stays starting and the poller marks it lost unless its pid appears.
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id)
+            session = await self._owned(db, caller, session_id, act=True)
+            # Again here: an owner act since the registration may have emptied the list.
+            session = await note_act(db, caller.account_id, caller.origin, session)
             if session.state != "running" or session.expires_at <= self.clock():
                 raise StoreError("The session is expired or stopping. Launch a new session.")
             scripts.parse_start(
@@ -853,13 +931,14 @@ class ComputeSessions:
                 owns = held is None or now >= held
             if not owns:
                 return Polled(task)
+            limit = self.settings.wake_run_limit
             if (
                 session.state != "running"
                 or session.expires_at <= now
                 or session.deployment_id != self.settings.deployment_id
             ):
                 done = await task_store.finish(
-                    db, task, session, state="cancelled", now=now, wake=wake
+                    db, task, session, state="cancelled", now=now, wake=wake, run_limit=limit
                 )
                 return Polled(done or task, settled=done is not None)
             token = session_token(self.settings, session.id)
@@ -876,7 +955,9 @@ class ComputeSessions:
             except ComputeProviderError:
                 if not overdue:
                     return Polled(task)
-                done = await task_store.finish(db, task, session, state="lost", now=now, wake=wake)
+                done = await task_store.finish(
+                    db, task, session, state="lost", now=now, wake=wake, run_limit=limit
+                )
                 return Polled(done or task, settled=done is not None)
             if probe.status == "exit":
                 assert probe.exit_code is not None
@@ -894,6 +975,7 @@ class ComputeSessions:
                     state=state,
                     now=now,
                     wake=wake,
+                    run_limit=limit,
                     exit_code=probe.exit_code,
                     output_bytes=probe.output_bytes,
                     output_tail=probe.tail,
@@ -917,6 +999,7 @@ class ComputeSessions:
                     state="timed_out",
                     now=now,
                     wake=wake,
+                    run_limit=limit,
                     output_bytes=probe.output_bytes,
                     output_tail=probe.tail,
                 )
@@ -951,6 +1034,7 @@ class ComputeSessions:
                     state="lost",
                     now=now,
                     wake=wake,
+                    run_limit=limit,
                     output_bytes=None if kept else probe.output_bytes,
                     output_tail=None if kept else probe.tail,
                 )

@@ -3001,6 +3001,16 @@ class ComputeSettings(BaseModel):
             "command may run for at most max_ttl_hours."
         ),
     )
+    wake_run_limit: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description=(
+            "How many wake turns in a row may act on one session. The count starts again "
+            "when the owner runs a command or writes a file on it; a chat message alone "
+            "does not."
+        ),
+    )
     profiles: dict[str, ComputeProfile] = Field(
         default_factory=dict,
         description=("Operator-managed image profiles. Empty means no images can be launched."),

@@ -9,7 +9,9 @@ the turn in a fresh scope with no history, so the turn's origin stands in anothe
 conversation than the session, and the session's conversation check refuses every
 read before the wake binding is looked at. The wake text therefore offers the read
 to the owner only (`stores.compute_tasks.wake_reads_in`), and the agent relays the
-end of the output it was given.
+end of the output it was given. The same check refuses a command, a file write and a
+stop, so the setting that lets a wake turn continue on its machine
+(`compute_wake_runs`, `compute_sessions.turn_may_act`) does nothing there.
 
 Closing the gap means carrying verified provenance of the source conversation
 through these runners, so the fresh turn can prove which conversation its wake came
@@ -45,7 +47,7 @@ from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .test_compute_sessions import settings
+from .test_compute_sessions import _wake_runs, settings
 from .test_dm_timer_run import OWNER, admission_for
 
 _RUNNERS = {
@@ -108,6 +110,8 @@ async def test_a_wake_in_a_dm_or_plain_channel_reads_nothing_today(
         approval_key="approved",
         source_metadata={},
     )
+    # Even where a server admin lets a wake turn continue, these places stay refused.
+    await _wake_runs(sm, tenant.id)
     task = await service.start_task(
         owner, session.id, command="python fit.py", timeout_minutes=60, request_key="use"
     )
@@ -119,6 +123,7 @@ async def test_a_wake_in_a_dm_or_plain_channel_reads_nothing_today(
     # The agent is told what is true here: the owner can read, it cannot.
     assert "You can read" not in (row.requested_work or "")
     assert "They can read the full result" in (row.requested_work or "")
+    assert "You can run" not in (row.requested_work or "")
 
     seen: dict[str, object] = {}
 
@@ -149,6 +154,19 @@ async def test_a_wake_in_a_dm_or_plain_channel_reads_nothing_today(
             seen["read"] = "allowed"
         except StoreError as refusal:
             seen["read"] = str(refusal)
+        try:
+            await service.run(
+                ComputeCaller(tenant.id, account.id, origin, "wake", OWNER),
+                session.id,
+                command="python next.py",
+                wait_seconds=0,
+                timeout_seconds=None,
+                timeout_minutes=60,
+                request_key="wake-run",
+            )
+            seen["run"] = "allowed"
+        except StoreError as refusal:
+            seen["run"] = str(refusal)
         return SimpleNamespace(
             state=SimpleNamespace(error=None, termination=TerminationReason.COMPLETED, content=[]),
             ma_session_id="sesn_wake",
@@ -178,3 +196,5 @@ async def test_a_wake_in_a_dm_or_plain_channel_reads_nothing_today(
     assert seen["place"] != (channel, scope)
     # ...so the session's conversation check refuses the read. Closing the gap fails here.
     assert seen["read"] == ELSEWHERE
+    # The same check refuses the next command, in the words a turn with nobody here gets.
+    assert seen["run"] == "The machine owner must be here in an active conversation."

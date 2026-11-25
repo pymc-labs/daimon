@@ -5189,6 +5189,8 @@ class ComputeSessionRecord(Base):
     agent_name: Mapped[str]
     source_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, server_default="{}")
     extension_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    # The wake turns (origin ids, hex) that acted since the owner last acted here.
+    wake_turns: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
     request_key: Mapped[str]
     app_name: Mapped[str]
     profile: Mapped[str]
