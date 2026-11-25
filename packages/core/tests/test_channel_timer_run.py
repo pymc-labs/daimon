@@ -139,9 +139,7 @@ def admission_for(tenant, account_id: uuid.UUID, agent_id: str) -> Admission:
 def patch_world(monkeypatch, admission: Admission):
     admit = AsyncMock(return_value=admission)
     bind = AsyncMock(return_value=SimpleNamespace(admission=admission, backend=None))
-    run = AsyncMock(
-        return_value=SimpleNamespace(text="done", session_id="sesn_ch", reported_problem=False)
-    )
+    run = AsyncMock(return_value=SimpleNamespace(text="done", session_id="sesn_ch"))
     monkeypatch.setattr(direct_messages, "admit", admit)
     monkeypatch.setattr(direct_messages, "bind_session", bind)
     monkeypatch.setattr(direct_messages, "_run_admitted_dm_turn", run)

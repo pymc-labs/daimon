@@ -95,10 +95,7 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
         if case == "dm_fail":
             raise TurnError(kind="upstream", message="private provider error")
         return SimpleNamespace(
-            text="Finished reply",
-            session_id="ses_completed",
-            producing_agent_id="old_agent",
-            reported_problem=False,
+            text="Finished reply", session_id="ses_completed", producing_agent_id="old_agent"
         )
 
     async with AsyncAnthropic(api_key="offline") as client:
@@ -235,9 +232,7 @@ async def test_a_dm_routine_fire_passes_the_owners_current_standing(
 
     async def dm_turn(*args: Any, **kwargs: Any) -> SimpleNamespace:
         seen.append(kwargs["requester_org"].value)
-        return SimpleNamespace(
-            text="ok", session_id="ses", producing_agent_id="old_agent", reported_problem=False
-        )
+        return SimpleNamespace(text="ok", session_id="ses", producing_agent_id="old_agent")
 
     async with AsyncAnthropic(api_key="offline") as client:
         fire = await _build_fire(

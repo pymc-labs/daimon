@@ -87,11 +87,7 @@ from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn.state import (
-    TurnState,
-    extract_final_response,
-    reported_routine_problem,
-)
+from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn.unattended import dm_routine_sandbox
 from daimon.core.turn_hold import RequesterOrg
@@ -883,7 +879,6 @@ class _DmTurn:
     session_id: str
     mapping_id: uuid.UUID | None
     outputs: OutputRuntime | None
-    reported_problem: bool = False
 
 
 async def _run_admitted_dm_turn(
@@ -1004,13 +999,7 @@ async def _run_admitted_dm_turn(
     answer = extract_final_response(outcome.state.content)
     if not answer and not may_end_empty:
         answer = "The reply finished without text."
-    return _DmTurn(
-        answer,
-        outcome.ma_session_id,
-        outcome.mapping_id,
-        outcome.outputs,
-        reported_problem=reported_routine_problem(outcome.state.content),
-    )
+    return _DmTurn(answer, outcome.ma_session_id, outcome.mapping_id, outcome.outputs)
 
 
 async def reply_to_dm(
@@ -1316,7 +1305,6 @@ class DmRoutineReply:
     text: str
     session_id: str
     producing_agent_id: str
-    reported_problem: bool = False
 
 
 #: Recorded on the routine when its agent runs on another provider.
@@ -1718,7 +1706,6 @@ async def _run_unattended_turn(
         text=done.text,
         session_id=done.session_id,
         producing_agent_id=prepared.admission.agent.id,
-        reported_problem=done.reported_problem,
     )
 
 
