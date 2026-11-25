@@ -104,6 +104,8 @@ async def test_me_has_the_shape_the_app_reads(
             "channels.view",
             "routines.view",
             "routines.manage",
+            "workflows.view",
+            "workflows.run",
             "credits.view_own",
         ]
     )
