@@ -536,8 +536,10 @@ class Admission:
 
     @property
     def toolset(self) -> SessionToolset:
-        """What this place's features change in the agent's session tools."""
-        return agent_toolset(self.features, self.agent)
+        """What this place's features change in the agent's session tools; a session that
+        read data keeps `data_reads` (`data_reading`)."""
+        toolset = agent_toolset(self.features, self.agent)
+        return replace(toolset, data_reads=True) if self.data_reading else toolset
 
     @property
     def identity(self) -> SessionIdentity:

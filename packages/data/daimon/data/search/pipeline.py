@@ -4,7 +4,8 @@ Every read runs inside `access.scoped`. The arms run one after another on its co
 in a savepoint with a statement timeout, so the time the request has left bounds them and a
 cut arm costs only itself. The query's embedding is fetched while full text runs. A payer out
 of balance, a model the rate table does not price or an embedder that fails leave the
-full-text answer, with a note.
+full-text answer, with a note. With the deployment's `Env`, stored hits whose source re-checks
+reads are asked again (`recheck`) and live sources answer beside the rerank (`federated`).
 """
 
 from __future__ import annotations
@@ -20,12 +21,13 @@ from uuid import UUID
 import psycopg
 import structlog
 from daimon.core.config import DataSettings
-from daimon.data import access, embed
+from daimon.data import access, embed, federated, recheck
 from daimon.data.access import ReadContext
 from daimon.data.metering import Meter, Payer, can_spend
 from daimon.data.schema import Schemas
 from daimon.data.search import arms, rerank, timewin
 from daimon.data.search.arms import Filters, Row
+from daimon.data.sync.engine import Env
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -45,6 +47,7 @@ class Hit:
     record_id: UUID
     chunk_id: UUID
     source_id: UUID
+    external_id: str
     kind: str
     title: str
     url: str | None
@@ -64,6 +67,8 @@ class Result:
     """What did not run or was cut, as short phrases: `balance`, `embedding`, `timeout`, ..."""
     rerank: str = "off"
     window: timewin.Window | None = None
+    live: list[federated.LiveResult] = field(default_factory=list[federated.LiveResult])
+    """One per live source the caller may read (`federated.search`)."""
 
 
 def fuse(lists: dict[str, list[Row]], k: int = RRF_K) -> list[dict[str, Any]]:
@@ -131,13 +136,16 @@ async def search(
     now: datetime | None = None,
     use_vectors: bool = True,
     use_rerank: bool = True,
+    env: Env | None = None,
+    live_meter: federated.Meter | None = None,
 ) -> Result:
     """The best `limit` chunks (one per record) for `text`, as `ctx` may read them.
 
     `conn` is the store owner's autocommit connection, as `access.scoped` takes. The query's
     embedding and the rerank are billed to `payer` through `meter` (neither, when there is
     no meter or payer): a payer out of balance gets full text only. Spend is recorded as
-    soon as the provider answers, whatever happens to the rest of the search.
+    soon as the provider answers, whatever happens to the rest of the search. With `env`,
+    hits pass `recheck.allowed` and live sources are asked, each call through `live_meter`.
     """
     end = time.monotonic() + settings.search_seconds
     notes: list[str] = []
@@ -206,6 +214,20 @@ async def search(
     finally:
         if vt is not None and not vt.done():
             vt.cancel()
+    if env is not None and hits:
+        ok = await recheck.allowed(
+            conn, schemas, env, ctx.readers, [(h.source_id, h.external_id) for h in hits]
+        )
+        hits = [h for h in hits if (h.source_id, h.external_id) in ok]
+    live = (
+        asyncio.ensure_future(
+            federated.search(
+                conn, schemas, env, ctx, q, seconds=max(1.0, _left(end)), meter=live_meter
+            )
+        )
+        if env is not None
+        else None
+    )
     status = "off"
     if use_rerank and hits:
         order, status = await rerank.order(
@@ -219,7 +241,7 @@ async def search(
         if order is not None:
             head = hits[:RERANK_TOP]
             hits = [head[i] for i in order] + hits[RERANK_TOP:]
-    return Result(hits[:limit], notes, status, win)
+    return Result(hits[:limit], notes, status, win, await live if live is not None else [])
 
 
 async def _embedded(
@@ -271,7 +293,8 @@ async def _fetch(
                 f"set local statement_timeout = {int(FETCH_SECONDS * 1000)}".encode()
             )
             cur = await conn.execute(
-                f"select c.id, c.record_id, c.source_id, c.text, c.ctx, c.scope, r.kind, r.title,"
+                f"select c.id, c.record_id, c.source_id, r.external_id, c.text, c.ctx, c.scope,"
+                f" r.kind, r.title,"
                 f" r.url, r.occurred_at, ts_headline('english', c.text,"
                 f" to_tsquery('english', %s), %s) as snippet"
                 f" from {d}.chunks c join {d}.records r on r.id = c.record_id"
@@ -289,7 +312,8 @@ async def _fetch(
         if r is not None:  # gone since the arm ran
             out.append(
                 Hit(
-                    r["record_id"], r["id"], r["source_id"], r["kind"], r["title"], r["url"],
+                    r["record_id"], r["id"], r["source_id"], r["external_id"], r["kind"],
+                    r["title"], r["url"],
                     r["occurred_at"], r["scope"], r["text"], r["snippet"], c["rrf"], c["arms"],
                 )
             )  # fmt: skip

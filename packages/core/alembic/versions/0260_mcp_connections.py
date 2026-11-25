@@ -6,9 +6,6 @@ its bearer token encrypted, and an optional data scope; each tool holds the desc
 schema an admin approved beside the ones the server last sent. Downgrading drops both tables
 and with them every shared connection.
 
-Chained on the data-access stack's newest revision; re-point `down_revision` at the head
-before merging.
-
 downgrade: destructive
 """
 
@@ -19,7 +16,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 revision: str = "0260_mcp_connections"
-down_revision: str | None = "0241_data_identity"
+down_revision: str | None = "0243_data_redaction"
 branch_labels: str | None = None
 depends_on: str | None = None
 

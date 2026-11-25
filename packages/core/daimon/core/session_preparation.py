@@ -117,6 +117,7 @@ from daimon.core.stores.thread_session_lineage import (
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
+    mark_data_read,
     record_snapshot,
     set_budget_channel_stamp,
     update_mutable_fingerprint,
@@ -685,7 +686,12 @@ async def prepare_session_for_turn(
                 find_carry_over=find_carry_over,
             )
 
-    return await retry_fences(attempt)
+    result = await retry_fences(attempt)
+    turn = result.prepared if isinstance(result, PreparationDeferred) else result
+    if isinstance(turn, PreparedTurn) and turn.admission.data_reading and turn.mapping_id:
+        async with deps.sessionmaker() as session, session.begin():
+            await mark_data_read(session, id=turn.mapping_id)
+    return result
 
 
 async def _resolve_legacy_budget_stamp(
@@ -896,6 +902,15 @@ async def _prepare_session_for_turn_locked(
         # (`daimon.core.relay_scope`). Channel history still gives continuity.
         relay_fresh = admission.relay_scoped and admission.hold is not None
         fresh_start = fresh_start or relay_fresh
+        # A session that read data keeps that posture until `/new`, whatever `data_reads`
+        # says now: its context holds what it read.
+        if (
+            row.effective_config is not None
+            and row.effective_config.data_read
+            and row.fresh_start_requested_at is None
+            and not admission.data_reading
+        ):
+            admission = replace(admission, data_reading=True)
 
         await _heal_lineage(deps, db, row=row)
 

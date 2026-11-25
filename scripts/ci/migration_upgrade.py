@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Upgrade a database from an earlier schema to this tree's head, the way a deploy does.
 
-For each start revision (the latest release tag, and the commit this one builds on) it:
+First it upgrades an empty database to head as a migrator that holds CREATEROLE but not the
+data store's roles, which an administrator made: the store must be skipped, and core's own
+migrations must still finish. Then, with the roles granted, for each start revision (the latest
+release tag, and the commit this one builds on) it:
   1. checks the revision's migration chain still leads to the single head here;
   2. builds that revision's schema as a role that is not a superuser, with that
      revision's own migration files, and seeds one row per stable table;
-  3. upgrades to head as the same role and checks the rows survived.
+  3. upgrades to head as the same role and checks the rows survived and the store is set up.
 
     migration_upgrade.py ADMIN_DSN [--db NAME] [--base REV ...]
 
@@ -41,6 +44,12 @@ SEED = (
     " VALUES ('{t}', 'agent-1', 'daimon', '0 9 * * *', 'hello')",
 )
 TENANT = "00000000-0000-4000-8000-000000000001"
+DATA_ROLES = (
+    "daimon_data_reader",
+    "daimon_data_sql",
+    "daimon_data_view_owner",
+    "daimon_data_parity",
+)
 TABLES = (
     "tenants",
     "tenant_config",
@@ -127,10 +136,26 @@ async def check(admin: str, base: str, workdir: Path, db: str, password: str) ->
     for table in TABLES:
         count = await conn.fetchval(f"SELECT count(*) FROM {table}")
         assert count == 1, f"{table} has {count} rows after the upgrade from {base}, want 1"
-    # The migrator can create roles, so the data store's revision set the store up.
+    # The migrator holds the store's roles, so the data store's revisions set the store up.
     assert await conn.fetchval("SELECT to_regnamespace('data') IS NOT NULL"), "no data schema"
     await conn.close()
     print(f"ok: {base} ({', '.join(old_heads)}) -> {heads[0]}")
+
+
+async def skipped(admin: str, db: str, password: str) -> None:
+    """Upgrade an empty database to head as a migrator that cannot set the data store up."""
+    conn = await asyncpg.connect(with_db(admin, "postgres"))
+    await conn.execute(f'DROP DATABASE IF EXISTS "{db}" WITH (FORCE)')
+    await conn.execute(f'CREATE DATABASE "{db}" OWNER {ROLE}')
+    await conn.close()
+    url = with_db(admin, db, ROLE, password)
+    alembic(ROOT, url)
+    conn = await asyncpg.connect(url)
+    version = await conn.fetchval("SELECT version_num FROM alembic_version")
+    assert version == chain(ROOT)[0][0], f"upgraded to {version} without the data store"
+    assert await conn.fetchval("SELECT to_regnamespace('data') IS NULL"), "the store was set up"
+    await conn.close()
+    print(f"ok: empty -> {version}, data store skipped")
 
 
 async def main() -> None:
@@ -146,14 +171,23 @@ async def main() -> None:
     admin = await asyncpg.connect(with_db(args.admin_dsn, "postgres"))
     await admin.execute(f"DROP ROLE IF EXISTS {ROLE}")
     await admin.execute(f"CREATE ROLE {ROLE} LOGIN NOSUPERUSER CREATEROLE PASSWORD '{password}'")
+    for role in DATA_ROLES:
+        await admin.execute(f"CREATE ROLE {role} NOLOGIN")
     await admin.close()
     try:
+        await skipped(args.admin_dsn, args.db, password)
+        admin = await asyncpg.connect(with_db(args.admin_dsn, "postgres"))
+        for role in DATA_ROLES:
+            await admin.execute(f"GRANT {role} TO {ROLE} WITH ADMIN OPTION")
+        await admin.close()
         for base in bases:
             with tempfile.TemporaryDirectory() as tmp:
                 await check(args.admin_dsn, base, Path(tmp), args.db, password)
     finally:
         admin = await asyncpg.connect(with_db(args.admin_dsn, "postgres"))
         await admin.execute(f'DROP DATABASE IF EXISTS "{args.db}" WITH (FORCE)')
+        for role in DATA_ROLES:  # first: the migrator granted one of them to another
+            await admin.execute(f"DROP ROLE IF EXISTS {role}")
         await admin.execute(f"DROP ROLE IF EXISTS {ROLE}")
         await admin.close()
 

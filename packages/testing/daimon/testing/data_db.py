@@ -22,6 +22,7 @@ import pytest_asyncio
 from daimon.core.config import DataSettings
 from daimon.data.dsn import libpq_dsn
 from daimon.data.init import PsycopgSql
+from daimon.data.locks import CLUSTER, advisory_key
 from daimon.data.migrate import STORE_FILES, apply
 from daimon.data.schema import Schemas
 from daimon.testing.db import DatabasePreflight
@@ -63,6 +64,15 @@ async def data_db(
     """Apply the store files to this worker's own schemas; drop them at the end."""
     settings = DataSettings(schema_name=f"{db_schema}_data")
     store = DataDb(db_preflight.url, Schemas.of(settings), settings)
+    with store.connect() as conn, conn.transaction():
+        # intarray goes in the first store's schema, once per database; keep it in a schema no
+        # worker's teardown drops, so every worker's store uses it there.
+        conn.execute("select pg_advisory_xact_lock(%s)", (advisory_key(CLUSTER, "migrate"),))
+        conn.execute(
+            b"create schema if not exists data_test_ext;"
+            b" grant usage on schema data_test_ext to public;"
+            b" create extension if not exists intarray schema data_test_ext"
+        )
     with store.connect() as conn:
         apply(PsycopgSql(conn), store.schemas, STORE_FILES)
     try:

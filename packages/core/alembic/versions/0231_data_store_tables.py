@@ -23,7 +23,8 @@ down_revision: str | None = "0230_data_store"
 branch_labels: str | None = None
 depends_on: str | None = None
 
-# Pinned: a later file is a later revision, never an edit to this list.
+# Pinned and cumulative: a later file is a later revision, never an edit to this list, and
+# each revision lists every file before it, so one skipped earlier still runs.
 FILES: tuple[str, ...] = ("0001_store.sql",)
 
 

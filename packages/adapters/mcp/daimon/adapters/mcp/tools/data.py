@@ -11,10 +11,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Final, cast
+from typing import Any, Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.data_access import data_audience_for
@@ -23,10 +23,10 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.core.data_audience import DataAudience, scope_ceiling
 from daimon.core.data_tools import mark_data_result
 from daimon.core.ports.data_metering import SessionMeter
-from daimon.data import access, caller_sql, identity, pool, reads
+from daimon.data import access, caller_sql, federated, identity, pool, reads, redaction
 from daimon.data.access import ReadContext, person
 from daimon.data.caller_sql import SqlRefused
-from daimon.data.metering import Meter, Payer
+from daimon.data.metering import Payer
 from daimon.data.schema import Schemas
 from daimon.data.search.arms import Filters
 from daimon.data.search.pipeline import search
@@ -45,11 +45,11 @@ async def read_context(
     conn: AsyncConnection[DictRow], schemas: Schemas, auth: AuthIdentity, audience: DataAudience
 ) -> ReadContext:
     """What `audience` may read together: the scopes they all hold, and their access lists."""
-    scopes_of: dict[uuid.UUID, frozenset[str]] = {}
-    for account in audience.people:
-        holders = await identity.list_holders(conn, schemas, auth.tenant_id, account)
-        held = await access.effective_scopes(conn, schemas, auth.tenant_id, holders)
-        scopes_of[account] = frozenset(held)
+    holders = await identity.holders_of(conn, schemas, auth.tenant_id, list(audience.people))
+    scopes_of: dict[uuid.UUID, frozenset[str]] = {
+        account: frozenset(await access.effective_scopes(conn, schemas, auth.tenant_id, held))
+        for account, held in holders.items()
+    }
     readers = [*map(person, audience.people), *audience.guests] if audience.list_rows else []
     return ReadContext(
         tenant_ids=(auth.tenant_id,),
@@ -76,25 +76,37 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     `data_reads` is On."""
     settings = runtime.settings
     schemas = Schemas.of(settings.data)
+    env = Env.of(settings)
 
     @asynccontextmanager
     async def reading(
         auth: AuthIdentity,
-    ) -> AsyncIterator[tuple[AsyncConnection[DictRow], ReadContext]]:
+    ) -> AsyncIterator[tuple[AsyncConnection[DictRow], ReadContext, Callable[[Any], Any]]]:
+        """The connection, what the answer may read, and how its result goes out: through the
+        tenant's redaction lists when a guest or a redacted person will read it."""
         audience = await data_audience_for(runtime, auth)
         async with pool.connection(settings) as conn:
-            yield conn, await read_context(conn, schemas, auth, audience)
+            hidden = audience.redact or bool(
+                await redaction.redacted_among(conn, schemas, auth.tenant_id, audience.people)
+            )
+            ctx = await read_context(conn, schemas, auth, audience)
+            entities = (
+                await redaction.read_redactor(conn, schemas, auth.tenant_id, ctx.scopes)
+                if hidden
+                else None
+            )
+            yield conn, ctx, entities or (lambda value: value)
 
     @mcp.tool()
     async def data_sources(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
         """The data sources you can read here, with their ids and how many records each holds,
         and the datasets `data_sql` can query."""
         auth = await _auth(ctx)
-        async with reading(auth) as (conn, rc):
+        async with reading(auth) as (conn, rc, show):
             found = await reads.sources(conn, schemas, rc)
             sets = await reads.datasets(conn, schemas, rc)
-        return _text({"sources": [dataclasses.asdict(s) for s in found],
-                      "datasets": [dataclasses.asdict(d) for d in sets]})  # fmt: skip
+        return _text(show({"sources": [dataclasses.asdict(s) for s in found],
+                           "datasets": [dataclasses.asdict(d) for d in sets]}))  # fmt: skip
 
     @mcp.tool()
     async def data_search(  # pyright: ignore[reportUnusedFunction]
@@ -108,7 +120,8 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Search the data sources for `query`; only what everyone who will see the answer may
         read. Filter by source ids (`data_sources`), record kind and date range. Each hit has a
-        `record_id` to open with `data_get`. No hit is not proof that nothing exists."""
+        `record_id` to open with `data_get`; `live` holds what live sources answered now. No
+        hit is not proof that nothing exists."""
         auth = await _auth(ctx)
         filters = Filters(
             sources=tuple(_uuid(s) for s in source_ids or ()),
@@ -116,42 +129,45 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             since=since,
             until=until,
         )
-        async with reading(auth) as (conn, rc):
+        async with reading(auth) as (conn, rc, show):
             result = await search(
                 conn,
                 schemas,
                 rc,
                 query,
                 settings=settings.data,
-                # The store's `Meter.record` takes any purpose; core's names the two it bills.
-                meter=cast(Meter, SessionMeter(runtime.session_factory, settings.billing.markup)),
+                meter=SessionMeter(runtime.session_factory, settings.billing.markup),
                 payer=Payer(auth.tenant_id, auth.platform_user_id),
                 limit=min(max(limit, 1), 25),
                 filters=filters,
+                env=env,
+                live_meter=federated.audit_meter(conn, schemas, auth.tenant_id, auth.account_id),
             )
         hits = [
             {k: v for k, v in dataclasses.asdict(h).items() if k not in ("text", "arms")}
             for h in result.hits
         ]
-        return _text({"hits": hits, "notes": result.notes})
+        live = [dataclasses.asdict(r) for r in result.live]
+        return _text(show({"hits": hits, "live": live, "notes": result.notes}))
 
     @mcp.tool()
     async def data_get(ctx: Context, record_id: str, start: int = 0) -> str:  # pyright: ignore[reportUnusedFunction]
         """Open one record by its `record_id`: its text (12,000 characters from `start`; a
         `next_start` says where the rest continues) and its attached files for `data_file`."""
         auth = await _auth(ctx)
-        async with reading(auth) as (conn, rc):
-            record = await reads.get(conn, schemas, rc, _uuid(record_id))
+        async with reading(auth) as (conn, rc, show):
+            record = await reads.get(conn, schemas, rc, _uuid(record_id), env)
         if record is None:
             raise ToolError(NOT_FOUND)
         start = max(start, 0)
         end = start + PAGE
-        return _text({
+        body = show(record.body)  # whole, so a name never straddles a page
+        return _text(show({
             **dataclasses.asdict(record.item),
-            "text": record.body[start:end],
-            "next_start": end if end < len(record.body) else None,
+            "text": body[start:end],
+            "next_start": end if end < len(body) else None,
             "files": [dataclasses.asdict(a) for a in record.attachments],
-        })  # fmt: skip
+        }))  # fmt: skip
 
     @mcp.tool()
     async def data_file(ctx: Context, record_id: str, index: int) -> str:  # pyright: ignore[reportUnusedFunction]
@@ -159,25 +175,23 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         its source with the source's permissions and never stored. Text files return their
         text; other files only their type and size."""
         auth = await _auth(ctx)
-        async with reading(auth) as (conn, rc):
-            got = await reads.read_file(
-                conn, schemas, rc, Env.of(settings), _uuid(record_id), index
-            )
+        async with reading(auth) as (conn, rc, show):
+            got = await reads.read_file(conn, schemas, rc, env, _uuid(record_id), index)
         if got is None:
             raise ToolError(NOT_FOUND)
         data, content_type = got
         textual = content_type.startswith("text/") or content_type.endswith(("json", "csv", "xml"))
-        text = data.decode("utf-8", "replace")[:PAGE] if textual else None
-        return _text({"content_type": content_type, "size": len(data), "text": text})
+        text = show(data.decode("utf-8", "replace"))[:PAGE] if textual else None
+        return _text(show({"content_type": content_type, "size": len(data), "text": text}))
 
     @mcp.tool()
     async def data_sql(ctx: Context, query: str) -> str:  # pyright: ignore[reportUnusedFunction]
         """Read-only SQL over the data views and datasets (`data_sources` lists them), by plain
         names. One statement, at most 500 rows, five seconds."""
         auth = await _auth(ctx)
-        async with reading(auth) as (conn, rc):
+        async with reading(auth) as (conn, rc, show):
             try:
                 result = await caller_sql.data_sql(conn, schemas, rc, query)
             except SqlRefused as e:
                 raise ToolError(str(e)) from None
-        return _text(dataclasses.asdict(result))
+        return _text(show(dataclasses.asdict(result)))

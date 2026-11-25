@@ -22,6 +22,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+from daimon.core.data_tools import DATA_READS
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.features.registry import DEFAULT
@@ -585,6 +586,43 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     assert admission.account_id == principal.account_id, (
         "account_id must match the principal resolved for this (platform, external_id)"
     )
+
+
+async def test_a_failed_data_reads_lookup_runs_the_turn_without_data_tools(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown answer reads no data: the turn is admitted with the data tools hidden."""
+    tenant = await make_tenant(db_session)
+    await _tenant_config(db_session, tenant=tenant)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key=DATA_READS,
+        value="on",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        "daimon.core.turn.admission.reads_data", AsyncMock(side_effect=RuntimeError("down"))
+    )
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    monkeypatch.setenv("DAIMON_FEATURES__DATA_SOURCES", "on")
+
+    admission = await admit_chat(deps, tenant, now=_NOW)
+
+    assert not admission.data_reading
+    assert admission.features is not None and not admission.features.on(DATA_READS)
 
 
 async def test_admission_limits_follow_their_settings(

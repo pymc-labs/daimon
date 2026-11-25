@@ -30,6 +30,8 @@ STORE_FILES: Final[tuple[str, ...]] = (
     "0002_sync.sql",
     "0003_store.sql",
     "0004_identity.sql",
+    "0005_ops.sql",
+    "0006_redaction.sql",
 )
 """Schema files `daimon data init` applies, in order. An Alembic revision pins its own copy of
 the names it applied, so this list may grow without them."""
@@ -38,6 +40,7 @@ GRANT_FILES: Final[dict[str, str]] = {
     "0001_store.sql": "0001_grants.sql",
     "0002_sync.sql": "0002_grants.sql",
     "0003_store.sql": "0003_grants.sql",
+    "0005_ops.sql": "0005_grants.sql",
 }
 """A store file's idempotent follow-up (grants, and parts that wait for an optional extension),
 re-run by every apply and by `--repair` once that store file is in."""
@@ -46,8 +49,19 @@ _ROLE_LIST: Final = ", ".join(f"'{r}'" for r in ROLES)
 _PROBE: Final = f"""
 select has_database_privilege(current_user, current_database(), 'CREATE'),
   coalesce((select rolsuper or rolcreaterole from pg_roles where rolname = current_user), false),
-  (select count(*) from pg_roles where rolname in ({_ROLE_LIST})) = {len(ROLES)}
+  (select count(*) from pg_roles where rolname in ({_ROLE_LIST})) = {len(ROLES)},
+  (select coalesce(bool_and(pg_has_role(current_user, oid, 'MEMBER WITH ADMIN OPTION')
+     or (rolname <> 'daimon_data_reader' and pg_has_role(current_user, oid, 'SET'))), true)
+   from pg_roles where rolname in ({_ROLE_LIST})),
+  not exists (select from pg_roles where rolname in ({_ROLE_LIST})
+    and (rolsuper or rolbypassrls or rolcanlogin or rolcreaterole or rolcreatedb or rolreplication))
+  and not exists (select from pg_auth_members m join pg_roles r on r.oid = m.member
+    join pg_roles g on g.oid = m.roleid where r.rolname in ({_ROLE_LIST})
+    and (r.rolname, g.rolname) <> ('daimon_data_view_owner', 'daimon_data_reader'))
 """
+"""Whether this role may create the store, make or hold the roles (SET on each, ADMIN on the
+reader, which the view owner is granted), and whether existing roles are safe: the names are
+cluster-wide, so one made elsewhere must not log in, bypass row security or hold other roles."""
 
 
 class Sql(Protocol):
@@ -63,6 +77,8 @@ class Facts:
     can_create: bool
     can_create_roles: bool
     roles_exist: bool
+    roles_held: bool
+    roles_safe: bool
 
 
 @dataclass(frozen=True)
@@ -74,7 +90,7 @@ class Outcome:
 
 def probe(sql: Sql) -> Facts:
     row = sql.query(_PROBE)[0]
-    return Facts(bool(row[0]), bool(row[1]), bool(row[2]))
+    return Facts(*(bool(v) for v in row))
 
 
 def missing_prerequisites(facts: Facts) -> tuple[str, ...]:
@@ -84,6 +100,12 @@ def missing_prerequisites(facts: Facts) -> tuple[str, ...]:
         out.append("CREATE on the database")
     if not (facts.can_create_roles or facts.roles_exist):
         out.append("CREATEROLE, or the daimon_data_* roles created by an administrator")
+    if not facts.roles_held:
+        out.append("SET on the daimon_data_* roles and ADMIN on daimon_data_reader")
+    if not facts.roles_safe:
+        out.append(
+            "daimon_data_* roles that cannot log in, bypass row security or hold other roles"
+        )
     return tuple(out)
 
 

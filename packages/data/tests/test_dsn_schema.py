@@ -30,11 +30,11 @@ def test_render_fills_both_schema_names() -> None:
 @pytest.mark.parametrize(
     ("facts", "missing"),
     [
-        (Facts(True, True, False), 0),
-        (Facts(True, False, True), 0),
-        (Facts(True, False, False), 1),
-        (Facts(False, True, True), 1),
-        (Facts(False, False, False), 2),
+        (Facts(True, True, False, True, True), 0),
+        (Facts(True, False, True, True, True), 0),
+        (Facts(True, False, False, True, True), 1),
+        (Facts(False, True, True, True, False), 2),
+        (Facts(False, False, False, False, False), 4),
     ],
 )
 def test_missing_prerequisites_names_what_the_server_lacks(facts: Facts, missing: int) -> None:

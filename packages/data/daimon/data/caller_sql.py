@@ -75,11 +75,11 @@ async def data_sql(
             await c.execute(f"set local statement_timeout = '{SECONDS}s'".encode())
             async with asyncio.timeout(SECONDS + 1):
                 cur = await c.execute(
-                    f"select {schemas.data}.caller_sql(%s, %s) as r".encode(), (text, limit)
+                    f"select {schemas.data}.caller_sql(%s, %s) as r".encode(), (text, limit + 1)
                 )
-                rows = [r["r"] for r in await cur.fetchall()]
+                rows = [r["r"] for r in await cur.fetchmany(limit + 1)]
     except (TimeoutError, psycopg.errors.QueryCanceled):
         raise SqlRefused("the query timed out") from None
     except psycopg.Error as e:
         raise SqlRefused(e.diag.message_primary or "the query failed") from None
-    return SqlResult(list(rows[0]) if rows else [], rows, len(rows) == limit)
+    return SqlResult(list(rows[0]) if rows else [], rows[:limit], len(rows) > limit)

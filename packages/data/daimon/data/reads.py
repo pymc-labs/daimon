@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from daimon.data import access
+from daimon.data import access, recheck, redaction
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS
@@ -149,10 +149,15 @@ async def browse(
 
 
 async def get(
-    conn: AsyncConnection[DictRow], schemas: Schemas, ctx: ReadContext, record_id: UUID
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    ctx: ReadContext,
+    record_id: UUID,
+    env: Env | None = None,
 ) -> Record | None:
     """One record with its text and attached files; None when it does not exist or this
-    reader may not see it (the two look alike)."""
+    reader may not see it (the two look alike). With `env`, a source that re-checks reads is
+    asked again (`recheck`)."""
     d = schemas.data
     async with access.scoped(conn, schemas, ctx):
         cur = await conn.execute(
@@ -171,6 +176,9 @@ async def get(
             Attachment(a["ord"], a["name"], a["content_type"], a["size"])
             for a in await cur.fetchall()
         ]
+    ref = (row["source_id"], row["external_id"])
+    if env is not None and ref not in await recheck.allowed(conn, schemas, env, ctx.readers, [ref]):
+        return None
     return Record(_item(row), row["body"], row["payload"], files)
 
 
@@ -185,14 +193,14 @@ async def read_file(
     """The bytes and content type of a record's attached file, asked of its source now with
     the source's own credential (the store keeps no bytes). None when the reader may not see
     the record, it has no such file, or the source no longer shows it."""
-    record = await get(conn, schemas, ctx, record_id)
+    record = await get(conn, schemas, ctx, record_id, env)
     file = next((a for a in record.attachments if a.ord == index), None) if record else None
     if record is None or file is None:
         return None
     d = schemas.data
     cur = await conn.execute(
         f"select s.id, s.tenant_id, s.kind, s.name, s.provider, s.config, s.credential,"
-        f" s.default_scope, c.state, c.last_sync_at from {d}.sources s"
+        f" s.default_scope, s.redaction_set, c.state, c.last_sync_at from {d}.sources s"
         f" left join {d}.source_cursors c on c.source_id = s.id where s.id = %s".encode(),
         (record.item.source_id,),
     )
@@ -204,11 +212,22 @@ async def read_file(
         f"select payload from {d}.records where id = %s".encode(), (record_id,)
     )
     payload = (await cur.fetchone() or {"payload": {}})["payload"]
+    try:
+        redactor = (
+            await redaction.ingest_redactor(conn, schemas, row["tenant_id"], row["redaction_set"])
+            if row["redaction_set"]
+            else None
+        )
+    except redaction.NotApproved:
+        return None
     source = build_source(row, env, None)
     try:
-        return await connector.fetch_file(
+        got = await connector.fetch_file(
             source, payload, record.item.external_id, file.name, file.ord
         )
+        if got is None or redactor is None or not got[1].startswith("text/"):
+            return got
+        return redactor.text(got[0].decode("utf-8", "replace")).encode(), got[1]
     finally:
         await connector.release(source)
 

@@ -168,8 +168,12 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
     "text-embedding-3-small": ModelRates(input=0.02, output=0.0, cache_write=0.0, cache_read=0.0),
     "text-embedding-3-large": ModelRates(input=0.13, output=0.0, cache_write=0.0, cache_read=0.0),
     "qwen/qwen3-embedding-8b": ModelRates(input=0.01, output=0.0, cache_write=0.0, cache_read=0.0),
-    # The data store's reranker is priced per request ($1 per 1,000), not per token: one request
-    # is metered as 1,000 input units at $1 per million.
+    "perplexity/pplx-embed-v1-0.6b": ModelRates(
+        input=0.004, output=0.0, cache_write=0.0, cache_read=0.0
+    ),
+    # The data store's reranker is priced per query ($1 per 1,000; a request of n records is
+    # ceil(n / 100) queries), not per token: one query is metered as 1,000 input units at $1
+    # per million. Unverified against Google's current price list.
     "semantic-ranker-fast-005": ModelRates(input=1.0, output=0.0, cache_write=0.0, cache_read=0.0),
 }
 
