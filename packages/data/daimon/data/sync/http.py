@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Final
 
 import httpx
@@ -95,20 +95,28 @@ async def send(
     deadline: float | None = None,
     cap: float = 600.0,
     waits: Sequence[float] | None = None,
+    json: object | None = None,
+    throttled: Collection[int] = (429,),
 ) -> httpx.Response:
-    """One GET inside the request budget. A 429 waits what the provider asks (up to `cap` in
-    all, and never far past the run's deadline); an emptied bucket (`x-ratelimit-remaining: 0`)
-    waits for its reset; network errors and 5xx back off. Returns the first answer below 500."""
+    """One GET inside the request budget (a POST of `json` when it is given, for providers
+    that read through one). A throttled answer (429; `throttled` adds more) waits what the
+    provider asks (up to `cap` in all, and never far past the run's deadline); an emptied
+    bucket (`x-ratelimit-remaining: 0`) waits for its reset; network errors and 5xx back off.
+    Returns the first answer below 500."""
     query = {k: v for k, v in (params or {}).items() if isinstance(v, str | int | float)}
     delays = WAITS if waits is None else waits
     tries, slept = 0, 0.0
     while True:
         await budget.take()
         try:
-            r = await client.get(path, params=query)
+            r = await (
+                client.get(path, params=query)
+                if json is None
+                else client.post(path, params=query, json=json)
+            )
         except httpx.TransportError:
             r = None
-        if r is not None and r.status_code == 429:
+        if r is not None and r.status_code in throttled:
             wait = _retry_after(r)
             slept += wait
             late = deadline is not None and time.monotonic() + wait > deadline + GRACE

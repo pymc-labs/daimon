@@ -240,6 +240,53 @@ Every run reads all posts, so a post deleted on LinkedIn, or no longer public, d
 Drafts, connection-only and sponsored posts are never stored. A run that finds no posts for
 an organization that had some fails and removes nothing.
 
+### Toggl Track
+
+A source of kind `toggl` reads a workspace's time entries, projects and clients. Give the
+credential `{"token": "..."}`, the API token of a workspace admin (it reads the workspace's
+members, project memberships, projects, clients and the time entry report; no rate, amount,
+cost or currency is kept).
+
+```json
+{"workspace": "1234567", "history_from": "2022-01-01"}
+```
+
+`workspace` is the numeric workspace id; `history_from` is the first day to read (default
+2010-01-01). An entry is readable by its author while their account is active, by every
+owner and admin, and by the managers of its project; projects and clients by owners and
+admins. Project lead, group roles and public projects grant nothing. Toggl verifies no
+address, so a data admin links each member by hand.
+
+Each run reads the entries changed since
+the last, a daily pass re-reads the last year and a weekly one everything from
+`history_from`; an entry or project deleted in Toggl goes with the pass that covers it.
+
+Created with mode `federated`, the same kind is read live: nothing is stored and a search
+reads the last 90 days from Toggl, showing each reader only what they may read. A reader who
+is not linked, or whose account is inactive, gets nothing; with several readers an entry
+shows only if every one may read it.
+
+### Linear
+
+A source of kind `linear` is live: it stores nothing and is created with mode `federated`.
+Give the credential `{"token": "..."}`, a personal API key (read access is enough). A search
+reads issues, and their descriptions, with that key. There is no per-issue access list: a
+caller whose scopes include the source's scope reads every issue the key sees, so give the
+source the narrowest scope that fits.
+
+### HubSpot
+
+A source of kind `hubspot` is live and scope-gated like Linear. Give the credential
+`{"token": "..."}`, a private app token with read access to the CRM objects to search
+(companies, deals, contacts, notes) and to pipelines.
+
+```json
+{"objects": ["companies", "deals"], "portal_id": "12345"}
+```
+
+`objects` limits the types searched (all four when empty); `portal_id` links each result to
+HubSpot. Results carry the record's own fields and its first associated company.
+
 ## People and their accounts
 
 A record a source shares with some of its users reads for a Daimon account only through a
