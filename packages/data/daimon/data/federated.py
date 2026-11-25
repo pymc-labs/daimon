@@ -19,8 +19,9 @@ from typing import Final
 import structlog
 from daimon.data import audit
 from daimon.data.access import ReadContext
+from daimon.data.recheck import reader_subjects
 from daimon.data.schema import Schemas
-from daimon.data.sync.connector import CONNECTORS, LiveHit
+from daimon.data.sync.connector import CONNECTORS, LiveHit, Source
 from daimon.data.sync.engine import Env, build_source
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -85,10 +86,28 @@ async def search(
         r for r in await cur.fetchall() if CONNECTORS.get(r["kind"]) and CONNECTORS[r["kind"]].live
     ]
 
+    people: dict[uuid.UUID, list[tuple[str, ...]]] = {}
+    for r in rows:
+        if CONNECTORS[r["kind"]].live_as_reader:
+            people[r["id"]] = await reader_subjects(
+                conn, schemas, build_source(r, env, None), ctx.readers
+            )
+
+    async def read(source: Source, query: str, limit: int) -> list[LiveHit]:
+        connector = CONNECTORS[source.kind]
+        if not connector.live_as_reader:
+            return await connector.live_search(source, query, limit)
+        who = people[source.id]
+        if not who or not all(who):
+            raise PermissionError("a reader the source cannot act as")
+        found = [await connector.live_search_as(source, query, limit, s) for s in who]
+        shared = {h.ref for h in found[0]}.intersection(*({h.ref for h in x} for x in found[1:]))
+        return [h for h in found[0] if h.ref in shared]
+
     async def one(row: DictRow) -> LiveResult:
         source = build_source(row, env, None)
         try:
-            hits = await CONNECTORS[source.kind].live_search(source, query, limit)
+            hits = await read(source, query, limit)
             if meter:
                 await meter(source.id, len(hits))
         except Exception as e:
