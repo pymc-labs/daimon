@@ -14,6 +14,7 @@ import pytest
 from daimon.core.compute_models import (
     ComputeResource,
     ComputeSession,
+    ComputeTask,
     MachineReadiness,
     MachineState,
     machine_readiness,
@@ -1136,6 +1137,23 @@ _WHILE_STARTING = {
     "reconcile": lambda service, owner, session: service.reconcile(),
     "poll_tasks": lambda service, owner, session: service.poll_tasks(),
     "stop": lambda service, owner, session: service.stop(owner, session.id),
+    # Writes only the message row of a finished task; it never calls a machine.
+    "mark_seen": lambda service, owner, session: service.mark_seen(
+        owner,
+        ComputeTask(
+            id=uuid.uuid4(),
+            tenant_id=owner.tenant_id,
+            session_id=session.id,
+            owner_account_id=owner.account_id,
+            request_key="seen",
+            command_preview="true",
+            timeout_minutes=1,
+            deadline_at=NOW,
+            output_path="/tmp/daimon-tasks/seen.out",
+            created_at=NOW,
+            state="succeeded",
+        ),
+    ),
 }
 
 
@@ -1734,6 +1752,13 @@ async def _runs(sm, task):
     return await claim_wake(sm, idempotency_key=wake_key(task.id), now=NOW) is not None
 
 
+async def _runs_not_yet(sm, task):
+    """Whether `task` still has a message waiting, without claiming it."""
+    async with sm.begin() as db:
+        row = await get_continuation(db, idempotency_key=wake_key(task.id))
+    return row is not None and row.status == "pending"
+
+
 async def test_an_end_the_conversation_read_sends_no_second_message(db_engine, db_clean):
     """Case 1: the scheduler settled the command and queued its message; the bot read the
     result in its turn; the message is withdrawn, while one nobody read still comes."""
@@ -1749,7 +1774,10 @@ async def test_an_end_the_conversation_read_sends_no_second_message(db_engine, d
     await _ended(fake)()
     await service.poll_tasks()
     assert len(await wakes_for(sm, owner)) == 2, "the scheduler queued one each"
-    assert (await service.task_result(owner, read.id)).state == "succeeded"
+    # What compute_task_result does: read, check, then mark the end seen as its last step.
+    result = await service.task_result(owner, read.id)
+    assert result.state == "succeeded" and await _runs_not_yet(sm, read), "a read alone keeps it"
+    await service.mark_seen(owner, result)
     assert not await _runs(sm, read), "the conversation has its end"
     assert await _runs(sm, unread), "nobody read this one: it still wakes, once"
     assert (await peek(sm, owner, read.id)).state == "succeeded"
@@ -1771,7 +1799,7 @@ async def test_a_claimed_wake_is_never_withdrawn(db_engine, db_clean):
     await service.poll_tasks()
     woken, _ = await _wake_turn(sm, tenant, account, wake_key(tasks[0].id))
     for task in tasks:
-        assert (await service.task_result(woken, task.id)).state == "succeeded"
+        await service.mark_seen(woken, await service.task_result(woken, task.id))
     assert await wakes_for(sm, owner) == [], "nothing left to say"
     async with sm.begin() as db:
         own = await get_continuation(db, idempotency_key=wake_key(tasks[0].id))
@@ -1782,8 +1810,9 @@ async def test_a_claimed_wake_is_never_withdrawn(db_engine, db_clean):
 async def test_a_stop_from_the_conversation_sends_no_message_for_its_commands(
     db_engine, db_clean, monkeypatch, who
 ):
-    """Case 2: the owner, from any of their conversations, or the session's own wake turn
-    stopped the machine, so they know: no message for its commands."""
+    """Case 2: the owner in the session's own conversation, or its wake turn, stopped the
+    machine, so that conversation knows: no message for its commands. A stop from another
+    of the owner's conversations is news there: each command keeps its message."""
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     owner, tenant, account = await caller(sm)
     fake = FakeComputeProvider()
@@ -1806,6 +1835,10 @@ async def test_a_stop_from_the_conversation_sends_no_message_for_its_commands(
     assert (await service.stop(stopper, session.id)).state == "deleted"
     await service.poll_tasks()
     assert (await peek(sm, owner, running.id)).state == "cancelled"
+    if who == "owner_elsewhere":
+        told = {wake.idempotency_key for wake in await wakes_for(sm, owner)}
+        assert told == {wake_key(ended.id), wake_key(running.id)}, "today's messages stay"
+        return
     assert await wakes_for(sm, owner) == [], "the stop is the news; nothing follows it"
 
 

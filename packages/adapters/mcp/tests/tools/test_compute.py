@@ -994,16 +994,19 @@ async def test_an_inline_command_that_needs_longer_continues_with_a_note(woken):
     woken.replay.assert_not_awaited()
 
 
-async def test_a_status_check_never_waits_on_a_held_session_lock_past_its_wait(
-    committing_sessionmaker, monkeypatch
-):
-    """The reads before the wait take the session lock too, so they count against it."""
+@pytest.fixture
+async def owned_machine(committing_sessionmaker, monkeypatch):
+    """The owner's running machine and one of its commands, with the compute tools as an
+    MCP client calls them, on a real database."""
     import asyncio
+    from contextlib import asynccontextmanager
 
     from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
+    from daimon.core.compute_tasks import wake_key
     from daimon.core.config import ComputeProfile
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import compute_sessions as session_store
+    from daimon.core.stores.task_continuations import get_continuation
     from daimon.core.stores.turn_origins import bind_origin_session, create_origin
     from daimon.testing.compute import FakeComputeProvider
     from daimon.testing.factories import make_account, make_tenant
@@ -1070,36 +1073,110 @@ async def test_a_status_check_never_waits_on_a_held_session_lock_past_its_wait(
         platform="discord",
     )
     monkeypatch.setattr(compute, "_auth", AsyncMock(return_value=identity))
-    monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
+    readable = AsyncMock(return_value=True)
+    monkeypatch.setattr(compute, "source_metadata_readable", readable)
     mcp = FastMCP("test")
     runtime = SimpleNamespace(
         session_factory=sm, settings=SimpleNamespace(compute=settings), compute_provider=fake
     )
     compute.register_compute_tools(mcp, runtime)
-    status = await mcp.get_tool("compute_task_status")
-    held, release = asyncio.Event(), asyncio.Event()
 
-    async def hold_the_lock():
+    async def call(name, **arguments):
+        tool = await mcp.get_tool(name)
+        return await tool.fn(
+            ctx=None, task_id=task.id, origin_context_id=str(origin.id), **arguments
+        )
+
+    @asynccontextmanager
+    async def lock_held():
+        """Another transaction holds the session lock meanwhile."""
+        held, release = asyncio.Event(), asyncio.Event()
+
+        async def hold():
+            async with sm.begin() as db:
+                await session_store.get(db, tenant.id, session.id, lock=True)
+                held.set()
+                await release.wait()
+
+        holder = asyncio.create_task(hold())
+        await held.wait()
+        try:
+            yield
+        finally:
+            release.set()
+            await holder
+
+    async def ended_with_a_message():
+        """The command ends and the scheduler settles it: its message waits to be sent."""
+        fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
+        fake.tasks[task.id.hex].output = "fit done\n"
+        await service.poll_tasks()
+
+    async def message_waits():
         async with sm.begin() as db:
-            await session_store.get(db, tenant.id, session.id, lock=True)
-            held.set()
-            await release.wait()
+            row = await get_continuation(db, idempotency_key=wake_key(task.id))
+        return row is not None and row.status == "pending"
 
-    holder = asyncio.create_task(hold_the_lock())
-    await held.wait()
+    return SimpleNamespace(
+        call=call,
+        lock_held=lock_held,
+        ended_with_a_message=ended_with_a_message,
+        message_waits=message_waits,
+        readable=readable,
+    )
+
+
+async def test_a_status_check_never_waits_on_a_held_session_lock_past_its_wait(owned_machine):
+    """The reads before the wait take the session lock too, so they count against it."""
+    import asyncio
+
     started = asyncio.get_running_loop().time()
-    try:
+    async with owned_machine.lock_held():
         with pytest.raises(ToolError, match="^Could not check the command right now"):
-            await asyncio.wait_for(
-                status.fn(
-                    ctx=None, task_id=task.id, origin_context_id=str(origin.id), wait_seconds=1
-                ),
-                5,
-            )
-    finally:
-        release.set()
-        await holder
+            await asyncio.wait_for(owned_machine.call("compute_task_status", wait_seconds=1), 5)
     assert asyncio.get_running_loop().time() - started < 2, "within the wait, not after it"
+
+
+@pytest.mark.parametrize(
+    ("tool", "failure"),
+    [
+        ("compute_task_status", "get"),
+        ("compute_task_status", "unreadable"),
+        ("compute_task_status", "timeout"),
+        ("compute_task_status", None),
+        ("compute_task_result", "get"),
+        ("compute_task_result", "unreadable"),
+        ("compute_task_result", None),
+    ],
+)
+async def test_a_failed_read_keeps_the_commands_message(owned_machine, monkeypatch, tool, failure):
+    """Only an answer that carries the end withdraws the message that would tell it: a
+    check that fails after the read leaves it, as a late extra message beats a lost one."""
+    import asyncio
+    from contextlib import nullcontext
+
+    from daimon.core.compute_sessions import ComputeSessions
+    from daimon.core.errors import StoreError
+
+    await owned_machine.ended_with_a_message()
+    assert await owned_machine.message_waits()
+    if failure == "get":
+        refused = AsyncMock(side_effect=StoreError("Could not read the machine."))
+        monkeypatch.setattr(ComputeSessions, "get", refused)
+    if failure == "unreadable":
+        owned_machine.readable.return_value = False
+    arguments = {"wait_seconds": 1} if tool == "compute_task_status" else {}
+    async with owned_machine.lock_held() if failure == "timeout" else nullcontext():
+        if failure is None:
+            answer = await owned_machine.call(tool, **arguments)
+        else:
+            with pytest.raises(ToolError):
+                await asyncio.wait_for(owned_machine.call(tool, **arguments), 5)
+    if failure is None:
+        assert answer["state"] == "succeeded"
+        assert not await owned_machine.message_waits(), "the answer carried the end"
+    else:
+        assert await owned_machine.message_waits(), "nothing was answered: the message stays"
 
 
 @pytest.mark.parametrize(("asked", "waited"), [(45, 40), (40, 40), (5, 5), (0, 0), (-3, 0)])
