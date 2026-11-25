@@ -179,8 +179,8 @@ _STILL_RUNNING = (
 
 
 def _command_view(task: ComputeTask) -> dict[str, JsonValue]:
-    """compute_run_bash's one result shape, finished or not, with the inline fields."""
-    view = _task_view(task, output=True)
+    """compute_run_bash's one result shape, finished or not: the output once, as stdout."""
+    view = _task_view(task, output=False)
     view["stdout"] = task.output_tail
     view["timed_out"] = task.state == "timed_out"
     view["truncated"] = task.output_bytes > len(task.output_tail.encode())

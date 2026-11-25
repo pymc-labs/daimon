@@ -620,7 +620,6 @@ _RESULT_KEYS = {
     "output_path",
     "created_at",
     "finished_at",
-    "output_tail",
     "stdout",
     "timed_out",
     "truncated",
