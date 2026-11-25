@@ -7,10 +7,12 @@ import uuid
 from typing import Annotated
 
 import typer
+from daimon.adapters.cli.commands.data_evals import register
 from daimon.core.config import load_settings
 from daimon.core.ports.gate import data_sources_on
 
 data_app = typer.Typer(help="The data store (the data_sources feature).")
+register(data_app)
 
 
 @data_app.command("init")
