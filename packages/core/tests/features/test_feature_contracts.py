@@ -108,6 +108,7 @@ _NARROWED: dict[str, str] = {
     "mcp_connector_relay": "operator-only: sends connector data to another provider",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
+    "data_sources": "the store is shared by the whole server, so the deployment and a workspace set it",
     "compute_wake_runs": "a server admin's choice for the team or one agent, read by a wake turn",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "compute_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
@@ -127,6 +128,7 @@ _NARROWED: dict[str, str] = {
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
+    "data_reads": "an admin's choice for the team, an agent or a room; a thread shares its room's readers",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 

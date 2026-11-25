@@ -2,7 +2,9 @@
 
 Each source keeps its own table and its own fields; this module only merges them.
 `web`: what admins changed in the web app. `security`: chat tool calls and panel
-writes. A new source is one `AuditSourceSpec` in `_SOURCES` plus its name in
+writes. `data`: an installed package's own trail, added at startup through
+`register_audit_source` (`daimon.core.ports.audit`), so it is read only where that
+package is installed. A new source is one `AuditSourceSpec` plus its name in
 `AuditSource`; filters, paging and the merge need no other change.
 
 Every source pages by `(time, id)` keyset, so a merged page is the newest rows of each
@@ -17,13 +19,25 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Final, Literal
 
+from daimon.core import ports
 from daimon.core.cursor import Cursor
 from daimon.core.stores import security_audit, web_audit
 from daimon.core.stores.domain import WebAuditRow
 from daimon.core.stores.security_audit import SecurityAuditRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
-type AuditSource = Literal["web", "security"]
+type AuditSource = Literal["web", "security", "data"]
+
+
+@dataclass(frozen=True)
+class SourceAuditRow:
+    """A row of a registered source: the fields every source can show."""
+
+    id: uuid.UUID
+    at: datetime
+    kind: str
+    target: str | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,7 +61,7 @@ class AuditEntry:
     actor_account_id: uuid.UUID | None
     kind: str
     """`web`: the action. `security`: the tool."""
-    row: WebAuditRow | SecurityAuditRow
+    row: WebAuditRow | SecurityAuditRow | SourceAuditRow
 
     @property
     def cursor(self) -> Cursor:
@@ -127,8 +141,18 @@ _SOURCES: Final[dict[AuditSource, AuditSourceSpec]] = {
 }
 
 
+def register_audit_source(name: AuditSource, spec: AuditSourceSpec) -> None:
+    """Add a source the built-in ones do not read; its entries join the merged trail."""
+    if name in ("web", "security"):
+        raise ValueError(f"{name} is a built-in audit source")
+    _SOURCES[name] = spec
+
+
 def _chosen(query: AuditFilter) -> list[AuditSource]:
-    return [query.source] if query.source is not None else list(_SOURCES)
+    ports.load()
+    if query.source is not None:
+        return [query.source] if query.source in _SOURCES else []
+    return list(_SOURCES)
 
 
 def day_bounds(first: date | None, last: date | None) -> tuple[datetime | None, datetime | None]:
@@ -157,6 +181,7 @@ async def list_entries(
 
 async def list_kinds(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[AuditKind]:
     """Every kind each source has recorded, for a filter's options."""
+    ports.load()
     return [
         AuditKind(name, kind)
         for name, spec in _SOURCES.items()

@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Final
 
+from daimon.core import ports
 from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.data_tools import DATA_READS
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
@@ -50,6 +52,23 @@ _TOOLS: Final[dict[str, frozenset[str]]] = {
     "web_awareness": WEB_APP_TOOLS,
 }
 _FEATURE_OF: Final[dict[str, str]] = {tool: key for key, tools in _TOOLS.items() for tool in tools}
+_REGISTERED: Final[dict[str, frozenset[str]]] = {}
+"""Tools an installed package gates with its own feature (`daimon.core.ports.tool_gate`)."""
+
+
+def register_gated_tools(key: str, tools: Iterable[str]) -> None:
+    """Gate `tools` behind the feature `key`: the same rule as the built-in keys, so a session
+    loses them and the server refuses them while the feature is Off. A key may not repeat a
+    built-in one."""
+    if key in _TOOLS:
+        raise ValueError(f"{key} already gates tools")
+    _REGISTERED[key] = frozenset(tools)
+
+
+def gated_keys() -> tuple[str, ...]:
+    """Every feature key that gates tools, the registered ones last."""
+    ports.load()
+    return (*GATED_KEYS, *_REGISTERED)
 
 
 def hides_tools(found: ResolvedFeature) -> bool:
@@ -58,6 +77,9 @@ def hides_tools(found: ResolvedFeature) -> bool:
     locked Off, so a gap or a lock there leaves nothing to hide; any other Off hides them."""
     if found.on:
         return False
+    if found.key == DATA_READS:
+        # Data is never offered by default: any Off, a missing dependency too, hides it.
+        return True
     if found.key == "repo_memory":
         return found.unavailable is None and not (found.tier == "deployment" and found.locked)
     return found.tier != "default" or found.unavailable in (None, "requires")
@@ -65,9 +87,16 @@ def hides_tools(found: ResolvedFeature) -> bool:
 
 def gated_tools(keys: Iterable[str]) -> frozenset[str]:
     """The Daimon tools a session loses when `keys` (from `GATED_KEYS`) are Off."""
-    return frozenset[str]().union(*(_TOOLS[key] for key in keys)) - SESSION_KEPT_TOOLS
+    ports.load()
+    tools = {**_TOOLS, **_REGISTERED}
+    return frozenset[str]().union(*(tools[key] for key in keys)) - SESSION_KEPT_TOOLS
 
 
 def server_gate_key(tool: str) -> str | None:
     """The feature whose Off makes the server refuse `tool`; None when nothing gates it."""
-    return None if tool in STOP_TOOLS else _FEATURE_OF.get(tool)
+    if tool in STOP_TOOLS:
+        return None
+    ports.load()
+    return _FEATURE_OF.get(tool) or next(
+        (key for key, tools in _REGISTERED.items() if tool in tools), None
+    )

@@ -7,6 +7,7 @@ license = "MIT"
 authors = [{ name = "PyMC Labs" }]
 dependencies = [
     "daimon-core",
+    "daimon-data",
     "daimon-mux[openai]",
     "daimon-adapter-cli",
     "daimon-adapter-mcp",
@@ -30,10 +31,11 @@ gemini = ["daimon-mux[gemini]"]
 Repository = "https://github.com/pymc-labs/daimon"
 
 [tool.uv.workspace]
-members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host", "apps/harness", "apps/compute-session"]
+members = ["packages/core", "packages/data", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host", "apps/harness", "apps/compute-session"]
 
 [tool.uv.sources]
 daimon-core = { workspace = true }
+daimon-data = { workspace = true }
 daimon-adapter-cli = { workspace = true }
 daimon-adapter-mcp = { workspace = true }
 daimon-adapter-discord = { workspace = true }
@@ -65,7 +67,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 
 [tool.pyright]
 exclude = ["qa/live/tests"]
-include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/adapters/web/daimon", "packages/adapters/sidecar/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness", "apps/compute-session/src/compute_session"]
+include = ["qa/live", "packages/core/daimon", "packages/data/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/adapters/web/daimon", "packages/adapters/sidecar/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness", "apps/compute-session/src/compute_session"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
@@ -139,6 +141,34 @@ unmatched_ignore_imports_alerting = "none"
 name = "Core must not import adapters"
 type = "forbidden"
 source_modules = ["daimon.core"]
+forbidden_modules = ["daimon.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "Core must not import the data store"
+type = "forbidden"
+source_modules = ["daimon.core"]
+forbidden_modules = ["daimon.data"]
+
+# The data store reaches core through settings, stores and the ports core defines for it.
+[[tool.importlinter.contracts]]
+name = "The data store reaches core only through settings, stores and ports"
+type = "forbidden"
+source_modules = ["daimon.data"]
+forbidden_modules = ["daimon.core"]
+allow_indirect_imports = true
+ignore_imports = [
+    "daimon.data.** -> daimon.core.config",
+    "daimon.data.** -> daimon.core.stores",
+    "daimon.data.** -> daimon.core.stores.**",
+    "daimon.data.** -> daimon.core.ports",
+    "daimon.data.** -> daimon.core.ports.**",
+]
+unmatched_ignore_imports_alerting = "none"
+
+[[tool.importlinter.contracts]]
+name = "The data store must not import adapters"
+type = "forbidden"
+source_modules = ["daimon.data"]
 forbidden_modules = ["daimon.adapters"]
 
 [[tool.importlinter.contracts]]
@@ -342,6 +372,7 @@ source_modules = [
     "daimon.core.platform_names",
     "daimon.core.platform_system",
     "daimon.core.platform_words",
+    "daimon.core.ports",
     "daimon.core.posted_controls",
     "daimon.core.pricing",
     "daimon.core.privacy",
@@ -544,6 +575,7 @@ name = "Product code must not import test harnesses"
 type = "forbidden"
 source_modules = [
     "daimon.core", "daimon.core.**",
+    "daimon.data", "daimon.data.**",
     "daimon.adapters", "daimon.adapters.**",
     "mux", "mux.contracts", "mux.contracts.**",
     "mux.drivers", "mux.drivers.**", "mux.errors",
@@ -621,7 +653,7 @@ pythonpath = [".", "tests/golden"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/adapters/web/tests", "packages/adapters/sidecar/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests", "apps/compute-session/tests"]
+testpaths = ["qa/live/tests", "packages/core/tests", "packages/data/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/adapters/web/tests", "packages/adapters/sidecar/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests", "apps/compute-session/tests"]
 addopts = "--import-mode=importlib -m 'not contract and not slow and not judge and not platform_contract'"
 markers = [
     "judge: manual Codex subscription transcript judge -- excluded by default",

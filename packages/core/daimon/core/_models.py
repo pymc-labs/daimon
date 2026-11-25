@@ -5645,6 +5645,22 @@ class DiscordChannelAudience(Base):
     computed_at: Mapped[datetime]
 
 
+class DiscordRoomViewers(Base):
+    """Who can view one room, from the generation `DiscordAudienceState` names.
+
+    Written only while the workspace has `data_sources` on, for rooms with at most the
+    data audience cap of viewers: a data read answers for exactly these people.
+    """
+
+    __tablename__ = "discord_room_viewers"
+
+    tenant_id: Mapped[TenantPk]
+    channel_id: Mapped[str] = mapped_column(primary_key=True)
+    user_ids: Mapped[list[str]]
+    generation: Mapped[int] = mapped_column(BigInteger)
+    computed_at: Mapped[datetime]
+
+
 class WorkspaceAdmin(Base):
     """Who administers a workspace in the web app, beyond platform admins."""
 

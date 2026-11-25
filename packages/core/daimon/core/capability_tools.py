@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from daimon.core.data_tools import DATA_READS, DATA_TOOLS
+
 CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
     "watches": frozenset(
         {
@@ -89,6 +91,7 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
             "lead_intake_health",
         }
     ),
+    DATA_READS: DATA_TOOLS,
 }
 """Feature key to the tools it switches. Every one binds to the session, so a tier's Off takes
 the tools from the next message on; a test keeps these names equal to what the server registers."""

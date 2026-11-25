@@ -1311,6 +1311,26 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Lead intake",
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
     ),
+    FeatureSpec(
+        key="data_reads",
+        name="Data source reads",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent", "channel"),
+        binds="session_mutable",
+        doc=(
+            "The agent can search the workspace's data sources, showing only what everyone "
+            "who will see the answer may read. It then starts fresh for each message in a "
+            "channel, keeps no memory, and other agents cannot ask it. Not in rooms people "
+            "outside the team can read."
+        ),
+        platforms=EVERY_PLATFORM,
+        # Writes after a data read must wait for a card: tool safety is what cards them.
+        depends_on=("data_sources", "tool_safety"),
+        authority=_ADMIN_NOT_OWNER,
+    ),
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",
@@ -1523,6 +1543,22 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         platforms=EVERY_PLATFORM,
         requires=("repo_memory_setup",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="data_sources",
+        name="Data sources",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "The data store, with its connected sources and search. Turned on for the "
+            "deployment first; a workspace can turn it off for itself."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
     ),
     FeatureSpec(
         key="context_provider",

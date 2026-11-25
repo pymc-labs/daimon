@@ -19,9 +19,9 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0230_workspace_skills"
-# Re-point at the head of the branch this lands on (PR2 adds 0231_discord_room_viewers).
-down_revision: str | None = "0229_compute_started_by_wake"
+revision: str = "0250_workspace_skills"
+# Follows the data-access head; re-pointed at the final merge.
+down_revision: str | None = "0241_data_identity"
 branch_labels: str | None = None
 depends_on: str | None = None
 

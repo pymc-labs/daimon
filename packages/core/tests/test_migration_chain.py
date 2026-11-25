@@ -191,7 +191,13 @@ TAIL = (
     "0227_turn_origin_own_dm_reach",
     "0228_compute_task_wait_until",
     "0229_compute_started_by_wake",
-    "0230_workspace_skills",
+    "0230_data_store",
+    "0231_data_store_tables",
+    "0232_data_sync",
+    "0233_data_search",
+    "0240_discord_room_viewers",
+    "0241_data_identity",
+    "0250_workspace_skills",
 )
 HEAD = TAIL[-1]
 
