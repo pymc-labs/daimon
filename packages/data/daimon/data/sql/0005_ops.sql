@@ -223,12 +223,6 @@ begin
     arr_sort(skip), v_fraction;
 end $$;
 
-create or replace function {{data}}.acls_for(readers jsonb, personal_ok boolean, limits int[], tenant_ids uuid[])
-  returns table (acls int[], units int[], skipped int[], fraction float8) language sql stable
-  set search_path = {{data}}, pg_catalog, pg_temp as $$
-  select * from acls_for(readers, personal_ok, limits, tenant_ids, null::uuid)
-$$;
-
 -- The records of `src` this person would read if it were published: what the reader role
 -- shows, minus the source's own hiding rules (freshness, status) and plus the source counted
 -- as published. Run as daimon_data_parity in a read-only transaction.

@@ -5,7 +5,8 @@ writes them until the `data_sources` feature is on. As with 0230, a server that 
 store needs, or an install without the `daimon-data` package, does nothing here; `daimon data
 init` applies it later.
 
-Downgrading drops both store schemas and everything in them, as 0230 does.
+Its list holds the earlier files too, as 0232's does. Downgrading drops what this file made
+(`0005_ops_down.sql`); 0231's downgrade drops the store.
 
 downgrade: destructive
 """
@@ -19,8 +20,14 @@ down_revision: str | None = "0241_data_identity"
 branch_labels: str | None = None
 depends_on: str | None = None
 
-# Pinned: a later file is a later revision, never an edit to this list.
-FILES: tuple[str, ...] = ("0005_ops.sql",)
+# Pinned and cumulative, as in 0231.
+FILES: tuple[str, ...] = (
+    "0001_store.sql",
+    "0002_sync.sql",
+    "0003_store.sql",
+    "0004_identity.sql",
+    "0005_ops.sql",
+)
 
 
 def upgrade() -> None:
@@ -36,4 +43,4 @@ def downgrade() -> None:
         from daimon.data import revision as data_revision
     except ImportError:
         return
-    data_revision.downgrade(op.get_bind())
+    data_revision.downgrade(op.get_bind(), "0005_ops.sql")
