@@ -64,6 +64,7 @@ from daimon.core.skills.service import StoredSkillUpload, UploadedSkill, add_ski
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.core.teams_graph import is_graph_url, is_sharepoint_host
+from daimon.core.workspace_skills import record_zip
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -405,18 +406,33 @@ class _AnthropicSkillAddHost:
             skill_id=skill_id,
         )
 
+    def _title(self, bundle: SkillBundle) -> str:
+        return tenant_scoped_display_title(
+            tenant_id=self.tenant_id, name=bundle.preview.name, agent_name=self.agent_name
+        )
+
+    async def _record(self, bundle: SkillBundle, uploaded: UploadedSkill) -> UploadedSkill:
+        await record_zip(
+            self.sessionmaker,
+            tenant_id=self.tenant_id,
+            skill_id=uploaded.id,
+            name=strip_tenant_prefix(tenant_id=self.tenant_id, display_title=self._title(bundle))
+            or bundle.preview.name,
+            version=uploaded.version,
+            zip_bytes=bundle.zip_bytes,
+        )
+        return uploaded
+
     async def create_skill(self, bundle: SkillBundle) -> UploadedSkill:
         created = await create_skill(
             self.client,
-            display_title=tenant_scoped_display_title(
-                tenant_id=self.tenant_id, name=bundle.preview.name, agent_name=self.agent_name
-            ),
+            display_title=self._title(bundle),
             data=bundle.zip_bytes,
             filename="SKILL.zip",
             media_type="application/zip",
             scope=self.scope,
         )
-        return UploadedSkill(created.id, created.latest_version)
+        return await self._record(bundle, UploadedSkill(created.id, created.latest_version))
 
     async def publish_skill(self, skill_id: str, bundle: SkillBundle) -> UploadedSkill:
         pushed = await publish_skill_version(
@@ -427,7 +443,7 @@ class _AnthropicSkillAddHost:
             media_type="application/zip",
             scope=self.scope,
         )
-        return UploadedSkill(skill_id, pushed.version)
+        return await self._record(bundle, UploadedSkill(skill_id, pushed.version))
 
     async def save_upload(self, bundle: SkillBundle, uploaded: UploadedSkill) -> None:
         async with self.sessionmaker.begin() as session:

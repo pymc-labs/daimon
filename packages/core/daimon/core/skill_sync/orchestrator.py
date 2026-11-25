@@ -95,6 +95,7 @@ from daimon.core.stores.user_skills import (
     load_user_skill,
     upsert_user_skill,
 )
+from daimon.core.workspace_skills import record_zip
 from mux.errors import ScopeViolation
 from pydantic import BaseModel, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -432,6 +433,14 @@ async def _process_one(
         latest_version = resp.version
         async with report_lock:
             report.updated += 1
+    await record_zip(
+        sessionmaker,
+        tenant_id=tenant_id,
+        skill_id=anthropic_id,
+        name=strip_tenant_prefix(tenant_id=tenant_id, display_title=display_title) or pending.name,
+        version=latest_version,
+        zip_bytes=zip_bytes,
+    )
 
     # 4. Store upsert.
     async with sessionmaker() as session, session.begin():

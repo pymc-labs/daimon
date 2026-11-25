@@ -931,6 +931,7 @@ class SkillRepoModal(discord.ui.Modal):
                         branch=branch,
                         path=path,
                         tenant_id=consumed_row.tenant_id,
+                        records=self._runtime.sessionmaker,
                         seeded_skill_names=seeded_skill_names,
                         is_admin=await is_guild_admin(interaction, action=None),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
                         token=pat,

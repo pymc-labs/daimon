@@ -26,7 +26,6 @@ from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.stores import server_skills as server_skills_store
 from daimon.core.stores import web_audit
-from daimon.core.stores import workspace_skills as workspace_skills_store
 from daimon.core.stores.channel_skills import list_tenant_channel_skills
 from daimon.core.stores.domain import ServerSkillRow
 from daimon.core.stores.platform_names import get_channel_names, get_channel_statuses
@@ -361,6 +360,7 @@ async def sync_from_github(
             branch=branch.strip() or "main",
             path=path.strip().strip("/"),
             tenant_id=actor.tenant_id,
+            records=deps.session_factory,
             seeded_skill_names=seeded,
             is_admin=True,
             token=None,
@@ -427,9 +427,6 @@ async def delete_library_skill(
                 kind="conflict",
             )
         await server_skills_store.forget_mirror(
-            session, tenant_id=actor.tenant_id, skill_id=skill_id
-        )
-        await workspace_skills_store.forget_skill(
             session, tenant_id=actor.tenant_id, skill_id=skill_id
         )
         if audited is not None:

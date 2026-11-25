@@ -24,11 +24,12 @@ async def add_server_skill(
     fetched: ServerSkill,
     now: datetime,
     audited: ChangeRecorder | None = None,
+    scope: str | None = None,
 ) -> SkillRef:
     """The library skill mirroring `fetched`, created on first add with every ingest check.
 
     Any editor may add one: the server decides who sees which skill, and the mirror is
-    read-only. Adding one already mirrored returns it.
+    read-only. Adding one already mirrored returns it. A new skill is recorded with `scope`.
     """
     entry = fetched.entry
     async with skill_lock(deps, tenant_id=actor.tenant_id, skill_id=f"{server}\n{entry.uri}"):
@@ -41,7 +42,7 @@ async def add_server_skill(
             return SkillRef(id=held.skill_id, name=held.name, version=deployed[PROVIDER].version)
         if held is not None:
             raise AgentEditError("This skill is still being added. Try again.", kind="conflict")
-        ref = await create_custom_skill(deps, actor=actor, files=fetched.files)
+        ref = await create_custom_skill(deps, actor=actor, files=fetched.files, scope=scope)
         if ref.name != entry.name:
             raise AgentEditError(f"The skill's SKILL.md must name {entry.name}.", kind="invalid")
         manifest = manifest_of(entry)

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 from daimon.core._models import WorkspaceSkill, WorkspaceSkillFile, WorkspaceSkillVersion
 from daimon.core.stores.domain import WorkspaceSkillFileRow, WorkspaceSkillRow
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,18 +22,24 @@ async def record_version(
     version: str,
     digest: str,
     files: Mapping[str, bytes],
+    scope: str | None = None,
 ) -> None:
-    """Keep a published version's files and make it the skill's latest.
+    """Keep a published version's files and make it the skill's latest, unless a newer one
+    is already latest (versions order by length, then text: provider timestamps).
 
-    Recording a version again changes nothing, so a retry after a crash is safe. The scope
-    of an existing skill stays as it was.
+    Recording a version again changes nothing, so a retry after a crash is safe. `scope` is
+    set only on a new skill; an existing skill keeps its own.
     """
+    stmt = insert(WorkspaceSkill).values(
+        tenant_id=tenant_id, skill_id=skill_id, name=name, scope=scope, current_version=version
+    )
+    held = WorkspaceSkill.current_version
     await session.execute(
-        insert(WorkspaceSkill)
-        .values(tenant_id=tenant_id, skill_id=skill_id, name=name, current_version=version)
-        .on_conflict_do_update(
+        stmt.on_conflict_do_update(
             index_elements=["tenant_id", "skill_id"],
             set_={"name": name, "current_version": version, "updated_at": func.now()},
+            where=tuple_(func.length(stmt.excluded.current_version), stmt.excluded.current_version)
+            >= tuple_(func.length(held), held),
         )
     )
     await session.execute(
@@ -131,10 +137,7 @@ async def set_scope(
     return result.first() is not None
 
 
-async def forget_skill(session: AsyncSession, *, tenant_id: uuid.UUID, skill_id: str) -> None:
-    """Drop a deleted library skill's local record; its versions and files go with it."""
-    await session.execute(
-        delete(WorkspaceSkill).where(
-            WorkspaceSkill.tenant_id == tenant_id, WorkspaceSkill.skill_id == skill_id
-        )
-    )
+async def forget_skill(session: AsyncSession, *, skill_id: str) -> None:
+    """Drop a deleted skill's local record; its versions and files go with it. A provider
+    skill id names one tenant's skill, as `delete_user_skills_for_skill_id` relies on."""
+    await session.execute(delete(WorkspaceSkill).where(WorkspaceSkill.skill_id == skill_id))

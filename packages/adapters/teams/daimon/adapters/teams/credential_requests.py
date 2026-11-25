@@ -822,6 +822,7 @@ class TeamsCredentialRequests:
                     branch=branch,
                     path=path,
                     tenant_id=consumed.tenant_id,
+                    records=self._runtime.sessionmaker,
                     seeded_skill_names=seeded,
                     is_admin=is_admin,
                     token=pat,
