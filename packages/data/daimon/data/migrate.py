@@ -25,7 +25,7 @@ ROLES: Final = (
     "daimon_data_parity",
 )
 
-STORE_FILES: Final[tuple[str, ...]] = ("0001_store.sql", "0002_sync.sql")
+STORE_FILES: Final[tuple[str, ...]] = ("0001_store.sql", "0002_sync.sql", "0003_identity.sql")
 """Schema files `daimon data init` applies, in order. An Alembic revision pins its own copy of
 the names it applied, so this list may grow without them."""
 
