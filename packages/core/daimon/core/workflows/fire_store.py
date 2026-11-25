@@ -23,6 +23,7 @@ from daimon.core.fire.subject import Subject, workflow_subject
 from daimon.core.ops_catalog import reason_label
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.routine_delivery import failure_notice_text
+from daimon.core.routine_files import plain_payload
 from daimon.core.routine_sandbox import RoutineSandbox, routine_sandbox
 from daimon.core.stores import (
     identity,
@@ -242,10 +243,12 @@ class WorkflowFireStore:
             if s.destination_kind is None or status is None:
                 return
             extra = {"hold": result.hold, "agent_id": result.producing_agent_id or s.agent_id}
+            # A quiet (`NO_POST`) reply queues nothing to post, which delivery skips.
+            text = plain_payload(result.tail) if result.payload is None else result.payload
             await self._queue(
                 session,
                 outcome,
-                result.payload or result.tail,
+                text or "",
                 extra=extra,
                 status=status,
                 note=result.note,

@@ -107,6 +107,7 @@ class Shape:
     name: str | None = "Digest"
     #: What both paths refuse with, in the routine's last error and the step's error.
     refusal: str | None = None
+    reply: str = REPLY
 
 
 SHAPES = {
@@ -115,6 +116,8 @@ SHAPES = {
     "thread": Shape(destination=("thread", "777")),
     "dm": Shape(destination=("dm", OWNER)),
     "no_destination": Shape(destination=None),
+    "no_post": Shape(reply="NO_POST: no new PRs"),
+    "no_post_dm": Shape(destination=("dm", OWNER), reply="NO_POST"),
     "sandboxed": Shape(sandbox=True),
     "lead_intake": Shape(destination=("dm", OWNER), intake="on"),
     "lead_intake_off": Shape(
@@ -304,11 +307,11 @@ def _deps(
                 )
             )
         kwargs["on_state"](TurnState(content=list(blocks)))
-        return REPLY
+        return shape.reply
 
     async def run_dm_routine(_turn_deps: object, **kwargs: Any) -> DmRoutineReply:
         record(kwargs)
-        return DmRoutineReply(REPLY, "sesn_dm", "agent_a")
+        return DmRoutineReply(shape.reply, "sesn_dm", "agent_a")
 
     base = _fire_deps(
         client=client,
