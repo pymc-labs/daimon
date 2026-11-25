@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Final, Literal
 
-from daimon.core.fire.subject import RoutineFacts, workflow_subject
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows.spec import RoutineNode, Spec
@@ -73,7 +73,11 @@ def mounts_personal_memory(row: RoutineFacts) -> bool:
     later stops it at the next run. An owner-DM routine runs as a live DM turn
     and gets personal memory there, not through this headless decision.
     """
-    return row.destination_kind is None and row.destination_id is None and row.channel_id is None
+    return _reaches_nobody(row.destination_kind, row.destination_id, row.channel_id)
+
+
+def _reaches_nobody(kind: str | None, destination_id: str | None, channel_id: str | None) -> bool:
+    return kind is None and destination_id is None and channel_id is None
 
 
 def has_private_output(row: RoutineFacts) -> bool:
@@ -81,13 +85,23 @@ def has_private_output(row: RoutineFacts) -> bool:
     return row.destination_kind == "dm" or mounts_personal_memory(row)
 
 
+def private_routine_steps(spec: Spec, home_channel_id: str | None) -> frozenset[str]:
+    """The routine step whose output is private, as `has_private_output` has it for a workflow's
+    step: a DM, or no destination and no home channel. Expressions read none of it."""
+    found: set[str] = set()
+    for node_id, node in spec.nodes.items():
+        if isinstance(node, RoutineNode):
+            kind, target = (node.to.kind, node.to.id) if node.to else (None, None)
+            if kind == "dm" or _reaches_nobody(kind, target, home_channel_id):
+                found.add(node_id)
+    return frozenset(found)
+
+
 def hides_workflow_output(workflow: WorkflowRow, spec: Spec, *, reader: uuid.UUID | None) -> bool:
-    """A routine step's private output (`has_private_output`) is its owner's, not an admin's."""
-    node = next((n for n in spec.nodes.values() if isinstance(n, RoutineNode)), None)
-    if node is None or (reader is not None and reader == workflow.owner_account_id):
+    """A routine step's private output is its owner's, not an admin's."""
+    if reader is not None and reader == workflow.owner_account_id:
         return False
-    subject = workflow_subject(workflow, spec, node, run_id=None, owner=None, agent_id="")
-    return has_private_output(subject)
+    return bool(private_routine_steps(spec, workflow.home_channel_id))
 
 
 def can_read_routine_output(row: RoutineRow, *, user_id: str | None) -> bool:

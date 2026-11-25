@@ -164,6 +164,8 @@ class RunFacts:
     max_steps: int = DEFAULT_MAX_STEPS
     #: Test runs: outputs reused for these nodes instead of running them.
     pinned: Mapping[str, StepView] = field(default_factory=dict[str, StepView])
+    #: Private routine steps (`routines.private_routine_steps`): expressions read none of them.
+    private_steps: frozenset[str] = frozenset()
 
 
 def project_status(steps: Sequence[StepView]) -> tuple[RunStatus, WaitingReason | None] | None:
@@ -235,7 +237,8 @@ def expression_context(
     A skipped visit counts only when no visit ran: a visit refused by `max_visits` must not
     hide the output of the one before it, which the `on_max_visits` target reads. A step that
     has not run is absent, so `has()` guards hold, except a loop-carried one (upstream and
-    downstream of `node_id` at once), which reads as null on the first pass.
+    downstream of `node_id` at once), which reads as null on the first pass. A private step's
+    output, summary and files read empty.
     """
     latest: dict[str, StepView] = {}
     counts: dict[str, int] = {}
@@ -252,12 +255,13 @@ def expression_context(
             latest[s.node_id] = s
     view: dict[str, JsonValue] = {}
     for nid, s in latest.items():
+        shown = nid not in facts.private_steps
         view[nid] = {
-            "output": s.output,
-            "summary": s.summary,
+            "output": s.output if shown else None,
+            "summary": s.summary if shown else None,
             "route": s.route,
             "status": s.status,
-            "files": list(s.files),
+            "files": list(s.files) if shown else [],
             "visits": counts.get(nid, 0),
         }
     up = ancestors(spec, node_id)

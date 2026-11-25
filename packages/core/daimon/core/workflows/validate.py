@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.continuity.watch_projection import projection_path
+from daimon.core.routines import private_routine_steps
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.workflows.expressions import (
     ExpressionError,
@@ -91,6 +92,9 @@ _BAD_WAIT_SOURCE: Final = (
     "workflow's webhook triggers (`trigger:<id>`) or `callback`"
 )
 _STEP_PARTS: Final = frozenset({"output", "summary", "route", "status", "files", "visits"})
+#: What a private routine step still shows expressions (`engine.expression_context`).
+_OPEN_PARTS: Final = frozenset({"route", "status", "visits"})
+_PRIVATE_OUTPUT: Final = "Step {step} is private to its owner, so its result cannot be used"
 _ROOTS: Final[dict[str, frozenset[str]]] = {
     "node": frozenset({"inputs", "trigger", "steps", "run", "workflow"}),
     "item": frozenset({"inputs", "trigger", "steps", "run", "workflow", "item", "index"}),
@@ -248,9 +252,12 @@ def _check_template(
         return
     guards = {r.path[1] for r in refs if r.guarded and len(r.path) > 1 and r.path[0] == "steps"}
     up = ancestors(spec, node_id) if node_id else set[str]()
+    private = private_routine_steps(spec, spec.home.channel if spec.home else None)
     for ref in refs:
         root, rest = ref.path[0], ref.path[1:]
-        if root not in _ROOTS[template.scope]:
+        if root == "steps" and rest and rest[0] in private and not _open_part(rest):
+            report.error("private_output", _PRIVATE_OUTPUT.format(step=rest[0]), node_id)
+        elif root not in _ROOTS[template.scope]:
             report.error("unknown_ref", f"Not available here: {'.'.join(ref.path)}", node_id)
         elif (
             root == "inputs"
@@ -265,6 +272,10 @@ def _check_template(
             _check_step_ref(
                 spec, ref.path, node_id, up, sure, ref.guarded or rest[0] in guards, report
             )
+
+
+def _open_part(rest: tuple[str, ...]) -> bool:
+    return len(rest) > 1 and rest[1] in _OPEN_PARTS
 
 
 def _check_step_ref(

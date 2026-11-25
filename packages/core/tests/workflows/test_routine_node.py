@@ -135,3 +135,51 @@ async def test_routine_step_output_when_private_then_only_its_owner_reads_it(
     for who, (env, shown) in readers.items():
         found = await service.step(env, succeeded, "r", None)
         assert found.summary == ("Notes" if shown else None), f"the step's result, for the {who}"
+
+
+@pytest.mark.parametrize(
+    ("to", "home", "private"),
+    [(None, None, True), ({"kind": "dm"}, "555", True), (ROUTINE["r"]["to"], "555", False)],
+    ids=["no_destination", "dm", "channel"],
+)
+async def test_routine_step_result_when_private_then_a_later_post_reads_nothing(
+    db_session: AsyncSession, to: dict[str, str] | None, home: str | None, private: bool
+) -> None:
+    node = {k: v for k, v in ROUTINE["r"].items() if k != "to"} | ({"to": to} if to else {})
+    post = {"to": "C0POST", "message": "Got ${{ steps.r.summary }}${{ steps.r.output }}"}
+    nodes = {"r": node, "f": {"kind": "finish", "deliver": post}}
+    world = await make_world(db_session, nodes, "r", home=home, spec_fields=ONE)
+    run_id = await _ends(world, engine.Succeeded({"error": "oops"}, summary="Notes"))
+    async with world.sm() as s:
+        texts = [d.payload["text"] for d in await s.scalars(select(WorkflowDelivery))]
+    assert texts == ["Got " if private else 'Got Notes{"error":"oops"}'], (
+        f"what the post said: {texts}"
+    )
+    kept = (await world.steps(run_id))["r"].summary
+    assert kept == "Notes", "the stored text stays for the owner's own reads"
+
+
+@pytest.mark.parametrize(
+    ("to", "home", "refused"),
+    [(None, None, True), ({"kind": "dm"}, "555", True), (ROUTINE["r"]["to"], "555", False)],
+    ids=["no_destination", "dm", "channel"],
+)
+def test_a_reference_to_a_private_routine_steps_result_is_refused(
+    to: dict[str, str] | None, home: str | None, refused: bool
+) -> None:
+    node = {k: v for k, v in ROUTINE["r"].items() if k != "to"} | ({"to": to} if to else {})
+    nodes = {"r": node, "f": {"kind": "finish", "output": "${{ steps.r.summary }}"}}
+    fields = ONE | ({"home": {"channel": home}} if home else {})
+    doc: dict[str, Any] = {"schema": "daimon.workflow/v1", "name": "T", "start": "r"}
+    doc |= {"nodes": nodes} | fields
+    found = validate_spec(parse_spec(doc)).errors
+    private = [p for p in found if p.code == "private_output"]
+    assert bool(private) is refused, f"a private result cannot be read: {found}"
+    if refused:
+        assert private[0].message == "Step r is private to its owner, so its result cannot be used"
+    ok = nodes | {"f": {"kind": "finish", "output": "${{ steps.r.status }}"}}
+    assert not [
+        p
+        for p in validate_spec(parse_spec(doc | {"nodes": ok})).errors
+        if p.code == "private_output"
+    ], "its status still reads"

@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
+from daimon.core.routines import private_routine_steps
 from daimon.core.stores import (
     security_audit,
     workflow_deliveries,
@@ -291,6 +292,7 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
         trigger={"kind": run.trigger_kind, "key": run.trigger_key},
         now=now,
         max_steps=_max_steps(spec, settings),
+        private_steps=private_routine_steps(spec, workflow.home_channel_id),
         pinned={
             n: StepView(n, 1, "succeeded", route=p.get("route"), output=p.get("output"))
             for n, p in pinned.items()

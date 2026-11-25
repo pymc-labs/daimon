@@ -10,10 +10,11 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast
 
-from daimon.core.routines import PRIVATE_FAILED, hides_workflow_output
+from daimon.core.routines import PRIVATE_FAILED, hides_workflow_output, private_routine_steps
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflow_waits as waits_store
@@ -931,6 +932,9 @@ async def step_detail(
     attempts = await runs_store.list_attempts(session, step.id)
     chosen = next((a for a in attempts if a.number == attempt), attempts[-1] if attempts else None)
     exprs = _inputs_of(node)
+    flow = await workflows_store.get_workflow(
+        session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
+    )
     facts = RunFacts(
         inputs=run.inputs,
         run={"id": str(run.id), "number": run.number, "mode": run.mode, "label": run.label},
@@ -940,7 +944,12 @@ async def step_detail(
     )
     context: Any = None
     try:
-        context = expression_context(parse_spec(spec), [_view(s) for s in steps], node_id, facts)
+        parsed = parse_spec(spec)
+        facts = replace(
+            facts,
+            private_steps=private_routine_steps(parsed, flow.home_channel_id if flow else None),
+        )
+        context = expression_context(parsed, [_view(s) for s in steps], node_id, facts)
         context |= own
     except ValueError:
         context = None
