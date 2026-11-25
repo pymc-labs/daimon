@@ -5,16 +5,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from daimon.core._models import ComputeTaskRecord
+from daimon.core._models import ComputeTaskRecord, TaskContinuation
 from daimon.core.compute_models import (
     ACTIVE_TASK_STATES,
     ComputeSession,
     ComputeTask,
     ComputeTaskState,
 )
-from daimon.core.compute_tasks import wake_text
+from daimon.core.compute_tasks import wake_key, wake_text
 from daimon.core.errors import StoreError
 from daimon.core.stores.compute_sessions import scope
+from daimon.core.stores.domain import TurnOriginRow
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -138,9 +139,63 @@ async def finish(
         target_ma_agent_id=session.agent_id,
         target_name=session.agent_name,
         reason="timer",
-        idempotency_key=uuid.uuid5(task.id, "finished"),
+        idempotency_key=wake_key(task.id),
         available_at=now,
         attended=False,
         requested_work=wake_text(done),
     )
     return done
+
+
+async def wake_turn_of(
+    db: AsyncSession, origin: TurnOriginRow, session: ComputeSession, *, now: datetime
+) -> bool:
+    """Whether ``origin`` is the running wake turn of one of this session's finished commands.
+
+    A wake row is claimed and fenced (``started_at``) for as long as its turn runs.
+    The turn is that wake's when the row is the only wake running in the session's
+    conversation, was queued by ``finish`` for the session's owner and agent, and
+    the origin began after the fence. The row names its command by ``wake_key``.
+    Two wakes running at once in one conversation cannot be told apart, so
+    neither reads.
+    """
+    await scope(db, session.tenant_id)
+    running = (
+        await db.scalars(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == session.tenant_id,
+                TaskContinuation.platform == session.platform,
+                TaskContinuation.thread_id == session.thread_id,
+                TaskContinuation.status == "claimed",
+                TaskContinuation.started_at.is_not(None),
+                TaskContinuation.lease_expires_at > now,
+            )
+            .limit(2)
+        )
+    ).all()
+    if len(running) != 1:
+        return False
+    wake = running[0]
+    place = (session.tenant_id, session.platform, session.thread_id, session.parent_channel_id)
+    if (
+        wake.reason != "timer"
+        or wake.attended
+        or wake.started_at is None
+        or origin.created_at < wake.started_at
+        or origin.attended
+        or origin.helper_of is not None
+        or (origin.tenant_id, origin.platform, origin.thread_id, origin.parent_channel_id) != place
+        or (wake.tenant_id, wake.platform, wake.thread_id, wake.parent_channel_id) != place
+        or not origin.account_id == wake.requester_account_id == session.owner_account_id
+        or not origin.responder_ma_agent_id == wake.target_ma_agent_id == session.agent_id
+    ):
+        return False
+    finished = await db.scalars(
+        select(ComputeTaskRecord.id).where(
+            ComputeTaskRecord.tenant_id == session.tenant_id,
+            ComputeTaskRecord.session_id == session.id,
+            ComputeTaskRecord.state.not_in(ACTIVE_TASK_STATES),
+        )
+    )
+    return wake.idempotency_key in {wake_key(task_id) for task_id in finished}

@@ -19,11 +19,18 @@ from daimon.core.compute_models import (
 )
 from daimon.core.compute_provider import ComputeProviderError, app_name
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
+from daimon.core.compute_tasks import WAKE_OUTPUT_CHARS, wake_key
 from daimon.core.config import ComputeProfile, ComputeSettings
 from daimon.core.errors import StoreError
 from daimon.core.stores import compute_sessions as session_store
 from daimon.core.stores import compute_tasks as task_store
 from daimon.core.stores.domain import Role
+from daimon.core.stores.task_continuations import (
+    claim_wake_row,
+    record_continuation,
+    settle_wake_row,
+    start_wake_row,
+)
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin, get_active_origin
 from daimon.testing.compute import FakeComputeProvider
 from daimon.testing.factories import make_account, make_tenant
@@ -49,7 +56,9 @@ def settings(**kwargs):
     )
 
 
-async def caller(sm, *, tenant=None, account=None, attended=True, human=True):
+async def caller(
+    sm, *, tenant=None, account=None, attended=True, human=True, created=NOW, agent="agent"
+):
     async with sm.begin() as db:
         tenant = tenant or await make_tenant(db)
         account = account or await make_account(db, tenant=tenant)
@@ -60,13 +69,13 @@ async def caller(sm, *, tenant=None, account=None, attended=True, human=True):
             platform="discord",
             parent_channel_id="parent",
             thread_id="thread",
-            responder_ma_agent_id="agent",
+            responder_ma_agent_id=agent,
             responder_name="Daimon",
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
             expires_at=NOW + timedelta(days=30),
-            now=NOW,
+            now=created,
             sender_foreign=False,
             shared_channel=False,
             attended=attended,
@@ -621,6 +630,169 @@ async def test_lost_start_restart_and_overdue_tasks_are_reported_never_rerun(db_
     assert sorted(started) == sorted([restarted.id.hex, overdue.id.hex])
 
 
+# --- A finished command's wake turn reads its own session, and nothing more ----
+
+_WAKE_LEASE = timedelta(minutes=5)
+
+
+async def _finished_task(service, fake, owner, session, request_key="use"):
+    task = await service.start_task(
+        owner, session.id, command="python fit.py", timeout_minutes=60, request_key=request_key
+    )
+    fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
+    fake.tasks[task.id.hex].output = "sampling done\n" * 300
+    await service.poll_tasks()
+    return await service.task_result(owner, task.id)
+
+
+async def _run_wake(sm, key, now=NOW):
+    """What a dispatcher does before the wake's turn: claim the row and fence its start."""
+    async with sm.begin() as db:
+        claim = dict(idempotency_key=key, owner="bot", now=now, lease=_WAKE_LEASE)
+        assert await claim_wake_row(db, **claim, max_attempts=5) is not None
+        assert await start_wake_row(db, **claim)
+
+
+async def _woken(sm, tenant, account, **kwargs):
+    """The unattended turn a wake starts: nobody sent it, nobody waits on it."""
+    turn, _, _ = await caller(
+        sm, tenant=tenant, account=account, attended=False, human=False, **kwargs
+    )
+    return turn
+
+
+def _reads(service, turn, session, task):
+    return (
+        service.get(turn, session.id),
+        service.status(turn, session.id),
+        service.task_status(turn, task.id),
+        service.task_result(turn, task.id),
+        service.call(turn, session.id, tool="read_file", arguments={"path": task.output_path}),
+        service.call(turn, session.id, tool="list_files", arguments={"path": "/tmp"}),
+    )
+
+
+async def _all_refused(operations):
+    for operation in operations:
+        with pytest.raises(StoreError):
+            await operation
+
+
+async def test_a_finished_command_wake_reads_its_own_session_and_does_nothing_else(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, account = await caller(sm)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+    other = await launch(service, owner, "second")
+    task = await _finished_task(service, fake, owner, session)
+    later = await service.start_task(
+        owner, session.id, command="make report", timeout_minutes=60, request_key="later"
+    )
+    woken = await _woken(sm, tenant, account)
+    # Queued is not running: until its turn starts, the wake reads nothing.
+    await _all_refused(_reads(service, woken, session, task))
+
+    await _run_wake(sm, wake_key(task.id))
+    calls = len(fake.calls)
+    _, _, status, result, file, listing = [
+        await read for read in _reads(service, woken, session, task)
+    ]
+    assert status.state == "succeeded"
+    # The whole saved result, not the short end the wake text carried.
+    assert result.output_tail == task.output_tail and len(result.output_tail) > WAKE_OUTPUT_CHARS
+    assert file == listing == fake.result
+    assert [tool for _, tool, _ in fake.calls[calls:]] == ["read_file", "list_files"]
+    # Nobody watches a wake's turn: a command it sees end still gets its own message.
+    fake.tasks[later.id.hex].status, fake.tasks[later.id.hex].exit_code = "exit", 0
+    assert (await service.task_status(woken, later.id)).state == "succeeded"
+    [told] = await wakes_for(sm, owner)
+    assert told.idempotency_key == wake_key(later.id)
+
+    calls = len(fake.calls)
+    await _all_refused(
+        (
+            service.call(woken, session.id, tool="run_bash", arguments={"command": "id"}),
+            service.call(woken, session.id, tool="write_file", arguments={"path": "/x"}),
+            service.start_task(
+                woken, session.id, command="id", timeout_minutes=1, request_key="more"
+            ),
+            service.extend(woken, session.id, hours=1, approval_key="extend"),
+            service.stop(woken, session.id),
+            launch(service, woken, "third"),
+            service.list(woken),
+            # The same owner's other machine in the same conversation.
+            service.get(woken, other.id),
+            service.status(woken, other.id),
+            service.call(woken, other.id, tool="read_file", arguments={"path": "/x"}),
+        )
+    )
+    assert len(fake.calls) == calls and fake.deleted == []
+    assert (await service.get(owner, session.id)).state == "running"
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["earlier_turn", "other_agent", "second_wake", "owner_timer", "delivered", "lease_lapsed"],
+)
+async def test_only_the_running_wake_of_that_session_reads(db_engine, db_clean, case):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, account = await caller(sm)
+    fake = FakeComputeProvider()
+    now = NOW
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: now)
+    session = await launch(service, owner)
+    task = await _finished_task(service, fake, owner, session)
+    key = wake_key(task.id)
+    readings = [(session, task)]
+
+    if case == "owner_timer":
+        # A timer the owner set fires in the conversation; the command's wake still waits.
+        async with sm.begin() as db:
+            row = await record_continuation(
+                db,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="parent",
+                thread_id="thread",
+                requester_account_id=account.id,
+                requester_external_user_id="user",
+                target_ma_agent_id="agent",
+                target_name="Daimon",
+                reason="timer",
+                idempotency_key=uuid.uuid4(),
+                available_at=NOW,
+                requested_work="Read the machine.",
+            )
+        await _run_wake(sm, row.idempotency_key)
+    else:
+        await _run_wake(sm, key)
+    turn = {}
+    if case == "earlier_turn":
+        turn = {"created": NOW - timedelta(seconds=1)}
+    if case == "other_agent":
+        turn = {"agent": "another-agent"}
+    if case == "second_wake":
+        # Two wakes running in one conversation cannot be told apart: neither reads.
+        other = await launch(service, owner, "second")
+        other_task = await _finished_task(service, fake, owner, other, "use-2")
+        await _run_wake(sm, wake_key(other_task.id))
+        readings.append((other, other_task))
+    woken = await _woken(sm, tenant, account, **turn)
+    if case == "delivered":
+        async with sm.begin() as db:
+            assert await settle_wake_row(
+                db, idempotency_key=key, owner="bot", status="delivered", now=NOW
+            )
+    if case == "lease_lapsed":
+        now += _WAKE_LEASE
+    for machine, command in readings:
+        await _all_refused(_reads(service, woken, machine, command))
+    assert [tool for _, tool, _ in fake.calls if tool != "run_bash"] == []
+
+
 async def test_owner_reading_the_end_gets_no_second_report_and_outages_wait(db_engine, db_clean):
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     owner, _, _ = await caller(sm)
@@ -710,8 +882,9 @@ async def test_status_turns_a_failed_database_write_into_a_plain_refusal(monkeyp
         "_poll_task",
         AsyncMock(side_effect=DataError("INSERT ... secret", {}, Exception("NUL"))),
     )
+    present = type("O", (), {"attended": True, "human_invocation": True})
     with pytest.raises(StoreError) as error:
-        await service.task_status(None, uuid.uuid4())
+        await service.task_status(type("C", (), {"origin": present}), uuid.uuid4())
     assert "secret" not in str(error.value) and "INSERT" not in str(error.value)
 
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Daimon reads a finished background command before it reports.** When a long command on a
+  cloud machine ends, the message Daimon posts can use the whole saved result and the machine's
+  files, not only the last 1,500 characters. For that message it can only read that one
+  machine: it cannot run commands, write files, or launch, extend or stop a machine
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **A quiet routine run posts nothing.** Each run with a destination is told to end with one
   `NO_POST:` line when its instructions say to stay silent or it already posted everything they
   ask for. Daimon keeps the reason in the run's record and posts no closing note; files the run
