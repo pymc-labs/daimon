@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The owner lists and stops their cloud machines from any of their conversations.**
+  `compute_list_sessions` shows every live machine of theirs, and `here` marks the ones the
+  current conversation can use. Commands, files and more time still work only in the
+  conversation the machine started in ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **A server admin can turn off the approval card for starting and extending a cloud
   computer.** The `compute_approval` setting, for the team or for one agent, defaults to Ask,
   which keeps the card. With Skip, a launch or an extend runs without the card, but only for

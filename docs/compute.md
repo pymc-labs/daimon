@@ -67,13 +67,13 @@ service agent Artifact Registry Reader on the repository.
 
 ## How sessions work
 
-The owner launches, extends and uses a session in the conversation it started
-in. Launching and extending need an approval card, unless a server admin turned
-off the [card for cloud computers](features.md#approval-for-cloud-computers);
-then only the default lifetime runs. A session is usable once
-its machine has started; until then a command gets a short notice to try
-again. A machine that fails to start, or has not started after 10 minutes, is
-removed, and its owner is told to ask an admin.
+The owner extends and uses a session only in the conversation it started in, and
+can list and stop it from any of their conversations. Launching and extending
+need an approval card, unless a server admin turned off the [card for cloud
+computers](features.md#approval-for-cloud-computers); then only the default
+lifetime runs. A session is usable once its machine has started; until then a
+command gets a short notice to try again. A machine that fails to start, or has
+not started after 10 minutes, is removed, and its owner is told to ask an admin.
 
 Each machine gets only its own token, and Google credentials stay in the
 control plane. The Cloud Run service refuses callers that Google IAM does not

@@ -445,6 +445,124 @@ async def test_read_limit_is_the_largest_chunk_the_session_answer_can_carry():
     assert f"at most {MAX_READ_BYTES // 1024} KiB" in description
 
 
+async def test_the_owner_lists_and_stops_a_machine_from_another_conversation(
+    committing_sessionmaker, monkeypatch
+):
+    """A machine started in thread A shows in thread B, not usable there but stoppable."""
+    import re
+
+    from daimon.core.compute_sessions import ELSEWHERE, ComputeCaller, ComputeSessions
+    from daimon.core.config import ComputeProfile
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.turn_origins import bind_origin_session, create_origin
+    from daimon.testing.compute import FakeComputeProvider
+    from daimon.testing.factories import make_account, make_tenant
+    from pydantic import SecretStr
+
+    sm = committing_sessionmaker
+    settings = ComputeSettings(
+        enabled=True,
+        deployment_id="test-deployment",
+        cloud_run_project="test-project",
+        cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
+        session_auth_key=SecretStr("session-secret-test-only"),
+        profiles={
+            "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+        },
+    )
+    fake = FakeComputeProvider()
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+        owner = await make_account(db, tenant=tenant)
+        stranger = await make_account(db, tenant=tenant)
+
+    async def turn(account, thread, *, attended=True):
+        now = datetime.now(UTC)
+        async with sm.begin() as db:
+            origin = await create_origin(
+                db,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                parent_channel_id="parent",
+                thread_id=thread,
+                responder_ma_agent_id="agent",
+                responder_name="Daimon",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=Role.USER,
+                expires_at=now + timedelta(minutes=5),
+                now=now,
+                sender_foreign=False,
+                shared_channel=False,
+                attended=attended,
+            )
+            # Each turn holds its own signed grant: binding one takes it from any other.
+            await bind_origin_session(
+                db, origin_id=origin.id, chat_session_id=str(origin.id), human_invocation=attended
+            )
+        return origin.model_copy(
+            update={"chat_session_id": str(origin.id), "human_invocation": attended}
+        )
+
+    here = await turn(owner, "thread-a")
+    session = await ComputeSessions(sm, settings, fake).launch(
+        ComputeCaller(tenant.id, owner.id, here, str(here.id), "owner"),
+        profile="mmm",
+        region="us-central1",
+        ttl_hours=24,
+        approval_key="approved",
+        source_metadata={},
+    )
+    auth = AsyncMock()
+    monkeypatch.setattr(compute, "_auth", auth)
+    monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=sm, settings=SimpleNamespace(compute=settings), compute_provider=fake
+    )
+    compute.register_compute_tools(mcp, runtime)
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    async def call(name, origin, **arguments):
+        """Call `name` as the person of `origin`, in that turn."""
+        auth.return_value = auth_identity(
+            origin.account_id,
+            tenant.id,
+            role=Role.USER,
+            chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent"),
+            chat_session_id=origin.chat_session_id,
+            platform_user_id="owner",
+            platform="discord",
+        )
+        return await tools[name].fn(ctx=None, origin_context_id=str(origin.id), **arguments)
+
+    there = await turn(owner, "thread-b")
+    [listed] = await call("compute_list_sessions", there)
+    assert listed["id"] == str(session.id) and listed["here"] is False
+    assert [row["here"] for row in await call("compute_list_sessions", here)] == [True]
+    with pytest.raises(ToolError, match=re.escape(ELSEWHERE)):
+        await call("compute_run_bash", there, session_id=session.id, command="id")
+
+    theirs = await turn(stranger, "thread-b")
+    assert await call("compute_list_sessions", theirs) == []
+    with pytest.raises(ToolError, match="^Session not found$"):
+        await call("compute_stop_session", theirs, session_id=session.id)
+
+    absent = await turn(owner, "thread-b", attended=False)
+    for name, arguments in (
+        ("compute_list_sessions", {}),
+        ("compute_stop_session", {"session_id": session.id}),
+    ):
+        with pytest.raises(ToolError, match="must be here"):
+            await call(name, absent, **arguments)
+    assert fake.calls == [] and fake.deleted == []
+
+    stopped = await call("compute_stop_session", there, session_id=session.id)
+    assert stopped == {"session_id": str(session.id), "state": "deleted"}
+    assert fake.deleted == [session.id]
+
+
 # --- What a finished command's wake turn may call, and what a routine may ------
 
 #: The tools a wake turn may use on the session of the command that woke it. Every

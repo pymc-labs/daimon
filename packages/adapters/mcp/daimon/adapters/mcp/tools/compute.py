@@ -1,8 +1,9 @@
 """Owner-only compute sessions bound to verified, attended conversation origins.
 
-One exception, decided in core (`daimon.core.compute_sessions.turn_may_read`): the
-turn that a finished background command wakes may use the read tools on that
-command's session.
+A session is used only in the conversation it started in; its owner lists and
+stops it from any of their conversations. One exception, decided in core
+(`daimon.core.compute_sessions.turn_may_read`): the turn that a finished background
+command wakes may use the read tools on that command's session.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from daimon.core.compute_sessions import (
     READ_OPERATIONS,
     ComputeCaller,
     ComputeSessions,
+    made_here,
     owner_present,
 )
 from daimon.core.compute_thin_mcp import MAX_READ_BYTES
@@ -300,7 +302,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> dict[str, str]:
         """Permanently delete a session and its files. Export needed files first.
 
-        The owner may stop it in the original conversation. A current tenant admin
+        The owner may stop it from any of their conversations. A current tenant admin
         may emergency-stop it without access to commands, files or other contents.
         Failed provider deletion remains pending for automatic cleanup.
         """
@@ -438,13 +440,17 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def compute_list_sessions(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, origin_context_id: str
-    ) -> list[ComputeSession]:
-        """List your live sessions in this conversation. Other people's sessions are private."""
+    ) -> list[dict[str, JsonValue]]:
+        """List your live machines from every conversation.
+
+        `here` is true for the ones this conversation can use. Other people's machines
+        are private.
+        """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         try:
             rows = await service.list(caller)
             return [
-                row
+                {**row.model_dump(mode="json"), "here": made_here(row, caller.origin)}
                 for row in rows
                 if await source_metadata_readable(
                     runtime, auth, row.source_metadata, origin_context_id=origin_context_id

@@ -1,8 +1,9 @@
 """Leased compute lifecycle and background commands.
 
-Only the authenticated session owner, through an authorized attended conversation,
-may launch, execute in, write to or extend their registered session within the
-configured caps; the owner, a tenant admin or the fenced reconciler may stop it.
+Only the authenticated session owner, through the attended conversation the session
+started in, may execute in, write to or extend it, within the configured caps. The
+owner lists and stops their sessions from any of their attended conversations; a
+tenant admin or the fenced reconciler may stop one too.
 
 Only the session owner, through an authorized attended conversation, can start a
 background command; its status and result go only to that owner; its completion
@@ -60,6 +61,10 @@ START_FAILED = (
     "The machine could not start, so it is being removed. "
     "Ask an admin to check the image profile it was launched from."
 )
+#: What the owner is told when they use, from one conversation, a machine another started.
+ELSEWHERE = (
+    "This machine belongs to another of your conversations. Use it there, or stop it from here."
+)
 # A start whose inline call was lost has this long to leave its pid file.
 _START_GRACE = timedelta(minutes=2)
 # How long after its deadline an unreachable or stuck task is given up.
@@ -71,6 +76,15 @@ READ_OPERATIONS = frozenset({"read_file", "list_files"})
 def owner_present(origin: TurnOriginRow) -> bool:
     """The owner sent this turn's message and waits for its reply."""
     return origin.attended and origin.human_invocation is True
+
+
+def made_here(session: ComputeSession, origin: TurnOriginRow) -> bool:
+    """Whether `session` started in `origin`'s conversation, the only one that may use it."""
+    return (session.platform, session.thread_id, session.parent_channel_id) == (
+        origin.platform,
+        origin.thread_id,
+        origin.parent_channel_id,
+    )
 
 
 async def turn_may_read(
@@ -156,12 +170,14 @@ class ComputeSessions:
             raise StoreError("Session not found")
         if stop and caller.admin:
             return session
-        if session.owner_account_id != caller.account_id or (
-            session.platform,
-            session.thread_id,
-            session.parent_channel_id,
-        ) != (caller.origin.platform, caller.origin.thread_id, caller.origin.parent_channel_id):
-            raise StoreError("Session not found in this owner's conversation")
+        if stop and session.owner_account_id == caller.account_id and owner_present(origin):
+            # The owner may stop their machine from any of their conversations.
+            return session
+        if session.owner_account_id != caller.account_id:
+            # As for a missing one: another person's machine is not shown to exist.
+            raise StoreError("Session not found")
+        if not made_here(session, caller.origin):
+            raise StoreError(ELSEWHERE)
         if read and not await turn_may_read(db, origin, session, now=self.clock()):
             raise StoreError("The machine owner must be here in an active conversation.")
         return session
@@ -383,14 +399,11 @@ class ComputeSessions:
         async with self.sm.begin() as db:
             await self._origin(db, caller)
             sessions = await store.list_sessions(db, caller.tenant_id, owner=caller.account_id)
+            # Every conversation's: the owner sees all their machines and may stop any.
             return [
                 s
                 for s in sessions
-                if s.deployment_id == self.settings.deployment_id
-                and s.platform == caller.origin.platform
-                and s.thread_id == caller.origin.thread_id
-                and s.parent_channel_id == caller.origin.parent_channel_id
-                and s.state != "deleted"
+                if s.deployment_id == self.settings.deployment_id and s.state != "deleted"
             ]
 
     async def call(
