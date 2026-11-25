@@ -1272,6 +1272,31 @@ async def test_a_caller_that_sleeps_past_its_wait_leaves_the_end_to_the_schedule
     assert len(await wakes_for(sm, owner)) == 1, "the conversation's message does"
 
 
+async def test_a_probe_that_never_answers_cannot_hold_the_caller_past_its_wait(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    answers = asyncio.Event()
+
+    class SilentMachine(FakeComputeProvider):
+        async def call(self, session, token, tool, arguments):
+            if str(arguments.get("command", "")).startswith("# daimon-task probe"):
+                await answers.wait()
+            return await super().call(session, token, tool, arguments)
+
+    fake = SilentMachine()
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    # A short wait keeps the test fast: the bound runs on the event loop's own clock.
+    ran = await asyncio.wait_for(_inline(service, owner, session, wait_seconds=0.05), 5)
+    assert not ran.ended_here and ran.task.state == "running"
+    assert ran.task.wait_until is None, "handed to the scheduler"
+    answers.set()
+    await _ended(fake)()
+    await service.poll_tasks()
+    assert (await service.task_result(owner, ran.task.id)).state == "succeeded"
+    assert len(await wakes_for(sm, owner)) == 1
+
+
 async def test_the_scheduler_leaves_a_waited_for_command_alone_until_its_wait_is_over(
     db_engine, db_clean, monkeypatch
 ):

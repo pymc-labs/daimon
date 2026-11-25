@@ -549,7 +549,7 @@ class ComputeSessions:
         request_key: str,
         timeout_seconds: int | None = None,
         extra_cap: int = 0,
-        wait_seconds: int | None = None,
+        wait_seconds: float | None = None,
     ) -> ComputeTask:
         """Start a command once per `request_key`, detached on the machine.
 
@@ -625,7 +625,7 @@ class ComputeSessions:
         session_id: uuid.UUID,
         *,
         command: str,
-        wait_seconds: int,
+        wait_seconds: float,
         timeout_seconds: int | None,
         timeout_minutes: int | None,
         request_key: str,
@@ -656,29 +656,53 @@ class ComputeSessions:
                 give_up + timedelta(seconds=wait_seconds),
                 task.wait_until - timedelta(seconds=_INLINE_HANDOVER),
             )
+        # A probe or a lock wait can take far longer than the wait (the transport allows
+        # 50 s), so every step is bounded by the time that remains, on the loop's clock.
+        remaining = (give_up - self.clock()).total_seconds()
+        deadline = asyncio.get_running_loop().time() + max(0.0, remaining)
         polls = iter(_INLINE_POLLS)
         while task.state in ACTIVE_TASK_STATES and self.clock() < give_up:
-            await self.sleep(next(polls, 2.0))
+            await self.sleep(min(next(polls, 2.0), (give_up - self.clock()).total_seconds()))
             try:
-                settled = await self._poll_task(task.tenant_id, task.id, wake=False, inline=True)
+                settled = await self._poll_task(
+                    task.tenant_id, task.id, wake=False, inline=True, deadline=deadline
+                )
+                if settled:
+                    # This call settled it, with no wake: the caller must get it.
+                    async with self.sm.begin() as db:
+                        task = await self._owned_task(db, caller, task.id)
+                    return InlineRun(task, ended_here=True)
+                async with asyncio.timeout_at(deadline), self.sm.begin() as db:
+                    task = await self._owned_task(db, caller, task.id)
+            except TimeoutError:
+                # Rolled back before any write: this caller settled nothing.
+                break
             except SQLAlchemyError:
                 # The scheduler takes it over after `wait_until`; report it as still running.
                 log.warning("compute.inline_poll_retry", task_id=str(task.id))
                 return InlineRun(task, ended_here=False)
-            async with self.sm.begin() as db:
-                task = await self._owned_task(db, caller, task.id)
-            if settled:
-                return InlineRun(task, ended_here=True)
-        if task.state not in ACTIVE_TASK_STATES or task.wait_until is None:
-            return InlineRun(task, ended_here=False)
+        return InlineRun(await self._hand_over(task), ended_here=False)
+
+    async def _hand_over(self, task: ComputeTask) -> ComputeTask:
+        """Let the scheduler poll a task its caller stopped waiting for, from now on.
+
+        One short transaction on the task row alone: it never waits for the session
+        lock, which a slow probe can hold. Its caller already proved it owns the task.
+        """
         try:
             async with self.sm.begin() as db:
-                # The caller has stopped looking: the scheduler may poll it from now on.
-                handed = await task_store.advance(db, task, wait_until=None)
-                task = handed or await self._owned_task(db, caller, task.id)
+                current = await task_store.get(db, task.tenant_id, task.id)
+                if (
+                    current is not None
+                    and current.state in ACTIVE_TASK_STATES
+                    and current.wait_until is not None
+                ):
+                    handed = await task_store.advance(db, current, wait_until=None)
+                    current = handed or await task_store.get(db, task.tenant_id, task.id)
+                return current or task
         except SQLAlchemyError:
             log.warning("compute.inline_handover_retry", task_id=str(task.id))
-        return InlineRun(task, ended_here=False)
+            return task
 
     async def _renew_for(
         self, db: AsyncSession, session: ComputeSession, task: ComputeTask
@@ -749,7 +773,13 @@ class ComputeSessions:
                     log.warning("compute.task_poll_retry", task_id=str(task.id))
 
     async def _poll_task(
-        self, tenant_id: uuid.UUID, task_id: uuid.UUID, *, wake: bool, inline: bool = False
+        self,
+        tenant_id: uuid.UUID,
+        task_id: uuid.UUID,
+        *,
+        wake: bool,
+        inline: bool = False,
+        deadline: float | None = None,
     ) -> bool:
         """Probe an active task once, and settle it when it ended. True when this call did.
 
@@ -758,6 +788,9 @@ class ComputeSessions:
         seconds ahead. The scheduler and a status read may settle it only once
         `wait_until` is empty or past. Outside its own window a call does nothing, so the
         caller and the conversation's message never both report one end.
+
+        `deadline`, on the event loop's clock, bounds the wait for the session lock and
+        for the probe. Both come before any write, so a `TimeoutError` settles nothing.
         """
         async with self.sm.begin() as db:
             task = await task_store.get(db, tenant_id, task_id)
@@ -765,7 +798,10 @@ class ComputeSessions:
                 return False
             # The session lock serializes with stop and deletion. The poller skips
             # a session busy with an inline call and returns next pass.
-            session = await store.get(db, tenant_id, task.session_id, lock=True, skip_locked=wake)
+            async with asyncio.timeout_at(deadline):
+                session = await store.get(
+                    db, tenant_id, task.session_id, lock=True, skip_locked=wake
+                )
             if session is None:
                 return False
             # Re-read under the lock: another poll may have settled it meanwhile.
@@ -792,14 +828,14 @@ class ComputeSessions:
             token = session_token(self.settings, session.id)
             overdue = now > task.deadline_at + _DEADLINE_GRACE
             try:
-                probe = scripts.parse_probe(
-                    await self.provider.call(
+                async with asyncio.timeout_at(deadline):
+                    answer = await self.provider.call(
                         session,
                         token,
                         "run_bash",
                         {"command": scripts.probe_script(task.id), "timeout_s": 20},
                     )
-                )
+                probe = scripts.parse_probe(answer)
             except ComputeProviderError:
                 if not overdue:
                     return False
