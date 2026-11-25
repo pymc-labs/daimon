@@ -1,7 +1,8 @@
-# Optional: Postgres with pgvector for the data store's embedding search. The store runs
-# without it (full-text search only), so the default compose file keeps the plain image.
+# Optional: Postgres with pgvector for the data store's embedding search, and the sync
+# worker. The store runs without pgvector (full-text search only), so the default compose
+# file keeps the plain image. The worker idles unless the `data_sources` feature is on.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build postgres
+#   docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build postgres data-sync
 #
 # Same data volume and major version, so an existing database keeps working. See
 # docs/data-sources.md.
@@ -9,3 +10,17 @@ services:
   postgres:
     image: daimon-postgres-pgvector:18
     build: ./deploy/postgres
+
+  # Keeps every data source in step with its system. One leader schedules at a time.
+  data-sync:
+    build: .
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
+    entrypoint: ["python", "-m", "daimon.data.sync"]
+    restart: unless-stopped
