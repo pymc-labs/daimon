@@ -514,7 +514,7 @@ async def test_the_nightly_rebuild_finds_nothing_then_finds_and_repairs_a_corrup
         found = await acl.nightly(store.conn, store.schemas)
         assert (found["grant_missing"], found["grant_extra"]) == (1, 1), f"drift missed: {found}"
         assert (await acl.nightly(store.conn, store.schemas))["grant_missing"] == 0, "not repaired"
-    async with store.conn.transaction():
+    async with store.conn.transaction(force_rollback=True):  # the worker's later tests share it
         await store.conn.execute(
             f"set local daimon_data.acl_writer = on; update {store.d}.records set acl = 0"
             f" where source_id = '{src}' and external_id = 'doc:nightly'".encode()

@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `read_library_skill`; a scoped skill shows only to callers whose data reads include its
   scope. Declared `skill_repos` add a repository's skills ([Data sources](docs/data-sources.md)).
 
+- **The web app gets pages for data sources, with the feature on.** A Data section searches
+  and browses what the person may read and opens items with their files. Integrations lists
+  sources with their runs, parity result and publish control. Admin gains Data access for
+  scopes, grants, identity links, data admins and redaction sets, and Profile lists a
+  person's linked and connected accounts ([Data sources](docs/data-sources.md)).
+
 - **Data sources can go stale, be read live, be declared in a file and be checked before
   they publish.** A source past its freshness ceiling is hidden until it syncs; a new source
   publishes only after a clean comparison with its own permissions. `DAIMON_DATA__DECLARED`

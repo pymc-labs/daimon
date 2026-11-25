@@ -21,6 +21,7 @@ from daimon.adapters.web.turns import WebTurns
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings, WebSettings
 from daimon.core.github_credentials import build_multifernet
+from daimon.testing.data_db import data_db  # noqa: F401
 from daimon.testing.db import (  # noqa: F401
     db_clean,
     db_committing_engine,

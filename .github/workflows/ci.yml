@@ -237,8 +237,9 @@ jobs:
             -c "CREATE DATABASE daimon_test OWNER migrator"
           psql -h localhost -U daimon -d daimon_test -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector"
           uv run alembic upgrade head
-          psql -h localhost -U daimon -d daimon_test -tAc \
-            "SELECT to_regnamespace('data') IS NOT NULL" | grep -qx t
+          test "$(psql -h localhost -U daimon -d daimon_test -tAc \
+            "SELECT string_agg(file, ' ' ORDER BY file) FROM data.schema_version")" \
+            = "0001_store.sql 0002_sync.sql 0003_store.sql"
       - name: pytest (data)
         run: >-
           uv run pytest packages/data -n 4 --dist worksteal --timeout=300

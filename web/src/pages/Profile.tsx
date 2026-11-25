@@ -17,6 +17,8 @@ import { plural, shortDate } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
 import { Pill } from "@/modules/agents/bits"
 import { clientName } from "@/modules/agents/setup/clients"
+import { ProfileData } from "./ProfileData"
+import { Empty, Row, Section } from "./profile-parts"
 
 type AgentRef = { id: string; name: string }
 export type Profile = {
@@ -41,18 +43,6 @@ export function ProfilePage() {
     </Page>
   )
 }
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section aria-label={title}>
-      <h2 className="mb-3 text-sm font-semibold">{title}</h2>
-      <div className="divide-y rounded-lg border">{children}</div>
-    </section>
-  )
-}
-
-const Empty = ({ children }: { children: React.ReactNode }) => <div className="px-4 py-6 text-center text-sm text-muted-foreground">{children}</div>
-const Row = ({ children }: { children: React.ReactNode }) => <div className="flex min-h-14 items-center gap-3 px-4 py-3 text-sm">{children}</div>
 
 function Body({ d }: { d: Profile }) {
   const qc = useQueryClient()
@@ -136,6 +126,8 @@ function Body({ d }: { d: Profile }) {
         ))}
         {!d.connections.length && <Empty>Nothing is connected</Empty>}
       </Section>
+
+      {me.data?.modules.includes("data") && <ProfileData />}
 
       <Section title="Access via MCP">
         {!d.keys.length ? <Empty>No keys</Empty> : d.keys.map((k) => (
