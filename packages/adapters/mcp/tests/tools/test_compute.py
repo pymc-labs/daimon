@@ -349,6 +349,45 @@ async def test_compute_skip_refuses_more_than_the_default_time(skipped, name, ch
     assert skipped.service.launch.await_count == skipped.service.extend.await_count == 0
 
 
+@pytest.mark.parametrize(
+    ("name", "changes"),
+    [("compute_launch_session", {"ttl_hours": 48}), ("compute_extend_session", {"hours": 25})],
+)
+async def test_with_tool_safety_on_a_skipped_call_reaches_the_time_limit(skipped, name, changes):
+    """Staging, 2026-11-25: with tool safety on, a 48-hour launch under skip showed a card
+    instead of the refusal. The turn's decider now lets it through, so the tool refuses."""
+    from typing import Any, cast
+
+    from daimon.core.confirmation import confirmed_tools_for_turn
+    from daimon.core.tool_safety import (
+        COMPUTE_APPROVAL_TOOLS,
+        ToolCall,
+        ToolSafetyPolicy,
+        decide_tool_call,
+    )
+
+    on = ToolSafetyPolicy(enabled=True)
+    deps = SimpleNamespace(backend_selection_enabled=True, microsoft_send=True, tool_safety=on)
+    turn = confirmed_tools_for_turn(cast(Any, deps)) - COMPUTE_APPROVAL_TOOLS  # as under skip
+    skipped.uses[name].update(changes)  # the model asked for this exact call
+    call = ToolCall(
+        tool_use_id="tu",
+        server_name=compute.DAIMON_SERVER_NAME,
+        tool_name=name,
+        input=skipped.uses[name],
+    )
+    verdict = decide_tool_call(
+        on,
+        call,
+        attended=True,
+        trusted_servers=frozenset({compute.DAIMON_SERVER_NAME}),
+        confirmed_tools=turn,
+    )
+    assert verdict.outcome == "allow", "no card: the call reaches Daimon's own rule"
+    with pytest.raises(ToolError, match="A longer time needs the approval card"):
+        await skipped.call(name)
+
+
 @pytest.mark.parametrize("name", ["compute_launch_session", "compute_extend_session"])
 async def test_compute_skip_still_needs_the_exact_tool_use_in_the_conversation(skipped, name):
     other = {"template": "other"} if name == "compute_launch_session" else {"hours": 2}
