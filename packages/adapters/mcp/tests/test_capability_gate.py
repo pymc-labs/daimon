@@ -201,6 +201,7 @@ async def test_a_proxied_call_when_the_feature_is_off_is_refused(
     async with Client(mcp) as client:
         message = await _error(client, "call_tool", {"name": "list_routines", "arguments": {}})
     assert OFF in message, f"the call_tool proxy reached list_routines: {message!r}"
+    assert message.endswith("Ask an admin or an owner to turn it on."), "an owner may turn it on"
 
 
 async def test_an_agent_key_when_its_channel_turns_the_feature_off_is_refused(
@@ -284,10 +285,26 @@ async def test_cloud_computers_stay_off_until_a_workspace_turns_them_on(
         await _set(sessionmaker, tenant_id, "compute", "on")
         after = {t.name for t in await client.list_tools()}
         allowed = await _error(client, "compute_launch_session", launch)
+        # Turned Off again with a machine running: list and stop stay, the rest is refused.
+        await _set(sessionmaker, tenant_id, "compute", "off")
+        on_machine = {
+            "session_id": str(uuid.uuid4()),
+            "origin_context_id": launch["origin_context_id"],
+        }
+        run = await _error(client, "compute_run_bash", {**on_machine, "command": "id"})
+        kept = [
+            await _error(client, "compute_list_sessions", {"origin_context_id": str(uuid.uuid4())}),
+            await _error(client, "compute_stop_session", on_machine),
+        ]
     assert not before & compute, f"cloud computer tools listed while Off: {before & compute}"
-    assert "Cloud computers is turned off here" in refused and OFF in refused, refused
+    assert refused == (
+        "Cloud computers is turned off here, so compute_launch_session can't run. "
+        "Nothing was done. Ask a server admin to turn it on."
+    ), "only a server admin can turn it on, so the refusal names one"
     assert compute <= after, "a workspace On offers them"
     assert OFF not in allowed, f"the gate let the call through: {allowed!r}"
+    assert OFF in run, f"a command ran with cloud computers Off: {run!r}"
+    assert not [message for message in kept if OFF in message], "list and stop stay callable"
 
 
 async def test_the_tool_list_for_a_chat_credential_is_left_whole(

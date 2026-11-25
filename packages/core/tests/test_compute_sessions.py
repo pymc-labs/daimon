@@ -470,6 +470,41 @@ async def test_a_launching_session_stops_where_compute_is_left_off(db_engine, db
     assert fake.machine_env == {}, "no machine started"
 
 
+async def test_turning_compute_off_leaves_a_running_machine_to_stop_or_expire(db_engine, db_clean):
+    """Off removes the computer tools here (the MCP gate refuses all but list and stop), but
+    a machine already running keeps running: its command is still polled, the owner can
+    list and stop it, and otherwise it ends at its idle time."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    now = NOW
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: now)
+    kept, stopped = await launch(service, owner), await launch(service, owner, "second")
+    task = await service.start_task(
+        owner, kept.id, command="python fit.py", timeout_minutes=60, request_key="use"
+    )
+    async with sm.begin() as db:
+        await set_feature_value(
+            db,
+            tenant_id=tenant.id,
+            target=FeatureTarget("workspace"),
+            key="compute",
+            value="off",
+            set_by=None,
+            surface="cli",
+        )
+    await service.reconcile()
+    assert (await service.get(owner, kept.id)).state == "running", "Off stops nothing running"
+    fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
+    await service.poll_tasks()
+    assert (await service.task_result(owner, task.id)).state == "succeeded", "still polled"
+    assert {s.id for s in await service.list(owner)} == {kept.id, stopped.id}
+    assert (await service.stop(owner, stopped.id)).state == "deleted"
+    now = kept.expires_at + timedelta(minutes=1)
+    await service.reconcile()
+    assert (await service.get(owner, kept.id)).state == "deleted", "it ends at its idle time"
+
+
 async def test_a_launching_session_waits_while_compute_cannot_be_read(
     db_engine, db_clean, monkeypatch: pytest.MonkeyPatch
 ):

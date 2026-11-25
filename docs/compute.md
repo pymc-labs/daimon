@@ -25,6 +25,11 @@ Cloud computers stay off after this set-up. A server admin then turns on the
 with `/settings` in chat, the web app or `daimon features`. To turn it on
 everywhere, set `DAIMON_FEATURES__COMPUTE=on` on every Daimon service.
 
+A value already set for a workspace, agent, channel or thread keeps it, so an
+Off there stays off, and only a server admin can change it. Turning the feature
+off does not stop a machine that is running: stop it, or it ends at its idle
+time.
+
 > **Warning:** Removing these settings before cleanup finishes can leave paid
 > machines running. To stop new launches, turn off `DAIMON_COMPUTE__ENABLED`
 > and leave the rest: cleanup keeps going.
