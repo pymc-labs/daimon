@@ -48,15 +48,21 @@ from daimon.core.server_skills.node import (
     list_server_skills,
     skill_sync_deps,
 )
+from daimon.core.server_skills.repo import RepoUpstream, parse_repo_server
+from daimon.core.server_skills.source import source_deps
 from daimon.core.server_skills.sync import (
     CheckResult,
     SyncDeps,
+    Upstream,
+    UpstreamGone,
+    UpstreamUnreachable,
     approve_update,
     check_mirror,
     follow_now,
 )
 from daimon.core.skill_library import MirrorDoc, mirror_doc
 from daimon.core.skill_library_files import SkillRef, fork_library_skill
+from daimon.core.skill_repos import RepoSkillOutcome, SkillRepoDecl, add_repo_skills
 from daimon.core.skills.ingest import SkillIngestError
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow, WebPersonRow
@@ -67,8 +73,10 @@ from sqlalchemy.exc import SQLAlchemyError
 __all__ = [
     "server_skills_node",
     "server_skills_router",
+    "source_of",
     "sync_deps",
     "sync_server_skills_forever",
+    "sync_source_skills_forever",
 ]
 
 log = structlog.get_logger(__name__)
@@ -98,7 +106,7 @@ async def sync_server_skills(runtime: WebRuntime, node: DataServerNode) -> None:
     """Check every mirror once; one that fails is retried on the next pass."""
     deps = sync_deps(runtime, node.skills_node())
     async with runtime.sessionmaker() as session:
-        mirrors = await store.list_mirrors(session)
+        mirrors = [m for m in await store.list_mirrors(session) if m.server == node.server.name]
     for mirror in mirrors:
         try:
             await check_mirror(deps, mirror.id)
@@ -112,6 +120,67 @@ async def sync_server_skills_forever(runtime: WebRuntime, node: DataServerNode) 
     while True:
         try:
             await sync_server_skills(runtime, node)
+        except SQLAlchemyError:
+            log.warning("server_skill.sync_failed", exc_info=True)
+        await asyncio.sleep(CHECK_INTERVAL_S)
+
+
+def repo_upstream(
+    runtime: WebRuntime, *, tenant_id: uuid.UUID, repo: str, branch: str
+) -> RepoUpstream:
+    app = runtime.settings.github_app
+    return RepoUpstream(
+        tenant_id=tenant_id,
+        repo=repo,
+        branch=branch,
+        sessionmaker=runtime.sessionmaker,
+        http=runtime.http_client,
+        app_id=app.app_id,
+        app_private_key=app.private_key,
+        now=runtime.now,
+        max_tarball_bytes=runtime.settings.github.max_tarball_bytes,
+        max_tarball_decompressed_bytes=runtime.settings.github.max_tarball_decompressed_bytes,
+    )
+
+
+def source_of(runtime: WebRuntime, mirror: ServerSkillRow) -> Upstream | None:
+    """The in-process source of a mirror (a repository, or a local store), else None."""
+    parsed = parse_repo_server(mirror.server)
+    if parsed is not None:
+        return repo_upstream(runtime, tenant_id=mirror.tenant_id, repo=parsed[0], branch=parsed[1])
+    return runtime.skill_sources.get(mirror.server)
+
+
+def source_sync_deps(runtime: WebRuntime, mirror: ServerSkillRow, source: Upstream) -> SyncDeps:
+    return source_deps(
+        server=mirror.server,
+        upstream=source,
+        sessionmaker=runtime.sessionmaker,
+        edit=change_deps(runtime).edit,
+        now=runtime.now,
+    )
+
+
+async def sync_source_skills(runtime: WebRuntime) -> None:
+    """Check every mirror whose source runs in process; one that fails is retried next pass."""
+    async with runtime.sessionmaker() as session:
+        mirrors = await store.list_mirrors(session)
+    for mirror in mirrors:
+        source = source_of(runtime, mirror)
+        if source is None:
+            continue
+        try:
+            await check_mirror(source_sync_deps(runtime, mirror, source), mirror.id)
+        # Boundary: one mirror's surprise must not stop the others or the loop.
+        except Exception:
+            log.warning("server_skill.check_failed", mirror_id=str(mirror.id), exc_info=True)
+
+
+async def sync_source_skills_forever(runtime: WebRuntime) -> None:
+    """Check every in-process mirror now and then every `CHECK_INTERVAL_S`, until cancelled."""
+    while True:
+        try:
+            await sync_source_skills(runtime)
         except SQLAlchemyError:
             log.warning("server_skill.sync_failed", exc_info=True)
         await asyncio.sleep(CHECK_INTERVAL_S)
@@ -138,6 +207,19 @@ class ApproveBody(BaseModel):
 
 class ForkBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
+
+
+class SkillReposBody(BaseModel):
+    repo: str = Field(min_length=3, max_length=200, pattern=r"^[\w.-]+/[\w.-]+$")
+    branch: str = Field(default="main", min_length=1, max_length=200)
+    paths: list[str] = Field(default_factory=list[str], max_length=50)
+    scope: str | None = Field(default=None, max_length=200)
+
+
+class RepoSkillResult(BaseModel):
+    name: str
+    action: str
+    detail: str | None
 
 
 class MirrorCheck(BaseModel):
@@ -190,6 +272,13 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
         if mirror is None:
             raise HTTPException(status_code=404, detail="No such server skill.")
         return mirror
+
+    async def _sync_for(caller: WebCaller, mirror: ServerSkillRow) -> SyncDeps:
+        """The sync that keeps `mirror` current: its in-process source's, else the node's."""
+        source = source_of(runtime, mirror)
+        if source is not None:
+            return source_sync_deps(runtime, mirror, source)
+        return sync_deps(runtime, (await node_or_404(caller)).skills_node())
 
     async def _checked(mirror: ServerSkillRow, result: CheckResult) -> MirrorCheck:
         async with runtime.sessionmaker() as session:
@@ -244,30 +333,59 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/skills/{skill_id}/check")
     async def check(caller: Editor, skill_id: str) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        node = await node_or_404(caller)
+        mirror = await _mirror(caller.person.tenant_id, skill_id)
+        deps = await _sync_for(caller, mirror)
         try:
             require_admin(actor_of(caller), "The skill library")
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
-        mirror = await _mirror(caller.person.tenant_id, skill_id)
-        return await _checked(
-            mirror, await check_mirror(sync_deps(runtime, node.skills_node()), mirror.id)
-        )
+        return await _checked(mirror, await check_mirror(deps, mirror.id))
 
     @router.post("/skills/{skill_id}/approve")
     async def approve(caller: Editor, skill_id: str, body: ApproveBody) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        node = await node_or_404(caller)
+        mirror = await _mirror(caller.person.tenant_id, skill_id)
+        deps = await _sync_for(caller, mirror)
         try:
             require_admin(actor_of(caller), "The skill library")
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
-        mirror = await _mirror(caller.person.tenant_id, skill_id)
         if mirror.pending_digest is None:
             raise HTTPException(status_code=409, detail="No update is waiting.")
-        result = await approve_update(
-            sync_deps(runtime, node.skills_node()), mirror.id, digest=body.digest
-        )
+        result = await approve_update(deps, mirror.id, digest=body.digest)
         return await _checked(mirror, result)
+
+    @router.post("/skill-repos", status_code=201)
+    async def add_repo(caller: Editor, body: SkillReposBody) -> list[RepoSkillResult]:  # pyright: ignore[reportUnusedFunction]
+        actor = actor_of(caller)
+        try:
+            require_admin(actor, "The skill library")
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+        decl = SkillRepoDecl(
+            tenant_id=actor.tenant_id,
+            repo=body.repo,
+            branch=body.branch,
+            paths=tuple(body.paths),
+            scope=body.scope,
+        )
+        upstream = repo_upstream(
+            runtime, tenant_id=actor.tenant_id, repo=decl.repo, branch=decl.branch
+        )
+        try:
+            outcomes: list[RepoSkillOutcome] = await add_repo_skills(
+                change_deps(runtime).edit, upstream, decl, writer=actor, now=runtime.now()
+            )
+        except UpstreamGone as exc:
+            raise HTTPException(
+                status_code=422, detail="That repository could not be read."
+            ) from exc
+        except UpstreamUnreachable as exc:
+            raise HTTPException(
+                status_code=502, detail="GitHub didn't answer. Try again soon."
+            ) from exc
+        async with runtime.sessionmaker.begin() as session:
+            await recorded(runtime, caller, "Added skill repository")(session, body.repo)
+        return [RepoSkillResult(name=o.name, action=o.action, detail=o.detail) for o in outcomes]
 
     @router.post("/skills/{skill_id}/fork", status_code=201)
     async def fork(caller: Editor, skill_id: str, body: ForkBody) -> SkillRef:  # pyright: ignore[reportUnusedFunction]

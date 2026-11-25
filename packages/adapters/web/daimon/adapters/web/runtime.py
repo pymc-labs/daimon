@@ -36,6 +36,7 @@ from daimon.core.mcp_tool_listing import McpToolLister
 from daimon.core.node_exchange import node_identity_key
 from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
+from daimon.core.server_skills.source import LocalSources, SkillSource
 from daimon.core.specs import AgentSpec
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
@@ -82,6 +83,9 @@ class WebRuntime:
     deployment_default: DeploymentDefault = DeploymentDefault()
     skill_descriptions: Mapping[str, str] = field(default_factory=dict[str, str])
     agent_templates: Sequence[AgentSpec] = ()
+    # Skills stores the mirror sync reads in process, by the `server` name their mirrors carry;
+    # the data package fills it at startup. A repository's skills need no entry here.
+    skill_sources: LocalSources = field(default_factory=dict[str, SkillSource])
     agents: AgentDirectory = field(default_factory=AgentDirectory)
     # When skill versions were made, for the agent GitHub panel.
     github_version_times: VersionTimeCache = field(default_factory=VersionTimeCache)
