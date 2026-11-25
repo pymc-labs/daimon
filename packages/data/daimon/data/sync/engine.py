@@ -25,10 +25,11 @@ from uuid import UUID
 
 import psycopg
 import structlog
-from daimon.core.config import Settings
+from daimon.core.config import DataSettings, Settings
 from daimon.data import acl, audit
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
+from daimon.data.metering import Meter
 from daimon.data.schema import Schemas
 from daimon.data.sync.attachments import text_of
 from daimon.data.sync.chunking import chunks, clean, context, resolve_scope
@@ -72,6 +73,10 @@ class Env:
     crypto_keys: tuple[str, ...] = ()
     private_hosts: tuple[str, ...] = ()
     embed: bool = False
+    data: DataSettings | None = None
+    """The settings embedding reads; with `embed`, always set by `of`."""
+    meter: Meter | None = None
+    """Bills embeddings to the source's tenant; none: embeds unmetered."""
 
     @classmethod
     def of(cls, settings: Settings) -> Env:
@@ -80,6 +85,7 @@ class Env:
             tuple(k.get_secret_value() for k in settings.crypto.keys),
             settings.data.private_hosts,
             settings.data.embed_url is not None,
+            settings.data,
         )
 
 
@@ -578,8 +584,8 @@ async def _locked(
     counts = run.c if run else _Counts()
     result = RunResult(run_id, status, counts.added, counts.updated, counts.deleted, error)
     await _finish(conn, env, row, started["started_at"], result)
-    if run and not result.error and env.embed:
-        await embed_pending(conn, env.schemas, source_id)
+    if run and not result.error and env.embed and env.data is not None:
+        await embed_pending(conn, env.schemas, source_id, settings=env.data, meter=env.meter)
     return result
 
 
