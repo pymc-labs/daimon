@@ -130,6 +130,11 @@ class SetDetailOut(BaseModel):
     pending_rules: redaction.Rules | None
 
 
+class PersonOut(BaseModel):
+    account_id: uuid.UUID
+    name: str
+
+
 class Approval(BaseModel):
     sha: str = Field(max_length=100)
 
@@ -160,6 +165,16 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
     async def names(caller: WebCaller) -> dict[uuid.UUID, str]:
         async with runtime.sessionmaker() as db:
             return await names_by_account(db, caller.person.tenant_id)
+
+    @router.get("/people")
+    async def people(  # pyright: ignore[reportUnusedFunction]
+        caller: Manager, q: Annotated[str, Query(max_length=100)] = ""
+    ) -> list[PersonOut]:
+        """The workspace's people by name, for choosing who holds a scope or links an account."""
+        who = await names(caller)
+        needle = q.strip().casefold()
+        found = sorted((n, a) for a, n in who.items() if needle in n.casefold())
+        return [PersonOut(account_id=a, name=n) for n, a in found[:8]]
 
     # ---- scopes and grants ----------------------------------------------------------------
 
