@@ -16,9 +16,9 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import aclosing, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Final
 from uuid import UUID
@@ -26,7 +26,7 @@ from uuid import UUID
 import psycopg
 import structlog
 from daimon.core.config import Settings
-from daimon.data import acl, audit, identity
+from daimon.data import acl, audit, connect, identity
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
 from daimon.data.schema import Schemas
@@ -46,6 +46,7 @@ from daimon.data.sync.connector import (
 )
 from daimon.data.sync.credentials import unseal
 from daimon.data.sync.embedding import embed_pending
+from daimon.data.sync.http import GuardedTransport
 from daimon.data.sync.rate import RateBudget
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -72,6 +73,8 @@ class Env:
     crypto_keys: tuple[str, ...] = ()
     private_hosts: tuple[str, ...] = ()
     embed: bool = False
+    clients: Mapping[str, connect.Client] = field(default_factory=dict[str, connect.Client])
+    """Daimon's own sign-in clients, for refreshing a connected person's token."""
 
     @classmethod
     def of(cls, settings: Settings) -> Env:
@@ -80,6 +83,7 @@ class Env:
             tuple(k.get_secret_value() for k in settings.crypto.keys),
             settings.data.private_hosts,
             settings.data.embed_url is not None,
+            connect.configured_clients(settings.data),
         )
 
 
@@ -564,6 +568,16 @@ async def _locked(
     source: Source | None = None
     try:
         source = build_source(row, env, deadline)
+        if connector.person_sign_in:
+            people = await connect.connected_people(
+                conn,
+                env.schemas,
+                env.crypto_keys,
+                env.clients,
+                GuardedTransport(env.private_hosts),
+                source_id,
+            )
+            source = replace(source, people=people)
         key = connector.scan_key(source)
         if key:
             scan = advisory_key(d, f"scan:{key}")

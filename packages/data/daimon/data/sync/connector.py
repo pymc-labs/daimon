@@ -45,6 +45,16 @@ class Descriptor:
 
 
 @dataclass(frozen=True)
+class Person:
+    """One person's sign-in at a source (`connect.py`). `token` is their live access token;
+    None when the connection no longer proves itself (a refused refresh), so its access ends."""
+
+    account_id: UUID
+    subject: str
+    token: str | None
+
+
+@dataclass(frozen=True)
 class Source:
     """What a connector is given of one source: its row, its opened credential and its cursor."""
 
@@ -62,6 +72,8 @@ class Source:
     private_hosts: tuple[str, ...] = ()
     deadline: float | None = None
     """Monotonic time after which the run stops at its next checkpoint."""
+    people: tuple[Person, ...] = ()
+    """The people signed in at this source; set only for a connector with `person_sign_in`."""
 
 
 @dataclass(frozen=True)
@@ -185,6 +197,8 @@ class Connector:
     fields: ClassVar[tuple[Field, ...]] = ()
     default_scope: ClassVar[str | None] = None
     descriptor: ClassVar[Descriptor | None] = None
+    person_sign_in: ClassVar[bool] = False
+    """The engine gives a run the people signed in at the source (`Source.people`)."""
 
     def descriptor_for(self, source: Source) -> Descriptor | None:
         """Whether this source's records are on the access list model; a connector whose
