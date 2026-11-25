@@ -1170,10 +1170,11 @@ package, where the image build puts it.
 
 ### `DAIMON_WEB__MODULES`
 
-`tuple['chat' | 'agents' | 'channels' | 'routines' | 'credits' | 'integrations' | 'admin', ...]` · optional · default `chat,agents,channels,routines,credits,integrations,admin`
+`tuple['chat' | 'agents' | 'channels' | 'routines' | 'data' | 'credits' | 'integrations' | 'admin', ...]` · optional · default `chat,agents,channels,routines,data,credits,integrations,admin`
 
 Sections of the web app that are on, comma-separated: chat, agents, channels, routines,
-credits, integrations, admin.
+data, credits, integrations, admin. The data section also needs the data sources
+feature.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
 

@@ -1174,8 +1174,8 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, channels, routines, data, credits, integrations, admin. The data section "
-            "also needs the data sources feature."
+            "chat, agents, channels, routines, data, credits, integrations, admin. "
+            "The data section also needs the data sources feature."
         ),
     )
     nodes: WebNodesSettings = Field(
