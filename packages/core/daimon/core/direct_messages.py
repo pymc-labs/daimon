@@ -907,6 +907,7 @@ async def _run_admitted_dm_turn(
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     reseed_prompt: Callable[[], Awaitable[str]] | None = None,
     own_dm_reach: bool = False,
+    may_end_empty: bool = False,
 ) -> _DmTurn:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -921,6 +922,8 @@ async def _run_admitted_dm_turn(
     `request_ref` their message's id; `platform_channel_id` and `platform_message_id`
     are recorded on the turn's origin, with `own_dm_reach` (see `turn_origin`): only the
     two callers that name an owner's own DM turn set it; a watch or a timer never does.
+    With `may_end_empty` a turn that ends without text returns empty text, which the
+    routine outbox posts nowhere; every other caller gets a placeholder to show.
     """
     async with (
         destination if destination is not None else nullcontext(),
@@ -993,7 +996,9 @@ async def _run_admitted_dm_turn(
         raise DirectMessageAccessRevoked(
             "execution_incomplete", message="The run did not complete."
         )
-    answer = extract_final_response(outcome.state.content) or "The reply finished without text."
+    answer = extract_final_response(outcome.state.content)
+    if not answer and not may_end_empty:
+        answer = "The reply finished without text."
     return _DmTurn(answer, outcome.ma_session_id, outcome.mapping_id, outcome.outputs)
 
 
@@ -1638,6 +1643,8 @@ async def _run_dm_fire(
             fence=fence,
             # A watch or a timer shares this path but never reaches.
             own_dm_reach=own_dm_reach and watch_row is None and timer_row is None,
+            # Someone waits for a watch's report or a timer's reminder, so those say something.
+            may_end_empty=watch_row is None and timer_row is None,
         )
 
 
@@ -1655,11 +1662,13 @@ async def _run_unattended_turn(
     watch_row: TaskContinuationRow | None = None,
     fence: OwnerDmFence | None = None,
     own_dm_reach: bool = False,
+    may_end_empty: bool = False,
 ) -> DmRoutineReply:
     """Run an admitted unattended fire in its fresh scope; a drain or lost fence settles it.
 
     `own_dm_reach` is true only for a routine of the scheduler's owner-DM path
-    (`run_dm_routine`): watches, timers and channel timers never reach.
+    (`run_dm_routine`): watches, timers and channel timers never reach. `may_end_empty`
+    is true only there too: a quiet routine run delivers nothing.
     """
 
     async def sealed() -> None:
@@ -1681,6 +1690,7 @@ async def _run_unattended_turn(
             origin="routine",
             watch_row=watch_row,
             own_dm_reach=own_dm_reach,
+            may_end_empty=may_end_empty,
         )
     except asyncio.CancelledError:
         if deps.running_turns.is_drain_cancel() or (fence is not None and fence.lost.is_set()):

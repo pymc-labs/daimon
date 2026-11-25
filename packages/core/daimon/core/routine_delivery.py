@@ -222,6 +222,18 @@ async def routine_links(
     )
 
 
+#: How a run with nothing to deliver ends, on every destination kind and platform: an empty
+#: final reply with no files is settled as `no_result` and posts nothing.
+QUIET_RUN_SENTENCE = (
+    " daimon may deliver any final text you write, even a note that nothing was posted. So "
+    "when your instructions say to stay silent or post nothing for what you found, or you "
+    "have already posted everything they ask for, end the run without any final text: daimon "
+    "then posts no reply, and only files you made still go out. Do this even if other "
+    "guidance asks for a closing line. Never end without text because the task could not "
+    "be done or checked: say what stopped you."
+)
+
+
 def render_routine_controls(
     row: RoutineRow,
     *,
@@ -301,6 +313,7 @@ def render_routine_controls(
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
         "for someone reading it later without context. "
         + delivery
+        + QUIET_RUN_SENTENCE
         + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
         + (ROUTINE_WEB_SENTENCE if links is not None else "")
         + " These controls grant no other posting or mutation permissions."

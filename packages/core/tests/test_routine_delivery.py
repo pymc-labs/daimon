@@ -18,6 +18,7 @@ from daimon.core.config import Settings, WebSettings
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
+    DirectPost,
     agent_posted_to,
     clear_creator,
     delivery_refusal,
@@ -209,6 +210,30 @@ def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:
     assert not agent_posted_to(TurnState(content=[_post_block("C1")]), row), (
         "a top-level post in the channel is not the thread"
     )
+
+
+@pytest.mark.parametrize("direct_post", ["allowed", "protected", "unverified"])
+@pytest.mark.parametrize(
+    ("platform", "kind", "destination_id"),
+    [
+        ("discord", "channel", "1"),
+        ("discord", "thread", "1"),
+        ("discord", "dm", "1"),
+        ("slack", "channel", "C1"),
+        ("teams", "channel", "19:abc@thread.tacv2"),
+    ],
+)
+def test_every_destination_says_how_a_quiet_run_ends(
+    platform: str, kind: str, destination_id: str, direct_post: DirectPost
+) -> None:
+    """`test_an_empty_tail_is_not_posted` proves that no text delivers nothing."""
+    text = render_routine_controls(
+        _row(destination_kind=kind, destination_id=destination_id),
+        platform=platform,
+        direct_post=direct_post,
+    )
+    assert "end the run without any final text: daimon then posts no reply" in text
+    assert "say what stopped you" in text, "a failed check is never silent"
 
 
 def test_protected_controls_do_not_invite_a_post() -> None:
