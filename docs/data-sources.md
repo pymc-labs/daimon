@@ -69,7 +69,8 @@ platform verified: the person's own chat account, a GitHub link, Sign in with Sl
 Microsoft, or the person signing in to the source.
 
 A data admin can link someone else's account, never their own. The person gets a notice
-and the audit trail records it. An email the source and the person both verified makes a
+and the audit trail records it. A link a data admin ends or rejects stays ended when the
+person signs in again. An email the source and the person both verified makes a
 suggested link, and a source can link those itself for one email domain. A Microsoft email
 never counts, since a directory user can set it.
 
@@ -99,9 +100,10 @@ publish after a complete sync.
 
 With the feature on, the web app has a Data section for search and browsing, which shows each
 person only what they may read. Owners and admins add, pause, publish and retire sources under
-Integrations > Data sources, and manage scopes, grants, identity links, data admins and
-redaction sets under Admin > Data access. Declared sources show as bound and are read-only
-there. People link and connect their own accounts on their Profile.
+Integrations > Data sources. Data admins, named by the owner or another data admin, manage
+scopes, grants, identity links and redaction sets under Admin > Data access, but never grant
+themselves a scope. Declared sources show as bound and are read-only there. People link and
+connect their own accounts on their Profile.
 
 ## Declared config
 
@@ -169,10 +171,11 @@ bounds a search; it returns what the arms have found when time runs out, and not
 cut.
 
 Callers browse a source's records, read one with its text and files, and run read-only SQL
-over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views and nothing
-else, so it never sees an access list, a credential or another workspace's rows. Like any
-role, it can read the system catalogs, so it can see roughly how many rows each of the
-store's tables holds across every workspace, though not what they say.
+over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views only: no access
+list, credential or other team's rows. Like any role it reads the system catalogs, so it sees
+rough row counts of the store's tables, not what they say. SQL leaves out sources that check
+reads with the source. While names are hidden from someone the answer is for, files and SQL
+are refused, and a search naming a hidden name finds nothing.
 
 ## Evals and probes
 
