@@ -155,10 +155,14 @@ async def test_declared_apply_never_deletes_and_refuses_a_lower_revision(
     )
     report = await declared.apply(store.conn, schemas, store.env, first)
     assert not report.ignored and report.results, "the first file is applied"
-    rows = await store.sql(f"select name, bound, publication from {store.d}.sources")
+    rows = await store.sql(
+        f"select name, bound, publication from {store.d}.sources where tenant_id = %s", store.tenant
+    )
     assert [(r["name"], r["bound"], r["publication"]) for r in rows] == [("Wiki", True, "shadow")]
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
-        await store.sql(f"update {store.d}.sources set name = 'x'")
+        await store.sql(
+            f"update {store.d}.sources set name = 'x' where tenant_id = %s", store.tenant
+        )
 
     lower = file(
         4, sources=[{"id": "wiki", "kind": "fake", "name": "Renamed", "mode": "federated"}]
@@ -166,8 +170,8 @@ async def test_declared_apply_never_deletes_and_refuses_a_lower_revision(
     assert (await declared.apply(store.conn, schemas, store.env, lower)).ignored, "refused"
     empty = file(6)
     await declared.apply(store.conn, schemas, store.env, empty)
-    rows = await store.sql(f"select name from {store.d}.sources")
-    scopes = await store.sql(f"select id from {store.d}.scopes where bound")
+    rows = await store.sql(f"select name from {store.d}.sources where tenant_id = %s", store.tenant)
+    scopes = await store.sql(f"select id from {store.d}.scopes where tenant_id = %s", store.tenant)
     assert [r["name"] for r in rows] == ["Wiki"], "a lower revision changes nothing"
     assert len(scopes) == 1, "an entry removed from the file is left as it was"
 
@@ -178,7 +182,9 @@ async def test_declared_apply_never_deletes_and_refuses_a_lower_revision(
         ],
     )
     await declared.apply(store.conn, schemas, store.env, retire)
-    rows = await store.sql(f"select publication from {store.d}.sources")
+    rows = await store.sql(
+        f"select publication from {store.d}.sources where tenant_id = %s", store.tenant
+    )
     assert [r["publication"] for r in rows] == ["retired"], "retired, not deleted"
 
 

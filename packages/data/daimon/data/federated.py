@@ -78,6 +78,8 @@ async def search(
             return LiveResult(source.id, source.name, (), "error")
         return LiveResult(source.id, source.name, tuple(hits[:limit]))
 
+    if not rows:
+        return []
     tasks = {asyncio.create_task(one(r)): r for r in rows}
     done, late = await asyncio.wait(tasks, timeout=seconds)
     for task in late:
