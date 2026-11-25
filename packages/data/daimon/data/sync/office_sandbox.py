@@ -9,6 +9,7 @@ cannot see.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,10 @@ def _run(mime: str, blob: bytes) -> str | None:
             capture_output=True,
             timeout=TIMEOUT,
             check=False,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "LANG": "C.UTF-8",
+            },  # none of the worker's keys
         )
     except (subprocess.TimeoutExpired, OSError):  # run() kills and reaps the child on a timeout
         return None

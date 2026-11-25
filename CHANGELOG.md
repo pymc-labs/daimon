@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Data sources can go stale, be read live, be declared in a file and be checked before
+  they publish.** A source past its freshness ceiling is hidden until it syncs; a new source
+  publishes only after a clean comparison with its own permissions. `DAIMON_DATA__DECLARED`
+  names a file of sources, scopes and grants that Daimon applies every 10 minutes without
+  deleting, and `daimon data access-check` explains who can read a record
+  ([Data sources](docs/data-sources.md)).
+
 - **The groundwork for a data store ships, switched off.** A release migration creates the
   `data` and `data_views` Postgres schemas, the store's tables and four `daimon_data_*` roles; the
   `data_sources` feature (`DAIMON_FEATURES__DATA_SOURCES`) stays off and nothing reads them

@@ -225,8 +225,20 @@ jobs:
             daimon-data-postgres:ci
           until docker exec data-postgres pg_isready -U daimon -h localhost; do sleep 1; done
       - uses: ./.github/actions/setup-daimon
-        with:
-          database: "true"
+      # Migrate as a role that is not a superuser, as a deploy does; only `vector` needs one.
+      # The tests then connect as the superuser their fixtures need.
+      - name: alembic upgrade (test DB, as a migrator)
+        env:
+          PGPASSWORD: daimon
+          DAIMON_DATABASE_URL: postgresql+asyncpg://migrator:migrator@localhost:5432/daimon_test
+        run: |
+          psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE migrator LOGIN CREATEROLE PASSWORD 'migrator'" \
+            -c "CREATE DATABASE daimon_test OWNER migrator"
+          psql -h localhost -U daimon -d daimon_test -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector"
+          uv run alembic upgrade head
+          psql -h localhost -U daimon -d daimon_test -tAc \
+            "SELECT to_regnamespace('data') IS NOT NULL" | grep -qx t
       - name: pytest (data)
         run: >-
           uv run pytest packages/data -n 4 --dist worksteal --timeout=300

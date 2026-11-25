@@ -1376,9 +1376,11 @@ API key for the embeddings API.
 
 ### `DAIMON_DATA__EMBED_PROVIDER`
 
-`str` · optional · default `openai`
+`str` · optional · default unset
 
-Embeddings API dialect: `openai` or a named provider.
+Who serves the embeddings: `openai` for OpenAI's API, or the providers an OpenRouter-
+style router may use, comma-separated. Usage rows name it, or `selfhosted` for anything
+else.
 
 ### `DAIMON_DATA__EMBED_QUERY_PREFIX`
 
@@ -1422,6 +1424,14 @@ Seconds a search may run before it returns what it has.
 
 Private hosts or ranges, comma-separated, that database connections to external Postgres
 servers may reach. Public hosts need no entry.
+
+### `DAIMON_DATA__DECLARED`
+
+`str | None` · optional · default unset
+
+Path of the YAML or JSON file that declares data sources, scopes and grants. It is
+applied at start and every 10 minutes; its rows are read-only in the app. Unset: nothing
+is declared.
 
 ### `DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`
 

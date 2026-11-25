@@ -18,9 +18,10 @@ import psycopg
 import structlog
 from daimon.core.config import Settings
 from daimon.core.ports.data_metering import SessionMeter
-from daimon.data import acl, pool
+from daimon.data import acl, declared, parity, pool
 from daimon.data.dsn import libpq_dsn
 from daimon.data.locks import advisory_key
+from daimon.data.migrate import STORE_FILES
 from daimon.data.schema import Schemas
 from daimon.data.sync.embedding import embed_pending
 from daimon.data.sync.engine import STALE_RUN, Env, run_source, try_lock, unlock
@@ -30,6 +31,8 @@ from psycopg.rows import DictRow, dict_row
 log = structlog.get_logger()
 
 TICK: Final = 15.0
+UNREADY_WAIT: Final = 60.0
+"""Seconds between checks of a store that `daimon data init` has not finished."""
 """Seconds between looks at what is due."""
 RUN_BUDGET: Final = 600.0
 """Seconds one run works before it yields as `partial` and the next run continues."""
@@ -46,7 +49,8 @@ select s.id, s.config, c.requested_at, c.last_status, c.last_sync_at,
        coalesce(c.errors, 0) as errors,
        (select max(r.finished_at) from {d}.sync_runs r where r.source_id = s.id) as last_run
 from {d}.sources s left join {d}.source_cursors c on c.source_id = s.id
-where s.status in ('active', 'error') and s.publication <> 'retired'"""
+where s.status in ('active', 'error') and s.publication <> 'retired'
+  and s.mode = 'stored'"""
 
 
 @dataclass(frozen=True)
@@ -164,6 +168,23 @@ class Maintenance:
             await embed_pending(conn, env.schemas, settings=env.data, meter=env.meter)
 
 
+class Ops:
+    """Every `declared.EVERY` seconds: apply the declared file, then run the parity
+    comparisons that are due. The first run follows the start."""
+
+    def __init__(self, start: datetime) -> None:
+        self.last = start - timedelta(seconds=declared.EVERY)
+
+    def due(self, now: datetime) -> bool:
+        return (now - self.last).total_seconds() >= declared.EVERY
+
+    async def run(self, settings: Settings, env: Env, now: datetime) -> None:
+        self.last = now
+        await declared.apply_from_settings(settings, env)
+        async with pool.connection(settings) as conn:
+            await parity.run_due(conn, env.schemas, env, declared.EVERY)
+
+
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
     with suppress(TimeoutError):
         await asyncio.wait_for(stop.wait(), seconds)
@@ -197,6 +218,15 @@ async def _maintain(settings: Settings, env: Env, m: Maintenance, flag: list[boo
         flag[0] = False
 
 
+async def _operate(settings: Settings, env: Env, ops: Ops, flag: list[bool]) -> None:
+    try:
+        await ops.run(settings, env, datetime.now(UTC))
+    except Exception:
+        log.exception("data.ops_failed")
+    finally:
+        flag[0] = False
+
+
 async def lead(
     settings: Settings, env: Env, leader: AsyncConnection[DictRow], stop: asyncio.Event
 ) -> None:
@@ -204,6 +234,7 @@ async def lead(
     inflight: set[UUID] = set()
     tasks: set[asyncio.Task[None]] = set()
     maintenance, maintaining = Maintenance(datetime.now(UTC)), [False]
+    ops, operating = Ops(datetime.now(UTC)), [False]
     limit = settings.data.worker_concurrency
     try:
         async with pool.connection(settings) as conn:
@@ -230,11 +261,29 @@ async def lead(
                 task = asyncio.create_task(_maintain(settings, env, maintenance, maintaining))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
+            if not operating[0] and ops.due(datetime.now(UTC)):
+                operating[0] = True
+                task = asyncio.create_task(_operate(settings, env, ops, operating))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
             await _wait(stop, TICK)
     finally:
         for task in tasks:
             task.cancel()  # a cut run is closed by `recover` on the next start
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def ready(settings: Settings, schemas: Schemas) -> bool:
+    """Whether the store has every schema file this release reads."""
+    async with pool.connection(settings) as conn:
+        cur = await conn.execute(
+            f"select to_regclass('{schemas.data}.schema_version') is not null as ok".encode()
+        )
+        row = await cur.fetchone()
+        if not (row and row["ok"]):
+            return False
+        cur = await conn.execute(f"select file from {schemas.data}.schema_version".encode())
+        return set(STORE_FILES) <= {r["file"] for r in await cur.fetchall()}
 
 
 async def serve(settings: Settings, stop: asyncio.Event) -> None:
@@ -244,6 +293,10 @@ async def serve(settings: Settings, stop: asyncio.Event) -> None:
     env = replace(env, meter=meter)
     try:
         while not stop.is_set():
+            if not await ready(settings, env.schemas):
+                log.warning("sync.store_not_ready", fix="daimon data init")
+                await _wait(stop, UNREADY_WAIT)
+                continue
             leader = await take_lead(str(settings.database.url), env.schemas)
             if leader is None:
                 await _wait(stop, TICK)

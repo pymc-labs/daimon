@@ -43,6 +43,10 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
             "created_by", f"update {d}.sources set created_by = null where created_by = :account_id"
         ),
         account("grants", f"delete from {d}.grants where holder = {_PERSON}"),
+        account("acl_refs", f"delete from {d}.acl_refs where ref = {_PERSON}"),
+        account("group_members", f"delete from {d}.group_members where subject = {_PERSON}"),
+        account("acl_grants", f"delete from {d}.acl_grants where holder = {_PERSON}"),
+        account("holder_sets", f"delete from {d}.holder_sets where holder = {_PERSON}"),
         account(
             "granted_by", f"update {d}.grants set granted_by = null where granted_by = :account_id"
         ),

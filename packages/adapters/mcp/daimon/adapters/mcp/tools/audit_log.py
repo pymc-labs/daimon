@@ -6,6 +6,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -149,7 +150,9 @@ def register_audit_log_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(name="list_audit_log", tags={"admin"})
     async def audit_log(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        source: AuditSource | None = None,
+        # The built-in sources only, so the schema is the same with or without the data store;
+        # its entries still show when no source is given.
+        source: Literal["web", "security"] | None = None,
         person_id: str | None = None,
         kind: str | None = None,
         first: str | None = None,

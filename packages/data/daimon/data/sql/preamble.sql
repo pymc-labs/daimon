@@ -32,14 +32,16 @@ create table if not exists {{data}}.schema_version (
   applied_at timestamptz not null default now()
 );
 
--- Optional: search features use whichever of these this server can offer.
+-- Optional: search features use whichever of these this server can offer. intarray overloads
+-- `int4[]` operators, so it goes in the store's schema, off every other search_path.
 do $$
 declare e text;
 begin
   foreach e in array array['vector', 'intarray', 'pg_textsearch']
   loop
     begin
-      execute format('create extension if not exists %I', e);
+      execute format('create extension if not exists %I', e)
+        || case when e = 'intarray' then ' schema {{data}}' else '' end;
     exception when others then
       raise notice 'data store: extension % unavailable: %', e, sqlerrm;
     end;

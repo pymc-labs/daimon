@@ -20,6 +20,7 @@ Configuration (`sources.config`), credential `{"dsn": "postgresql://..."}`:
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
@@ -46,7 +47,7 @@ from daimon.data.sync.connector import (
 )
 from daimon.data.sync.netguard import NotPublic, resolve
 from psycopg import AsyncConnection, sql
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 
 PAGE: Final = 500
@@ -56,6 +57,23 @@ STATEMENT_MS: Final = 300_000
 _IDENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")
 _DEFAULTS: Final = {"id": "id", "title": "title", "body": "body", "updated_at": "updated_at"}
 _OPTIONAL: Final = ("occurred_at", "url", "author", "container")
+_KEYS: Final = frozenset(
+    {"host", "port", "dbname", "user", "password", "sslmode", "connect_timeout"}
+)
+"""What a source's URL may set: no other libpq key, several of which read the worker's files."""
+_SECURE: Final = frozenset({"require", "verify-ca", "verify-full"})
+_REFUSED: Final = """
+select (select rolsuper or rolbypassrls from pg_roles where rolname = current_user) as bad,
+  exists (select 1 from pg_class c
+    where c.relowner = (select oid from pg_roles where rolname = current_user)
+      and c.relkind in ('r', 'p') and not c.relforcerowsecurity
+      and (c.oid = to_regclass(%(v)s) or c.oid in (
+        select d.refobjid from pg_rewrite w join pg_depend d
+          on d.classid = 'pg_rewrite'::regclass and d.objid = w.oid
+        where w.ev_class = to_regclass(%(v)s)))) as owns
+"""
+"""A role that bypasses row security, or owns the relation read or a table the view reads
+directly, sees every row. A table behind a second view is not checked."""
 
 
 class SourceError(RuntimeError):
@@ -166,12 +184,14 @@ class PostgresConnector(Connector):
     def scan_key(self, source: Source) -> str | None:
         return dsn_key(source.credentials.get("dsn"))
 
-    async def _connect(self, source: Source) -> AsyncConnection[DictRow]:
+    async def _connect(self, source: Source, view: sql.Identifier) -> AsyncConnection[DictRow]:
         dsn = source.credentials.get("dsn") or ""
         try:
             parts = conninfo_to_dict(dsn)
         except psycopg.ProgrammingError:
             raise SourceError("the database URL is not a valid Postgres URL") from None
+        if extra := sorted(set(parts) - _KEYS):
+            raise SourceError(f"the database URL may not set {', '.join(extra)}")
         host = str(parts.get("host") or "")
         if not host or "," in host or host.startswith("/"):
             raise SourceError("the database URL needs one host name or address")
@@ -179,11 +199,15 @@ class PostgresConnector(Connector):
             ip = await resolve(host, int(parts.get("port") or 5432), source.private_hosts)
         except NotPublic as e:
             raise SourceError(str(e)) from None
+        if not ipaddress.ip_address(ip).is_loopback:
+            parts.setdefault("sslmode", "require")
+            if parts["sslmode"] not in _SECURE:
+                raise SourceError("the database URL needs sslmode=require or stronger")
+        parts["connect_timeout"] = 10
         with _errors("the database", 10_000):
             conn = await AsyncConnection[DictRow].connect(
-                dsn,
+                make_conninfo("", **parts),
                 hostaddr=ip,
-                connect_timeout=10,
                 autocommit=True,
                 row_factory=dict_row,
                 prepare_threshold=None,
@@ -191,18 +215,16 @@ class PostgresConnector(Connector):
                 options="-c default_transaction_read_only=on",
             )
         try:
-            row = await (
-                await conn.execute(
-                    "select rolsuper or rolbypassrls as bad from pg_roles"
-                    " where rolname = current_user"
-                )
-            ).fetchone()
+            row = await (await conn.execute(_REFUSED, {"v": view.as_string(conn)})).fetchone()
         except BaseException:
             await conn.close()
             raise
         if row and row["bad"]:
             await conn.close()
             raise SourceError("this role can bypass row security; use a read-only role")
+        if row and row["owns"]:
+            await conn.close()
+            raise SourceError("this role owns what the view reads, so row security skips it")
         return conn
 
     async def _read(
@@ -248,7 +270,7 @@ class PostgresConnector(Connector):
     async def fetch(self, source: Source) -> AsyncGenerator[Record]:
         cfg = Config.of(source.config)
         state: Json = {"cursor": source.state.get("cursor")}
-        conn = await self._connect(source)
+        conn = await self._connect(source, cfg.view)
         try:
             at = cursor_at(state["cursor"])
             query = cfg.page_query()
@@ -280,7 +302,7 @@ class PostgresConnector(Connector):
     async def test(self, source: Source) -> tuple[bool, str]:
         try:
             cfg = Config.of(source.config)
-            conn = await self._connect(source)
+            conn = await self._connect(source, cfg.view)
         except SourceError as e:
             return False, str(e)
         try:

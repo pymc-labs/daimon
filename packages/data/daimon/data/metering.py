@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import structlog
+from daimon.core.ports.data_metering import Purpose
 
 log = structlog.get_logger()
 
@@ -23,7 +24,7 @@ class Meter(Protocol):
 
     async def record(
         self,
-        purpose: str,
+        purpose: Purpose,
         *,
         tenant_id: uuid.UUID,
         platform_user_id: str | None,
