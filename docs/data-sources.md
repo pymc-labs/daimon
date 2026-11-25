@@ -137,12 +137,54 @@ shares, outside people and expiring shares grant nothing, and a file nobody insi
 not stored. Changes arrive through each scope's change feed. Everything is listed again every
 `relist_hours`, which is also how soon a new share on a folder reaches the files below it.
 
+### Notion
+
+A source of kind `notion` reads the pages and databases that an internal integration can
+see. Create the integration with read content access, share the pages to read with it, and
+give the credential `{"token": "secret_..."}`. The source's config:
+
+```json
+{"workspace": "example", "exclude": ["0a1b2c3d-0000-0000-0000-000000000000"]}
+```
+
+The integration only discovers pages: it grants nobody anything. A page is readable by the
+people who have signed in to Notion through Daimon (their own sign-in, each time Notion must
+still accept their token), and by nobody else. `exclude` lists page or database ids whose
+whole tree is stored but never shown. A page that disappears from a complete listing is
+removed. A page Notion refuses to give keeps what it had.
+
+### Bluedot
+
+A source of kind `bluedot` reads meeting summaries and transcripts. It has no credential:
+each person signs in to Bluedot with their own account, and Daimon reads with their
+sign-in. A meeting of a collection is readable by the people who list that collection. A
+private meeting is readable by the people who list it, its uploader and the people it is
+shared with. A meeting nobody signed in lists is not stored, and one is removed only by a
+run in which every sign-in listed completely. The source's config:
+
+```json
+{"workspace": "ws_123", "domain": "example.com"}
+```
+
+`workspace` lets Daimon list the workspace's participants as accounts. Addresses on `domain`
+count as verified when linking accounts.
+
+### LinkedIn
+
+A source of kind `linkedin` reads an organization's published, public posts, readable by
+the whole tenant (create the source with the `public` scope). The credential is
+`{"token": "..."}`, an access token that can read the organization's posts
+(`r_organization_social`). The config is `{"organization": "urn:li:organization:12345"}`.
+Every run reads all posts, so a post deleted on LinkedIn, or no longer public, disappears.
+Drafts, connection-only and sponsored posts are never stored. A run that finds no posts for
+an organization that had some fails and removes nothing.
+
 ## People and their accounts
 
 A record a source shares with some of its users reads for a Daimon account only through a
 link to one of those users. Daimon links an account only on a proof the source or chat
 platform verified: the person's own chat account, a GitHub link, Sign in with Slack or
-Microsoft, or the person signing in to the source.
+Microsoft, or the person signing in to the source (Bluedot and Notion).
 
 A data admin can link someone else's account, never their own. The person gets a notice
 and the audit trail records it. An email the source and the person both verified makes a
