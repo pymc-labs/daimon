@@ -154,7 +154,9 @@ class Api:
             q: Json = {"start_cursor": cursor} if cursor else {}
             page = await self.request(
                 method,
-                f"{path}?start_cursor={cursor}" if method == "GET" and cursor else path,
+                f"{path}{'&' if '?' in path else '?'}start_cursor={cursor}"
+                if method == "GET" and cursor
+                else path,
                 {**(body or {}), **q} if method == "POST" else None,
             )
             for item in rows(page.get("results")):
@@ -368,7 +370,7 @@ class NotionConnector(Connector):
         for p in source.people:
             ref = f"person:{p.account_id}"
             if p.token is None:
-                yield PermissionUnit("connection", ref, 0, {group: ()})
+                yield PermissionUnit("connection", ref, 0, {group: ()}, time.time_ns() // 1000)
             elif await accepted(self._guard(source), p.token):
                 yield PermissionUnit(
                     "connection",
