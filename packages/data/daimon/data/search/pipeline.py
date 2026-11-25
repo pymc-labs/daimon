@@ -222,28 +222,31 @@ async def search(
         hits = [h for h in hits if (h.source_id, h.external_id) in ok]
     status = "off"
     # The live sources answer beside the rerank, and never outlive this search's connection.
-    async with asyncio.TaskGroup() as tg:
-        live = (
-            tg.create_task(
-                federated.search(
-                    conn, schemas, env, ctx, q, seconds=max(1.0, _left(end)), meter=live_meter
+    try:
+        async with asyncio.TaskGroup() as tg:
+            live = (
+                tg.create_task(
+                    federated.search(
+                        conn, schemas, env, ctx, q, seconds=max(1.0, _left(end)), meter=live_meter
+                    )
                 )
+                if env is not None
+                else None
             )
-            if env is not None
-            else None
-        )
-        if use_rerank and hits:
-            order, status = await rerank.order(
-                settings,
-                text,
-                [h.text for h in hits[:RERANK_TOP]],
-                meter=meter,
-                payer=payer,
-                seconds=max(1.0, _left(end)),
-            )
-            if order is not None:
-                head = hits[:RERANK_TOP]
-                hits = [head[i] for i in order] + hits[RERANK_TOP:]
+            if use_rerank and hits:
+                order, status = await rerank.order(
+                    settings,
+                    text,
+                    [h.text for h in hits[:RERANK_TOP]],
+                    meter=meter,
+                    payer=payer,
+                    seconds=max(1.0, _left(end)),
+                )
+                if order is not None:
+                    head = hits[:RERANK_TOP]
+                    hits = [head[i] for i in order] + hits[RERANK_TOP:]
+    except ExceptionGroup as eg:  # a failed arm fails the search as itself
+        raise eg.exceptions[0] from None
     return Result(hits[:limit], notes, status, win, live.result() if live is not None else [])
 
 
