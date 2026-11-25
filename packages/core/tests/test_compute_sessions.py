@@ -18,7 +18,7 @@ from daimon.core.compute_models import (
     machine_readiness,
 )
 from daimon.core.compute_provider import ComputeProviderError, app_name
-from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
+from daimon.core.compute_sessions import _INLINE_EXTRA_TASKS, ComputeCaller, ComputeSessions
 from daimon.core.compute_tasks import WAKE_OUTPUT_CHARS, wake_key
 from daimon.core.config import ComputeProfile, ComputeSettings
 from daimon.core.continuity.wakes import WAKE_RUN_LEASE, claim_wake, settle_wake, start_wake
@@ -206,7 +206,7 @@ async def test_caps_ttl_disabled_and_expiry(db_engine, db_clean):
     assert await service.extend(owner, session.id, hours=2, approval_key="extend") == extended
     now += timedelta(hours=2)
     with pytest.raises(StoreError, match="expired"):
-        await service.call(owner, session.id, tool="run_bash", arguments={"command": "true"})
+        await service.call(owner, session.id, tool="write_file", arguments={"path": "/x"})
     await service.reconcile()
     assert (await service.get(owner, session.id)).state == "deleted"
 
@@ -720,7 +720,15 @@ async def test_a_finished_command_wake_reads_its_own_session_and_does_nothing_el
     calls = len(fake.calls)
     await _all_refused(
         (
-            service.call(woken, session.id, tool="run_bash", arguments={"command": "id"}),
+            service.run(
+                woken,
+                session.id,
+                command="id",
+                wait_seconds=1,
+                timeout_seconds=None,
+                timeout_minutes=1,
+                request_key="inline",
+            ),
             service.call(woken, session.id, tool="write_file", arguments={"path": "/x"}),
             service.start_task(
                 woken, session.id, command="id", timeout_minutes=1, request_key="more"
@@ -919,13 +927,18 @@ async def test_status_turns_a_failed_database_write_into_a_plain_refusal(monkeyp
 # --- A session is `running` only after its machine has started -----------------
 
 
-def _waiting(sm, fake, **kwargs):
-    """A service whose launch wait costs no real time: sleeping moves its clock."""
+def _waiting(sm, fake, on_sleep=None, **kwargs):
+    """A service whose waits cost no real time: sleeping moves its clock.
+
+    ``on_sleep`` runs after each sleep: what the machine or the scheduler did meanwhile.
+    """
     state = {"now": NOW, "slept": []}
 
     async def sleep(seconds):
         state["slept"].append(seconds)
         state["now"] += timedelta(seconds=seconds)
+        if on_sleep is not None:
+            await on_sleep()
 
     service = ComputeSessions(sm, settings(**kwargs), fake, clock=lambda: state["now"], sleep=sleep)
     return service, state
@@ -948,7 +961,16 @@ _WHILE_STARTING = {
     "status": lambda service, owner, session: service.status(owner, session.id),
     "list": lambda service, owner, session: service.list(owner),
     "call": lambda service, owner, session: service.call(
-        owner, session.id, tool="run_bash", arguments={"command": "true", "timeout_s": 1}
+        owner, session.id, tool="write_file", arguments={"path": "/x", "content": "x"}
+    ),
+    "run": lambda service, owner, session: service.run(
+        owner,
+        session.id,
+        command="make",
+        wait_seconds=1,
+        timeout_seconds=None,
+        timeout_minutes=5,
+        request_key="inline",
     ),
     "start_task": lambda service, owner, session: service.start_task(
         owner, session.id, command="make", timeout_minutes=5, request_key="task"
@@ -993,9 +1015,11 @@ async def test_no_entry_point_calls_a_machine_or_reports_it_running_before_it_ha
     assert await _state(sm, owner, session.id) in {"launching", "deleted"}
     assert fake.calls == [], "nothing is sent to a machine that cannot answer"
     async with sm.begin() as db:
-        assert await task_store.list_active(db, owner.tenant_id) == [], "no task to lose"
+        assert await task_store.list_active(db, owner.tenant_id, now=clock["now"]) == [], (
+            "no task to lose"
+        )
     assert await wakes_for(sm, owner) == []
-    if entry in {"call", "start_task", "extend"}:
+    if entry in {"call", "run", "start_task", "extend"}:
         assert str(result) == "The machine is still starting. Try again in about 10 seconds."
     if entry == "status":
         assert (result.state, result.machine_state) == ("launching", "starting")
@@ -1017,7 +1041,7 @@ async def test_the_next_call_or_the_scheduler_promotes_a_session_once_its_machin
     assert await _state(sm, owner, session.id) == "running"
     assert (await service.status(owner, session.id)).machine_state == "started"
     assert await service.call(
-        owner, session.id, tool="run_bash", arguments={"command": "true", "timeout_s": 1}
+        owner, session.id, tool="write_file", arguments={"path": "/x", "content": "x"}
     ) == {"exit_code": 0, "stdout": "done", "timed_out": False}
 
 
@@ -1148,3 +1172,163 @@ def test_every_machine_state_a_provider_may_report_has_a_readiness():
     states = get_args(MachineState)
     assert [state for state in states if machine_readiness(state) == "ready"] == ["started"]
     assert {machine_readiness(state) for state in states} == set(get_args(MachineReadiness))
+
+
+# --- An inline command is a task its caller waits for --------------------------
+
+
+def _ended(fake, output="fit done\n"):
+    """The machine ends every command it runs, with exit code 0."""
+
+    async def end():
+        for task in fake.tasks.values():
+            task.status, task.exit_code, task.output = "exit", 0, output
+
+    return end
+
+
+def _inline(service, owner, session, key="inline:1", *, wait_seconds=40, timeout_seconds=None):
+    return service.run(
+        owner,
+        session.id,
+        command="python fit.py",
+        wait_seconds=wait_seconds,
+        timeout_seconds=timeout_seconds,
+        timeout_minutes=None,
+        request_key=key,
+    )
+
+
+def _scripts(fake, action):
+    return [
+        args["command"]
+        for _, tool, args in fake.calls
+        if tool == "run_bash"
+        and isinstance(args.get("command"), str)
+        and args["command"].startswith(f"# daimon-task {action}")
+    ]
+
+
+async def test_an_inline_command_that_ends_in_time_is_returned_and_never_reported_again(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, clock = _waiting(sm, fake, on_sleep=_ended(fake))
+    session = await launch(service, owner)
+    task = await _inline(service, owner, session)
+    assert (task.state, task.exit_code, task.output_tail) == ("succeeded", 0, "fit done\n")
+    assert clock["slept"] == [0.3], "it ended by the first look"
+    await service.poll_tasks()
+    assert await wakes_for(sm, owner) == []
+
+
+async def test_an_inline_command_that_needs_longer_continues_and_wakes_its_conversation_once(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await _inline(service, owner, session, wait_seconds=10)
+    assert task.state == "running" and task.wait_until is None, "handed to the scheduler"
+    assert clock["slept"] == [0.3, 0.7, 1.0, 2.0, 2.0, 2.0, 2.0]
+    assert len(_scripts(fake, "probe")) == 7
+    assert len(_scripts(fake, "start")) == 1, "looking at a command never starts it again"
+    await _ended(fake)()
+    await service.poll_tasks()
+    await service.poll_tasks()
+    assert (await service.task_result(owner, task.id)).state == "succeeded"
+    [wake] = await wakes_for(sm, owner)
+    assert wake.idempotency_key == wake_key(task.id)
+
+
+async def test_the_scheduler_leaves_a_waited_for_command_alone_until_its_wait_is_over(
+    db_engine, db_clean
+):
+    """A caller that stopped while it waited saw nothing: after `wait_until` it is told."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await service.start_task(
+        owner, session.id, command="make", timeout_minutes=60, request_key="k", wait_seconds=10
+    )
+    # The wait, the start call's limit and the hand-over gap.
+    assert task.wait_until == NOW + timedelta(seconds=10 + 30 + 5)
+    await _ended(fake)()
+    calls = len(fake.calls)
+    clock["now"] = task.wait_until - timedelta(seconds=1)
+    await service.poll_tasks()
+    assert len(fake.calls) == calls and await wakes_for(sm, owner) == []
+    clock["now"] = task.wait_until
+    await service.poll_tasks()
+    assert (await service.task_result(owner, task.id)).state == "succeeded"
+    assert len(await wakes_for(sm, owner)) == 1
+
+
+async def test_a_slow_start_never_lets_the_caller_and_the_scheduler_both_report_the_end(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+
+    class SlowStart(FakeComputeProvider):
+        async def call(self, session, token, tool, arguments):
+            if str(arguments.get("command", "")).startswith("# daimon-task start"):
+                clock["now"] += timedelta(seconds=20)
+            return await super().call(session, token, tool, arguments)
+
+    fake = SlowStart()
+
+    async def meanwhile():
+        # The command ends 25 seconds in, and the scheduler runs a pass at every look.
+        if clock["now"] >= NOW + timedelta(seconds=25):
+            await _ended(fake)()
+        await service.poll_tasks()
+
+    service, clock = _waiting(sm, fake, on_sleep=meanwhile)
+    session = await launch(service, owner)
+    task = await _inline(service, owner, session, wait_seconds=10)
+    assert task.state == "succeeded", "the caller saw the end"
+    await service.poll_tasks()
+    assert await wakes_for(sm, owner) == [], "so the conversation is not told again"
+
+
+async def test_an_inline_command_starts_while_background_commands_fill_the_machine(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, _ = _waiting(sm, fake, per_session_tasks=1)
+    session = await launch(service, owner)
+    await service.start_task(
+        owner, session.id, command="sleep 9999", timeout_minutes=60, request_key="background"
+    )
+    # A command nobody waits for keeps the machine's limit.
+    with pytest.raises(StoreError, match="Too many"):
+        await _inline(service, owner, session, "background-2", wait_seconds=0)
+    for n in range(_INLINE_EXTRA_TASKS):
+        assert (await _inline(service, owner, session, f"inline:{n}", wait_seconds=1)).state == (
+            "running"
+        )
+    with pytest.raises(StoreError, match="Too many"):
+        await _inline(service, owner, session, "inline:last", wait_seconds=1)
+
+
+async def test_a_timeout_in_seconds_ends_the_command_at_that_time(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await _inline(service, owner, session, wait_seconds=0, timeout_seconds=5)
+    assert (task.deadline_at, task.timeout_minutes) == (NOW + timedelta(seconds=5), 1)
+    [start] = _scripts(fake, "start")
+    assert "timeout -k 10 5 bash" in start
+    with pytest.raises(StoreError, match="1 to"):
+        await _inline(service, owner, session, "inline:2", timeout_seconds=0)

@@ -250,7 +250,7 @@ Owner-only compute sessions bound to verified, attended conversation origins.
 | `compute_list_sessions` | all callers | List your live sessions in this conversation. |
 | `compute_list_templates` | all callers | List operator image profiles, fixed CPU/RAM and allowed regions. |
 | `compute_read_file` | all callers | Read a file from your session in byte chunks of at most 512 KiB. |
-| `compute_run_bash` | all callers | Run bash on your session; inline by default, returning exit code and stdout. |
+| `compute_run_bash` | all callers | Run bash on your session and wait up to wait_seconds (0 to 40) for it to end. |
 | `compute_stop_session` | all callers | Permanently delete a session and its files. |
 | `compute_task_result` | all callers | Read the end of a background command's output (last 16 KiB). |
 | `compute_task_status` | all callers | Check one of your background commands: state, exit code and output size. |

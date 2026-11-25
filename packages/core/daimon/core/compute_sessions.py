@@ -7,7 +7,8 @@ configured caps; the owner, a tenant admin or the fenced reconciler may stop it.
 Only the session owner, through an authorized attended conversation, can start a
 background command; its status and result go only to that owner; its completion
 wake goes only to the originating conversation, once. The turn that wake starts
-may read the command's session and nothing more (`turn_may_read`).
+may read the command's session and nothing more (`turn_may_read`). An inline
+command is a background command that its caller waits for (`run`).
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from math import ceil
 
 import structlog
 from daimon.core import compute_tasks as scripts
@@ -62,6 +64,16 @@ START_FAILED = (
 )
 # A start whose inline call was lost has this long to leave its pid file.
 _START_GRACE = timedelta(minutes=2)
+# The longest the machine may take to answer the call that starts a command.
+_START_CALL_SECONDS = 30
+# How long an inline command's caller sleeps before each look at it, in seconds;
+# every look after these is 2 seconds later.
+_INLINE_POLLS = (0.3, 0.7, 1.0)
+# An inline command may start while `per_session_tasks` background commands run, so
+# the bot can still look at the machine.
+_INLINE_EXTRA_TASKS = 4
+# Seconds between the caller's last look at an inline command and the scheduler's first.
+_INLINE_HANDOVER = 5
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may make.
@@ -401,7 +413,8 @@ class ComputeSessions:
         tool: str,
         arguments: dict[str, JsonValue],
     ) -> JsonValue:
-        if tool not in {"run_bash", "write_file"} | READ_OPERATIONS:
+        # A command is a task (`run`); its start and probes call the machine's run_bash.
+        if tool not in {"write_file"} | READ_OPERATIONS:
             raise StoreError("Unsupported session operation")
         read = tool in READ_OPERATIONS
         await self._started(caller, session_id, read=read)
@@ -514,7 +527,7 @@ class ComputeSessions:
         limit = self.settings.max_ttl_hours * 60
         value = min(8 * 60, limit) if minutes is None else minutes
         if not 1 <= value <= limit:
-            raise StoreError(f"A background command can run for 1 to {limit} minutes.")
+            raise StoreError(f"A command can run for 1 to {limit} minutes.")
         return value
 
     async def start_task(
@@ -525,10 +538,27 @@ class ComputeSessions:
         command: str,
         timeout_minutes: int | None,
         request_key: str,
+        timeout_seconds: int | None = None,
+        extra_cap: int = 0,
+        wait_seconds: int | None = None,
     ) -> ComputeTask:
+        """Start a command once per `request_key`, detached on the machine.
+
+        `timeout_seconds`, when given, ends the command after that many seconds in
+        place of `timeout_minutes`. `extra_cap` raises the session's task limit for
+        this start. `wait_seconds` says its caller waits that long for it to end: the
+        row's `wait_until` keeps the scheduler away until the wait, the start call and
+        `_INLINE_HANDOVER` have passed.
+        """
         if not request_key:
             raise StoreError("Run the command from the owner's conversation.")
-        minutes = self._task_timeout(timeout_minutes)
+        if timeout_seconds is None:
+            minutes = self._task_timeout(timeout_minutes)
+            seconds = minutes * 60
+        else:
+            # The stored row counts whole minutes; less than 1 second rounds to 0, refused.
+            minutes = self._task_timeout(ceil(timeout_seconds / 60))
+            seconds = timeout_seconds
         # Before the task row exists: a task registered for a machine that cannot
         # answer would be reported lost.
         await self._started(caller, session_id)
@@ -538,6 +568,8 @@ class ComputeSessions:
             if session.state != "running" or session.expires_at <= now:
                 raise StoreError("The session is expired or stopping. Launch a new session.")
             task_id = uuid.uuid4()
+            # The start call may take its whole limit before the caller starts to wait.
+            held = _START_CALL_SECONDS + _INLINE_HANDOVER + (wait_seconds or 0)
             task, created = await task_store.register(
                 db,
                 ComputeTask(
@@ -548,11 +580,12 @@ class ComputeSessions:
                     request_key=request_key,
                     command_preview=command[: scripts.PREVIEW_CHARS],
                     timeout_minutes=minutes,
-                    deadline_at=now + timedelta(minutes=minutes),
+                    deadline_at=now + timedelta(seconds=seconds),
                     output_path=scripts.output_path(task_id),
                     created_at=now,
+                    wait_until=None if wait_seconds is None else now + timedelta(seconds=held),
                 ),
-                cap=self.settings.per_session_tasks,
+                cap=self.settings.per_session_tasks + extra_cap,
             )
         if not created:
             # A retried call never starts the command again; the poller settles it.
@@ -569,15 +602,71 @@ class ComputeSessions:
                     session_token(self.settings, session.id),
                     "run_bash",
                     {
-                        "command": scripts.start_script(
-                            task.id, command, timeout_s=task.timeout_minutes * 60
-                        ),
-                        "timeout_s": 30,
+                        "command": scripts.start_script(task.id, command, timeout_s=seconds),
+                        "timeout_s": _START_CALL_SECONDS,
                     },
                 )
             )
             await self._renew_for(db, session, task)
             return await task_store.advance(db, task, state="running") or task
+
+    async def run(
+        self,
+        caller: ComputeCaller,
+        session_id: uuid.UUID,
+        *,
+        command: str,
+        wait_seconds: int,
+        timeout_seconds: int | None,
+        timeout_minutes: int | None,
+        request_key: str,
+    ) -> ComputeTask:
+        """Start a command and wait up to `wait_seconds` for it to end.
+
+        A command that ends in time is returned finished and queues no wake: the caller
+        sees it. One that needs longer keeps running; the poller wakes its conversation.
+        The caller stops `_INLINE_HANDOVER` seconds before the scheduler may poll the
+        task, then hands it over at once, so only one of them reports its end.
+        """
+        task = await self.start_task(
+            caller,
+            session_id,
+            command=command,
+            timeout_minutes=timeout_minutes,
+            timeout_seconds=timeout_seconds,
+            request_key=request_key,
+            # Only a caller who waits gets the extra room: a background start keeps the cap.
+            extra_cap=_INLINE_EXTRA_TASKS if wait_seconds > 0 else 0,
+            wait_seconds=wait_seconds,
+        )
+        give_up = self.clock()
+        if task.wait_until is not None:
+            # A row with no `wait_until` (a retried background start) is the scheduler's.
+            give_up = min(
+                give_up + timedelta(seconds=wait_seconds),
+                task.wait_until - timedelta(seconds=_INLINE_HANDOVER),
+            )
+        polls = iter(_INLINE_POLLS)
+        while task.state in ACTIVE_TASK_STATES and self.clock() < give_up:
+            await self.sleep(next(polls, 2.0))
+            try:
+                await self._poll_task(task.tenant_id, task.id, wake=False)
+            except SQLAlchemyError:
+                # The scheduler takes it over after `wait_until`; report it as still running.
+                log.warning("compute.inline_poll_retry", task_id=str(task.id))
+                return task
+            async with self.sm.begin() as db:
+                task = await self._owned_task(db, caller, task.id)
+        if task.state not in ACTIVE_TASK_STATES or task.wait_until is None:
+            return task
+        try:
+            async with self.sm.begin() as db:
+                # The caller has stopped looking: the scheduler may poll it from now on.
+                handed = await task_store.advance(db, task, wait_until=None)
+                return handed or await self._owned_task(db, caller, task.id)
+        except SQLAlchemyError:
+            log.warning("compute.inline_handover_retry", task_id=str(task.id))
+            return task
 
     async def _renew_for(
         self, db: AsyncSession, session: ComputeSession, task: ComputeTask
@@ -634,7 +723,7 @@ class ComputeSessions:
         for tenant in await list_tenants_by_platform(self.sm):
             try:
                 async with self.sm.begin() as db:
-                    tasks = await task_store.list_active(db, tenant.id)
+                    tasks = await task_store.list_active(db, tenant.id, now=self.clock())
             except Exception:
                 # One tenant's read failure must not stop the pass for the others.
                 log.warning("compute.task_list_retry", tenant_id=str(tenant.id))

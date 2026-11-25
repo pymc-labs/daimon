@@ -82,8 +82,9 @@ warns before expiry, deletes expired machines and retries until Google
 confirms. Keep the scheduler running while any session remains. A Discord
 server admin can emergency-stop a session without seeing its files.
 
-Inline bash stops after 40 seconds. Longer commands run in the background, and
-the scheduler posts one message in the conversation when each ends. In a
+Daimon waits up to 40 seconds for a command's result. A command that needs
+longer keeps running, and the scheduler posts one message in the conversation
+when it ends. In a
 thread, Daimon can read the command's output and the machine's files for that
 message. Outside a thread it reports only the end of the output. It cannot run
 commands or change the machine until the owner writes again.

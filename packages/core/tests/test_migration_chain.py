@@ -189,6 +189,7 @@ TAIL = (
     "0225_agent_github_grant_removals",
     "0226_compute_tool_names",
     "0227_turn_origin_own_dm_reach",
+    "0228_compute_task_wait_until",
 )
 HEAD = TAIL[-1]
 
@@ -246,6 +247,7 @@ AFTER_MERGE_COLUMNS = {
     ("usage_observation", "observed_at"),
     ("routines", "delivery_hold"),
     ("routines", "owner_notice"),
+    ("compute_tasks", "wait_until"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 

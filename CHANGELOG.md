@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A command on a cloud computer that needs more than 40 seconds now continues, and the
+  conversation gets a message when it ends.** Before, the machine stopped it at 40 seconds.
+  A command that ends in time still returns its result in the reply
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **In a thread, Daimon reads a finished background command before it reports.** When a long
   command on a cloud machine ends, the message Daimon posts in the thread can use the whole
   saved result and the machine's files, not only the last 1,500 characters. For that message
