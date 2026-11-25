@@ -18,6 +18,7 @@ from typing import Any, Literal
 from daimon.core.config import Settings
 from daimon.core.features.service import clear_pinned_on
 from daimon.core.routine_files import RoutineFile
+from daimon.core.routines import PRIVATE_FAILED
 from daimon.core.stores import security_audit, workflow_waits
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_reads as reads
@@ -996,7 +997,8 @@ async def runs_view(
 async def get_run(env: Env, run_id: uuid.UUID) -> run_views.RunDetail:
     async with env.sm() as session:
         run, workflow, _ = await _run(session, env, run_id)
-        return await run_views.detail(session, run, workflow.name)
+        private = await run_views.hides_output(session, run, workflow, env.who.account_id)
+        return await run_views.detail(session, run, workflow.name, private=private)
 
 
 async def get_run_by_number(env: Env, workflow_id: uuid.UUID, number: int) -> run_views.RunDetail:
@@ -1015,8 +1017,9 @@ async def run_events(
 ) -> tuple[list[run_views.RunEvent], bool]:
     """The ledger rows after `after_seq`, and whether the run has ended."""
     async with env.sm() as session:
-        run, _, _ = await _run(session, env, run_id)
-        events = await run_views.event_views(session, run, after_seq=after_seq)
+        run, workflow, _ = await _run(session, env, run_id)
+        private = await run_views.hides_output(session, run, workflow, env.who.account_id)
+        events = await run_views.event_views(session, run, after_seq=after_seq, private=private)
         return events, run.status not in _ACTIVE
 
 
@@ -1028,8 +1031,11 @@ async def verify_run(env: Env, run_id: uuid.UUID) -> run_views.Verify:
 
 async def step(env: Env, run_id: uuid.UUID, key: str, attempt: int | None) -> run_views.StepDetail:
     async with env.sm() as session:
-        run, _, _ = await _run(session, env, run_id)
-        found = await run_views.step_detail(session, run, key, attempt, now=env.now)
+        run, workflow, _ = await _run(session, env, run_id)
+        private = await run_views.hides_output(session, run, workflow, env.who.account_id)
+        found = await run_views.step_detail(
+            session, run, key, attempt, now=env.now, private=private
+        )
     if found is None:
         raise NotFound("That step has not run.")
     return found
@@ -1291,8 +1297,11 @@ async def attention(env: Env) -> list[Attention]:
         for workflow_id, found in latest.items():
             run = found[0]
             if run.status in ("failed", "timed_out"):
-                _, _, rights = await _load(session, env, workflow_id)
+                workflow, _, rights = await _load(session, env, workflow_id)
                 if rights.controls_run(own=run_views.started_by_me(run, env.who.account_id)):
+                    hidden = await run_views.hides_output(
+                        session, run, workflow, env.who.account_id
+                    )
                     out.append(
                         Attention(
                             kind="failed",
@@ -1301,7 +1310,9 @@ async def attention(env: Env) -> list[Attention]:
                             step=run.failure_step,
                             since=views.iso(run.ended_at or run.created_at) or "",
                             expires_at=None,
-                            detail=run.failure_message or "The run failed.",
+                            detail=PRIVATE_FAILED
+                            if hidden
+                            else run.failure_message or "The run failed.",
                         )
                     )
         for run in await reads.unknown_step_runs(session, tenant_id=env.who.tenant_id):

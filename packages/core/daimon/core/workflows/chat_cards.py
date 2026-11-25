@@ -518,7 +518,13 @@ async def run_card_of(
         workflow = await workflows_store.get_workflow(
             session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
         )
-        detail = await run_views.detail(session, run, workflow.name if workflow else "")
+        # A card is for everyone where it is posted, so private routine output stays off it.
+        private = workflow is not None and await run_views.hides_output(
+            session, run, workflow, None
+        )
+        detail = await run_views.detail(
+            session, run, workflow.name if workflow else "", private=private
+        )
     return run_card(detail, await links(run.tenant_id, channel_id, thread_id))
 
 

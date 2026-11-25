@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Final, Literal
 
-from daimon.core.fire.subject import RoutineFacts
+from daimon.core.fire.subject import RoutineFacts, workflow_subject
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.workflows import WorkflowRow
+from daimon.core.workflows.spec import RoutineNode, Spec
 
 PANEL_CAP = 25
 #: A moved routine's line on every panel; the panel links the workflow and offers no changes.
 MOVED_TO_WORKFLOWS: Final = "Moved to Workflows. Change it there."
 #: A routine surface's badge: routines still run, workflows replace them.
+#: A routine run's failure, where its output is private to someone else.
+PRIVATE_FAILED: Final = "Private routine run failed."
 LEGACY: Final = "Legacy"
 #: The same, where there is room to name the replacement.
 LEGACY_USE_WORKFLOWS: Final = "Legacy, use Workflows"
@@ -76,6 +81,15 @@ def has_private_output(row: RoutineFacts) -> bool:
     return row.destination_kind == "dm" or mounts_personal_memory(row)
 
 
+def hides_workflow_output(workflow: WorkflowRow, spec: Spec, *, reader: uuid.UUID | None) -> bool:
+    """A routine step's private output (`has_private_output`) is its owner's, not an admin's."""
+    node = next((n for n in spec.nodes.values() if isinstance(n, RoutineNode)), None)
+    if node is None or (reader is not None and reader == workflow.owner_account_id):
+        return False
+    subject = workflow_subject(workflow, spec, node, run_id=None, owner=None, agent_id="")
+    return has_private_output(subject)
+
+
 def can_read_routine_output(row: RoutineRow, *, user_id: str | None) -> bool:
     """Private output requires an identified owner, including for admins."""
     return not has_private_output(row) or (
@@ -90,7 +104,7 @@ def routine_for_reader(row: RoutineRow, *, user_id: str | None) -> RoutineRow:
     return row.model_copy(
         update={
             "last_result_tail": None,
-            "last_error": "Private routine run failed." if row.last_error is not None else None,
+            "last_error": PRIVATE_FAILED if row.last_error is not None else None,
             "delivery_payload": None,
             "delivery_note": None,
         }

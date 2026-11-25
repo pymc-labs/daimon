@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast
 
+from daimon.core.routines import PRIVATE_FAILED, hides_workflow_output
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflow_waits as waits_store
@@ -20,6 +21,7 @@ from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.workflow_run_events import EventRow, list_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow
 from daimon.core.stores.workflow_waits import Wait
+from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows import board, ledger
 from daimon.core.workflows.engine import (
     RunFacts,
@@ -353,9 +355,11 @@ def _wanted_accounts(events: Sequence[EventRow]) -> set[uuid.UUID]:
     return found
 
 
-async def event_views(session: AsyncSession, run: RunRow, *, after_seq: int = 0) -> list[RunEvent]:
+async def event_views(
+    session: AsyncSession, run: RunRow, *, after_seq: int = 0, private: bool = False
+) -> list[RunEvent]:
     """Ledger rows for the page, with names, and answers read from their waits (the ledger
-    holds only the answer's hash)."""
+    holds only the answer's hash); `private` hides a routine step's failures (`hides_output`)."""
     events = await list_events(session, run.id, after_seq=after_seq)
     names = await people_of(session, run.tenant_id, _wanted_accounts(events))
     answered = [
@@ -364,9 +368,29 @@ async def event_views(session: AsyncSession, run: RunRow, *, after_seq: int = 0)
         if e.type == "wait.decided" and isinstance(e.data.get("answer"), dict)
     ]
     found = await waits_store.waits_by_id(session, answered)
-    views = [event_view(e, names, found, run) for e in events]
+    views = [event_view(e, names, found, run, private=private) for e in events]
     await _add_costs(session, run, views)
     return views
+
+
+#: Rows whose `message` is a step's error.
+_FAILURES: Final = {
+    "run.failed",
+    "run.timed_out",
+    "step.failed",
+    "step.retry_scheduled",
+    "step.unknown",
+}
+
+
+async def hides_output(
+    session: AsyncSession, run: RunRow, workflow: WorkflowRow, reader: uuid.UUID | None
+) -> bool:
+    """Whether `reader` misses the run's private routine output: anyone but the owner."""
+    if run.mode != "live":  # a routine step runs only live
+        return False
+    spec = await _spec_of(session, run, {})
+    return hides_workflow_output(workflow, parse_spec(spec), reader=reader)
 
 
 #: Rows that end an attempt carry its cost, as `runs.ts` `project` reads it.
@@ -429,8 +453,12 @@ def event_view(
     names: Mapping[uuid.UUID, Person],
     waits: Mapping[uuid.UUID, Wait] | None = None,
     run: RunRow | None = None,
+    *,
+    private: bool = False,
 ) -> RunEvent:
     data = dict(e.data)
+    if private and e.type in _FAILURES and "message" in data:
+        data["message"] = PRIVATE_FAILED
     answer = data.get("answer")
     if e.type == "wait.decided" and isinstance(answer, dict):
         wait = (waits or {}).get(uuid.UUID(str(data["id"])))
@@ -769,7 +797,7 @@ def board_of(cards: Sequence[RunCard], stages: Sequence[str]) -> Board:
     return Board(columns=[Column(stage=n, cards=[c for c in cards if c.stage == n]) for n in names])
 
 
-def _overlay(state: RunState, run: RunRow) -> RunState:
+def _overlay(state: RunState, run: RunRow, *, private: bool) -> RunState:
     """The run row is the truth for status and cost; the ledger fills in the steps."""
     state.status = run.status
     state.waiting_reason = run.waiting_reason
@@ -779,7 +807,7 @@ def _overlay(state: RunState, run: RunRow) -> RunState:
     state.failure = (
         RunFailure(
             reason=run.failure_reason or "step_failed",
-            message=run.failure_message or "",
+            message=PRIVATE_FAILED if private else run.failure_message or "",
             step=run.failure_step,
         )
         if run.status in ("failed", "timed_out") and run.failure_reason
@@ -788,9 +816,11 @@ def _overlay(state: RunState, run: RunRow) -> RunState:
     return state
 
 
-async def detail(session: AsyncSession, run: RunRow, workflow_name: str) -> RunDetail:
-    events = await event_views(session, run)
-    state = _overlay(project(events), run)
+async def detail(
+    session: AsyncSession, run: RunRow, workflow_name: str, *, private: bool = False
+) -> RunDetail:
+    events = await event_views(session, run, private=private)
+    state = _overlay(project(events), run, private=private)
     (summary,) = await summaries(session, [run], {run.workflow_id: workflow_name})
     spec = await _spec_of(session, run, {})
     parent_id = run.forked_from_run_id or run.parent_run_id
@@ -871,7 +901,13 @@ def _inputs_of(node: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def step_detail(
-    session: AsyncSession, run: RunRow, key: str, attempt: int | None, *, now: datetime
+    session: AsyncSession,
+    run: RunRow,
+    key: str,
+    attempt: int | None,
+    *,
+    now: datetime,
+    private: bool = False,
 ) -> StepDetail | None:
     steps = await runs_store.list_steps(session, run.id)
     node_id = node_of(key)
@@ -937,7 +973,7 @@ async def step_detail(
         attempt=chosen.number if chosen else 0,
         agent=agent if node.get("kind") == "agent" else None,
         model=node.get("model") if node.get("kind") == "agent" else None,
-        summary=step.summary if done else None,
+        summary=step.summary if done and not private else None,
         route={"name": route, "reason": str(obj(way).get("when") or "")} if route else None,
         files=[file_view(run.id, f) for f in step.files] if done else [],
         input=shown,

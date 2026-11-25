@@ -211,14 +211,13 @@ def _spec(snap: RoutineSnapshot) -> dict[str, Any]:
 
 
 def _last(snap: RoutineSnapshot) -> dict[str, Any] | None:
-    """The "Before migration" strip; a DM routine's text stays private."""
+    """The "Before migration" strip, whose text the page shows as it shows the runs'."""
     if snap.last_fired_at is None:
         return None
-    private = snap.destination_kind == "dm"
     return {
         "at": _iso(snap.last_finished_at or snap.last_fired_at),
         "status": "failed" if snap.last_error else "succeeded",
-        "text": "" if private else snap.last_error or snap.last_result_tail,
+        "text": snap.last_error or snap.last_result_tail,
     }
 
 

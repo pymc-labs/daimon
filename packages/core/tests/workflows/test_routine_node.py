@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 from typing import Any
 
-from daimon.core._models import WorkflowDelivery
-from daimon.core.workflows import engine, runs
+import pytest
+from daimon.core._models import Account, WorkflowDelivery
+from daimon.core.routines import PRIVATE_FAILED
+from daimon.core.workflows import engine, runs, service
+from daimon.core.workflows.access import Who
 from daimon.core.workflows.preflight import routine_only
 from daimon.core.workflows.runs import StepWork
+from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import parse_spec
 from daimon.core.workflows.validate import validate_spec
 from daimon.testing.workflows import NOW, World, make_world
@@ -83,3 +88,50 @@ async def test_routine_step_when_reclaimed_then_fails_interrupted_without_notice
     assert (step.status, step.error_message) == ("failed", "Interrupted"), f"never rerun: {step}"
     assert (await world.get(run.id)).status == "failed", "the run fails, never waits as unknown"
     assert await _notices(world) == 0, "the engine adds no failure notice to a routine step's"
+
+
+async def _ends(world: World, outcome: engine.Outcome) -> uuid.UUID:
+    async def step(_work: StepWork) -> engine.Outcome:
+        return outcome
+
+    run = await world.run()
+    claimed = await world.claim(run.id, "r")
+    await runs.execute(world.sm, world.settings, {"routine": step}, claimed, clock=lambda: NOW)
+    return run.id
+
+
+@pytest.mark.parametrize(
+    ("to", "home", "hidden"),
+    [(None, None, True), ({"kind": "dm"}, "555", True), (ROUTINE["r"]["to"], "555", False)],
+    ids=["no_destination", "dm", "channel"],
+)
+async def test_routine_step_output_when_private_then_only_its_owner_reads_it(
+    db_session: AsyncSession, to: dict[str, str] | None, home: str | None, hidden: bool
+) -> None:
+    """As `routines.has_private_output`: a DM or destination-free run is its owner's, not an
+    admin's, in the run, its ledger, the attention list and its step's result."""
+    node = {k: v for k, v in ROUTINE["r"].items() if k != "to"} | ({"to": to} if to else {})
+    world = await make_world(db_session, ROUTINE | {"r": node}, "r", home=home, spec_fields=ONE)
+    admin = Account(tenant_id=world.tenant_id)
+    db_session.add(admin)
+    await db_session.commit()
+    readers = {
+        "owner": (Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW), True),
+        "admin": (
+            Env(world.sm, world.settings, Who(world.tenant_id, admin.id, admin=True), NOW),
+            not hidden,
+        ),
+    }
+    failed = await _ends(world, engine.Failed("fatal", "Your notes: boom"))
+    for who, (env, shown) in readers.items():
+        view = await service.get_run(env, failed)
+        events, _ = await service.run_events(env, failed)
+        texts = [view.failure.message if view.failure else None, view.steps[0].reason]
+        texts += [e.detail for e in events if e.type in ("step.failed", "run.failed")]
+        texts += [a.detail for a in await service.attention(env) if a.kind == "failed"]
+        error = "Your notes: boom" if shown else PRIVATE_FAILED
+        assert texts == [error] * 5, f"the run's error, for the {who}"
+    succeeded = await _ends(world, engine.Succeeded({}, summary="Notes"))
+    for who, (env, shown) in readers.items():
+        found = await service.step(env, succeeded, "r", None)
+        assert found.summary == ("Notes" if shown else None), f"the step's result, for the {who}"

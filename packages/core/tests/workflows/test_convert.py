@@ -53,14 +53,12 @@ async def _env(db: AsyncSession, *, admin: bool = True, agents: AgentLister | No
 
 
 async def _routine(db: AsyncSession, env: Env, **fields: Any) -> uuid.UUID:
-    defaults: dict[str, Any] = {"next_fire_at": SLOT, "created_by_user_id": "owner-1"}
-    row = await new_routine(
-        db,
-        env.who.tenant_id,
-        cron_expr="0 * * * *",
-        channel_id="c1",
-        **(defaults | fields),
-    )
+    defaults: dict[str, Any] = {
+        "next_fire_at": SLOT,
+        "created_by_user_id": "owner-1",
+        "channel_id": "c1",
+    }
+    row = await new_routine(db, env.who.tenant_id, cron_expr="0 * * * *", **(defaults | fields))
     await db.commit()
     return row.id
 
@@ -348,3 +346,32 @@ async def test_only_the_owner_or_an_admin_runs_a_moved_routine_by_hand(
     for call in refused:
         with pytest.raises(Forbidden, match="Ask the owner or an admin to run it"):
             await call
+
+
+@pytest.mark.parametrize(
+    ("fields", "hidden"),
+    [
+        ({"channel_id": None}, True),
+        ({"created_by_user_id": "1001", "destination_kind": "dm", "destination_id": "1001"}, True),
+        ({}, False),
+    ],
+    ids=["personal", "dm", "channel"],
+)
+async def test_a_moved_personal_routines_last_result_is_its_owners_alone(
+    db_session: AsyncSession, fields: dict[str, Any], hidden: bool
+) -> None:
+    """A DM routine, or one with no destination or channel (it mounts personal memory): the
+    strip shows its last result to its owner, never to an admin."""
+    env = await _env(db_session)
+    routine_id = await _routine(db_session, env, **fields)
+    await db_session.execute(
+        update(Routine).values(last_fired_at=NOW, last_finished_at=NOW, last_result_tail="Notes")
+    )
+    await db_session.commit()
+    flow = await convert.from_routine(env, routine_id)
+    owner = await db_session.scalar(select(Workflow.owner_account_id).where(Workflow.id == flow))
+    assert owner is not None and owner != env.who.account_id, "the admin is not the owner"
+    as_owner = Env(env.sm, env.settings, Who(env.who.tenant_id, owner), NOW, env.agents)
+    for reader, shown in ((as_owner, "Notes"), (env, "" if hidden else "Notes")):
+        migration = (await service.get(reader, flow)).migration
+        assert migration is not None and migration["last"]["text"] == shown, f"{reader.who}"

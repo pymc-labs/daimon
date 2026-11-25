@@ -141,10 +141,11 @@ def test_each_routine_shape_translates(shape: tuple[dict[str, Any], str, tuple[s
     assert move.writes[-1].op == "delete" and move.writes[-1].table == "routines"
 
 
-def test_dm_text_stays_private_and_source_links_are_kept() -> None:
+def test_dm_text_is_kept_for_its_owner_and_source_links_are_kept() -> None:
+    """The page hides it from everyone else (`test_a_moved_personal_routines_last_result_...`)."""
     dm = _move(destination_kind="dm", destination_id="u1")
     assert dm.spec["nodes"]["run"]["to"] == {"kind": "dm"}
-    assert _values(dm, "workflows")["converted_from"]["last"]["text"] == ""
+    assert _values(dm, "workflows")["converted_from"]["last"]["text"] == "All quiet"
     linked = _move(source_routine_id=uuid.UUID(int=9))
     assert _values(linked, "workflows")["converted_from"]["source_routine_id"] == str(
         uuid.UUID(int=9)

@@ -71,14 +71,11 @@ class RoutineStep:
             return engine.Succeeded({"skipped": "lead_intake_turned_off"})
         if status == "unreadable":
             return engine.Failed("retryable", "Could not read the features. Try again later.")
-        done, private = store.outcome, subject.destination_kind == "dm"
+        # The run view shows a private routine's output to its owner only (`hides_output`).
+        done = store.outcome
         if done is None or done.status == "stale":
             return engine.Failed("fatal", STALE)
         if done.status == "failed":
-            return engine.Failed(
-                "fatal", "Private routine run failed." if private else done.error or "Failed"
-            )
+            return engine.Failed("fatal", done.error or "Failed")
         delivery = str(done.delivery_id) if done.delivery_id else None
-        return engine.Succeeded(
-            {"delivery_id": delivery, "error": None}, summary="" if private else done.tail
-        )
+        return engine.Succeeded({"delivery_id": delivery, "error": None}, summary=done.tail)
