@@ -1,4 +1,4 @@
-"""Who each source identity is: proofs, links, candidates and data admins (`0003_identity.sql`).
+"""Who each source identity is: proofs, links, candidates and data admins (`0004_identity.sql`).
 
 A link makes a person read as that identity, so one is written only
 - for the person a provider or platform verified (`link`): the tenant's own platform

@@ -86,6 +86,33 @@ docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build po
 It keeps the data volume, so an existing database carries over. Run
 `daimon data init` afterwards to create the extension.
 
+Set `DAIMON_DATA__EMBED_URL` and `DAIMON_DATA__EMBED_MODEL` (and `_KEY`) to an
+OpenAI-compatible embeddings API, and the sync worker embeds new chunks after each run and
+once a day for gaps. `DAIMON_DATA__EMBED_DIM` is the vector length kept, and the HNSW index
+is built over it. `DAIMON_DATA__EMBED_PROVIDER` names the providers an OpenRouter-style
+router may use, comma-separated; the default `openai` sends a plain request.
+`DAIMON_DATA__EMBED_QUERY_PREFIX` goes before a question when it is embedded.
+
+Embedding and reranking are billed like any model call: the usage rows are
+`data_embedding` and `data_rerank`, priced from the model's entry in the rate table
+(`text-embedding-3-small`, `text-embedding-3-large`, `qwen/qwen3-embedding-8b`,
+`semantic-ranker-fast-005`), and a model without an entry is never called. Ingest is billed
+to the source's workspace, a question to whoever asked. A workspace out of balance gets
+full-text answers only, and its new chunks wait to be embedded until it tops up.
+
+## Search and reading
+
+Search combines full text, BM25 (where `pg_textsearch` is installed), vectors and, when the
+question names a date ("last week", "in March"), a time window, fused by reciprocal rank.
+`DAIMON_DATA__RERANK=vertex` and `DAIMON_DATA__RERANK_PROJECT` add the Vertex AI Ranking
+API on the best candidates, using the host's cloud identity. `DAIMON_DATA__SEARCH_SECONDS`
+bounds a search; it returns what the arms have found when time runs out, and notes what was
+cut.
+
+Callers browse a source's records, read one with its text and files, and run read-only SQL
+over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views and nothing
+else, so it never sees an access list, a credential or another workspace's rows.
+
 ## After a restore
 
 A restore with `--no-privileges`, as `scripts/backup/postgres.sh` does, drops the

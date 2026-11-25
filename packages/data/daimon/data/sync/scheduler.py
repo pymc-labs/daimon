@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
 from uuid import UUID
@@ -17,6 +17,7 @@ from uuid import UUID
 import psycopg
 import structlog
 from daimon.core.config import Settings
+from daimon.core.ports.data_metering import SessionMeter
 from daimon.data import acl, pool
 from daimon.data.dsn import libpq_dsn
 from daimon.data.locks import advisory_key
@@ -159,8 +160,8 @@ class Maintenance:
             wrong = {k: n for k, n in (await acl.nightly(conn, env.schemas)).items() if n}
         if wrong:
             log.warning("data.acl_repaired", counts=wrong)
-        if env.embed:
-            await embed_pending(conn, env.schemas)
+        if env.embed and env.data is not None:
+            await embed_pending(conn, env.schemas, settings=env.data, meter=env.meter)
 
 
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
@@ -239,14 +240,20 @@ async def lead(
 async def serve(settings: Settings, stop: asyncio.Event) -> None:
     """Take the lead whenever it is free and schedule until `stop` is set."""
     env = Env.of(settings)
-    while not stop.is_set():
-        leader = await take_lead(str(settings.database.url), env.schemas)
-        if leader is None:
-            await _wait(stop, TICK)
-            continue
-        log.info("sync.leader")
-        try:
-            await lead(settings, env, leader, stop)
-        finally:
-            await leader.close()
-        await _wait(stop, 1.0)
+    meter = SessionMeter.of(settings) if env.embed else None
+    env = replace(env, meter=meter)
+    try:
+        while not stop.is_set():
+            leader = await take_lead(str(settings.database.url), env.schemas)
+            if leader is None:
+                await _wait(stop, TICK)
+                continue
+            log.info("sync.leader")
+            try:
+                await lead(settings, env, leader, stop)
+            finally:
+                await leader.close()
+            await _wait(stop, 1.0)
+    finally:
+        if meter is not None:
+            await meter.close()
