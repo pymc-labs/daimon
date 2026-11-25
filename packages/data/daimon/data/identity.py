@@ -243,8 +243,9 @@ async def mirror_platform(
     people: Mapping[str, uuid.UUID],
 ) -> None:
     """The tenant's own platform principals (platform user id -> account) as identities of its
-    workspace. Core admits a principal, so it is who that user is here and wins over any other
-    link of the same user."""
+    `workspace`, the tenant's external id, each read as `user_subject(platform, workspace, id)`.
+    Core admits a principal, so it is who that user is here and wins over any other link of
+    the same user."""
     async with conn.transaction():
         await fence_account(conn, schemas, *people.values())
         for user_id, account_id in sorted(people.items()):

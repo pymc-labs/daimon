@@ -2,6 +2,7 @@
 
 Written with the room facts, under their generation (`daimon.core.stores.audience_facts`),
 so a change that makes the facts unknown makes the viewers unknown too. Unknown is None.
+Viewers are reader subjects (`daimon.core.data_audience.user_subject`).
 """
 
 from __future__ import annotations

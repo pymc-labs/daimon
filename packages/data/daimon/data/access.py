@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Final
 
+from daimon.core.ports.data_subject import subject as subject
 from daimon.data.schema import Schemas
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -26,11 +27,6 @@ POLICY: Final = 1
 """Part of every audience key: bump it to refill every audience."""
 ACL_SCOPE: Final = "restricted:acl"
 """The scope of rows read through their access list only; no context ever holds it."""
-
-
-def subject(provider: str, workspace: str, kind: str, id_: str) -> str:
-    """A source principal: `<provider>/<workspace>:<kind>:<id>` (kind: user, group, role...)."""
-    return f"{provider}/{workspace}:{kind}:{id_}"
 
 
 def person(account_id: uuid.UUID) -> str:

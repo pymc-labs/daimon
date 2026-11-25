@@ -32,6 +32,17 @@ OriginKind = Literal["room", "private", "agent_request", "none"]
 RefusalReason = Literal["no_person", "contained", "agent_request"]
 
 
+def subject(provider: str, workspace: str, kind: str, id_: str) -> str:
+    """A source principal: `<provider>/<workspace>:<kind>:<id>` (kind: user, group, role...)."""
+    return f"{provider}/{workspace}:{kind}:{id_}"
+
+
+def user_subject(platform: str, workspace: str, user_id: str) -> str:
+    """A platform user as a reader, in the form its mirrored identity takes: `workspace` is
+    the tenant's external id (a Discord server, a Slack team)."""
+    return subject(platform, workspace, "user", user_id)
+
+
 @dataclass(frozen=True)
 class Reader:
     """Someone who reads the answer: a platform subject, and the account it is linked to
