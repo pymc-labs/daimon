@@ -29,7 +29,7 @@ from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
 from daimon.core.features.surface import ask_to_turn_on
 from daimon.core.features.tool_gate import (
-    GATED_KEYS,
+    gated_keys,
     gated_tools,
     hides_tools,
     server_gate_key,
@@ -207,7 +207,7 @@ class CapabilityGateMiddleware(Middleware):
         if not isinstance(auth, AuthIdentity):
             return tools
         settings = self._runtime.settings
-        unset = gated_tools(k for k in GATED_KEYS if not server_setup_met(FEATURES[k], settings))
+        unset = gated_tools(k for k in gated_keys() if not server_setup_met(FEATURES[k], settings))
         tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
         if _lists_everything(auth):
             return tools
@@ -215,7 +215,7 @@ class CapabilityGateMiddleware(Middleware):
             places = await caller_places(self._runtime, auth, None)
             found = [
                 await resolve_features(
-                    self._runtime.session_factory, self._runtime.settings, place, keys=GATED_KEYS
+                    self._runtime.session_factory, self._runtime.settings, place, keys=gated_keys()
                 )
                 for place in places
             ]
@@ -223,6 +223,6 @@ class CapabilityGateMiddleware(Middleware):
             log.warning("capability_gate.list_read_failed", exc_info=True)
             return tools
         off = gated_tools(
-            key for key in GATED_KEYS if any(hides_tools(place.get(key)) for place in found)
+            key for key in gated_keys() if any(hides_tools(place.get(key)) for place in found)
         )
         return [t for t in tools if t.name not in off or server_gate_key(t.name) is None]
