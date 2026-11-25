@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import anthropic
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.config import GithubAppSettings, GithubSettings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.github_rate_limit import GitHubRateLimitError
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.skill_repos import resync_repo_mirrors
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.github_access import active_grant_for_repo
@@ -53,7 +55,7 @@ def _retryable(error: Exception) -> bool:
     return False
 
 
-async def resync_bound_repo(
+async def _resync_agent_repos(
     *,
     repo_full_name: str,
     ref: str,
@@ -140,3 +142,52 @@ async def resync_bound_repo(
     else:
         await run(http_client)
     return ResyncReport(failed_bindings=failed, retryable_bindings=retryable)
+
+
+async def resync_bound_repo(
+    *,
+    repo_full_name: str,
+    ref: str,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+    anthropic_client: AsyncAnthropic,
+    http_client: httpx.AsyncClient | None = None,
+    github_settings: GithubSettings | None = None,
+    github_app: GithubAppSettings | None = None,
+) -> ResyncReport:
+    """Resync a pushed repository: agents' imported skills, then the library's repo mirrors."""
+    agents = await _resync_agent_repos(
+        repo_full_name=repo_full_name,
+        ref=ref,
+        sessionmaker=sessionmaker,
+        fernet=fernet,
+        anthropic_client=anthropic_client,
+        http_client=http_client,
+        github_settings=github_settings,
+        github_app=github_app,
+    )
+
+    async def mirrors(client: httpx.AsyncClient) -> tuple[int, int]:
+        return await resync_repo_mirrors(
+            repo_full_name=repo_full_name,
+            ref=ref,
+            sessionmaker=sessionmaker,
+            edit=AgentEditDeps(
+                client=anthropic_client, session_factory=sessionmaker, public_url=None
+            ),
+            http=client,
+            app_id=None if github_app is None else github_app.app_id,
+            app_private_key=None if github_app is None else github_app.private_key,
+            now=lambda: datetime.now(UTC),
+        )
+
+    if http_client is None:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            failed, retryable = await mirrors(client)
+    else:
+        failed, retryable = await mirrors(http_client)
+    return ResyncReport(
+        failed_bindings=agents.failed_bindings + failed,
+        retryable_bindings=agents.retryable_bindings + retryable,
+        retry_after=agents.retry_after,
+    )
