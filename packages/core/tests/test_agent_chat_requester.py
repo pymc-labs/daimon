@@ -151,3 +151,19 @@ async def test_each_send_is_numbered_and_a_resume_is_not(
     assert await send(resuming=True) is None
     assert await send(resuming=True, person=True) is None
     assert await send() == 3, "a resume starts no new turn, so it is not counted"
+
+
+async def test_the_store_names_nobody_on_a_resume(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only a send can name its driver, even if a caller asks the store to on a resume."""
+    assert await _start(db_session_factory, SESSION)
+    async with db_session_factory.begin() as db:
+        await session_settle_state.record_agent_chat_driver(
+            db,
+            managed_session_id=SESSION,
+            signed_in=True,
+            send=False,
+            sends_read=await _sends(db_session_factory, SESSION),
+        )
+    assert not await driver_signed_in(db_session_factory, managed_session_id=SESSION)

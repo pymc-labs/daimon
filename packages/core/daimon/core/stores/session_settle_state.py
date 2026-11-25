@@ -286,19 +286,20 @@ async def record_agent_chat_driver(
     """Record, before a send or resume, whether that session's driver is signed in.
 
     A send (`send`) also counts itself and returns its number, for
-    `record_unattended_turn` once it is accepted. The driver is named only if nothing
-    changed since the caller decided, checked in the same statement as the write: on a
+    `record_unattended_turn` once it is accepted. Only a send can name its driver: a
+    resume carries on a turn someone else may have started. The driver is named only if
+    nothing changed since the caller decided, checked in the same statement as the write: on a
     session its caller just created (`new_session`), only if this write creates the
     row; on any other, only if `agent_chat_sends` is still `sends_read`, the count the
     decision read, so another send begun in between names nobody.
     """
     stmt = insert(SessionSettleState).values(
         managed_session_id=managed_session_id,
-        agent_chat_signed_in=signed_in and new_session,
+        agent_chat_signed_in=signed_in and send and new_session,
         agent_chat_sends=1 if send else None,
     )
     named: object = False
-    if signed_in and not new_session and sends_read is not None:
+    if signed_in and send and not new_session and sends_read is not None:
         # Read before this row is updated: the count as it stood when the send began.
         named = case((SessionSettleState.agent_chat_sends == sends_read, True), else_=False)
     set_: dict[str, object] = {"agent_chat_signed_in": named, "updated_at": func.now()}

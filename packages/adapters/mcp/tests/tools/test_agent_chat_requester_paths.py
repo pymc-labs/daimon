@@ -191,6 +191,41 @@ def _fenced(fn: ast.AST, call: ast.Call) -> bool:
     )
 
 
+#: Store functions that only read the driver state; any other that names it writes it.
+_DRIVER_STATE_READERS = {"count_agent_chat_sends", "is_agent_chat_signed_in", "unattended_turn"}
+
+
+def _strings(node: ast.AST) -> list[str]:
+    """The string a node spells, if it is a literal, a concatenation of literals or the
+    literal parts of an f-string."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _strings(node.left), _strings(node.right)
+        return [a + b for a in left for b in right] if left and right else []
+    if isinstance(node, ast.JoinedStr):
+        return ["".join(v for part in node.values for v in _strings(part))]
+    return []
+
+
+def _names_driver_state(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether a function names a driver-state column anywhere but its docstring: as a
+    keyword, an attribute (ORM expression or assignment), or inside a string (raw SQL, a
+    built name, or the `agent_chat_` prefix such a name is built from)."""
+    body = fn.body
+    if body and isinstance(body[0], ast.Expr) and _strings(body[0].value):
+        body = body[1:]
+    for node in (n for stmt in body for n in ast.walk(stmt)):
+        if isinstance(node, ast.keyword) and node.arg in _DRIVER_STATE:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in _DRIVER_STATE:
+            return True
+        for spelled in _strings(node):
+            if "agent_chat_" in spelled or any(column in spelled for column in _DRIVER_STATE):
+                return True
+    return False
+
+
 def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence() -> None:
     """Each column the decision reads has one store writer, called from one helper,
     which is called only inside a session fence. No code deletes a row."""
@@ -201,10 +236,7 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
             continue
         calls = {_called(n) for n in ast.walk(fn) if isinstance(n, ast.Call)}
         assert "delete" not in calls, f"{fn.name} deletes a settle-state row"
-        named = {n.arg for n in ast.walk(fn) if isinstance(n, ast.keyword)}
-        named |= {n.value for n in ast.walk(fn) if isinstance(n, ast.Constant)} - {None}
-        named |= {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
-        if calls & {"insert", "update"} and named & _DRIVER_STATE:
+        if fn.name not in _DRIVER_STATE_READERS and _names_driver_state(fn):
             writers.add(fn.name)
     assert writers == {"record_agent_chat_driver", "record_unattended_turn"}
 
@@ -439,7 +471,7 @@ async def _mark(factory: async_sessionmaker[AsyncSession], session_id: str) -> N
             db,
             managed_session_id=session_id,
             signed_in=True,
-            send=False,
+            send=True,
             new_session=sends is None,
             sends_read=sends.begun if sends is not None else None,
         )
@@ -731,6 +763,7 @@ async def test_a_send_begun_is_open_until_its_turn_is_recorded(
         ("not a time", _IDLE["processed_at"]),  # unparseable
         (_SENT_AT, "2026-09-05T23:59:00Z"),  # the idle was processed before it
         (_SENT_AT, None),  # the idle has no time
+        (_IDLE["processed_at"], _IDLE["processed_at"]),  # picked up as the idle was stamped
     ],
 )
 async def test_a_key_message_queued_behind_the_earlier_turn_names_nobody(

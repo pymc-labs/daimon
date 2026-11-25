@@ -293,7 +293,7 @@ async def earlier_turn_open(
       that may have been accepted unrecorded (a 5xx or a timeout) is open and logged.
       The recorded turn then counts as ended only once the transcript's newest
       boundary is that turn, processed, and an idle that is not a pause was processed
-      no earlier than it. Anything else, or an unreadable transcript, is open.
+      after it. Anything else, or an unreadable transcript, is open.
 
     Nothing is read for a caller who is not a signed-in person, or while no server
     names the agent-chat requester: the send then names nobody (counted as open), so
@@ -331,16 +331,17 @@ async def earlier_turn_open(
 
 
 def _processed_in_order(boundary: object, idle: object) -> bool:
-    """Whether the idle was processed no earlier than the boundary message.
+    """Whether the idle was processed after the boundary message.
 
     The list order alone does not show it: a message queued behind a running turn is
-    listed with no `processed_at` and may sort before that turn's idle. A missing or
-    unparsed timestamp is not in order.
+    listed with no `processed_at` and may sort before that turn's idle. Equal times
+    show no order either: a queued message picked up as the earlier turn ends may share
+    its idle's time. A missing or unparsed timestamp is not in order.
     """
     if not (isinstance(boundary, datetime) and isinstance(idle, datetime)):
         return False
     try:
-        return idle >= boundary
+        return idle > boundary
     except TypeError:  # one naive, one aware
         return False
 
