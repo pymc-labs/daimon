@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import time
@@ -34,8 +35,10 @@ def _left_running(pid: int) -> Iterator[None]:
     try:
         yield
     finally:
-        if _alive(pid):
-            os.kill(pid, signal.SIGKILL)
+        # The process can end between the check and the signal.
+        with contextlib.suppress(ProcessLookupError):
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
 
 
 async def test_health_needs_no_token_and_reveals_nothing(client: httpx.AsyncClient) -> None:
