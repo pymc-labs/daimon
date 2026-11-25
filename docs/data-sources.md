@@ -6,8 +6,8 @@ until you turn it on and set it up.
 
 ## Set it up
 
-Every release migration creates the `data` and `data_views` schemas and four
-cluster-wide roles, `daimon_data_reader`, `daimon_data_sql`, `daimon_data_view_owner`
+Every release migration creates the `data` and `data_views` schemas, the store's tables
+and four cluster-wide roles, `daimon_data_reader`, `daimon_data_sql`, `daimon_data_view_owner`
 and `daimon_data_parity`, whether or not the feature is on. Nothing reads them until you
 set `DAIMON_FEATURES__DATA_SOURCES=on` on every Daimon service; a workspace can then turn
 the [`data_sources` feature](features.md#data-sources) off for itself.
