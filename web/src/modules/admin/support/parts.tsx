@@ -23,7 +23,7 @@ export function Cards<T extends string>({ label, value, onChange, choices, disab
             value === k && "border-foreground/40 bg-accent",
           )}
         >
-          <span className="min-w-0 truncate">{choices[k]}</span>
+          <span className="min-w-0 break-words">{choices[k]}</span>
           {value === k && <Check className="size-4 shrink-0 text-muted-foreground" />}
         </button>
       ))}
