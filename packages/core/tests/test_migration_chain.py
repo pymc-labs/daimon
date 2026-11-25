@@ -247,6 +247,7 @@ AFTER_MERGE_COLUMNS = {
     ("usage_observation", "observed_at"),
     ("routines", "delivery_hold"),
     ("routines", "owner_notice"),
+    ("lead_intake_executions", "workflow_run_id"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 
