@@ -216,8 +216,15 @@ def _task_view(task: ComputeTask, *, output: bool) -> dict[str, JsonValue]:
 _STILL_RUNNING = "Still running. End your reply; this conversation gets a message when it ends."
 
 
-#: What it adds to a command whose end another poll saw: the conversation gets the message.
-_ENDED_ELSEWHERE = "It has ended. This conversation gets a message with the result."
+#: What they add to a command that ended, when this call did not report the end itself.
+#: True whether the conversation gets a message or not: a status read the owner saw
+#: queues none (`ComputeSessions.task_status`).
+_ENDED = "It has ended. Read it with compute_task_result."
+
+
+def _note(task: ComputeTask) -> str:
+    """The one note for a command whose end this call did not report itself."""
+    return _STILL_RUNNING if task.state in ACTIVE_TASK_STATES else _ENDED
 
 
 def _command_view(run: InlineRun) -> dict[str, JsonValue]:
@@ -230,7 +237,7 @@ def _command_view(run: InlineRun) -> dict[str, JsonValue]:
         view["timed_out"] = task.state == "timed_out"
         view["truncated"] = task.output_bytes > len(task.output_tail.encode())
     else:
-        view["note"] = _STILL_RUNNING if task.state in ACTIVE_TASK_STATES else _ENDED_ELSEWHERE
+        view["note"] = _note(task)
     return view
 
 
@@ -560,10 +567,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             )
         except (StoreError, ComputeProviderError) as exc:
             raise ToolError(str(exc)) from None
-        view = _task_view(seen, output=False)
-        if seen.state in ACTIVE_TASK_STATES:
-            view["note"] = _STILL_RUNNING
-        return view
+        return {**_task_view(seen, output=False), "note": _note(seen)}
 
     @mcp.tool
     async def compute_task_result(  # pyright: ignore[reportUnusedFunction]

@@ -1041,7 +1041,7 @@ async def test_a_status_check_waits_at_most_40_seconds_and_says_to_end_the_reply
             "Still running. End your reply; this conversation gets a message when it ends."
         )
     else:
-        assert "note" not in view, "an ended command says nothing more"
+        assert view["note"] == compute._ENDED == "It has ended. Read it with compute_task_result."
 
 
 def test_an_end_another_poll_saw_is_left_to_the_conversation_message():
@@ -1065,7 +1065,7 @@ def test_an_end_another_poll_saw_is_left_to_the_conversation_message():
         created_at=now,
     )
     view = compute._command_view(InlineRun(task, ended_here=False))
-    assert set(view) == _VIEW_KEYS | {"note"} and view["note"] == compute._ENDED_ELSEWHERE
+    assert set(view) == _VIEW_KEYS | {"note"} and view["note"] == compute._ENDED
 
 
 def _background_use(woken, origin_id, **arguments):

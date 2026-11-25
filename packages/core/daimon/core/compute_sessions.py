@@ -84,6 +84,8 @@ _INLINE_EXTRA_TASKS = 4
 _INLINE_HANDOVER = 5
 #: How often a status read that waits looks at its command again.
 _STATUS_POLL_SECONDS = 2.0
+#: What a status read says when it could not read the command at all.
+_STATUS_REFUSED = "Could not check the command right now. Try again soon."
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may always make.
@@ -852,28 +854,36 @@ class ComputeSessions:
         the task, a probe only reads it. Like a poll, a probe that finds the command
         running keeps the lease alive.
 
-        The wait is bounded on the event loop's clock, as `run` is: a lock wait or a
-        probe cut short settles nothing, and the last state read is returned. With no
-        wait there is one probe, unbounded as before. A database error before any probe
-        succeeded is the plain refusal; after one, the state read then is returned.
+        One deadline on the event loop's clock, taken when the call starts, bounds every
+        step before a write: the one authorization read, and each poll's reads, lock wait
+        and probe. A step cut short settles nothing: the last state read is returned, or
+        the plain refusal when nothing was read yet. With no wait there is one probe and
+        no deadline, as before. A database error before the first probe succeeded is the
+        plain refusal; after one, the state read then is returned. A probe that settles
+        the command returns it at once, with no read after it. A write, its commit and
+        the kill of an overdue command are never cut short, so the call can run a little
+        longer than `wait_seconds` when the machine or the database is slow.
         """
-        async with self.sm.begin() as db:
-            task = await self._owned_task(db, caller, task_id)
-        if task.state not in ACTIVE_TASK_STATES:
-            return task
         wait_seconds = max(0.0, wait_seconds)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + wait_seconds
+        deadline = loop.time() + wait_seconds if wait_seconds else None
         give_up = self.clock() + timedelta(seconds=wait_seconds)
+        try:
+            async with self.sm.begin() as db:
+                async with asyncio.timeout_at(deadline):
+                    task = await self._owned_task(db, caller, task_id)
+        except (TimeoutError, SQLAlchemyError):
+            log.warning("compute.task_status_retry", task_id=str(task_id))
+            raise StoreError(_STATUS_REFUSED) from None
+        if task.state not in ACTIVE_TASK_STATES:
+            return task
         wake = not owner_present(caller.origin)
         probed = False
         while True:
             try:
-                await self._poll_task(
-                    task.tenant_id, task.id, wake=wake, deadline=deadline if wait_seconds else None
+                polled = await self._poll_task(
+                    task.tenant_id, task.id, wake=wake, deadline=deadline
                 )
-                async with self.sm.begin() as db:
-                    task = await self._owned_task(db, caller, task_id)
             except TimeoutError:
                 # Rolled back before any write: this call settled nothing.
                 return task
@@ -881,13 +891,21 @@ class ComputeSessions:
                 # Never relay database errors; the scheduler keeps polling.
                 log.warning("compute.task_status_retry", task_id=str(task.id))
                 if not probed:
-                    raise StoreError(
-                        "Could not check the command right now. Try again soon."
-                    ) from None
+                    raise StoreError(_STATUS_REFUSED) from None
+                return task
+            if polled.task is None:
+                return task
+            task = polled.task
+            if polled.settled:
+                # This call saved the end: its caller gets it now, with no read after it.
                 return task
             probed = True
             left = (give_up - self.clock()).total_seconds()
-            if task.state not in ACTIVE_TASK_STATES or left <= 0 or loop.time() >= deadline:
+            if (
+                task.state not in ACTIVE_TASK_STATES
+                or left <= 0
+                or (deadline is not None and loop.time() >= deadline)
+            ):
                 return task
             await self.sleep(min(_STATUS_POLL_SECONDS, left))
 
@@ -934,25 +952,27 @@ class ComputeSessions:
         `wait_until` is empty or past. Outside its own window a call does nothing, so the
         caller and the conversation's message never both report one end.
 
-        `deadline`, on the event loop's clock, bounds the wait for the session lock and
-        for the probe. Both come before any write, so a `TimeoutError` settles nothing.
+        `deadline`, on the event loop's clock, bounds the reads, the wait for the session
+        lock and the probe. All come before any write, so a `TimeoutError` settles
+        nothing. The writes, their commit and the kill of an overdue command are never
+        cut short.
         """
         async with self.sm.begin() as db:
-            task = await task_store.get(db, tenant_id, task_id)
-            if task is None or task.state not in ACTIVE_TASK_STATES:
-                return Polled(task)
-            # The session lock serializes with stop and deletion. The poller skips
-            # a session busy with an inline call and returns next pass.
             async with asyncio.timeout_at(deadline):
+                task = await task_store.get(db, tenant_id, task_id)
+                if task is None or task.state not in ACTIVE_TASK_STATES:
+                    return Polled(task)
+                # The session lock serializes with stop and deletion. The poller skips
+                # a session busy with an inline call and returns next pass.
                 session = await store.get(
                     db, tenant_id, task.session_id, lock=True, skip_locked=wake
                 )
-            if session is None:
-                return Polled(task)
-            # Re-read under the lock: another poll may have settled it meanwhile.
-            task = await task_store.get(db, tenant_id, task_id)
-            if task is None or task.state not in ACTIVE_TASK_STATES:
-                return Polled(task)
+                if session is None:
+                    return Polled(task)
+                # Re-read under the lock: another poll may have settled it meanwhile.
+                task = await task_store.get(db, tenant_id, task_id)
+                if task is None or task.state not in ACTIVE_TASK_STATES:
+                    return Polled(task)
             now = self.clock()
             held = task.wait_until
             if inline:
