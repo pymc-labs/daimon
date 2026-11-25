@@ -4,7 +4,7 @@ A YAML or JSON file, applied at start and every 10 minutes:
 
     revision: 4
     tenants:
-      - workspace: <workspace id>
+      - workspace: <platform>:<workspace id>
         scopes: [{id: shared:eng, kind: shared, name: Engineering}]
         grants: [{scope: shared:eng, holder: "account:<uuid>"}]
         sources:
@@ -18,7 +18,8 @@ created in shadow and published only with `publish: true` and a met gate (`parit
 after retiring the other sources it `replaces` (by declared id or name). `publish: false`
 returns a published source to shadow. Credentials are references, `env:NAME` or
 `file:/path`, never values; one that cannot be read pauses a new source. A source's
-`auto_link_domain` joins its config.
+`auto_link_domain` joins its config. A `workspace` is a tenant id, or `<platform>:<workspace
+id>` resolved to the tenant here, so one file serves every deployment; an unknown one is skipped.
 
 Sections are handlers registered by name (`register_section`), so other features add theirs;
 a section nobody handles is logged and kept in `declared_state.unknown`.
@@ -32,7 +33,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
 import structlog
 import yaml
@@ -100,7 +101,7 @@ class TenantDecl(BaseModel):
     """One workspace's sections. Sections nobody handles are kept as extra fields."""
 
     model_config = ConfigDict(extra="allow")
-    workspace: uuid.UUID
+    workspace: uuid.UUID | Annotated[str, Field(pattern=r"^[a-z]+:\S+$")]
 
 
 class Declaration(BaseModel):
@@ -411,6 +412,18 @@ class Report:
     results: list[Result] | None = None
 
 
+async def _tenant(conn: AsyncConnection[DictRow], workspace: uuid.UUID | str) -> uuid.UUID | None:
+    """The tenant a declared `workspace` names: its id, or its `<platform>:<id>`."""
+    if isinstance(workspace, uuid.UUID):
+        return workspace
+    platform, external_id = workspace.split(":", 1)
+    cur = await conn.execute(
+        b"select id from tenants where platform = %s and external_id = %s", (platform, external_id)
+    )
+    row = await cur.fetchone()
+    return row["id"] if row else None
+
+
 async def apply(
     conn: AsyncConnection[DictRow], schemas: Schemas, env: Env, decl: Declaration
 ) -> Report:
@@ -432,7 +445,13 @@ async def apply(
             return Report(decl.revision, ignored=True)
         await conn.execute(f"select set_config('{GUC}', 'on', true)".encode())
         for tenant in decl.tenants:
-            ctx = Ctx(conn, schemas, env, tenant.workspace, decl.revision)
+            tenant_id = await _tenant(conn, tenant.workspace)
+            if tenant_id is None:
+                log.warning("data.declared_workspace_unknown")
+                results.append({"section": "workspace", "id": "", "action": "error",
+                                "error": "no such workspace"})  # fmt: skip
+                continue
+            ctx = Ctx(conn, schemas, env, tenant_id, decl.revision)
             extra = tenant.model_extra or {}
             for name, handler in SECTIONS.items():
                 if name in extra:

@@ -100,15 +100,17 @@ for each workspace. Daimon applies it at start and every 10 minutes.
 ```yaml
 revision: 4
 tenants:
-  - workspace: <workspace id>
+  - workspace: discord:<server id>
     scopes: [{id: shared:eng, kind: shared, name: Engineering}]
     sources:
       - {id: wiki, kind: postgres, name: Wiki, credentials: {dsn: "env:WIKI_DSN"}, publish: true}
 ```
 
-Declared rows are read-only in the app. Daimon never deletes one: a removed entry stays, and
+A `workspace` is Daimon's workspace id, or `<platform>:<id>` with the platform's own id for
+it, so one file serves every deployment; one not found is skipped. Declared rows are
+read-only in the app. Daimon never deletes one: a removed entry stays, and
 `retire: true` retires a source for good. A source is created in shadow and published only
-with `publish: true` and a clean run. `replaces` retires the sources it names. A `revision`
+with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
 below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
 
 ## Who can read a record
