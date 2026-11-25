@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import anthropic
 import httpx
 import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
@@ -147,6 +148,24 @@ def test_only_the_hub_identity_is_a_signed_in_person() -> None:
     assert [s.rsplit(":", 1)[0] for s in setters] == [
         "packages/adapters/mcp/daimon/adapters/mcp/tools/hub.py"
     ], setters
+
+
+def test_no_send_record_is_ever_deleted() -> None:
+    """`earlier_turn_open` reads any send record on a new session as an earlier send,
+    which holds only while nothing deletes a row of the settle-state table."""
+    repo = _MCP_ROOT.parents[4].parent
+    offenders = []
+    for root in (repo / "packages", repo / "apps"):
+        for path in root.rglob("*.py"):
+            parts = set(path.parts)
+            if parts & {"tests", "versions", ".venv", "node_modules"}:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if "delete(SessionSettleState" in text or (
+                "usage_reconcile_progress" in text and path.name != "_models.py"
+            ):
+                offenders.append(str(path.relative_to(repo)))
+    assert offenders == []
 
 
 @dataclass
@@ -378,6 +397,80 @@ async def test_a_key_send_before_the_start_records_its_driver_names_nobody(
     assert not await _signed_in(db_session_factory, _NEW), "another caller sent first"
 
 
+def _accepted_unseen() -> anthropic.InternalServerError:
+    """A 5xx after the send: Managed Agents may have accepted it, so Daimon keeps its
+    settle request but records no turn."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/sessions/s/events")
+    return anthropic.InternalServerError(
+        "upstream timed out", response=httpx.Response(503, request=request), body=None
+    )
+
+
+async def _key_send_accepted_unrecorded(world: _World, handle: str) -> None:
+    """A key's continue on `handle`, through its real path, whose send may have been
+    accepted although Daimon recorded no turn for it."""
+    with (
+        patch.object(
+            agent_chat, "send_session_events", new=AsyncMock(side_effect=_accepted_unseen())
+        ),
+        pytest.raises(anthropic.APIStatusError),
+    ):
+        await _continue_turn_impl(world.runtime, world.auth, handle, "hi")
+
+
+async def test_a_key_send_accepted_but_not_recorded_before_the_start_names_nobody(
+    db_session: AsyncSession, pooled_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The key's send ends in an error that may hide its acceptance, so no turn is
+    recorded for it; its turn may still run, so the person's start must not name them.
+
+    On independent connections, as in production, so the key's committed records
+    outlive its fence's rolled-back transaction.
+    """
+    world = await _world(db_session, pooled_sessionmaker)
+
+    async def created_then_key_sends(*_a: object, **_kw: object) -> object:
+        await _key_send_accepted_unrecorded(world, _NEW)
+        async with pooled_sessionmaker() as db:
+            records = await session_settle_state.send_records(db, managed_session_id=_NEW)
+        assert records is not None and records.turn_event_id is None, "sent, not recorded"
+        return _new_session()
+
+    with patch.object(
+        agent_chat, "create_session", new=AsyncMock(side_effect=created_then_key_sends)
+    ):
+        result = await _call_tool(
+            world.app.http_app(path="/mcp", stateless_http=True, json_response=True),
+            "/mcp",
+            _TOKEN,
+            name="start_turn",
+            arguments={"daimon_id": world.daimon_id, "message": "status?"},
+        )
+    assert not result["result"].get("isError"), result
+    assert not await _signed_in(pooled_sessionmaker, _NEW), "another caller may have sent first"
+
+
+async def test_a_key_send_accepted_but_not_recorded_or_listed_names_nobody_on_continue(
+    db_session: AsyncSession, pooled_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The same send on an existing session, before the transcript lists it: the
+    newest listed turn is the recorded one and has ended, but the key's may run."""
+    world = await _world(db_session, pooled_sessionmaker)
+    await _key_send_accepted_unrecorded(world, _EXISTING)
+    assert world.events == [_IDLE, _REPLY, _boundary(_EARLIER)], "not listed yet"
+    result = await _call_tool(
+        world.app.http_app(path="/mcp", stateless_http=True, json_response=True),
+        "/mcp",
+        _TOKEN,
+        name="continue_turn",
+        arguments={"daimon_id": world.daimon_id, "handle": _EXISTING, "message": "and?"},
+    )
+    assert not result["result"].get("isError"), result
+    assert not await _signed_in(pooled_sessionmaker, _EXISTING), (
+        "a send begun after the recorded turn may still be calling"
+    )
+
+
 @pytest.mark.parametrize("tool", ["continue_turn", "start_turn"])
 async def test_with_no_server_opted_in_a_hub_send_names_nobody(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tool: str
@@ -413,7 +506,7 @@ async def test_with_no_server_opted_in_no_earlier_send_is_read(
     unread = AsyncMock(side_effect=AssertionError("nothing is read while off"))
     with (
         patch.object(_agent_chat_safety, "_read_turn", new=unread),
-        patch.object(_agent_chat_safety, "_recorded_turn", new=unread),
+        patch.object(_agent_chat_safety, "_send_records", new=unread),
     ):
         assert await _agent_chat_safety.earlier_turn_open(
             world.runtime, person, _EXISTING, new_session=new_session

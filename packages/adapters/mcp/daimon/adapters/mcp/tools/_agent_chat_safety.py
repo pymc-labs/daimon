@@ -190,6 +190,13 @@ async def _recorded_turn(
         return await session_settle_state.unattended_turn(db, managed_session_id=handle)
 
 
+async def _send_records(
+    runtime: McpRuntime, handle: str
+) -> session_settle_state.SendRecords | None:
+    async with runtime.session_factory() as db:
+        return await session_settle_state.send_records(db, managed_session_id=handle)
+
+
 def _public_url(runtime: McpRuntime) -> str | None:
     url = runtime.settings.mcp.public_url
     return str(url) if url is not None else None
@@ -258,14 +265,19 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
 async def earlier_turn_open(
     runtime: McpRuntime, auth: AuthIdentity, handle: str, *, new_session: bool
 ) -> bool:
-    """Whether a turn agent chat sent earlier on `handle` may still be running.
+    """Whether a turn sent earlier on `handle` may still be running.
 
-    Read from Daimon's own record of the latest send (`record_turn`), not the session's
-    status, which can still read idle just after a send was accepted. On a session this
-    caller just created any recorded send is another caller's, so it counts as open.
-    Otherwise the turn counts as ended only once the transcript's newest boundary is
-    that send and an idle that is not a pause follows it; no record, another boundary
-    or an unreadable transcript counts as open.
+    Read from Daimon's own send records, written before each send is made, not from the
+    session's status or transcript alone: the status can still read idle, and the
+    transcript may not list the message yet, just after a send was accepted.
+
+    - On a session this caller just created, any send record is another caller's send,
+      recorded or not (a send that failed with an error that may hide its acceptance
+      leaves its settle request but no turn), so it counts as open.
+    - Otherwise there must be a recorded turn and no pending settle request for any other
+      turn, which would be a send begun after it whose turn may be running. The turn then
+      counts as ended only once the transcript's newest boundary is that turn and an idle
+      that is not a pause follows it. Anything else, or an unreadable transcript, is open.
 
     Nothing is read for a caller who is not a signed-in person, or while no server
     names the agent-chat requester: the send then names nobody (counted as open), so
@@ -273,10 +285,12 @@ async def earlier_turn_open(
     """
     if not (auth.signed_in_person and runtime.settings.mcp_identity.names_agent_chat_requester):
         return True
-    recorded = await _recorded_turn(runtime, handle)
+    records = await _send_records(runtime, handle)
     if new_session:
-        return recorded is not None
-    if recorded is None:
+        return records is not None
+    if records is None or records.turn_event_id is None:
+        return True
+    if records.settle is not None and records.settle.turn_event_id != records.turn_event_id:
         return True
     try:
         turn = await _read_turn(runtime, auth, handle)
@@ -284,7 +298,7 @@ async def earlier_turn_open(
         return True
     stop = turn.state.stop_reason
     return not (
-        turn.boundary_id == recorded.turn_event_id
+        turn.boundary_id == records.turn_event_id
         and stop is not None
         and stop.type != "requires_action"
     )

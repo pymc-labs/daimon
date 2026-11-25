@@ -235,6 +235,46 @@ async def unattended_turn(
     return UnattendedTurn(turn_event_id=row[0], rules_channel_id=row[1])
 
 
+@dataclass(frozen=True)
+class SendRecords:
+    """What Daimon wrote of the sends on one session.
+
+    `turn_event_id` is the latest turn agent chat recorded (`record_unattended_turn`);
+    `settle` the pending settle request, written before a send and kept after a send
+    that may have been accepted unseen (`request_settle`).
+    """
+
+    turn_event_id: str | None
+    settle: PendingSettle | None
+
+
+async def send_records(session: AsyncSession, *, managed_session_id: str) -> SendRecords | None:
+    """The session's send records; None when no send was ever begun on it.
+
+    Every agent-chat send writes its driver record (`record_agent_chat_driver`) and its
+    settle request before sending, and no row of this table is ever deleted, so a row
+    means a send was begun, whether or not it was recorded afterwards.
+    """
+    row = (
+        await session.execute(
+            select(
+                SessionSettleState.unattended_turn_event_id,
+                SessionSettleState.settle_turn_event_id,
+                SessionSettleState.settle_requested_at,
+            ).where(SessionSettleState.managed_session_id == managed_session_id)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    turn_event_id, settle_turn_event_id, requested_at = row
+    settle = (
+        PendingSettle(turn_event_id=settle_turn_event_id, requested_at=requested_at)
+        if requested_at is not None
+        else None
+    )
+    return SendRecords(turn_event_id=turn_event_id, settle=settle)
+
+
 async def record_agent_chat_driver(
     session: AsyncSession, *, managed_session_id: str, signed_in: bool
 ) -> None:
