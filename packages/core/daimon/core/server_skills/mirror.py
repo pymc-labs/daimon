@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
+from daimon.core.agent_editing import AgentEditDeps, AgentEditError
 from daimon.core.agent_target import ChangeRecorder
 from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.server_skills.anthropic import PROVIDER
 from daimon.core.server_skills.gate import allowed_tools_of, manifest_digest, manifest_of
 from daimon.core.server_skills.sync import version_label
-from daimon.core.skill_library_files import SkillRef, create_custom_skill, skill_lock
+from daimon.core.skill_library_files import SkillRef, SkillWriter, create_custom_skill, skill_lock
 from daimon.core.stores import server_skills as store
 
 __all__ = ["add_server_skill"]
@@ -19,7 +19,7 @@ __all__ = ["add_server_skill"]
 async def add_server_skill(
     deps: AgentEditDeps,
     *,
-    actor: AgentActor,
+    actor: SkillWriter,
     server: str,
     fetched: ServerSkill,
     now: datetime,

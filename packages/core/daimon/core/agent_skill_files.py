@@ -14,7 +14,7 @@ import anthropic
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_editing
-from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
+from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError, SkillWriter
 from daimon.core.agent_view import AgentConfigDoc, SkillDoc
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mux_compat import download_skill_version, list_skill_versions
@@ -132,7 +132,7 @@ async def concrete_version(
 
 
 async def download_files(
-    deps: AgentEditDeps, *, actor: AgentActor, skill_id: str, version: str
+    deps: AgentEditDeps, *, actor: SkillWriter, skill_id: str, version: str
 ) -> dict[str, bytes]:
     """The files of one version of ``skill_id``; a version of another skill is not found."""
     if not version or version == "latest":

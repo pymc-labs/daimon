@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, Protocol
 
 import anthropic
 import httpx
@@ -26,6 +26,7 @@ from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.stores import server_skills as server_skills_store
 from daimon.core.stores import web_audit
+from daimon.core.stores import workspace_skills as workspace_skills_store
 from daimon.core.stores.channel_skills import list_tenant_channel_skills
 from daimon.core.stores.domain import ServerSkillRow
 from daimon.core.stores.platform_names import get_channel_names, get_channel_statuses
@@ -118,8 +119,13 @@ class SyncedSkill(BaseModel):
     detail: str | None = None
 
 
+class InTenant(Protocol):
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+
 def own_skills(
-    actor: AgentActor, rows: list[SkillListResponse]
+    actor: InTenant, rows: list[SkillListResponse]
 ) -> list[tuple[SkillListResponse, str]]:
     """Anthropic's skills and this workspace's own by bare name; others are left out."""
     out: list[tuple[SkillListResponse, str]] = []
@@ -421,6 +427,9 @@ async def delete_library_skill(
                 kind="conflict",
             )
         await server_skills_store.forget_mirror(
+            session, tenant_id=actor.tenant_id, skill_id=skill_id
+        )
+        await workspace_skills_store.forget_skill(
             session, tenant_id=actor.tenant_id, skill_id=skill_id
         )
         if audited is not None:

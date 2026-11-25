@@ -14,7 +14,7 @@ import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Literal, cast, get_args
+from typing import Any, Final, Literal, Protocol, cast, get_args
 
 import anthropic
 import anyio
@@ -130,6 +130,18 @@ class AgentActor:
 
     def scope(self) -> Scope:
         return resource_scope(tenant_id=str(self.tenant_id), account_id=str(self.account_id))
+
+
+class SkillWriter(Protocol):
+    """Who a library skill is created for: a person editing, or the workspace itself."""
+
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+    @property
+    def account_id(self) -> uuid.UUID | None: ...
+
+    def scope(self) -> Scope: ...
 
 
 @dataclass(frozen=True)

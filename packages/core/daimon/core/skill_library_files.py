@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 
 import anthropic
 from daimon.core.agent_admin import require_admin
-from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
+from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError, SkillWriter
 from daimon.core.agent_skill_files import (
     MAX_EDIT_BYTES,
     SkillFilesDoc,
@@ -33,12 +33,14 @@ from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_library import library_skill, own_skills
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_files
 from daimon.core.stores.server_skills import mirror_of_skill
+from daimon.core.workspace_skills import record_bundle
 from mux.contracts.errors import ProviderError, ScopeViolation
 from pydantic import BaseModel
 from sqlalchemy import text
 
 __all__ = [
     "SkillRef",
+    "SkillWriter",
     "create_custom_skill",
     "create_library_skill",
     "custom_skill_names",
@@ -141,6 +143,14 @@ async def _publish(
         raise AgentEditError(
             "The skill could not be saved. Try again.", kind="unavailable"
         ) from exc
+    await record_bundle(
+        deps.session_factory,
+        tenant_id=actor.tenant_id,
+        skill_id=skill_id,
+        name=name,
+        version=published.version,
+        bundle=bundle,
+    )
     if audited is not None:
         async with deps.session_factory() as session, session.begin():
             await audited(session, _target(name, published.version))
@@ -239,14 +249,14 @@ async def create_library_skill(
     return ref
 
 
-async def custom_skill_names(deps: AgentEditDeps, *, actor: AgentActor) -> frozenset[str]:
+async def custom_skill_names(deps: AgentEditDeps, *, actor: SkillWriter) -> frozenset[str]:
     """The names the tenant's own library skills hold."""
     rows, _truncated = await list_skills_lenient(deps.client)
     return frozenset(bare for row, bare in own_skills(actor, rows) if row.source == "custom")
 
 
 async def create_custom_skill(
-    deps: AgentEditDeps, *, actor: AgentActor, files: dict[str, bytes]
+    deps: AgentEditDeps, *, actor: SkillWriter, files: dict[str, bytes]
 ) -> SkillRef:
     """A new library skill holding `files`, named by their SKILL.md, after every ingest check."""
     try:
@@ -268,6 +278,14 @@ async def create_custom_skill(
     version = created.latest_version or ""
     if version in ("", "latest"):
         raise AgentEditError("The skill could not be created. Try again.", kind="unavailable")
+    await record_bundle(
+        deps.session_factory,
+        tenant_id=actor.tenant_id,
+        skill_id=created.id,
+        name=slug,
+        version=version,
+        bundle=bundle,
+    )
     return SkillRef(id=created.id, name=slug, version=version)
 
 
