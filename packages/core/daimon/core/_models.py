@@ -5274,6 +5274,8 @@ class ComputeTaskRecord(Base):
     created_at: Mapped[datetime]
     finished_at: Mapped[datetime | None]
     version: Mapped[int] = mapped_column(server_default="0")
+    # The scheduler does not poll the task before this: its caller still waits for it.
+    wait_until: Mapped[datetime | None]
 
 
 class AgentDaimonToolAllowlist(Base):

@@ -8,7 +8,8 @@ tenant admin or the fenced reconciler may stop one too.
 Only the session owner, through an authorized attended conversation, can start a
 background command; its status and result go only to that owner; its completion
 wake goes only to the originating conversation, once. The turn that wake starts
-may read the command's session and nothing more (`turn_may_read`).
+may read the command's session and nothing more (`turn_may_read`). An inline
+command is a background command that its caller waits for (`run`).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from math import ceil
 
 import structlog
 from daimon.core import compute_tasks as scripts
@@ -67,6 +69,16 @@ ELSEWHERE = (
 )
 # A start whose inline call was lost has this long to leave its pid file.
 _START_GRACE = timedelta(minutes=2)
+# The longest the machine may take to answer the call that starts a command.
+_START_CALL_SECONDS = 30
+# How long an inline command's caller sleeps before each look at it, in seconds;
+# every look after these is 2 seconds later.
+_INLINE_POLLS = (0.3, 0.7, 1.0)
+# An inline command may start while `per_session_tasks` background commands run, so
+# the bot can still look at the machine.
+_INLINE_EXTRA_TASKS = 4
+# Seconds between the caller's last look at an inline command and the scheduler's first.
+_INLINE_HANDOVER = 5
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may make.
@@ -107,6 +119,24 @@ class ComputeCaller:
     chat_session_id: str
     external_user_id: str
     admin: bool = False
+
+
+@dataclass(frozen=True)
+class Polled:
+    """One poll of a task: the task as its transaction committed it (None when it is
+    gone), and whether this poll settled it."""
+
+    task: ComputeTask | None
+    settled: bool = False
+
+
+@dataclass(frozen=True)
+class InlineRun:
+    """What `ComputeSessions.run` saw. `ended_here`: this call settled the task, so its
+    caller reports the end. Otherwise the conversation gets the end as a message."""
+
+    task: ComputeTask
+    ended_here: bool
 
 
 class ComputeSessions:
@@ -418,7 +448,8 @@ class ComputeSessions:
         tool: str,
         arguments: dict[str, JsonValue],
     ) -> JsonValue:
-        if tool not in {"run_bash", "write_file"} | READ_OPERATIONS:
+        # A command is a task (`run`); its start and probes call the machine's run_bash.
+        if tool not in {"write_file"} | READ_OPERATIONS:
             raise StoreError("Unsupported session operation")
         read = tool in READ_OPERATIONS
         await self._started(caller, session_id, read=read)
@@ -531,7 +562,7 @@ class ComputeSessions:
         limit = self.settings.max_ttl_hours * 60
         value = min(8 * 60, limit) if minutes is None else minutes
         if not 1 <= value <= limit:
-            raise StoreError(f"A background command can run for 1 to {limit} minutes.")
+            raise StoreError(f"A command can run for 1 to {limit} minutes.")
         return value
 
     async def start_task(
@@ -542,10 +573,27 @@ class ComputeSessions:
         command: str,
         timeout_minutes: int | None,
         request_key: str,
+        timeout_seconds: int | None = None,
+        extra_cap: int = 0,
+        wait_seconds: float | None = None,
     ) -> ComputeTask:
+        """Start a command once per `request_key`, detached on the machine.
+
+        `timeout_seconds`, when given, ends the command after that many seconds in
+        place of `timeout_minutes`. `extra_cap` raises the session's task limit for
+        this start. `wait_seconds` says its caller waits that long for it to end: the
+        row's `wait_until` keeps the scheduler away until the wait, the start call and
+        `_INLINE_HANDOVER` have passed.
+        """
         if not request_key:
             raise StoreError("Run the command from the owner's conversation.")
-        minutes = self._task_timeout(timeout_minutes)
+        if timeout_seconds is None:
+            minutes = self._task_timeout(timeout_minutes)
+            seconds = minutes * 60
+        else:
+            # The stored row counts whole minutes; less than 1 second rounds to 0, refused.
+            minutes = self._task_timeout(ceil(timeout_seconds / 60))
+            seconds = timeout_seconds
         # Before the task row exists: a task registered for a machine that cannot
         # answer would be reported lost.
         await self._started(caller, session_id)
@@ -555,6 +603,8 @@ class ComputeSessions:
             if session.state != "running" or session.expires_at <= now:
                 raise StoreError("The session is expired or stopping. Launch a new session.")
             task_id = uuid.uuid4()
+            # The start call may take its whole limit before the caller starts to wait.
+            held = _START_CALL_SECONDS + _INLINE_HANDOVER + (wait_seconds or 0)
             task, created = await task_store.register(
                 db,
                 ComputeTask(
@@ -565,11 +615,12 @@ class ComputeSessions:
                     request_key=request_key,
                     command_preview=command[: scripts.PREVIEW_CHARS],
                     timeout_minutes=minutes,
-                    deadline_at=now + timedelta(minutes=minutes),
+                    deadline_at=now + timedelta(seconds=seconds),
                     output_path=scripts.output_path(task_id),
                     created_at=now,
+                    wait_until=None if wait_seconds is None else now + timedelta(seconds=held),
                 ),
-                cap=self.settings.per_session_tasks,
+                cap=self.settings.per_session_tasks + extra_cap,
             )
         if not created:
             # A retried call never starts the command again; the poller settles it.
@@ -586,15 +637,106 @@ class ComputeSessions:
                     session_token(self.settings, session.id),
                     "run_bash",
                     {
-                        "command": scripts.start_script(
-                            task.id, command, timeout_s=task.timeout_minutes * 60
-                        ),
-                        "timeout_s": 30,
+                        "command": scripts.start_script(task.id, command, timeout_s=seconds),
+                        "timeout_s": _START_CALL_SECONDS,
                     },
                 )
             )
             await self._renew_for(db, session, task)
             return await task_store.advance(db, task, state="running") or task
+
+    async def run(
+        self,
+        caller: ComputeCaller,
+        session_id: uuid.UUID,
+        *,
+        command: str,
+        wait_seconds: float,
+        timeout_seconds: int | None,
+        timeout_minutes: int | None,
+        request_key: str,
+    ) -> InlineRun:
+        """Start a command and wait up to `wait_seconds` for it to end.
+
+        A command whose end this call settles is returned with `ended_here`, and queues
+        no wake: the caller sees it. In every other case the conversation gets the end
+        as a message: the command needs longer, or another poll settled it. Who settles
+        is decided under the session lock (`_poll_task`). `start_task` never settles a
+        task; a retried background key can return one that ended elsewhere.
+
+        Locks: `start_task` takes the session lock; its time counts against the wait, but
+        it is never cut short. Each poll takes the lock within the deadline; once a poll
+        settles the task, nothing else runs. The hand-over writes only the task row.
+        """
+        # The wait starts now: a slow start uses part of it. A probe or a lock wait can take
+        # far longer than the wait (the transport allows 50 s), so each poll is bounded by
+        # this deadline on the loop's clock. The start itself is not: a cancelled start
+        # would leave a command nobody knows the state of.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, wait_seconds)
+        give_up = self.clock() + timedelta(seconds=wait_seconds)
+        task = await self.start_task(
+            caller,
+            session_id,
+            command=command,
+            timeout_minutes=timeout_minutes,
+            timeout_seconds=timeout_seconds,
+            request_key=request_key,
+            # Only a caller who waits gets the extra room: a background start keeps the cap.
+            extra_cap=_INLINE_EXTRA_TASKS if wait_seconds > 0 else 0,
+            wait_seconds=wait_seconds,
+        )
+        # A row with no `wait_until` (a retried background start) is the scheduler's.
+        give_up = (
+            min(give_up, task.wait_until - timedelta(seconds=_INLINE_HANDOVER))
+            if task.wait_until is not None
+            else self.clock()
+        )
+        polls = iter(_INLINE_POLLS)
+        while (
+            task.state in ACTIVE_TASK_STATES and self.clock() < give_up and loop.time() < deadline
+        ):
+            await self.sleep(min(next(polls, 2.0), (give_up - self.clock()).total_seconds()))
+            try:
+                polled = await self._poll_task(
+                    task.tenant_id, task.id, wake=False, inline=True, deadline=deadline
+                )
+            except TimeoutError:
+                # Rolled back before any write: this caller settled nothing.
+                break
+            except SQLAlchemyError:
+                # Nothing committed. The scheduler takes it over after `wait_until`.
+                log.warning("compute.inline_poll_retry", task_id=str(task.id))
+                return InlineRun(task, ended_here=False)
+            if polled.task is None:
+                break
+            if polled.settled:
+                # Saved with no wake, so the caller gets it now: nothing may wait or fail
+                # after this, and no second read happens.
+                return InlineRun(polled.task, ended_here=True)
+            task = polled.task
+        return InlineRun(await self._hand_over(task), ended_here=False)
+
+    async def _hand_over(self, task: ComputeTask) -> ComputeTask:
+        """Let the scheduler poll a task its caller stopped waiting for, from now on.
+
+        One short transaction on the task row alone: it never waits for the session
+        lock, which a slow probe can hold. Its caller already proved it owns the task.
+        """
+        try:
+            async with self.sm.begin() as db:
+                current = await task_store.get(db, task.tenant_id, task.id)
+                if (
+                    current is not None
+                    and current.state in ACTIVE_TASK_STATES
+                    and current.wait_until is not None
+                ):
+                    handed = await task_store.advance(db, current, wait_until=None)
+                    current = handed or await task_store.get(db, task.tenant_id, task.id)
+                return current or task
+        except SQLAlchemyError:
+            log.warning("compute.inline_handover_retry", task_id=str(task.id))
+            return task
 
     async def _renew_for(
         self, db: AsyncSession, session: ComputeSession, task: ComputeTask
@@ -628,6 +770,7 @@ class ComputeSessions:
         if task.state in ACTIVE_TASK_STATES:
             # An owner who is present sees an ending here, so no separate wake is
             # queued for it. A wake's turn has no owner watching: the wake stays.
+            # While an inline caller still waits for the task, this only reads it.
             try:
                 await self._poll_task(
                     task.tenant_id, task.id, wake=not owner_present(caller.origin)
@@ -651,7 +794,7 @@ class ComputeSessions:
         for tenant in await list_tenants_by_platform(self.sm):
             try:
                 async with self.sm.begin() as db:
-                    tasks = await task_store.list_active(db, tenant.id)
+                    tasks = await task_store.list_active(db, tenant.id, now=self.clock())
             except Exception:
                 # One tenant's read failure must not stop the pass for the others.
                 log.warning("compute.task_list_retry", tenant_id=str(tenant.id))
@@ -663,43 +806,78 @@ class ComputeSessions:
                     # Never log remote exceptions: requests may include credentials.
                     log.warning("compute.task_poll_retry", task_id=str(task.id))
 
-    async def _poll_task(self, tenant_id: uuid.UUID, task_id: uuid.UUID, *, wake: bool) -> None:
+    async def _poll_task(
+        self,
+        tenant_id: uuid.UUID,
+        task_id: uuid.UUID,
+        *,
+        wake: bool,
+        inline: bool = False,
+        deadline: float | None = None,
+    ) -> Polled:
+        """Probe an active task once, and settle it when it ended; say whether this call did.
+
+        The task it returns is the one its transaction committed, so a caller that settled
+        it needs no second read.
+
+        Under the session lock, one side owns a task its caller waits for. The `inline`
+        caller may settle it only while `wait_until` is more than `_INLINE_HANDOVER`
+        seconds ahead. The scheduler and a status read may settle it only once
+        `wait_until` is empty or past. Outside its own window a call does nothing, so the
+        caller and the conversation's message never both report one end.
+
+        `deadline`, on the event loop's clock, bounds the wait for the session lock and
+        for the probe. Both come before any write, so a `TimeoutError` settles nothing.
+        """
         async with self.sm.begin() as db:
             task = await task_store.get(db, tenant_id, task_id)
             if task is None or task.state not in ACTIVE_TASK_STATES:
-                return
+                return Polled(task)
             # The session lock serializes with stop and deletion. The poller skips
             # a session busy with an inline call and returns next pass.
-            session = await store.get(db, tenant_id, task.session_id, lock=True, skip_locked=wake)
+            async with asyncio.timeout_at(deadline):
+                session = await store.get(
+                    db, tenant_id, task.session_id, lock=True, skip_locked=wake
+                )
             if session is None:
-                return
+                return Polled(task)
             # Re-read under the lock: another poll may have settled it meanwhile.
             task = await task_store.get(db, tenant_id, task_id)
             if task is None or task.state not in ACTIVE_TASK_STATES:
-                return
+                return Polled(task)
             now = self.clock()
+            held = task.wait_until
+            if inline:
+                owns = held is not None and now < held - timedelta(seconds=_INLINE_HANDOVER)
+            else:
+                owns = held is None or now >= held
+            if not owns:
+                return Polled(task)
             if (
                 session.state != "running"
                 or session.expires_at <= now
                 or session.deployment_id != self.settings.deployment_id
             ):
-                await task_store.finish(db, task, session, state="cancelled", now=now, wake=wake)
-                return
+                done = await task_store.finish(
+                    db, task, session, state="cancelled", now=now, wake=wake
+                )
+                return Polled(done or task, settled=done is not None)
             token = session_token(self.settings, session.id)
             overdue = now > task.deadline_at + _DEADLINE_GRACE
             try:
-                probe = scripts.parse_probe(
-                    await self.provider.call(
+                async with asyncio.timeout_at(deadline):
+                    answer = await self.provider.call(
                         session,
                         token,
                         "run_bash",
                         {"command": scripts.probe_script(task.id), "timeout_s": 20},
                     )
-                )
+                probe = scripts.parse_probe(answer)
             except ComputeProviderError:
-                if overdue:
-                    await task_store.finish(db, task, session, state="lost", now=now, wake=wake)
-                return
+                if not overdue:
+                    return Polled(task)
+                done = await task_store.finish(db, task, session, state="lost", now=now, wake=wake)
+                return Polled(done or task, settled=done is not None)
             if probe.status == "exit":
                 assert probe.exit_code is not None
                 state = (
@@ -709,7 +887,7 @@ class ComputeSessions:
                     if probe.exit_code == 124 or now >= task.deadline_at
                     else "failed"
                 )
-                await task_store.finish(
+                done = await task_store.finish(
                     db,
                     task,
                     session,
@@ -732,7 +910,7 @@ class ComputeSessions:
                     # Settle anyway: the task is past its deadline, and deleting the
                     # machine at lease end is the final kill.
                     log.warning("compute.task_kill_retry", task_id=str(task.id))
-                await task_store.finish(
+                done = await task_store.finish(
                     db,
                     task,
                     session,
@@ -749,20 +927,24 @@ class ComputeSessions:
             ):
                 await self._renew_for(db, session, task)
                 if probe.status == "running":
-                    await task_store.advance(
-                        db,
-                        task,
-                        state="running",
-                        output_bytes=probe.output_bytes,
-                        output_tail=probe.tail,
+                    task = (
+                        await task_store.advance(
+                            db,
+                            task,
+                            state="running",
+                            output_bytes=probe.output_bytes,
+                            output_tail=probe.tail,
+                        )
+                        or task
                     )
+                return Polled(task)
             else:
                 # The process ended without an exit file (machine restart) or never
                 # started. It is reported, never run again. A probe that finds no
                 # files at all has no output to report: the machine was replaced, so
                 # the owner keeps the output the last poll saved.
                 kept = probe.status == "missing"
-                await task_store.finish(
+                done = await task_store.finish(
                     db,
                     task,
                     session,
@@ -772,3 +954,4 @@ class ComputeSessions:
                     output_bytes=None if kept else probe.output_bytes,
                     output_tail=None if kept else probe.tail,
                 )
+            return Polled(done or task, settled=done is not None)

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -612,7 +613,10 @@ def _wake_calls(session, task, origin_id):
 
 @pytest.fixture
 async def woken(committing_sessionmaker, monkeypatch):
-    """A machine whose background command ended, and the wake turn the scheduler queued."""
+    """A machine whose background command ended, and the wake turn the scheduler queued.
+
+    `as_owner` calls a tool in a later turn the owner sends, where the owner is present.
+    """
     from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
     from daimon.core.compute_tasks import wake_key
     from daimon.core.config import ComputeProfile
@@ -700,9 +704,44 @@ async def woken(committing_sessionmaker, monkeypatch):
     monkeypatch.setattr(compute, "_auth", auth)
     readable = AsyncMock(return_value=True)
     monkeypatch.setattr(compute, "source_metadata_readable", readable)
+    # The tools' waits cost no real time: sleeping moves their clock, and the machine
+    # ends every command it runs once `machine.ends` is set.
+    clock, machine = {"now": datetime.now(UTC)}, SimpleNamespace(ends=False)
+
+    async def sleep(seconds):
+        clock["now"] += timedelta(seconds=seconds)
+        for running in fake.tasks.values():
+            if machine.ends:
+                running.status, running.exit_code, running.output = "exit", 0, "fit done\n"
+
+    monkeypatch.setattr(
+        compute,
+        "ComputeSessions",
+        functools.partial(ComputeSessions, clock=lambda: clock["now"], sleep=sleep),
+    )
+    # The owner's conversation, which only a background start replays.
+    replay = AsyncMock(return_value=[])
+    monkeypatch.setattr(compute, "turn_io", Mock(return_value=SimpleNamespace(replay=replay)))
+    monkeypatch.setattr(
+        compute,
+        "get_live_thread_session",
+        AsyncMock(return_value=SimpleNamespace(ma_session_id="parent-session")),
+    )
+    monkeypatch.setattr(
+        compute,
+        "retrieve_session",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="parent-session", agent=SimpleNamespace(id="agent"), metadata={}
+            )
+        ),
+    )
     mcp = FastMCP("test")
     runtime = SimpleNamespace(
-        session_factory=sm, settings=SimpleNamespace(compute=settings), compute_provider=fake
+        session_factory=sm,
+        settings=SimpleNamespace(compute=settings),
+        compute_provider=fake,
+        client=None,
     )
     compute.register_compute_tools(mcp, runtime)
     tools = {tool.name: tool for tool in await mcp.list_tools()}
@@ -710,6 +749,19 @@ async def woken(committing_sessionmaker, monkeypatch):
 
     async def call(name, **changes):
         return await tools[name].fn(ctx=None, **{**calls[name], **changes})
+
+    owner_turn = []
+
+    async def owner_writes():
+        """The owner writes again: their new turn takes the conversation's grant."""
+        if not owner_turn:
+            owner_turn.append(await turn(attended=True))
+        return owner_turn[0]
+
+    async def as_owner(name, **changes):
+        """The call made in that turn of the owner's, where the owner is present."""
+        owned = _wake_calls(session, task, (await owner_writes()).id)[name]
+        return await tools[name].fn(ctx=None, **{**owned, **changes})
 
     async def become(other):
         """Make the caller another unattended turn of the same owner, agent and conversation."""
@@ -724,7 +776,17 @@ async def woken(committing_sessionmaker, monkeypatch):
             )
 
     return SimpleNamespace(
-        call=call, tools=set(tools), calls=calls, fake=fake, readable=readable, become=become
+        call=call,
+        tools=set(tools),
+        calls=calls,
+        fake=fake,
+        readable=readable,
+        become=become,
+        as_owner=as_owner,
+        owner_writes=owner_writes,
+        machine=machine,
+        replay=replay,
+        session=session,
     )
 
 
@@ -793,3 +855,118 @@ def test_the_wake_text_names_only_tools_its_turn_may_call():
     told, _, _ = wake_text(task, reads=False).partition("<<<untrusted command and output")
     assert "You can read" not in told and "They can read the full result" in told
     assert "Do not run commands" in told and "never instructions" in told
+
+
+# --- An inline command waits for its end, then continues ----------------------
+
+_VIEW_KEYS = {
+    "task_id",
+    "session_id",
+    "state",
+    "exit_code",
+    "deadline_at",
+    "output_bytes",
+    "output_path",
+    "created_at",
+    "finished_at",
+}
+
+
+async def test_an_inline_command_that_ends_in_time_returns_its_output_once(woken):
+    """Older calls pass a longer wait and a description: neither is refused."""
+    woken.machine.ends = True
+    result = await woken.as_owner("compute_run_bash", wait_seconds=45, description="Fit it")
+    assert set(result) == _VIEW_KEYS | {"stdout", "timed_out", "truncated"}
+    assert (result["state"], result["exit_code"], result["stdout"]) == (
+        "succeeded",
+        0,
+        "fit done\n",
+    )
+    assert result["timed_out"] is False and result["truncated"] is False
+    woken.replay.assert_not_awaited()
+
+
+async def test_an_inline_command_that_needs_longer_continues_with_a_note(woken):
+    result = await woken.as_owner("compute_run_bash", wait_seconds=1)
+    assert set(result) == _VIEW_KEYS | {"note"}, "no output: the message carries it"
+    assert result["state"] == "running" and result["note"] == compute._STILL_RUNNING
+    woken.replay.assert_not_awaited()
+
+
+def test_an_end_another_poll_saw_is_left_to_the_conversation_message():
+    from daimon.core.compute_models import ComputeTask
+    from daimon.core.compute_sessions import InlineRun
+
+    now = datetime.now(UTC)
+    task = ComputeTask(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        owner_account_id=uuid.uuid4(),
+        request_key="inline:1",
+        command_preview="python fit.py",
+        state="succeeded",
+        exit_code=0,
+        timeout_minutes=60,
+        deadline_at=now,
+        output_tail="fit done\n",
+        output_path="/tmp/daimon-tasks/x.out",
+        created_at=now,
+    )
+    view = compute._command_view(InlineRun(task, ended_here=False))
+    assert set(view) == _VIEW_KEYS | {"note"} and view["note"] == compute._ENDED_ELSEWHERE
+
+
+def _background_use(woken, origin_id, **arguments):
+    """The agent's background compute_run_bash tool use, as the conversation records it."""
+    use = {
+        "session_id": str(woken.session.id),
+        "command": "python fit.py",
+        "origin_context_id": str(origin_id),
+        "run_in_background": True,
+        **arguments,
+    }
+    woken.replay.return_value = [
+        SimpleNamespace(
+            type="agent.mcp_tool_use",
+            name="compute_run_bash",
+            mcp_server_name=compute.DAIMON_SERVER_NAME,
+            input=use,
+            id="background-use",
+        )
+    ]
+
+
+async def test_a_background_start_is_its_tool_use_and_a_retry_never_starts_it_again(woken):
+    _background_use(woken, (await woken.owner_writes()).id)
+    first = await woken.as_owner("compute_run_bash", run_in_background=True)
+    again = await woken.as_owner("compute_run_bash", run_in_background=True)
+    assert set(first) == _VIEW_KEYS | {"note"} and first["state"] == "running"
+    assert again["task_id"] == first["task_id"]
+    assert woken.fake.tasks[uuid.UUID(first["task_id"]).hex].starts == 1
+
+
+@pytest.mark.parametrize(
+    ("limits", "runs_for"),
+    [
+        (
+            {"run_in_background": True, "timeout": 40000, "timeout_minutes": 45},
+            timedelta(minutes=45),
+        ),
+        ({"run_in_background": True, "timeout": 40000}, timedelta(hours=8)),
+        ({"timeout": 1500, "timeout_minutes": 5, "wait_seconds": 1}, timedelta(seconds=2)),
+    ],
+)
+async def test_each_time_limit_keeps_the_meaning_it_had(woken, limits, runs_for):
+    """A background command ignores timeout. Inline, timeout ends it and wins."""
+    _background_use(woken, (await woken.owner_writes()).id, **limits)
+    result = await woken.as_owner("compute_run_bash", **limits)
+    started = datetime.fromisoformat(result["created_at"])
+    assert datetime.fromisoformat(result["deadline_at"]) - started == runs_for
+
+
+async def test_an_inline_timeout_out_of_range_is_refused(woken):
+    started = len(woken.fake.tasks)
+    with pytest.raises(ToolError, match="Use a timeout of 1 to"):
+        await woken.as_owner("compute_run_bash", timeout=0)
+    assert len(woken.fake.tasks) == started

@@ -17,7 +17,7 @@ from daimon.core.compute_tasks import wake_key, wake_text
 from daimon.core.errors import StoreError
 from daimon.core.stores.compute_sessions import scope
 from daimon.core.stores.domain import TurnOriginRow
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -31,12 +31,16 @@ async def get(db: AsyncSession, tenant_id: uuid.UUID, task_id: uuid.UUID) -> Com
     return None if row is None else ComputeTask.model_validate(row)
 
 
-async def list_active(db: AsyncSession, tenant_id: uuid.UUID) -> list[ComputeTask]:
+async def list_active(
+    db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime
+) -> list[ComputeTask]:
+    """The active tasks the scheduler polls: not one whose caller still waits for it."""
     await scope(db, tenant_id)
     rows = await db.scalars(
         select(ComputeTaskRecord).where(
             ComputeTaskRecord.tenant_id == tenant_id,
             ComputeTaskRecord.state.in_(ACTIVE_TASK_STATES),
+            or_(ComputeTaskRecord.wait_until.is_(None), ComputeTaskRecord.wait_until <= now),
         )
     )
     return [ComputeTask.model_validate(row) for row in rows]

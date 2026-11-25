@@ -104,3 +104,5 @@ class ComputeTask(BaseModel):
     created_at: datetime
     finished_at: datetime | None = None
     version: int = 0
+    # While the caller of an inline command still waits for it, the scheduler leaves it.
+    wait_until: datetime | None = None

@@ -9,6 +9,7 @@ command wakes may use the read tools on that command's session.
 from __future__ import annotations
 
 import uuid
+from math import ceil
 
 from anthropic.types.beta.sessions import BetaManagedAgentsAgentMCPToolUseEvent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -20,12 +21,18 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._session_access import source_metadata_readable
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.adapters.mcp.tools.watches import fresh_admin
-from daimon.core.compute_models import ComputeSession, ComputeStatus, ComputeTask
+from daimon.core.compute_models import (
+    ACTIVE_TASK_STATES,
+    ComputeSession,
+    ComputeStatus,
+    ComputeTask,
+)
 from daimon.core.compute_provider import ComputeProviderError, compute_provider_for
 from daimon.core.compute_sessions import (
     READ_OPERATIONS,
     ComputeCaller,
     ComputeSessions,
+    InlineRun,
     made_here,
     owner_present,
 )
@@ -197,6 +204,31 @@ def _task_view(task: ComputeTask, *, output: bool) -> dict[str, JsonValue]:
     return view
 
 
+#: What compute_run_bash adds to a command that ends after its caller stops waiting.
+_STILL_RUNNING = (
+    "Still running. This conversation gets a message when it ends. "
+    "Check it with compute_task_status."
+)
+
+
+#: What it adds to a command whose end another poll saw: the conversation gets the message.
+_ENDED_ELSEWHERE = "It has ended. This conversation gets a message with the result."
+
+
+def _command_view(run: InlineRun) -> dict[str, JsonValue]:
+    """compute_run_bash's result. An end this call settled carries the output once, as
+    stdout. Any other result says the conversation gets a message, and has no output."""
+    task = run.task
+    view = _task_view(task, output=False)
+    if run.ended_here:
+        view["stdout"] = task.output_tail
+        view["timed_out"] = task.state == "timed_out"
+        view["truncated"] = task.output_bytes > len(task.output_tail.encode())
+    else:
+        view["note"] = _STILL_RUNNING if task.state in ACTIVE_TASK_STATES else _ENDED_ELSEWHERE
+    return view
+
+
 def _read_arguments(path: str, offset: int, limit: int) -> dict[str, JsonValue]:
     """A `read_file` call the session's answer can carry, whatever the file holds."""
     if not path.startswith("/") or "\x00" in path or offset < 0 or not 1 <= limit <= MAX_READ_BYTES:
@@ -334,35 +366,43 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         session_id: uuid.UUID,
         command: str,
         origin_context_id: str,
-        timeout: int = 40000,
+        timeout: int | None = None,
         run_in_background: bool = False,
         timeout_minutes: int | None = None,
+        wait_seconds: int = 40,
+        description: str | None = None,
     ) -> JsonValue:
-        """Run bash on your session; inline by default, returning exit code and stdout.
+        """Run bash on your session and wait up to wait_seconds (0 to 40) for it to end.
 
-        Inline: timeout is milliseconds, 1–40000. For longer work set
-        run_in_background: it returns a task_id at once, the command runs for up to
-        timeout_minutes (default 8 hours, capped by the operator TTL) and this
-        conversation gets one message when it ends. Read it with compute_task_status and
-        compute_task_result. Do not retry an uncertain response automatically: check
-        compute_task_status or files first. Commands, file writes and running background
-        commands renew the idle lease. Reads do not renew it.
+        A command that ends in time returns its exit_code and stdout, the last 16 KiB
+        of its output. truncated says there is more: read output_path with
+        compute_read_file. A command that needs longer keeps running and returns its
+        task_id with state `running`; this conversation gets one message when it
+        ends. Check it with compute_task_status and compute_task_result.
+        run_in_background returns at once, in the same way.
+
+        timeout, in milliseconds, ends an inline command at that time; a background
+        command ignores it. Otherwise the command can run for timeout_minutes (default
+        8 hours, capped by the operator TTL). description is accepted and not used.
+
+        Do not retry an uncertain response automatically: check compute_task_status or
+        files first. Commands, file writes and running commands renew the idle lease.
+        Reads do not renew it.
         """
-        if (
-            not command.strip()
-            or "\x00" in command
-            or len(command) > 8000
-            or not 1 <= timeout <= 40000
-        ):
-            raise ToolError(
-                "Use a command of 1–8000 characters and timeout of 1–40000 milliseconds."
-            )
-        if run_in_background:
-            auth, caller = await _caller(runtime, ctx, origin_context_id)
-            try:
-                await _readable(
-                    runtime, auth, origin_context_id, await service.get(caller, session_id)
-                )
+        if not command.strip() or "\x00" in command or len(command) > 8000:
+            raise ToolError("Use a command of 1–8000 characters.")
+        timeout_seconds: int | None = None
+        if not run_in_background and timeout is not None:
+            # Inline, `timeout` ends the command and wins over timeout_minutes. A background
+            # command ignores it, as it always has.
+            limit_ms = runtime.settings.compute.max_ttl_hours * 3600 * 1000
+            if not 1 <= timeout <= limit_ms:
+                raise ToolError(f"Use a timeout of 1 to {limit_ms} milliseconds.")
+            timeout_seconds = ceil(timeout / 1000)
+        auth, caller = await _caller(runtime, ctx, origin_context_id)
+        try:
+            await _readable(runtime, auth, origin_context_id, await service.get(caller, session_id))
+            if run_in_background:
                 # A retried tool use returns its existing task instead of running twice.
                 key, _ = await _approved(
                     runtime,
@@ -376,27 +416,33 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                         "timeout": timeout,
                         "run_in_background": True,
                         "timeout_minutes": timeout_minutes,
+                        "wait_seconds": wait_seconds,
+                        "description": description,
                     },
-                    {"timeout": 40000, "run_in_background": False, "timeout_minutes": None},
+                    {
+                        "timeout": None,
+                        "run_in_background": False,
+                        "timeout_minutes": None,
+                        "wait_seconds": 40,
+                        "description": None,
+                    },
                     approval=False,
                 )
-                task = await service.start_task(
-                    caller,
-                    session_id,
-                    command=command,
-                    timeout_minutes=timeout_minutes,
-                    request_key=key,
-                )
-            except (StoreError, ComputeProviderError) as exc:
-                raise ToolError(str(exc)) from None
-            return _task_view(task, output=False)
-        return await call(
-            ctx,
-            session_id,
-            origin_context_id,
-            "run_bash",
-            {"command": command, "timeout_s": max(1, (timeout + 999) // 1000)},
-        )
+            else:
+                # An inline call is not replayed from the conversation: that is slow.
+                key = "inline:" + uuid.uuid4().hex
+            ran = await service.run(
+                caller,
+                session_id,
+                command=command,
+                wait_seconds=0 if run_in_background else min(max(wait_seconds, 0), 40),
+                timeout_seconds=timeout_seconds,
+                timeout_minutes=timeout_minutes,
+                request_key=key,
+            )
+        except (StoreError, ComputeProviderError) as exc:
+            raise ToolError(str(exc)) from None
+        return _command_view(ran)
 
     @mcp.tool
     async def compute_write_file(  # pyright: ignore[reportUnusedFunction]

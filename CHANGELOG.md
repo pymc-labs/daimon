@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A command on a cloud computer that needs more than 40 seconds now continues, and the
+  conversation gets a message when it ends.** Before, the machine stopped it at 40 seconds.
+  A command that ends in time still returns its result in the reply
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **A cloud computer starts from its profile name alone.** `compute_launch_session` takes
   `region` as optional; without it the machine starts in the profile's first region
   ([Compute sessions](docs/compute.md#turn-it-on)).
