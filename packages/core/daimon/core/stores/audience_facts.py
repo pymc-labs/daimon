@@ -195,12 +195,15 @@ async def read_channel_facts(
     channel_id: str,
     now: datetime,
     parent_id: str | None = None,
+    public_thread: bool = False,
 ) -> RoomFacts:
     """One room's facts: unknown when the server is incomplete or lapsed or the room has no row.
 
-    A thread with no row (an archived one is not cached) that names its `parent_id` takes
-    the parent's "contained" and is narrow: both kinds of thread take "contained" from the
-    parent, and a private one is always narrow.
+    A thread with no row (an archived one is not cached, a new one has none for seconds) that
+    names its `parent_id` takes the parent's "contained" and is narrow, unless the caller knows
+    from the platform that it is a `public_thread` (a forum post and an announcement thread
+    too): then it takes both facts from the parent, as the next reconcile writes them
+    (`compute_room_facts`). A private thread, and a thread of unknown kind, is always narrow.
     """
     found = await read_channel_rows(
         session,
@@ -213,7 +216,7 @@ async def read_channel_facts(
         return RoomFacts(contained=own[0], narrow=own[1])
     parent = found.get(parent_id) if parent_id else None
     if parent is not None:
-        return RoomFacts(contained=parent[0], narrow=True)
+        return RoomFacts(contained=parent[0], narrow=parent[1] if public_thread else True)
     return UNKNOWN_FACTS
 
 

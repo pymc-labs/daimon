@@ -86,6 +86,7 @@ from daimon.adapters.discord.errors import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.outsiders import is_public_thread
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
@@ -509,6 +510,7 @@ async def run_wizard_submit_turn_observed(
                 role=Role.ADMIN if is_admin else Role.USER,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                public_thread=is_public_thread(channel),
             )
         except MissingTurnConfigError as err:
             _log.info(

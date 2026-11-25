@@ -33,7 +33,11 @@ import structlog
 from anthropic import APIError, APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
-from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
+from daimon.core.access_policy import (
+    TenantAccessPolicy,
+    agent_invoker_roles,
+    with_public_thread_room,
+)
 from daimon.core.agent_identity import shown_name
 from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.anthropic_guard import anthropic_configured
@@ -267,6 +271,9 @@ class AdmissionGrant:
     # The room is narrow by its stored facts (mode `on`): its memory is read-only, the
     # agent pinned to it included.
     narrow_room: bool = False
+    # The platform said `thread_id` is a public thread, so a thread with no room fact yet
+    # is judged by its parent (`with_public_thread_room`).
+    public_thread: bool = False
 
 
 @dataclass(frozen=True)
@@ -405,6 +412,7 @@ class AdmitRequest:
     spend_person: SpendPerson | None
     surface: Surface | None
     principal_platform: str | None
+    public_thread: bool = False
     # The turn was admitted as a relay agent's (`daimon.core.relay_scope`); its helpers inherit it.
     relay_scoped: bool = False
 
@@ -728,6 +736,7 @@ async def admit(
     surface: Surface | None = None,
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
+    public_thread: bool = False,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
 
@@ -777,6 +786,7 @@ async def admit(
                 surface=surface,
                 principal_platform=principal_platform,
                 helper=helper,
+                public_thread=public_thread,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -830,6 +840,7 @@ async def admit(
         spend_person=spend_person,
         surface=surface,
         principal_platform=principal_platform,
+        public_thread=public_thread,
         relay_scoped=result.relay_scoped,
     )
     return replace(result, observation=observation, request=request)
@@ -867,6 +878,7 @@ async def admit_helper(
         spend_person=request.spend_person,
         surface=request.surface,
         principal_platform=request.principal_platform,
+        public_thread=request.public_thread,
         helper=replace(helper, relay_scoped=request.relay_scoped),
     )
 
@@ -911,6 +923,7 @@ async def admit_impl(
     surface: Surface | None = None,
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
+    public_thread: bool = False,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -949,6 +962,7 @@ async def admit_impl(
         surface=surface,
         principal_platform=principal_platform,
         helper=helper,
+        public_thread=public_thread,
     )
     followed: list[Slot] = []
     try:
@@ -989,6 +1003,7 @@ async def _admit_gates(
     surface: Surface | None = None,
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
+    public_thread: bool = False,
     followed: list[Slot] | None = None,
     follow_switch: bool = True,
 ) -> Admission:
@@ -1057,6 +1072,7 @@ async def _admit_gates(
                 requester_org=requester_org,
                 channel_shared=channel_shared,
                 mode=mode,
+                public_thread=public_thread,
             )
             shared = audience.contained
             source_shared = is_dm and shared
@@ -1082,6 +1098,8 @@ async def _admit_gates(
         hold = TurnHold(platform, channel_id, client) if (client or shared) and not is_dm else None
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        if public_thread:
+            policy = with_public_thread_room(policy, channel_id=channel_id, thread_id=thread_id)
         mark("policy_and_admins")
         from daimon.core.native_admins import is_daimon_admin
 
@@ -1629,6 +1647,7 @@ async def _admit_gates(
         hold=hold,
         dm_no_source=dm_no_source,
         narrow_room=_narrow_by_facts(audience, mode) and not is_dm,
+        public_thread=public_thread and not is_dm,
     )
     if agent_invoker_roles(policy, grant.agent.names):
         # Role gates always use fresh registered Discord membership, including
@@ -2194,6 +2213,7 @@ async def _record_shared_channel(
     requester_org: RequesterOrg,
     channel_shared: bool | None,
     mode: AudienceMode | None = None,
+    public_thread: bool = False,
 ) -> ChannelAudience:
     """The channel's audience, recording it as shared when learned.
 
@@ -2225,6 +2245,7 @@ async def _record_shared_channel(
         channel_id=channel_id,
         thread_id=thread_id,
         mode=mode,
+        public_thread=public_thread,
     )
 
 
@@ -2444,6 +2465,7 @@ async def _tightened_hold(
         platform=grant.platform,
         channel_id=grant.channel_id,
         thread_id=grant.thread_id,
+        public_thread=grant.public_thread,
     )
     shared = shared or audience.contained
     platform = grant.platform
@@ -2482,6 +2504,10 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+        if grant.public_thread:
+            policy = with_public_thread_room(
+                policy, channel_id=grant.channel_id, thread_id=grant.thread_id
+            )
         # The opt-in conversation policy is separate from native personal-chat
         # surfaces (for example Teams), which also admit with is_dm=True.
         if grant.is_dm and (grant.cold_dm or grant.dm_source is not None):
