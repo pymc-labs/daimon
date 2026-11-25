@@ -14,7 +14,7 @@ that use this fixture create the schemas; the default suites never do.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 
 import psycopg
@@ -25,6 +25,7 @@ from daimon.data.init import PsycopgSql
 from daimon.data.migrate import STORE_FILES, apply
 from daimon.data.schema import Schemas
 from daimon.testing.db import DatabasePreflight
+from psycopg.rows import DictRow, dict_row
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -43,6 +44,15 @@ class DataDb:
     def connect(self) -> Iterator[psycopg.Connection[tuple[object, ...]]]:
         """A psycopg connection in autocommit, as the database's own user."""
         with psycopg.connect(libpq_dsn(self.url), autocommit=True) as conn:
+            yield conn
+
+    @asynccontextmanager
+    async def aconnect(self) -> AsyncIterator[psycopg.AsyncConnection[DictRow]]:
+        """An async psycopg connection in autocommit with dict rows, as the store's code takes."""
+        conn = await psycopg.AsyncConnection[DictRow].connect(
+            libpq_dsn(self.url), autocommit=True, row_factory=dict_row
+        )
+        async with conn:
             yield conn
 
 
