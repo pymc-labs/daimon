@@ -119,7 +119,9 @@ create table {{data}}.erased_accounts (
 );
 do $$
 begin
-  if to_regclass('erased_account') is not null then   -- core's tombstones, where visible
+  -- Core's tombstones, where this role may read them.
+  if to_regclass('erased_account') is not null
+     and has_table_privilege('erased_account', 'select') then
     execute 'insert into {{data}}.erased_accounts (account_id) select account_id from erased_account
              on conflict do nothing';
   end if;

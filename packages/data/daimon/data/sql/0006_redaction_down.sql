@@ -1,5 +1,20 @@
 -- Revision 0243's downgrade: drop what 0006_redaction.sql made and put back 0005's trigger functions.
 drop table if exists {{data}}.redaction_sets;
+drop trigger if exists guard_bound_delete on {{data}}.sources;
+drop trigger if exists guard_bound_delete on {{data}}.scopes;
+drop trigger if exists guard_bound_delete on {{data}}.grants;
+create or replace function {{data}}.visible_sources() returns setof uuid language sql stable security definer rows 10
+  set search_path = {{data}}, pg_catalog, pg_temp as $$
+  select s.id from sources s join read_contexts c on s.tenant_id = any (c.tenant_ids)
+  where c.pid = pg_backend_pid() and c.xact = pg_current_xact_id_if_assigned()
+    and s.publication = 'published' and s.status <> 'disabled' and source_fresh(s.id)
+$$;
+alter table {{data}}.read_contexts drop column if exists hidden_sources;
+create or replace function {{data}}.linked_subjects(account uuid, tenant_ids uuid[]) returns setof text
+  language sql stable set search_path = {{data}}, pg_catalog, pg_temp as $$
+  select provider || '/' || workspace || ':user:' || subject from identities
+  where account_id = account and tenant_id = any (tenant_ids) and (active or proof = 'oauth')
+$$;
 create or replace function {{data}}.source_generation() returns trigger language plpgsql
   set search_path = {{data}}, pg_catalog, pg_temp as $$
 begin
