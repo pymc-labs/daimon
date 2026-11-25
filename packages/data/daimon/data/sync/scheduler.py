@@ -17,7 +17,7 @@ from uuid import UUID
 import psycopg
 import structlog
 from daimon.core.config import Settings
-from daimon.data import acl, pool
+from daimon.data import acl, declared, parity, pool
 from daimon.data.dsn import libpq_dsn
 from daimon.data.locks import advisory_key
 from daimon.data.schema import Schemas
@@ -45,7 +45,8 @@ select s.id, s.config, c.requested_at, c.last_status, c.last_sync_at,
        coalesce(c.errors, 0) as errors,
        (select max(r.finished_at) from {d}.sync_runs r where r.source_id = s.id) as last_run
 from {d}.sources s left join {d}.source_cursors c on c.source_id = s.id
-where s.status in ('active', 'error') and s.publication <> 'retired'"""
+where s.status in ('active', 'error') and s.publication <> 'retired'
+  and s.mode = 'stored'"""
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,23 @@ class Maintenance:
             await embed_pending(conn, env.schemas)
 
 
+class Ops:
+    """Every `declared.EVERY` seconds: apply the declared file, then run the parity
+    comparisons that are due. The first run follows the start."""
+
+    def __init__(self, start: datetime) -> None:
+        self.last = start - timedelta(seconds=declared.EVERY)
+
+    def due(self, now: datetime) -> bool:
+        return (now - self.last).total_seconds() >= declared.EVERY
+
+    async def run(self, settings: Settings, env: Env, now: datetime) -> None:
+        self.last = now
+        await declared.apply_from_settings(settings, env)
+        async with pool.connection(settings) as conn:
+            await parity.run_due(conn, env.schemas, env, declared.EVERY)
+
+
 async def _wait(stop: asyncio.Event, seconds: float) -> None:
     with suppress(TimeoutError):
         await asyncio.wait_for(stop.wait(), seconds)
@@ -196,6 +214,15 @@ async def _maintain(settings: Settings, env: Env, m: Maintenance, flag: list[boo
         flag[0] = False
 
 
+async def _operate(settings: Settings, env: Env, ops: Ops, flag: list[bool]) -> None:
+    try:
+        await ops.run(settings, env, datetime.now(UTC))
+    except Exception:
+        log.exception("data.ops_failed")
+    finally:
+        flag[0] = False
+
+
 async def lead(
     settings: Settings, env: Env, leader: AsyncConnection[DictRow], stop: asyncio.Event
 ) -> None:
@@ -203,6 +230,7 @@ async def lead(
     inflight: set[UUID] = set()
     tasks: set[asyncio.Task[None]] = set()
     maintenance, maintaining = Maintenance(datetime.now(UTC)), [False]
+    ops, operating = Ops(datetime.now(UTC)), [False]
     limit = settings.data.worker_concurrency
     try:
         async with pool.connection(settings) as conn:
@@ -227,6 +255,11 @@ async def lead(
             if not maintaining[0] and maintenance.due(datetime.now(UTC)):
                 maintaining[0] = True
                 task = asyncio.create_task(_maintain(settings, env, maintenance, maintaining))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+            if not operating[0] and ops.due(datetime.now(UTC)):
+                operating[0] = True
+                task = asyncio.create_task(_operate(settings, env, ops, operating))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
             await _wait(stop, TICK)
