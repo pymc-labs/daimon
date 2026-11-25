@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, Literal
 
-from daimon.data import parity
+from daimon.data import identity, parity
 from daimon.data.access import ACL_SCOPE
 from daimon.data.audit import record_audit
 from daimon.data.identity import Conflict, IdentityError, Missing
@@ -329,8 +329,8 @@ async def act(
     source_id: uuid.UUID,
     action: Action,
 ) -> None:
-    """Pause, resume, retire, publish, unpublish or sync one source. Declared sources refuse,
-    and a publish waits on the parity gate."""
+    """Pause, resume, retire, publish, unpublish or sync one source. Declared sources refuse
+    here only (the store's trigger guards edits and deletes), and a publish waits on parity."""
     d = schemas.data
     async with conn.transaction():
         row = await _one(
@@ -368,6 +368,15 @@ async def act(
 
 
 # ---- scopes and grants -----------------------------------------------------------------------
+
+
+async def _admin(
+    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, by: uuid.UUID
+) -> None:
+    """Scopes and grants decide who reads what, so only a data admin changes them, as for
+    links (`identity.admin_link`)."""
+    if not await identity.is_data_admin(conn, schemas, tenant_id, by):
+        raise identity.NotAllowed("Only a data admin can do this. Ask the owner.")
 
 
 async def scopes(
@@ -411,6 +420,7 @@ async def create_scope(
     if not name.strip():
         raise Invalid("Give the scope a name.")
     async with conn.transaction():
+        await _admin(conn, schemas, tenant_id, by)
         cur = await conn.execute(
             f"insert into {schemas.data}.scopes (tenant_id, id, kind, name, description)"
             " values (%s, %s, %s, %s, %s) on conflict do nothing returning id".encode(),
@@ -434,6 +444,7 @@ async def delete_scope(
     """Remove a scope and its grants; refused while it is the default of a source."""
     d = schemas.data
     async with conn.transaction():
+        await _admin(conn, schemas, tenant_id, by)
         row = await _one(
             conn,
             f"select bound from {d}.scopes where tenant_id = %s and id = %s for update",
@@ -469,6 +480,9 @@ async def grant(
     if not HOLDER.match(holder):
         raise Invalid("Name who holds the scope.")
     async with conn.transaction():
+        await _admin(conn, schemas, tenant_id, by)
+        if holder in (await identity.holders_of(conn, schemas, tenant_id, [by]))[by]:
+            raise identity.NotAllowed("Ask another data admin to grant you a scope.")
         await _one(
             conn,
             f"select 1 from {schemas.data}.scopes where tenant_id = %s and id = %s",
@@ -499,6 +513,7 @@ async def revoke(
 ) -> None:
     d = schemas.data
     async with conn.transaction():
+        await _admin(conn, schemas, tenant_id, by)
         row = await _one(
             conn,
             f"select bound from {d}.grants where tenant_id = %s and scope = %s and holder = %s"
