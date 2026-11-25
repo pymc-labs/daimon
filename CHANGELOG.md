@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it no data tool where people outside the team can read. Other sessions' transcripts hide its
   data results ([Features](docs/features.md#data-source-reads)).
 
+- **Agents that read data sources get tools to search and read them.** `data_sources`,
+  `data_search`, `data_get`, `data_file` and `data_sql` answer only with what everyone who
+  will see the answer may read, and bill the person who asked. After such a read, a write that
+  would not ask first shows a card in chat and is refused in a routine
+  ([Permissions](docs/permissions.md#data-reads)).
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has

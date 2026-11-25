@@ -1,12 +1,11 @@
 # Permissions
 
 What each channel rule, agent rule and tool rule limits, who can change them,
-and which turns are held to one channel. Read it before you restrict a channel,
-pin an agent to one, or let clients into a shared channel.
+and which turns are held to one channel.
 
 Two rules say what reaches whom. A **channel rule** says whose turns may read a
 channel and who may write in it. An **agent rule** says where an agent may run.
-Every limit below follows from these two. Who owns what is on
+Who owns what is on
 [isolation.md](isolation.md), and who counts as an admin on
 [admins.md](admins.md).
 
@@ -33,8 +32,7 @@ inside it with `daimon channels rule set --thread <id> --readers inside`. A
 thread takes the strictest of its own, its channel's and its category's rule.
 
 On Discord, a direct @mention in a `writers: none` channel gets a lock
-reaction and a DM naming the rule, so "not allowed here" does not look like
-"Daimon is down". It sends at most one per person per channel within
+reaction and a DM naming the rule. It sends at most one per person per channel within
 [the cooldown](configuration.md#daimon_discord__protected_channel_notice_cooldown_min),
 and posts nothing in the channel.
 
@@ -143,6 +141,13 @@ even where the rule does not name the channel.
 > Daimon's tools. Their turn is refused when the agent has an `ask` rule or a
 > channel-scoped `deny` on one. Agent-wide `deny` rules still work.
 > The operator log records `turn.backend_unsupported`.
+
+## Data reads
+
+[`data_reads`](features.md#data-source-reads) gives an agent `data_sources`,
+`data_search`, `data_get`, `data_file` and `data_sql`. After such a read, a write that
+would not ask first, including sandbox `bash` and `web_fetch`, shows a card in chat
+and is refused in a routine.
 
 ## Approval overrides
 
