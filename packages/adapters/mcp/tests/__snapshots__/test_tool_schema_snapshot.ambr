@@ -43,6 +43,40 @@
           'type': 'object',
         }),
       }),
+      'call_shared_tool': dict({
+        'description': '''
+          Call one shared tool of a workspace's connected MCP servers, as listed by
+          list_shared_tools. Only tools that don't change anything run from here.
+        ''',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'arguments': dict({
+              'anyOf': list([
+                dict({
+                  'additionalProperties': True,
+                  'type': 'object',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'default': None,
+            }),
+            'name': dict({
+              'type': 'string',
+            }),
+            'workspace_id': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'workspace_id',
+            'name',
+          ]),
+          'type': 'object',
+        }),
+      }),
       'continue_turn': dict({
         'description': '''
           Send a follow-up on an existing session without waiting.
@@ -225,6 +259,27 @@
           }),
           'required': list([
             'daimon_id',
+          ]),
+          'type': 'object',
+        }),
+      }),
+      'list_shared_tools': dict({
+        'description': '''
+          List the tools a workspace has shared from its connected MCP servers.
+          <blank line>
+          ``workspace_id`` is the ``workspace_id`` of a Daimon from list_daimons. Pass a
+          tool's ``name`` to call_shared_tool. A tool with ``writes`` true changes things
+          and can't be called from here.
+        ''',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'workspace_id': dict({
+              'type': 'string',
+            }),
+          }),
+          'required': list([
+            'workspace_id',
           ]),
           'type': 'object',
         }),

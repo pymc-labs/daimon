@@ -48,6 +48,7 @@ from daimon.adapters.mcp.oauth_microsoft import build_oauth_microsoft_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
+from daimon.adapters.mcp.shared_connections import SharedConnectionProvider
 from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools import (
     agent_chat,
@@ -561,6 +562,7 @@ def create_mcp_app(
     identity_middleware.attach_host_call_gate(
         HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
     )
+    mcp.add_provider(SharedConnectionProvider(runtime))  # `<connection>_<tool>`, per caller
     mcp.add_middleware(CallOriginMiddleware(runtime))  # where the call's turn started
     mcp.add_middleware(CapabilityGateMiddleware(runtime))  # innermost: reads the identity
     agents.register_agent_tools(mcp, runtime)

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 240 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 240 tools Daimon's MCP server registers, plus the 10 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -811,3 +811,18 @@ visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id
 | `list_events` | all callers | A session's transcript. |
 | `list_my_sessions` | all callers | Sessions you started with this Daimon, for resuming with ``handle``. |
 | `start_turn` | all callers | Start a turn without waiting. |
+
+## Hub login mounts: `hub_shared`
+
+The hub's view of a workspace's shared MCP connections, for an outside client.
+
+A second surface, separate from the tools above: one app per platform, mounted at
+`/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
+when the matching `DAIMON_HUB__*` client credentials are set. These tools carry no
+visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id` from
+`list_daimons`, because one person reaches several workspaces here.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `call_shared_tool` | all callers | Call one shared tool of a workspace's connected MCP servers, as listed by list_shared_tools. |
+| `list_shared_tools` | all callers | List the tools a workspace has shared from its connected MCP servers. |

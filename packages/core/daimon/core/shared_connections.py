@@ -347,11 +347,13 @@ async def refresh_connection(
     policy: ToolSafetyPolicy,
     connection: McpConnectionRow,
     *,
-    open_session: OpenUpstream = open_upstream,
+    open_session: OpenUpstream | None = None,
 ) -> int:
     """Read the upstream's tool list into the store; how it went is kept on the connection."""
     try:
-        async with open_session(connection.url, reveal_auth(fernet, connection)) as upstream:
+        async with (open_session or open_upstream)(
+            connection.url, reveal_auth(fernet, connection)
+        ) as upstream:
             listed = await upstream.list_tools()
     except McpCallError as err:
         async with sessions.begin() as session:
@@ -408,11 +410,11 @@ async def call_upstream(
     shared: SharedTool,
     arguments: dict[str, JsonValue],
     *,
-    open_session: OpenUpstream = open_upstream,
+    open_session: OpenUpstream | None = None,
 ) -> SharedResult:
     """Call the connection's tool by its own name; an unreachable server is one safe message."""
     try:
-        async with open_session(
+        async with (open_session or open_upstream)(
             shared.connection.url, reveal_auth(fernet, shared.connection)
         ) as up:
             return _result_of(await up.call_tool_result(shared.tool.name, arguments))

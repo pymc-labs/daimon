@@ -26,6 +26,7 @@ from daimon.adapters.mcp.hub.storage import asyncpg_dsn, build_hub_kv_base, hub_
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.hub import register_hub_tools
+from daimon.adapters.mcp.tools.hub_shared import register_hub_shared_tools
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
 from daimon.core.errors import BootstrapError
@@ -60,6 +61,7 @@ def build_hub_app(
     mcp.add_middleware(HubIdentityMiddleware(platform))
     mcp.add_middleware(MaErrorMiddleware())
     register_hub_tools(mcp, runtime, billing_config=billing_config)
+    register_hub_shared_tools(mcp, runtime)
     return mcp
 
 

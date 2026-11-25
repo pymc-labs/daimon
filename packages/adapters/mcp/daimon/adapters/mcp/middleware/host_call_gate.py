@@ -143,9 +143,12 @@ class HostCallGate:
         self, context: MiddlewareContext, identity: AuthIdentity, run: CallNext
     ) -> object:
         """Record the gated call and post its card; fail closed on anything missing.
-        A call Claude's session runs without a card runs through `run` here too."""
+        A call Claude's session runs without a card runs through `run` here too, and so does
+        a shared-connection tool's: it is decided as a third party's, not as Daimon's own."""
+        from daimon.adapters.mcp.shared_connections import SharedConnectionTool
         from daimon.adapters.mcp.tools._own_card import post_own_card
         from daimon.core.confirmation import reach_title
+        from daimon.core.shared_connections import decide_shared_call
         from daimon.core.turn.approvals import (
             agent_rule_lookup,
             channel_for_tool_rules,
@@ -225,15 +228,26 @@ class HostCallGate:
                 ),
             ),
         )
-        verdict = await tool_call_verdict(
-            policy,
-            call,
-            attended=origin.attended,
-            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-            # As a chat turn's (`confirmed_tools_for_turn`): a reach always asks.
-            confirmed_tools=protected_tools(policy) | {"approve_reach"},
-            agent_rule=rule,
-        )
+        if isinstance(tool, SharedConnectionTool):
+            # A third party's tool: never trusted, its effect is the admin's flag.
+            verdict = decide_shared_call(
+                policy,
+                name,
+                args,
+                writes=tool.served.tool.writes,
+                attended=origin.attended,
+                agent_rule=rule,
+            )
+        else:
+            verdict = await tool_call_verdict(
+                policy,
+                call,
+                attended=origin.attended,
+                trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+                # As a chat turn's (`confirmed_tools_for_turn`): a reach always asks.
+                confirmed_tools=protected_tools(policy) | {"approve_reach"},
+                agent_rule=rule,
+            )
         if read_error:
             verdict = read_error_verdict(verdict, attended=origin.attended)
         if verdict.outcome == "allow":

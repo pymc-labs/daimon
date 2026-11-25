@@ -461,15 +461,19 @@ EXEMPT: dict[str, str] = {
 }
 
 #: The hub mount's tools. It forwards turns to a Daimon and lists sessions; it changes no setting.
-_HUB = "forwards a turn or reads a session of a Daimon; changes no channel or agent setting"
+_HUB = (
+    "forwards a turn, reads a session or calls a shared tool; changes no channel or agent setting"
+)
 HUB_EXEMPT: dict[str, str] = {
     "ask": _HUB,
+    "call_shared_tool": _HUB,
     "continue_turn": _HUB,
     "describe_daimon": _HUB,
     "get_session": _HUB,
     "list_daimons": _HUB,
     "list_events": _HUB,
     "list_my_sessions": _HUB,
+    "list_shared_tools": _HUB,
     "start_turn": _HUB,
 }
 

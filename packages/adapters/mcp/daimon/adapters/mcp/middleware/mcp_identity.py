@@ -79,6 +79,7 @@ from mcp.types import CallToolResult, TextContent
 
 if TYPE_CHECKING:
     from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
+    from daimon.core.shared_connections import SharedTool
 
 #: Audit reason for a call a held credential made to a tool off the allowlist.
 HELD_DENIAL_REASON = "held_tool_not_allowed"
@@ -717,6 +718,10 @@ class IdentityMiddleware(Middleware):
             return await gate.run_confirmed(
                 context, lambda context: self._run_backend(context, call_next, identity), identity
             )
+        if context.method == "tools/call":
+            served = await self._shared_tool(context)
+            if served is not None:
+                return await self._gate_shared(context, call_next, identity, served)
         if identity.no_confirmation_surface and context.method == "tools/call":
             from daimon.core.tool_safety import confirmation_gated_tools
 
@@ -728,6 +733,58 @@ class IdentityMiddleware(Middleware):
                     lambda context: self._run_backend(context, call_next, identity),
                 )
         return await self._run_backend(context, call_next, identity)
+
+    async def _shared_tool(self, context: MiddlewareContext) -> SharedTool | None:
+        """The shared-connection tool this call names, if it is one (never a static tool)."""
+        from daimon.adapters.mcp.shared_connections import SharedConnectionTool
+        from daimon.core.shared_connections import is_served_name
+
+        name = str(getattr(context.message, "name", ""))
+        fastmcp_ctx = context.fastmcp_context
+        if fastmcp_ctx is None or not is_served_name(name):
+            return None
+        tool = await fastmcp_ctx.fastmcp.get_tool(name)
+        return tool.served if isinstance(tool, SharedConnectionTool) else None
+
+    async def _gate_shared(
+        self,
+        context: MiddlewareContext,
+        call_next: CallNext,
+        identity: AuthIdentity,
+        served: SharedTool,
+    ) -> object:
+        """A third-party tool's rules: a chat credential is asked or carded as its agent's rules
+        say; a client with no card to answer is treated as unattended, so a read runs and a
+        write is refused unless the operator allows unattended writes."""
+        from daimon.adapters.mcp.shared_connections import refuse
+        from daimon.core.shared_connections import decide_shared_call
+
+        def run(context: MiddlewareContext) -> Awaitable[object]:
+            return self._run_backend(context, call_next, identity)
+
+        if (
+            identity.chat_agent_id is not None
+            and identity.chat_session_id is not None
+            and identity.platform_user_id is not None
+        ):
+            return await self._require_host_call_gate().ask(context, identity, run)
+        raw: object = getattr(context.message, "arguments", None)
+        args = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
+        verdict = decide_shared_call(
+            self._tool_safety or ToolSafetyPolicy(),
+            served.name,
+            args,
+            writes=served.tool.writes,
+            attended=False,
+            agent_rule=None,
+        )
+        if verdict.outcome == "allow":
+            return await run(context)
+        raise refuse(
+            f"verdict_{verdict.reason}",
+            "This connection's tool changes things and needs a person's approval, which this "
+            "client can't ask for. Nothing was done. Use it from a chat with a Daimon.",
+        )
 
     def attach_host_call_gate(self, gate: HostCallGate) -> None:
         """Set once the runtime exists; the middleware is built before it."""
