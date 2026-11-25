@@ -282,7 +282,7 @@ async def test_routine_effects_match_recording(platform, op, scenario, monkeypat
     module = importlib.import_module(f"daimon.adapters.{platform}.{suffix}")
     monkeypatch.setattr(module, "datetime", Clock)
 
-    async def never_moved(_session, _ids):  # the faked session cannot run the moved-routine query
+    async def never_moved(_session, _ids, *, tenant_id):  # the fake session runs no query
         return {}
 
     monkeypatch.setattr("daimon.core.posted_controls.routines.migrated_workflows", never_moved)
