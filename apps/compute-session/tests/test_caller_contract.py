@@ -8,6 +8,7 @@ either side that breaks the contract of `docs/compute.md` fails here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import shutil
@@ -241,4 +242,6 @@ async def test_a_detached_command_outlives_its_start_call(
         assert (await _probe(provider, session, uuid.uuid4(), task_dir)).status == "missing"
     finally:
         # What the kill script does, without its two-second pause between signals.
-        os.killpg(int(group.read_text()), signal.SIGKILL)
+        # The group can be gone already when the assertions above took long.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(int(group.read_text()), signal.SIGKILL)

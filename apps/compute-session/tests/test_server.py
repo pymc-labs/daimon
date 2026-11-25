@@ -25,7 +25,8 @@ def _alive(pid: int) -> bool:
     """Whether a process still runs; one that has ended but is not yet reaped does not."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # Reading /proc/<pid>/stat fails with ESRCH when the process ends during the read.
         return False
 
 
