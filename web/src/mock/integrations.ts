@@ -1,7 +1,7 @@
 // Integrations: chat installs, GitHub, tool servers and API tokens for Fernhill Labs.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { ApiToken, Github, Mcp, McpExpiry, Minted, Tokens, Workspaces } from "@/modules/integrations/types"
+import type { ApiToken, Connections, Github, Mcp, McpExpiry, Minted, Tokens, Workspaces } from "@/modules/integrations/types"
 import { forbidden, wait } from "./util"
 import { me } from "./world"
 
@@ -72,6 +72,20 @@ export const integrationsHandlers: HttpHandler[] = [
   http.get("/api/integrations/github", async () => { await wait(); return admin() ? HttpResponse.json(github) : forbidden() }),
   http.get("/api/integrations/mcp", async () => { await wait(); return admin() ? HttpResponse.json(mcp) : forbidden() }),
   http.get("/api/integrations/mcp/expiry", async () => { await wait(1400); return admin() ? HttpResponse.json(expiry) : forbidden() }),
+  http.get("/api/integrations/connections", async () => {
+    await wait()
+    const body: Connections = {
+      enabled: true,
+      connections: [{
+        id: "c1", name: "docs", url: "https://mcp.example.com/mcp", status: "active", error: null, refreshed_at: ago(2), scope: null, declared: false, has_token: true,
+        tools: [
+          { name: "search", description: "Find pages", seen_description: "Find pages", seen_arguments: ["query"], seen: "a1", changed: false, enabled: true, writes: false, scope: null },
+          { name: "create_page", description: "", seen_description: "Create a page in the space.", seen_arguments: ["title", "body"], seen: "b2", changed: false, enabled: false, writes: true, scope: null },
+        ],
+      }],
+    }
+    return admin() ? HttpResponse.json(body) : forbidden()
+  }),
   http.get("/api/integrations/tokens", async () => {
     await wait()
     const body: Tokens = { configured: true, scopes: SCOPES, days: 30, tokens }
