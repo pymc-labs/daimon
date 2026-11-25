@@ -111,7 +111,7 @@ def _dicts(tools: Any) -> list[Any]:
 
 
 #: The capabilities Off until a server admin turns them on, which a web place offers.
-_OFF_BY_DEFAULT = ("compute", "long_jobs")
+_OFF_BY_DEFAULT = ("compute", "data_reads", "long_jobs")
 
 
 def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:

@@ -194,10 +194,19 @@ async def link(
     proof: Proof,
 ) -> None:
     """Link the identity `proof` verified to the person who presented it; a link they already
-    hold keeps its proof. An identity linked to someone else raises Conflict, writing nothing."""
+    hold keeps its proof. An identity linked to someone else raises Conflict, and one a data
+    admin rejected or unlinked for them NotAllowed, writing nothing."""
     k = proof.key
     async with conn.transaction():
         await fence_account(conn, schemas, account_id)
+        cur = await conn.execute(
+            f"select 1 from {schemas.data}.link_decisions where tenant_id = %s and provider = %s"
+            " and workspace = %s and subject = %s and account_id = %s"
+            " and decision <> 'approved'".encode(),
+            (tenant_id, k.provider, k.workspace, k.subject, account_id),
+        )
+        if await cur.fetchone() is not None:
+            raise NotAllowed("A data admin unlinked that account from you. Ask one to link it.")
         cur = await conn.execute(
             f"insert into {schemas.data}.identities as i (tenant_id, provider, workspace, subject,"
             " account_id, proof, email, email_verified, linked_at)"

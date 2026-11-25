@@ -8,7 +8,7 @@ Writes are the workspace admins'. The store's own refusals carry messages safe t
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -20,11 +20,10 @@ from daimon.core.data_audience import (
     DataRefusal,
     Reader,
     data_audience,
-    scope_ceiling,
 )
-from daimon.data import access, identity, pool, redaction
-from daimon.data.access import ReadContext, person
+from daimon.data import pool
 from daimon.data.identity import Conflict, IdentityError, Missing, NotAllowed
+from daimon.data.reading import Reading, open_read
 from daimon.data.schema import Schemas
 from fastapi import Depends, HTTPException
 from psycopg import AsyncConnection
@@ -72,49 +71,23 @@ def audience_of(caller: WebCaller) -> DataAudience:
     return found
 
 
-async def read_context(
-    runtime: WebRuntime, conn: AsyncConnection[DictRow], caller: WebCaller
-) -> ReadContext:
-    """What this person may read: the scopes they hold and the access lists they are on."""
-    schemas, tenant = schemas_of(runtime), caller.person.tenant_id
-    account = caller.person.account_id
-    audience = audience_of(caller)
-    holders = await identity.holders_of(conn, schemas, tenant, [account])
-    held = frozenset(await access.effective_scopes(conn, schemas, tenant, holders[account]))
-    return ReadContext(
-        tenant_ids=(tenant,),
-        scopes=tuple(sorted(scope_ceiling(audience, {account: held}))),
-        readers=(person(account),) if audience.list_rows else (),
-        personal_ok=True,
-        salt="web",
-    )
-
-
 @asynccontextmanager
 async def reading(
     runtime: WebRuntime, caller: WebCaller
-) -> AsyncIterator[tuple[AsyncConnection[DictRow], ReadContext, Callable[[object], object]]]:
-    """The connection, what this person may read, and how a result goes out: through the
-    workspace's redaction lists when the person is marked redacted."""
+) -> AsyncIterator[tuple[AsyncConnection[DictRow], Reading]]:
+    """The connection and what this person may read (`daimon.data.reading`), as an agent
+    answering them would."""
     async with store(runtime) as conn:
-        ctx = await read_context(runtime, conn, caller)
-        account = caller.person.account_id
-        hidden = await redaction.redacted_among(
-            conn, schemas_of(runtime), caller.person.tenant_id, [account]
+        tenant = caller.person.tenant_id
+        yield (
+            conn,
+            await open_read(conn, schemas_of(runtime), tenant, audience_of(caller), salt="web"),
         )
-        entities = (
-            await redaction.read_redactor(
-                conn, schemas_of(runtime), caller.person.tenant_id, ctx.scopes
-            )
-            if hidden
-            else None
-        )
-        yield conn, ctx, entities or (lambda value: value)
 
 
-def shown[M: BaseModel](show: Callable[[object], object], model: M) -> M:
-    """`model` with its text passed through `show` (the redaction lists)."""
-    return type(model).model_validate(show(model.model_dump(mode="json")))
+def shown[M: BaseModel](reading: Reading, model: M) -> M:
+    """`model` with its text as this reader may read it."""
+    return type(model).model_validate(reading.show(model.model_dump(mode="json")))
 
 
 def uuid_of(raw: str) -> uuid.UUID:

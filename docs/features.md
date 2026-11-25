@@ -1112,7 +1112,7 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Data source reads
 
-The agent can search the workspace's data sources, showing only what everyone who will see the answer may read. It then starts fresh for each message in a channel, keeps no memory, and other agents cannot ask it. Not in rooms people outside the team can read.
+The agent can search the team's data sources, showing only what everyone who will see the answer may read. It then starts fresh for each message in a channel, keeps no memory, and other agents cannot ask it. Not in rooms people outside the team can read.
 
 | | |
 | --- | --- |

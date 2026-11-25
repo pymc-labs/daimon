@@ -156,7 +156,7 @@ from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import mark_channel_shared
-from daimon.core.stores.thread_sessions import get_thread_session_at
+from daimon.core.stores.thread_sessions import get_live_thread_session, get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
@@ -1633,6 +1633,23 @@ async def _admit_gates(
     except Exception:
         _log.warning("turn.data_reads_lookup_failed", tenant_id=str(tenant_id), exc_info=True)
         data_reading, data_unknown = False, True
+    if not data_reading and not data_unknown:
+        # A session that read data keeps the whole data seal until `/new`, whatever
+        # `data_reads` says now: its context holds what it read.
+        async with deps.sessionmaker() as session:
+            live = await get_live_thread_session(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=slot_thread_id or channel_id,
+                account_id=principal.account_id,
+            )
+        data_reading = (
+            live is not None
+            and live.effective_config is not None
+            and live.effective_config.data_read
+            and live.fresh_start_requested_at is None
+        )
     if helper is not None and data_reading and not helper.data_reading:
         raise UserFacingError(AGENT_REQUEST_REFUSAL)
     data_blocked = data_unknown or hold is not None or (platform == "teams" and not is_dm)
@@ -3103,8 +3120,9 @@ async def _capture_backend_source(
             ids = (context.tenant_id, read_on, context.channel_id, context.thread_id)
             here = FeaturePlace.of(*ids, agent_id=actual.id)
             features = await place_features(deps, here, actual, HIDING_KEYS)
-            # A data-reading agent is sealed as a relay agent is, as its turn will be.
-            data_reading = features.on(DATA_READS)
+            # A data-reading agent, or a session that read data, is sealed as a relay agent
+            # is, as its turn will be.
+            data_reading = admission.data_reading or features.on(DATA_READS)
             relay = data_reading or agent_has_identity_relay(
                 (server.url for server in actual.mcp_servers),
                 public_url=deps.public_url,

@@ -12,8 +12,10 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from daimon.core.data_audience import DataAudience
 from daimon.data import declared, identity, redaction
 from daimon.data.identity import IdentityKey, Proof
+from daimon.data.reading import Reading, open_read
 from daimon.data.sync.connector import CONNECTORS, Connector, ItemRecord, Record, Source, SyncState
 from daimon.data.sync.engine import Env, run_source
 from daimon.testing.data_db import DataDb
@@ -85,9 +87,15 @@ class Store:
 
 
 @pytest.fixture
-async def store(data_db: DataDb) -> AsyncIterator[Store]:
+async def store(data_db: DataDb, db_schema: str) -> AsyncIterator[Store]:
     async with data_db.aconnect() as conn:
-        yield Store(conn, data_db, uuid.uuid4())
+        tenant = uuid.uuid4()
+        await conn.execute(f"set search_path = {db_schema}".encode())
+        await conn.execute(
+            b"insert into tenants (id, platform, external_id) values (%s, 'discord', %s)",
+            (tenant, f"guild-{tenant.hex[:8]}"),
+        )
+        yield Store(conn, data_db, tenant)
 
 
 RULES = {
@@ -143,6 +151,22 @@ async def test_names_hide_from_a_guest_and_a_marked_person_only(store: Store) ->
     assert reader({"text": "Globex renewed"}) == {"text": "[client] renewed"}, "a guest's view"
     holder = await redaction.read_redactor(store.conn, schemas, store.tenant, ["client:globex"])
     assert holder.text("Globex renewed") == "Globex renewed", "who holds the scope sees it"
+
+    def audience(*people: uuid.UUID) -> DataAudience:
+        return DataAudience(frozenset(people), frozenset(), False, True, False)
+
+    async def reading(*people: uuid.UUID) -> Reading:
+        return await open_read(store.conn, schemas, store.tenant, audience(*people), salt="t")
+
+    seen = await reading(other)
+    assert not seen.redacted and not seen.names_hidden("Globex"), "nothing hides from others"
+    hidden = await reading(marked, other)
+    assert hidden.redacted, "caller SQL and file bytes are refused while names hide"
+    assert hidden.names_hidden("any news on globex?"), "a query naming an entity finds nothing"
+    assert not hidden.names_hidden("any news?")
+    assert hidden.show({"files": [{"name": "Globex deal.pdf"}]}) == {
+        "files": [{"name": "[client] deal.pdf"}]
+    }, "an attachment's name hides too"
 
 
 def _file(rules: dict[str, object]) -> tuple[str, bytes]:

@@ -103,7 +103,9 @@ async def signin_allowed_in(db: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     return tenant is not None and tenant.archived_at is None
 
 
-async def _data_sources_on(runtime: WebRuntime, db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+async def workspace_data_sources_on(
+    runtime: WebRuntime, db: AsyncSession, tenant_id: uuid.UUID
+) -> bool:
     """Whether the workspace has data sources on: the deployment's value, then its own."""
     if not data_sources_on(runtime.settings):
         return False
@@ -188,7 +190,9 @@ async def _caller(
                 m for m in runtime.web.modules if m not in chosen.modules_off
             ]
             # The data section follows the data sources feature, which the workspace may turn off.
-            if "data" in enabled and not await _data_sources_on(runtime, db, person.tenant_id):
+            if "data" in enabled and not await workspace_data_sources_on(
+                runtime, db, person.tenant_id
+            ):
                 enabled.remove("data")
             modules = tuple(modules_for(role, enabled))
             return WebCaller(

@@ -33,6 +33,26 @@ type Ref = tuple[uuid.UUID, str]
 """A stored record: its source and its `external_id`."""
 
 
+def _rechecks(kind: str) -> bool:
+    connector = CONNECTORS.get(kind)
+    return connector is not None and connector.recheck_reads and connector.has_can_open()
+
+
+async def rechecked_sources(
+    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_ids: Sequence[uuid.UUID]
+) -> list[uuid.UUID]:
+    """The sources of `tenant_ids` whose reads are re-checked, for reads that cannot ask."""
+    kinds = [k for k in CONNECTORS if _rechecks(k)]
+    if not kinds:
+        return []
+    cur = await conn.execute(
+        f"select id from {schemas.data}.sources where tenant_id = any(%s)"
+        " and kind = any(%s)".encode(),
+        (list(tenant_ids), kinds),
+    )
+    return [r["id"] for r in await cur.fetchall()]
+
+
 async def reader_subjects(
     conn: AsyncConnection[DictRow], schemas: Schemas, source: Source, readers: Sequence[str]
 ) -> list[tuple[str, ...]]:
@@ -61,10 +81,12 @@ async def reader_subjects(
     ]
 
 
-async def _ask(source: Source, external_id: str, subjects: Sequence[tuple[str, ...]]) -> bool:
+async def _ask(
+    source: Source, external_id: str, subjects: Sequence[tuple[str, ...]], seconds: float
+) -> bool:
     connector = CONNECTORS[source.kind]
     try:
-        async with asyncio.timeout(SECONDS):
+        async with asyncio.timeout(seconds):
             answers = await asyncio.gather(
                 *(connector.can_open(source, external_id, s) for s in subjects)
             )
@@ -81,9 +103,10 @@ async def allowed(
     readers: Sequence[str],
     refs: Sequence[Ref],
     limit: int = MAX_CHECKS,
+    seconds: float = SECONDS,
 ) -> set[Ref]:
     """The records of `refs` that may be shown to `readers` now: those whose source needs no
-    check, and those the source itself still opens to every reader."""
+    check, and those the source itself still opens to every reader, within `seconds`."""
     if not refs:
         return set()
     d = schemas.data
@@ -94,14 +117,30 @@ async def allowed(
         (list({r[0] for r in refs}),),
     )
     sources = {row["id"]: build_source(row, env, None) for row in await cur.fetchall()}
+    try:
+        return await _allowed(conn, schemas, sources, readers, refs, limit, seconds)
+    finally:
+        for src in sources.values():
+            if connector := CONNECTORS.get(src.kind):
+                await connector.release(src)
+
+
+async def _allowed(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    sources: dict[uuid.UUID, Source],
+    readers: Sequence[str],
+    refs: Sequence[Ref],
+    limit: int,
+    seconds: float,
+) -> set[Ref]:
     out: set[Ref] = set()
     pending: list[Ref] = []
     for ref in refs:
         src = sources.get(ref[0])
-        connector = CONNECTORS.get(src.kind) if src else None
-        if src is None or connector is None:
+        if src is None or src.kind not in CONNECTORS:
             continue  # not stored any more: fail closed
-        if connector.recheck_reads and connector.has_can_open():
+        if _rechecks(src.kind):
             pending.append(ref)
         else:
             out.add(ref)
@@ -112,7 +151,9 @@ async def allowed(
     }
     verdicts = await asyncio.gather(
         *(
-            _ask(sources[sid], ext, subjects[sid]) if readers and all(subjects[sid]) else _no()
+            _ask(sources[sid], ext, subjects[sid], seconds)
+            if readers and all(subjects[sid])
+            else _no()
             for sid, ext in asked
         )
     )

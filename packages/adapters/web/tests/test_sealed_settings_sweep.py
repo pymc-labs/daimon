@@ -177,6 +177,22 @@ EXEMPT: dict[str, str] = {
         "a person's own data, not a channel or an agent's settings"
     ),
     "POST /api/profile/delete": ("a person's own data, not a channel or an agent's settings"),
+    "POST /api/admin/data/scopes": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "DELETE /api/admin/data/scopes/{scope_id}": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "POST /api/admin/data/scopes/{scope_id}/grants": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "DELETE /api/admin/data/scopes/{scope_id}/grants": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "POST /api/admin/data/links": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "POST /api/admin/data/links/reject": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "POST /api/admin/data/links/unlink": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "PUT /api/admin/data/people/{account_id}/redacted": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "POST /api/admin/data/admins": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "DELETE /api/admin/data/admins/{account_id}": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "POST /api/admin/data/redaction/{name}/approve": "workspace level: the data store's access, links and admins, no channel and no agent",
+    "POST /api/profile/data/connect": "a person's own data, not a channel or an agent's settings",
+    "POST /api/profile/data/connect/{pending_id}/poll": "a person's own data, not a channel or an agent's settings",
+    "DELETE /api/profile/data/connections/{source_id}": "a person's own data, not a channel or an agent's settings",
+    "POST /api/integrations/data/sources": "workspace level: the data store's sources, no channel and no agent",
+    "POST /api/integrations/data/sources/{source_id}/{action}": "workspace level: the data store's sources, no channel and no agent",
     "POST /api/agents/server-skills": (
         "workspace level: no channel and no agent (the skill library)"
     ),

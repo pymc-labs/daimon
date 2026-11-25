@@ -6,18 +6,20 @@ no table, no access list, no other schema. Postgres keeps a security-definer fun
 for its whole body and refuses `SET ROLE` and `RESET ROLE` inside it, so the text cannot get
 back to the reader or the owner. The views are owned by `daimon_data_view_owner` and apply
 the same row policies as every read. A read context still wraps the call, so those policies
-know who is asking.
+know who is asking. Sources whose reads are re-checked live (`recheck`) are left out: a
+row of SQL cannot be asked of its source again.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import re
 from dataclasses import dataclass
 from typing import Any, Final
 
 import psycopg
-from daimon.data import access
+from daimon.data import access, recheck
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
 from psycopg import AsyncConnection
@@ -61,13 +63,16 @@ async def data_sql(
     sql: str,
     limit: int = LIMIT,
 ) -> SqlResult:
-    """Rows of one `select` (or `with`, `table`, `values`) over the views, as `ctx` may read."""
+    """Rows of one `select` (or `with`, `table`, `values`) over the views, as `ctx` may read,
+    without the sources that re-check reads."""
     text = sql.strip().rstrip(";").strip()
     if ";" in text:
         raise SqlRefused("one statement only")
     if not re.match(r"(select|with|table|values)\b", text, re.I):
         raise SqlRefused("queries only: start with select or with")
     await _guarded(conn, schemas)
+    hidden = await recheck.rechecked_sources(conn, schemas, ctx.tenant_ids)
+    ctx = dataclasses.replace(ctx, hidden_sources=(*ctx.hidden_sources, *hidden))
     limit = min(max(limit, 1), LIMIT)
     try:
         async with access.scoped(conn, schemas, ctx) as c:

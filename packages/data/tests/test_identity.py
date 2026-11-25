@@ -280,6 +280,15 @@ async def test_a_data_admin_links_others_with_a_notice_and_a_trail_and_never_a_p
         f"select decision from {d}.link_decisions where account_id = %s", you
     )
     assert trail == {"n": 2} and decided == {"decision": "unlinked"}
+    with pytest.raises(NotAllowed):  # an own sign-in does not undo the admin's unlink
+        await identity.link(
+            people.conn,
+            people.schemas,
+            tenant_id=people.tenant,
+            account_id=you,
+            proof=Proof(key, "oauth"),
+        )
+    assert not await people.reads(you, await people.record_for(key.ref())), "it stays unlinked"
     await identity.mirror_platform(
         people.conn,
         people.schemas,

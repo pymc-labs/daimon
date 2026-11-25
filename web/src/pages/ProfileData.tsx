@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { CircleAlert, CircleCheck, ExternalLink } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
+import { BrandIcon } from "@/components/brand"
 import { Ago } from "@/components/common"
 import { QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
@@ -38,9 +39,9 @@ export function ProfileData() {
             <>
               {d.accounts.map((a) => (
                 <Row key={`${a.provider}|${a.workspace}|${a.name}`}>
-                  <CircleCheck className="size-3.5 text-success" aria-label="Linked" />
-                  <span className="min-w-0 flex-1 truncate">{a.name}</span>
-                  <span className="text-muted-foreground max-sm:hidden">{a.provider}</span>
+                  <BrandIcon brand={a.provider} />
+                  <span className="min-w-0 flex-1 truncate">{a.provider[0]!.toUpperCase() + a.provider.slice(1)}<span className="text-muted-foreground"> {a.name}</span></span>
+                  {a.linked_at && <span className="text-xs text-muted-foreground max-sm:hidden">Linked <Ago iso={a.linked_at} /></span>}
                 </Row>
               ))}
               {d.connections.map((c) => (

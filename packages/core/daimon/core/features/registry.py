@@ -1339,7 +1339,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent", "channel"),
         binds="session_mutable",
         doc=(
-            "The agent can search the workspace's data sources, showing only what everyone "
+            "The agent can search the team's data sources, showing only what everyone "
             "who will see the answer may read. It then starts fresh for each message in a "
             "channel, keeps no memory, and other agents cannot ask it. Not in rooms people "
             "outside the team can read."

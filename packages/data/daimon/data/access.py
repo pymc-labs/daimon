@@ -43,6 +43,7 @@ class ReadContext:
     every reader holds its list. `personal_ok`: false hides one person's private records
     (an agent reading for others). `limits`: the list ids the caller may reach at most
     (None: no limit). `salt`: what else tells this caller apart (an agent, a key).
+    `hidden_sources`: sources this read never sees (caller SQL over re-checked sources).
     """
 
     tenant_ids: tuple[uuid.UUID, ...]
@@ -51,6 +52,7 @@ class ReadContext:
     personal_ok: bool = True
     limits: tuple[int, ...] | None = None
     salt: str = ""
+    hidden_sources: tuple[uuid.UUID, ...] = ()
 
 
 def _arguments(ctx: ReadContext) -> dict[str, object]:
@@ -61,6 +63,7 @@ def _arguments(ctx: ReadContext) -> dict[str, object]:
         "personal": ctx.personal_ok,
         "limits": list(ctx.limits) if ctx.limits is not None else None,
         "salt": f"{ctx.salt}|{POLICY}",
+        "hidden": sorted(set(ctx.hidden_sources)),
     }
 
 
@@ -90,15 +93,17 @@ async def scoped(
     async with conn.transaction():
         await conn.execute(
             f"insert into {schemas.data}.read_contexts"
-            " (pid, xact, tenant_ids, scopes, readers, personal_ok, limits, salt, key)"
-            " select pg_backend_pid(), pg_current_xact_id(), %(tenants)s::uuid[],"
+            " (pid, xact, tenant_ids, scopes, readers, personal_ok, limits, salt, hidden_sources,"
+            " key) select pg_backend_pid(), pg_current_xact_id(), %(tenants)s::uuid[],"
             " %(scopes)s::text[], %(readers)s::jsonb, %(personal)s, %(limits)s::int[], %(salt)s,"
+            " %(hidden)s::uuid[],"
             f" {schemas.data}.audience_key_for(%(readers)s::jsonb, %(personal)s, %(limits)s::int[],"
             " %(salt)s, %(tenants)s::uuid[])"
             " on conflict (pid) do update set xact = excluded.xact,"
             " tenant_ids = excluded.tenant_ids, scopes = excluded.scopes,"
             " readers = excluded.readers, personal_ok = excluded.personal_ok,"
-            " limits = excluded.limits, salt = excluded.salt, key = excluded.key".encode(),
+            " limits = excluded.limits, salt = excluded.salt,"
+            " hidden_sources = excluded.hidden_sources, key = excluded.key".encode(),
             _arguments(ctx),
         )
         await conn.execute(f"select {schemas.data}.fill_audience()".encode())

@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 import httpx
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.branded_pages import branded_page
+from daimon.adapters.mcp.data_access import link_github
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.github_request_delivery import deliver_private_request_card
 from daimon.adapters.mcp.web_icons import icon
@@ -502,6 +503,10 @@ def build_personal_link_routes(
         except ValueError:
             _log.exception("Personal GitHub link failed")
             return _page("GitHub didn't answer. Try again in a minute.", status=502)
+        await link_github(
+            settings, sessionmaker, tenant_id=intent.tenant_id, platform=intent.platform,
+            account_id=intent.account_id, github_user_id=github_user_id,
+        )  # fmt: skip
         pending, resumed_ids = await _resume_linked_requests(
             sessionmaker,
             settings=settings,
