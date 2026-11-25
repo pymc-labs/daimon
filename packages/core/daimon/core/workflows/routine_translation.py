@@ -130,7 +130,8 @@ class Delivery:
 @dataclass(frozen=True)
 class WorkflowSnapshot:
     """A converted workflow: its row, live spec and publisher, schedule cursor, pending result
-    and notice posts (oldest first), workflow-tier feature keys, intake config and runs."""
+    and notice posts (oldest first), workflow-tier feature keys, intake config, runs and how
+    the last ended."""
 
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -149,6 +150,9 @@ class WorkflowSnapshot:
     features: tuple[str, ...] = ()
     intake: dict[str, Any] | None = None
     active_runs: bool = False
+    #: How its last ended live run ended and why it failed; None before its first.
+    last_status: str | None = None
+    last_error: str | None = None
 
 
 def ids(routine_id: uuid.UUID) -> dict[str, uuid.UUID]:
@@ -430,6 +434,9 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
     to = node.get("to")
     made_in = snap.made_in or {}
     source = cf.get("source_routine_id")
+    error = cf.get("error")  # the failure streak: its last run's since the move, if any
+    if snap.last_status is not None:
+        error = None if snap.last_status == "succeeded" else snap.last_error or "The run failed."
     values: dict[str, Any] = {
         "id": routine_id,
         "tenant_id": snap.tenant_id,
@@ -448,7 +455,7 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
         "last_fired_at": _at(cf.get("fired_at")),
         "last_fired_slot": snap.last_fired_slot,
         "last_finished_at": _at(cf.get("finished_at")),
-        "last_error": cf.get("error"),
+        "last_error": error,
         "last_result_tail": cf.get("tail"),
         "destination_kind": None if to is None else to["kind"],
         "destination_id": None if to is None else to.get("id", cf.get("owner")),

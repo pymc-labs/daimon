@@ -205,6 +205,7 @@ async def to_routine(env: Env, workflow_id: uuid.UUID) -> uuid.UUID:
             workflow_id=workflow.id,
         )
         posts = await deliveries_store.unsent_routine_posts(session, workflow.id)
+        last = await runs_store.last_ended(session, workflow_id=workflow.id)
         snap = WorkflowSnapshot(
             id=workflow.id,
             tenant_id=tenant_id,
@@ -225,6 +226,8 @@ async def to_routine(env: Env, workflow_id: uuid.UUID) -> uuid.UUID:
                 session, tenant_id, key="workflow_id", holder=workflow.id
             ),
             active_runs=bool(await runs_store.count_active_runs(session, workflow_id=workflow.id)),
+            last_status=last.status if last else None,
+            last_error=last.failure_message if last else None,
         )
         move = untranslate(snap, now=env.now)
         if isinstance(move, Refusal):

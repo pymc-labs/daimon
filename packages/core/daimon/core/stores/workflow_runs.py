@@ -27,7 +27,7 @@ from daimon.core._models import (
 )
 from daimon.core.workflows.engine import ErrorClass, StepStatus
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy import and_, delete, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -961,21 +961,30 @@ async def orphaned_children(session: AsyncSession, *, limit: int) -> list[uuid.U
     return list(rows)
 
 
-async def previous_end(
-    session: AsyncSession, *, workflow_id: uuid.UUID, before: uuid.UUID
-) -> str | None:
-    """How the workflow's last other ended live run ended (cancelled runs left out)."""
-    return await session.scalar(
-        select(WorkflowRun.status)
+async def last_ended(
+    session: AsyncSession, *, workflow_id: uuid.UUID, before: uuid.UUID | None = None
+) -> RunRow | None:
+    """The workflow's last ended live run other than `before` (cancelled runs left out)."""
+    orm = await session.scalar(
+        select(WorkflowRun)
         .where(
             WorkflowRun.workflow_id == workflow_id,
-            WorkflowRun.id != before,
+            WorkflowRun.id != before if before is not None else true(),
             WorkflowRun.mode == "live",
             WorkflowRun.status.in_(("succeeded", "failed", "timed_out")),
         )
         .order_by(WorkflowRun.ended_at.desc().nulls_last(), WorkflowRun.number.desc())
         .limit(1)
     )
+    return None if orm is None else RunRow.model_validate(orm)
+
+
+async def previous_end(
+    session: AsyncSession, *, workflow_id: uuid.UUID, before: uuid.UUID
+) -> str | None:
+    """How the workflow's last other ended live run ended (cancelled runs left out)."""
+    run = await last_ended(session, workflow_id=workflow_id, before=before)
+    return None if run is None else run.status
 
 
 async def last_succeeded(session: AsyncSession, *, workflow_id: uuid.UUID) -> RunRow | None:

@@ -244,6 +244,21 @@ def test_untranslate_refuses_what_a_routine_cannot_be() -> None:
         assert untranslate(snap, now=NOW) == Refusal(reason)  # pyright: ignore[reportArgumentType]
 
 
+@pytest.mark.parametrize(
+    ("ran", "error"),
+    [({}, "boom"), ({"last_status": "succeeded"}, None), ({"last_status": "failed"}, "late")],
+    ids=["no_run", "succeeded", "failed"],
+)
+def test_moving_back_takes_the_failure_streak_from_the_workflows_runs(
+    ran: dict[str, Any], error: str | None
+) -> None:
+    move = translate(replace(BASE, last_error="boom"), now=NOW)
+    assert isinstance(move, Move)
+    back = untranslate(_back(move, last_error="late", **ran), now=NOW)
+    assert isinstance(back, Move)
+    assert _values(back, "routines")["last_error"] == error, "the last run's error, or none"
+
+
 async def _env(db: AsyncSession) -> Env:
     tenant = await make_tenant(db)
     account = await make_account(db, tenant=tenant)
