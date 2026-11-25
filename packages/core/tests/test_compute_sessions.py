@@ -1606,8 +1606,10 @@ async def test_a_wake_turn_continues_on_its_machine_only_with_the_setting_on(
                 await act
         assert len(fake.calls) == calls and fake.deleted == []
         return
-    background, inline, written, stopped = [await act for act in acts]
-    assert background.task.state == "running" and background.task.started_by_wake == woken.origin.id
+    background, inline, written = [await act for act in acts[:3]]
+    assert background.task.state == "running"
+    assert await _wake_list(sm, owner, session) == [woken.origin.id.hex], "on the list once"
+    stopped = await acts[3]
     assert inline.ended_here and inline.task.state == "succeeded"
     assert written == fake.result
     assert stopped.state == "deleted" and fake.deleted == [session.id]
@@ -1660,36 +1662,58 @@ async def test_only_the_wake_turn_of_this_machine_acts_and_never_on_another(db_e
     assert stranger_account.id != account.id
 
 
-async def test_wake_turns_in_a_row_stop_at_the_limit_until_the_owner_writes(db_engine, db_clean):
+async def _wake_list(sm, owner, session):
+    async with sm.begin() as db:
+        row = await session_store.get(db, owner.tenant_id, session.id)
+    assert row is not None
+    return row.wake_turns
+
+
+async def test_the_wake_turns_on_a_machine_stop_at_the_limit_until_the_owner_acts(
+    db_engine, db_clean
+):
+    """Kept on the locked session row, so no clock decides it: every task here starts at
+    the same instant."""
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     owner, tenant, account = await caller(sm)
     fake = FakeComputeProvider()
-    now = NOW
-    service = ComputeSessions(sm, settings(wake_run_limit=2), fake, clock=lambda: now)
+    service = ComputeSessions(
+        sm, settings(wake_run_limit=2, per_session_tasks=16), fake, clock=lambda: NOW
+    )
     session = await launch(service, owner)
     await _wake_runs(sm, tenant.id)
-
-    async def ends(task):
-        nonlocal now
-        now += timedelta(seconds=1)
+    started = [(await _next(service, owner, session, f"owner-{n}")).task for n in range(3)]
+    for task in started:
         fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
-        await service.poll_tasks()
-        [told] = await wakes_for(sm, owner)
-        woken, _ = await _wake_turn(sm, tenant, account, wake_key(task.id), now=now)
-        return woken, told
+    await service.poll_tasks()
+    assert all(_RUNS in wake.requested_work for wake in await wakes_for(sm, owner))
+    first, second, third = [
+        (await _wake_turn(sm, tenant, account, wake_key(task.id)))[0] for task in started
+    ]
 
-    task = (await _next(service, owner, session, "owner")).task
-    first, told = await ends(task)
-    assert _RUNS in told.requested_work
-    second, told = await ends((await _next(service, first, session, "first")).task)
-    assert _RUNS in told.requested_work
-    task = (await _next(service, second, session, "second")).task
-    # The turn that reached the limit may still run more.
-    assert (await _next(service, second, session, "second-again")).task.state == "running"
-    third, told = await ends(task)
-    assert _RUNS not in told.requested_work and "You can read" in told.requested_work
+    # A wake turn that only reads is not on the list; one that acts joins it once.
+    await service.task_result(first, started[0].id)
+    assert await _wake_list(sm, owner, session) == []
+    more = [(await _next(service, first, session, f"first-{n}")).task for n in range(2)]
+    await service.call(first, session.id, tool="write_file", arguments={"path": "/x"})
+    assert await _wake_list(sm, owner, session) == [first.origin.id.hex]
+
+    # Two turns want the last place: the first gets it, the next gets the limit words.
+    more.append((await _next(service, second, session, "second")).task)
     with pytest.raises(StoreError, match="This machine ran 2 times with nobody here"):
         await _next(service, third, session, "third")
-    now += timedelta(seconds=1)
-    await _next(service, owner, session, "owner-again")
+    assert (await _next(service, second, session, "second-again")).task.state == "running"
+    assert {task.created_at for task in [*started, *more]} == {NOW}
+    # A full list: the next command's wake only reads.
+    fake.tasks[more[0].id.hex].status, fake.tasks[more[0].id.hex].exit_code = "exit", 0
+    await service.poll_tasks()
+    [told] = await wakes_for(sm, owner)
+    assert _RUNS not in told.requested_work and "You can read" in told.requested_work
+
+    # The owner writing a file, or running a command, empties it.
+    await service.call(owner, session.id, tool="write_file", arguments={"path": "/y"})
+    assert await _wake_list(sm, owner, session) == []
     assert (await _next(service, third, session, "third-after")).task.state == "running"
+    assert await _wake_list(sm, owner, session) == [third.origin.id.hex]
+    await _next(service, owner, session, "owner-again")
+    assert await _wake_list(sm, owner, session) == []

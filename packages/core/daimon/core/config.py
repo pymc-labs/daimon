@@ -2998,8 +2998,9 @@ class ComputeSettings(BaseModel):
         ge=1,
         le=200,
         description=(
-            "How many wake turns in a row may run commands on one session before a person "
-            "must write again."
+            "How many wake turns in a row may act on one session. The count starts again "
+            "when the owner runs a command or writes a file on it; a chat message alone "
+            "does not."
         ),
     )
     profiles: dict[str, ComputeProfile] = Field(

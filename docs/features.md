@@ -1321,7 +1321,7 @@ Ask shows a card before a cloud computer is started or its time is extended. Ski
 
 ## Cloud computers continue after a job
 
-When a background command ends and nobody is in the conversation, the agent may run the next command on that cloud computer. Off: it only reads the result and reports. Only a server admin can change it.
+When a background command ends and nobody is in the conversation, the agent may run the next command on that cloud computer. After a set number in a row it waits until the owner runs a command or writes a file there; a message alone does not count. Off: it only reads the result and reports. Only a server admin can change it.
 
 | | |
 | --- | --- |

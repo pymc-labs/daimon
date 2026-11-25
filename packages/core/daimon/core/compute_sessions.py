@@ -122,8 +122,9 @@ async def turn_may_act(
 
     The owner is present; or the turn is the completion wake of one of the session's
     own commands in a thread, `compute_wake_runs` is on at the session's place, and
-    fewer than `limit` wake turns ran commands since the owner's last command. A wake
-    turn that already ran one may run more. `"limit"` says the count stopped it.
+    fewer than `limit` wake turns acted since the owner last ran a command or wrote a
+    file (`ComputeSession.wake_turns`, read from the locked row). A wake turn already on
+    that list may act again. `"limit"` says the list stopped it.
     """
     if owner_present(origin):
         return True
@@ -133,8 +134,30 @@ async def turn_may_act(
         return False
     if not await task_store.wake_runs_on(db, session):
         return False
-    runs = await task_store.wake_runs_since_owner(db, session)
-    return True if origin.id in runs or len(runs) < limit else "limit"
+    turns = session.wake_turns
+    return True if origin.id.hex in turns or len(turns) < limit else "limit"
+
+
+async def note_act(
+    db: AsyncSession, caller_account_id: uuid.UUID, origin: TurnOriginRow, session: ComputeSession
+) -> ComputeSession:
+    """Record an act on `session`, in the transaction that holds its lock: the one rule
+    for every act path (a command, inline or background, a file write and a stop).
+
+    The owner acting here empties the list; a wake turn `turn_may_act` let through joins
+    it once. A chat message alone changes nothing, and neither does a read.
+    """
+    if owner_present(origin) and caller_account_id == session.owner_account_id:
+        turns: list[str] = []
+    elif owner_present(origin) or origin.id.hex in session.wake_turns:
+        return session
+    else:
+        turns = [*session.wake_turns, origin.id.hex]
+    if turns == session.wake_turns:
+        return session
+    noted = session.model_copy(update={"wake_turns": turns})
+    await store.save(db, noted)
+    return noted
 
 
 @dataclass(frozen=True)
@@ -249,8 +272,8 @@ class ComputeSessions:
             allowed = await turn_may_act(db, origin, session, now=self.clock(), limit=limit)
             if allowed == "limit":
                 raise StoreError(
-                    f"This machine ran {limit} times with nobody here. "
-                    "Tell the owner what happened and wait for them."
+                    f"This machine ran {limit} times with nobody here. Tell the owner what "
+                    "happened. It continues after the owner runs a command on it."
                 )
             if not allowed:
                 raise StoreError("The machine owner must be here in an active conversation.")
@@ -430,6 +453,7 @@ class ComputeSessions:
     async def stop(self, caller: ComputeCaller, session_id: uuid.UUID) -> ComputeSession:
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id, stop=True, act=True)
+            session = await note_act(db, caller.account_id, caller.origin, session)
             if session.state != "deleted":
                 session = session.model_copy(update={"state": "stopping"})
                 await store.save(db, session)
@@ -504,6 +528,8 @@ class ComputeSessions:
         await self._started(caller, session_id, read=read, act=not read)
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id, read=read, act=not read)
+            if not read:
+                session = await note_act(db, caller.account_id, caller.origin, session)
             if session.state != "running" or session.expires_at <= self.clock():
                 raise StoreError("The session is expired or stopping. Launch a new session.")
             result = await self.provider.call(
@@ -648,6 +674,7 @@ class ComputeSessions:
         await self._started(caller, session_id, act=True)
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id, act=True)
+            session = await note_act(db, caller.account_id, caller.origin, session)
             now = self.clock()
             if session.state != "running" or session.expires_at <= now:
                 raise StoreError("The session is expired or stopping. Launch a new session.")
@@ -668,7 +695,6 @@ class ComputeSessions:
                     output_path=scripts.output_path(task_id),
                     created_at=now,
                     wait_until=None if wait_seconds is None else now + timedelta(seconds=held),
-                    started_by_wake=None if owner_present(caller.origin) else caller.origin.id,
                 ),
                 cap=self.settings.per_session_tasks + extra_cap,
             )

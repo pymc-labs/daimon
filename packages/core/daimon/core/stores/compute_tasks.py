@@ -118,7 +118,7 @@ async def finish(
     task can be started from. ``wake`` is false when the owner observed the end
     themselves in that conversation, so they are not told twice. Its text offers the
     next command only when the wake turn may run one: fewer than ``run_limit`` wake
-    turns ran commands since the owner's last (`turn_may_act`).
+    turns acted since the owner last did (`ComputeSession.wake_turns`, `turn_may_act`).
     """
     if state in ACTIVE_TASK_STATES:
         raise ValueError("Finish requires a terminal state")
@@ -138,11 +138,8 @@ async def finish(
     from daimon.core.stores.task_continuations import record_continuation
 
     reads = wake_reads_in(session)
-    runs = (
-        reads
-        and await wake_runs_on(db, session)
-        and len(await wake_runs_since_owner(db, session)) < run_limit
-    )
+    # A new wake turn is not on the list yet: it may run while the list has room.
+    runs = reads and len(session.wake_turns) < run_limit and await wake_runs_on(db, session)
     await record_continuation(
         db,
         tenant_id=session.tenant_id,
@@ -233,28 +230,3 @@ async def wake_runs_on(db: AsyncSession, session: ComputeSession) -> bool:
     )
     found = await feature_in_or_none(db, None, place, "compute_wake_runs")
     return found is not None and found.on
-
-
-async def wake_runs_since_owner(db: AsyncSession, session: ComputeSession) -> set[uuid.UUID]:
-    """The wake turns that started commands on this session since the owner's last one.
-
-    All of them when the owner started none (`ComputeTask.started_by_wake`).
-    """
-    await scope(db, session.tenant_id)
-    own = (
-        ComputeTaskRecord.tenant_id == session.tenant_id,
-        ComputeTaskRecord.session_id == session.id,
-    )
-    since = await db.scalar(
-        select(func.max(ComputeTaskRecord.created_at)).where(
-            *own, ComputeTaskRecord.started_by_wake.is_(None)
-        )
-    )
-    query = (
-        select(ComputeTaskRecord.started_by_wake)
-        .distinct()
-        .where(*own, ComputeTaskRecord.started_by_wake.is_not(None))
-    )
-    if since is not None:
-        query = query.where(ComputeTaskRecord.created_at > since)
-    return {wake for wake in await db.scalars(query) if wake is not None}

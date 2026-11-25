@@ -249,7 +249,7 @@ AFTER_MERGE_COLUMNS = {
     ("routines", "delivery_hold"),
     ("routines", "owner_notice"),
     ("compute_tasks", "wait_until"),
-    ("compute_tasks", "started_by_wake"),
+    ("compute_sessions", "wake_turns"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 

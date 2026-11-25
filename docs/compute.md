@@ -97,9 +97,10 @@ For that message Daimon cannot run commands or change the machine until the
 owner writes again. A server admin can turn on [Cloud computers continue after
 a job](features.md#cloud-computers-continue-after-a-job). Then, in a thread, it
 may run the next command, write files and stop that machine. It never starts
-or extends a machine, and it waits for the owner after
+or extends a machine. After
 [`DAIMON_COMPUTE__WAKE_RUN_LIMIT`](configuration.md#daimon_compute__wake_run_limit)
-such messages in a row.
+such messages in a row it waits until the owner runs a command or writes a file
+on that machine; a chat message alone does not reset it.
 
 Google can restart a machine at any time. A restart clears its files and ends
 running commands. Each is reported as stopped, with the last output Daimon
