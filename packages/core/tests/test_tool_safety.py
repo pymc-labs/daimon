@@ -1088,19 +1088,37 @@ def _skippable(tool: str) -> ToolCall:
     )
 
 
-def _decided(tool: str, confirmed: frozenset[str], *, attended: bool = True) -> str:
+def _decided(
+    tool: str,
+    confirmed: frozenset[str],
+    *,
+    attended: bool = True,
+    policy: ToolSafetyPolicy = _ON,
+    rule: ResolvedAgentToolRule | None = None,
+) -> str:
     return decide_tool_call(
-        _ON,
+        policy,
         _skippable(tool),
         attended=attended,
         trusted_servers=frozenset({DAIMON_SERVER_NAME}),
         confirmed_tools=confirmed,
+        agent_rule=rule,
     ).outcome
 
 
-def _asks_in_session(tool: str, confirmed: frozenset[str]) -> bool:
+def _asks_in_session(
+    tool: str,
+    confirmed: frozenset[str],
+    *,
+    policy: ToolSafetyPolicy = _ON,
+    rule_tools: frozenset[str] = frozenset(),
+) -> bool:
     out = session_tools_for_policy(
-        _ON, _tools(), trusted_servers=frozenset({DAIMON_SERVER_NAME}), confirmed_tools=confirmed
+        policy,
+        _tools(),
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=confirmed,
+        daimon_rule_tools=rule_tools,
     )
     return has_confirmation_gate(out or _tools(), tool_name=tool)
 
@@ -1141,3 +1159,29 @@ def test_an_unattended_turn_is_refused_a_skipped_tool(tool: str) -> None:
     skipped = _turn_set() - _SKIP_GROUPS[tool]
     assert _decided(tool, skipped | protected_tools(_ON), attended=False) == "deny"
     assert _decided(tool, skipped, attended=False) == "deny", "even without protected_tools"
+
+
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_an_operator_deny_wins_over_a_skipped_card(tool: str) -> None:
+    """The skip only drops the card: a tool the operator denies stays denied, and the
+    session still holds it so the call reaches the decider."""
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    denied = ToolSafetyPolicy(enabled=True, denied=(f"{DAIMON_SERVER_NAME}/{tool}",))
+    assert _decided(tool, skipped, policy=denied) == "deny"
+    assert _asks_in_session(tool, skipped, policy=denied)
+    assert _decided(tool, skipped) == "allow", "with no deny the skip holds"
+
+
+@pytest.mark.parametrize(
+    ("rule", "outcome"), [("deny", "deny"), ("ask", "ask"), ("allow", "allow")]
+)
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_an_agent_rule_that_denies_or_asks_wins_over_a_skipped_card(
+    tool: str, rule: str, outcome: str
+) -> None:
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    rules = ToolSafetyPolicy(enabled=True, agent_rules=True)
+    found = ResolvedAgentToolRule(rule=rule)  # type: ignore[arg-type]
+    assert _decided(tool, skipped, policy=rules, rule=found) == outcome
+    if rule != "allow":
+        assert _asks_in_session(tool, skipped, policy=rules, rule_tools=frozenset({tool}))

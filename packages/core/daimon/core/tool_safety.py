@@ -135,6 +135,9 @@ VerdictReason = Literal[
     "agent_rule_allow",
     "agent_rule_ask",
     "agent_rule_deny",
+    #: A confirmed write whose card an admin's approval setting skips, in an attended
+    #: turn, after every deny and ask rule had its say (`approval_skipped_tools`).
+    "approval_skipped",
 ]
 
 
@@ -349,12 +352,18 @@ def approval_skipped_tools(confirmed_tools: frozenset[str]) -> frozenset[str]:
     return APPROVAL_SKIPPABLE_TOOLS - confirmed_tools
 
 
-def _policy_confirmed_tools(confirmed_tools: frozenset[str], *, skips: bool) -> frozenset[str]:
-    """The confirmed tools that ask with the policy on: all but the ones a setting skips.
-
-    ``skips`` is false for an unattended turn: nobody could see the card it would skip.
-    """
-    skipped = approval_skipped_tools(confirmed_tools) if skips else frozenset[str]()
+def _session_confirmed_tools(
+    policy: ToolSafetyPolicy, confirmed_tools: frozenset[str], trusted_servers: frozenset[str]
+) -> frozenset[str]:
+    """The confirmed tools a session asks on with the policy on: all but the ones a
+    setting skips. A skipped tool the operator denies still asks, so its call reaches
+    the decider and is refused there (`_decide_tool_call`)."""
+    servers = trusted_servers | {DAIMON_SERVER_NAME}
+    skipped = {
+        tool
+        for tool in approval_skipped_tools(confirmed_tools)
+        if not any(_listed(policy.denied, server_name=s, tool_name=tool) for s in servers)
+    }
     return _always_confirmed_tools() - skipped
 
 
@@ -803,12 +812,10 @@ def _confirmed_daimon_write(
     *,
     trusted_servers: frozenset[str],
     confirmed_tools: frozenset[str] = frozenset(),
-    skips: bool = False,
 ) -> bool:
     field = (
         CONFIRMED_DAIMON_TOOLS.get(call.tool_name)
-        if call.tool_name in _policy_confirmed_tools(confirmed_tools, skips=skips)
-        or call.tool_name in confirmed_tools
+        if call.tool_name in _always_confirmed_tools() or call.tool_name in confirmed_tools
         else None
     )
     # Keep the reserved-name unattended refusal even without a binding. Aliases
@@ -993,7 +1000,7 @@ def _decide_tool_call(
     trusted_rule = agent_rule if trusted and policy.enabled and policy.agent_rules else None
     if trusted_rule is not None and trusted_rule.rule == "deny":
         confirmed = _confirmed_daimon_write(
-            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
+            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
         )
         assert call.server_name is not None
         if confirmed and _listed(
@@ -1016,7 +1023,7 @@ def _decide_tool_call(
         and call.server_name in trusted_servers
         and call.tool_name in confirmed_tools
         and _confirmed_daimon_write(
-            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
+            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
         )
     ):
         return ToolVerdict(
@@ -1053,7 +1060,7 @@ def _decide_tool_call(
             policy, server_name=call.server_name, tool_name=call.tool_name, annotations=annotations
         )
     elif _confirmed_daimon_write(
-        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
+        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
     ):
         effect = "write"
     elif trusted_rule is not None and trusted_rule.rule == "ask":
@@ -1079,10 +1086,16 @@ def _decide_tool_call(
             return ToolVerdict(outcome="allow", effect=effect, reason="agent_rule_allow")
     if effect == "read":
         return ToolVerdict(outcome="allow", effect=effect, reason="read")
+    if attended and trusted and call.tool_name in approval_skipped_tools(confirmed_tools):
+        # An admin skipped this card. Last, so an operator deny and an agent rule's deny
+        # above still win; an agent rule that asks still asks.
+        if trusted_rule is not None and trusted_rule.rule == "ask":
+            return ToolVerdict(outcome="ask", effect=effect, reason="agent_rule_ask")
+        return ToolVerdict(outcome="allow", effect=effect, reason="approval_skipped")
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
     if not _confirmed_daimon_write(
-        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
+        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
     ) and (
         ANY_KEY in policy.unattended_writes
         or _listed(policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name)
@@ -1150,7 +1163,11 @@ def session_tools_for_policy(
     )
     asked = (
         # A turn's set may skip a card (`approval_skipped_tools`); no other set can.
-        *(sorted(_policy_confirmed_tools(confirmed_tools, skips=True)) if policy.enabled else ()),
+        *(
+            sorted(_session_confirmed_tools(policy, confirmed_tools, trusted_servers))
+            if policy.enabled
+            else ()
+        ),
         *sorted(confirmed_tools),
         *(sorted(PUBLISH_TOOLS) if asks_before_publishing else ()),
         *sorted(rule_asked),
