@@ -277,6 +277,13 @@ async def test_compute_skip_runs_launch_and_extend_with_no_card_for_the_default_
     skipped.gap.assert_not_awaited()
 
 
+async def test_a_launch_may_leave_the_region_out(skipped):
+    """The tool use without a region is the same call as one with the default of None."""
+    del skipped.uses["compute_launch_session"]["region"]
+    assert await skipped.call("compute_launch_session") == "launched"
+    assert skipped.service.launch.await_args.kwargs["region"] is None
+
+
 @pytest.mark.parametrize(
     ("name", "changes"),
     [

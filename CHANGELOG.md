@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A cloud computer starts from its profile name alone.** `compute_launch_session` takes
+  `region` as optional; without it the machine starts in the profile's first region
+  ([Compute sessions](docs/compute.md#turn-it-on)).
+
 - **The owner lists and stops their cloud machines from any of their conversations.**
   `compute_list_sessions` shows every live machine of theirs, and `here` marks the ones the
   current conversation can use. Commands, files and more time still work only in the

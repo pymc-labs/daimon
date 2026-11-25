@@ -191,6 +191,34 @@ async def test_the_owner_lists_and_stops_a_machine_from_another_conversation(db_
     assert await service.list(owner) == []
 
 
+async def test_a_launch_with_no_region_uses_the_profiles_first(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    two = ComputeProfile(
+        image="registry.example/mmm@sha256:abc", regions=["europe-west4", "us-central1"]
+    )
+    service = ComputeSessions(
+        sm, settings().model_copy(update={"profiles": {"mmm": two}}), fake, clock=lambda: NOW
+    )
+
+    async def start(region, key):
+        return await service.launch(
+            owner,
+            profile="mmm",
+            region=region,
+            ttl_hours=None,
+            approval_key=key,
+            source_metadata={},
+        )
+
+    with pytest.raises(StoreError, match="profile and region"):
+        await start("asia-east1", "wrong")
+    assert fake.resources == {}, "a region the profile does not list starts nothing"
+    assert (await start(None, "first")).region == "europe-west4"
+    assert (await start("us-central1", "named")).region == "us-central1"
+
+
 @pytest.mark.parametrize("attended,human", [(False, True), (True, False), (True, None)])
 async def test_unattended_and_worker_origins_cannot_launch(db_engine, db_clean, attended, human):
     sm = async_sessionmaker(db_engine, expire_on_commit=False)

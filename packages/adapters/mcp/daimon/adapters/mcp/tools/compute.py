@@ -219,7 +219,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         template: str,
         origin_context_id: str,
-        region: str,
+        region: str | None = None,
         ttl_hours: int | None = None,
     ) -> ComputeSession:
         """Launch your own temporary machine from an operator image profile.
@@ -227,7 +227,8 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Needs the owner in the conversation; a card asks first unless an admin turned the
         card off. Without the card, leave ttl_hours out: only the default time runs. List
         profiles first: each names its fixed CPU/RAM, image and the regions you may pass.
-        No shared credentials are mounted. Sessions are deleted after their idle lease;
+        Leave `region` out to use the profile's first region. No shared credentials are
+        mounted. Sessions are deleted after their idle lease;
         export files before stopping or expiry.
 
         The result's state is `running` once the machine has started. `launching` means
@@ -246,7 +247,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 "region": region,
                 "ttl_hours": ttl_hours,
             },
-            {"ttl_hours": None},
+            {"ttl_hours": None, "region": None},
             default_time=ttl_hours is None,
         )
         if not await source_metadata_readable(

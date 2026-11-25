@@ -187,7 +187,7 @@ class ComputeSessions:
         caller: ComputeCaller,
         *,
         profile: str,
-        region: str,
+        region: str | None,
         ttl_hours: int | None,
         approval_key: str,
         source_metadata: dict[str, str],
@@ -195,7 +195,11 @@ class ComputeSessions:
         if not self.settings.enabled:
             raise StoreError("Starting a machine is turned off. Ask an admin.")
         image = self.settings.profiles.get(profile)
-        if image is None or region not in image.regions:
+        if image is not None and region is None and image.regions:
+            # No region given: the profile's first. With Cloud Run set up a profile
+            # always names one (`config._cloud_run_profile_error`).
+            region = image.regions[0]
+        if image is None or region is None or region not in image.regions:
             raise StoreError("Choose an available image profile and region.")
         ttl = self.ttl(ttl_hours)
         session_id = uuid.uuid4()
