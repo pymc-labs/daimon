@@ -3284,7 +3284,7 @@
       'description': '''
         Create a recurring routine; owner DMs run as unattended live-DM turns.
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         <blank line>
         Owner-DM routines are scheduled live-DM turns, using the owner's normal
         personal/shared memory, credentials and DM tool authority in a fresh private
@@ -3809,7 +3809,7 @@
       'description': '''
         Create a workflow as a private draft owned by this person.
         <blank line>
-        Give a name for a blank one, a starter `template` id, or a whole `spec` (the
+        Pass a name for a blank one, a starter `template` id, or a whole `spec` (the
         daimon.workflow/v1 document). The result is the new workflow as get_workflow shows it.
       ''',
       'parameters': dict({
@@ -3999,7 +3999,7 @@
       'description': '''
         Delete a routine (hard delete, tenant-scoped).
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4240,7 +4240,7 @@
       'description': '''
         Change a workflow's draft from the revision you read; nothing goes live.
         <blank line>
-        Give `edits` (add_node, update_node, remove_node, connect, set_trigger, set_inputs,
+        Pass `edits` (add_node, update_node, remove_node, connect, set_trigger, set_inputs,
         set_start), applied in order, or a whole `spec`. A draft may have problems; they come
         back for you to fix. If the draft moved on, you are told its revision: read it again.
       ''',
@@ -5267,7 +5267,7 @@
         Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
         are not an admin.
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6884,7 +6884,7 @@
       'description': '''
         List the routines you created (an admin sees every routine in the workspace).
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8804,7 +8804,7 @@
       'description': '''
         Tell the admins this routine run could not do its task, and why.
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         <blank line>
         Only inside a routine run, once, when something kept you from the task. `note` is
         one short line on what blocked you (at most 300 characters), with no private
@@ -9728,7 +9728,7 @@
       'description': '''
         Run a routine now, ahead of its schedule; its own schedule continues after.
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         <blank line>
         The routine's owner or an admin. A paused routine is refused: resume it first.
       ''',
@@ -11109,7 +11109,7 @@
         Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         <blank line>
         They are off for every unattended run by default. The supported way today is the
         operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform
@@ -13087,7 +13087,7 @@
       'description': '''
         PATCH-update a routine, including owner-only DM delivery where supported.
         <blank line>
-        Legacy: prefer the workflow tools (create_workflow, run_workflow).
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
         <blank line>
         Only provided fields are changed.
         <blank line>
