@@ -3343,6 +3343,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     auth = AuthIdentity(
@@ -3555,6 +3556,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     recheck = _admission_recheck(
@@ -3740,6 +3742,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     recheck = _admission_recheck(
@@ -4285,6 +4288,7 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     auth = AuthIdentity(
