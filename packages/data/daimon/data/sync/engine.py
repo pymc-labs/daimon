@@ -245,12 +245,16 @@ class _Run:
             for r in batch
             if known.get(r.external_id) != record_hash(r)
         }
-        counts = await acl.retry(lambda: self._batch(batch, texts, state), _noop)
+        counts = await acl.retry(lambda: self._batch(batch, texts, state), self._forget_acls)
         self.c.added += counts[0]
         self.c.updated += counts[1]
         self.c.skipped += counts[2]
         if counts[2]:
             log.warning("sync.records_skipped", source=str(self.src.id), skipped=counts[2])
+
+    async def _forget_acls(self) -> None:
+        """A rolled-back batch may have interned access lists that never committed."""
+        self._acl_ids.clear()
 
     async def _known(self, ids: list[str]) -> dict[str, str]:
         if not ids:
@@ -573,7 +577,7 @@ async def _locked(
         await conn.execute(f"delete from {d}.sync_runs where id = %s".encode(), (run_id,))
         return RunResult(None, "skipped", error="database busy")
     except Exception as e:  # a failed sync is recorded, not raised: the next run resumes
-        status, error = "error", f"{type(e).__name__}: {e}"[:ERROR_CHARS]
+        status, error = "error", _error_text(e)
         log.warning("sync.failed", source=str(source_id), error=error)
     finally:
         if scan is not None:
@@ -587,6 +591,16 @@ async def _locked(
     if run and not result.error and env.embed and env.data is not None:
         await embed_pending(conn, env.schemas, source_id, settings=env.data, meter=env.meter)
     return result
+
+
+def _error_text(e: Exception) -> str:
+    """What a failed run records and logs. A database error keeps its code and primary message
+    only: its detail can quote row values."""
+    if isinstance(e, psycopg.Error):
+        return f"{type(e).__name__}: {e.sqlstate or ''} {e.diag.message_primary or ''}"[
+            :ERROR_CHARS
+        ]
+    return f"{type(e).__name__}: {e}"[:ERROR_CHARS]
 
 
 async def _finish(

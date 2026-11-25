@@ -313,9 +313,12 @@ async def test_search_ranks_by_text_and_vector_and_bills_ingest_and_the_asker(
         await world.put(i, title)
     env = replace(world.env, embed=True, data=EMBED, meter=ledger)
     await run_source(world.conn, env, src)
-    vectors = await world.sql(f"select count(*) as n from {world.d}.chunk_vectors")
-    chunks = await world.sql(f"select count(*) as n from {world.d}.chunks")
-    assert vectors[0]["n"] == chunks[0]["n"] > 0, "every chunk got a vector"
+    counts = await world.sql(
+        f"select count(v.chunk_id) as vectors, count(*) as chunks from {world.d}.chunks c"
+        f" left join {world.d}.chunk_vectors v on v.chunk_id = c.id where c.source_id = %s",
+        src,
+    )
+    assert counts[0]["vectors"] == counts[0]["chunks"] > 0, "every chunk got a vector"
     assert [(p, t) for p, t, _, _ in ledger.spent] == [("data_embedding", world.tenant)], (
         "ingest is billed once, to the source's tenant"
     )

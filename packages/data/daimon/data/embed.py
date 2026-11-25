@@ -17,6 +17,7 @@ from typing import Any, Final
 import httpx
 import structlog
 from daimon.core.config import DataSettings
+from daimon.data.locks import advisory_key
 from daimon.data.schema import Schemas
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -169,15 +170,27 @@ async def ensure_index(conn: AsyncConnection[DictRow], schemas: Schemas, dim: in
     is on the cast, so a query must use `cast_sql` to reach it."""
     if dim > MAX_INDEXED_DIM:
         return False
-    d = schemas.data
+    d, name = schemas.data, f"chunk_vectors_hnsw_{dim}"
+    key = advisory_key(d, f"index:{dim}")
+    got = await (await conn.execute(b"select pg_try_advisory_lock(%s) as ok", (key,))).fetchone()
+    if not (got and got["ok"]):
+        return False  # another worker builds it; an invalid index meanwhile is its build
     try:
+        cur = await conn.execute(
+            b"select indisvalid as ok from pg_index where indexrelid = to_regclass(%s)",
+            (f"{d}.{name}",),
+        )
+        if (row := await cur.fetchone()) and not row["ok"]:  # a cancelled build's leftover
+            await conn.execute(f"drop index concurrently {d}.{name}".encode())
         await conn.execute(
-            f"create index concurrently if not exists chunk_vectors_hnsw_{dim} on {d}.chunk_vectors"
+            f"create index concurrently if not exists {name} on {d}.chunk_vectors"
             f" using hnsw (({cast_sql(ns, dim, 'embedding')}) {ns}.vector_cosine_ops)".encode()
         )
     except Exception:
         log.warning("data.index_failed", dim=dim, exc_info=True)
         return False
+    finally:
+        await conn.execute(b"select pg_advisory_unlock(%s)", (key,))
     return True
 
 
