@@ -1343,6 +1343,53 @@ async def test_a_caller_that_sleeps_past_its_wait_leaves_the_end_to_the_schedule
     assert len(await wakes_for(sm, owner)) == 1, "the conversation's message does"
 
 
+async def test_a_settled_inline_command_is_returned_with_no_read_after_it(
+    db_committing_engine, db_clean, monkeypatch
+):
+    """The end was saved with no wake, so nothing after the settling poll may wait or fail."""
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, _ = _waiting(sm, fake, on_sleep=_ended(fake))
+    session = await launch(service, owner)
+    opened, settled_after, holder = [], [], []
+    held, release = asyncio.Event(), asyncio.Event()
+
+    class Counting:
+        """The service's sessionmaker, counting the transactions it opens."""
+
+        def begin(self):
+            opened.append(1)
+            return sm.begin()
+
+    async def hold_the_lock():
+        async with sm.begin() as db:
+            await session_store.get(db, owner.tenant_id, session.id, lock=True)
+            held.set()
+            await release.wait()
+
+    poll = service._poll_task
+
+    async def poll_then_lock(*args, **kwargs):
+        polled = await poll(*args, **kwargs)
+        if polled.settled:
+            # Another command's slow probe takes the session lock right after.
+            settled_after.append(len(opened))
+            holder.append(asyncio.create_task(hold_the_lock()))
+            await held.wait()
+        return polled
+
+    monkeypatch.setattr(service, "sm", Counting())
+    monkeypatch.setattr(service, "_poll_task", poll_then_lock)
+    try:
+        ran = await asyncio.wait_for(_inline(service, owner, session), 2)
+    finally:
+        release.set()
+        await asyncio.gather(*holder)
+    assert ran.ended_here and ran.task.state == "succeeded"
+    assert len(opened) == settled_after[0], "no transaction after the settling poll"
+
+
 async def test_a_probe_that_never_answers_cannot_hold_the_caller_past_its_wait(db_engine, db_clean):
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     owner, _, _ = await caller(sm)

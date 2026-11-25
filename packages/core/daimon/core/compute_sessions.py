@@ -148,6 +148,15 @@ class ComputeCaller:
 
 
 @dataclass(frozen=True)
+class Polled:
+    """One poll of a task: the task as its transaction committed it (None when it is
+    gone), and whether this poll settled it."""
+
+    task: ComputeTask | None
+    settled: bool = False
+
+
+@dataclass(frozen=True)
 class InlineRun:
     """What `ComputeSessions.run` saw. `ended_here`: this call settled the task, so its
     caller reports the end. Otherwise the conversation gets the end as a message."""
@@ -704,6 +713,10 @@ class ComputeSessions:
         as a message: the command needs longer, or another poll settled it. Who settles
         is decided under the session lock (`_poll_task`). `start_task` never settles a
         task; a retried background key can return one that ended elsewhere.
+
+        Locks: `start_task` takes the session lock before the wait starts. Each poll takes
+        it within the deadline; once a poll settles the task, nothing else runs. The
+        hand-over writes only the task row.
         """
         task = await self.start_task(
             caller,
@@ -731,23 +744,23 @@ class ComputeSessions:
         while task.state in ACTIVE_TASK_STATES and self.clock() < give_up:
             await self.sleep(min(next(polls, 2.0), (give_up - self.clock()).total_seconds()))
             try:
-                settled = await self._poll_task(
+                polled = await self._poll_task(
                     task.tenant_id, task.id, wake=False, inline=True, deadline=deadline
                 )
-                if settled:
-                    # This call settled it, with no wake: the caller must get it.
-                    async with self.sm.begin() as db:
-                        task = await self._owned_task(db, caller, task.id)
-                    return InlineRun(task, ended_here=True)
-                async with asyncio.timeout_at(deadline), self.sm.begin() as db:
-                    task = await self._owned_task(db, caller, task.id)
             except TimeoutError:
                 # Rolled back before any write: this caller settled nothing.
                 break
             except SQLAlchemyError:
-                # The scheduler takes it over after `wait_until`; report it as still running.
+                # Nothing committed. The scheduler takes it over after `wait_until`.
                 log.warning("compute.inline_poll_retry", task_id=str(task.id))
                 return InlineRun(task, ended_here=False)
+            if polled.task is None:
+                break
+            if polled.settled:
+                # Saved with no wake, so the caller gets it now: nothing may wait or fail
+                # after this, and no second read happens.
+                return InlineRun(polled.task, ended_here=True)
+            task = polled.task
         return InlineRun(await self._hand_over(task), ended_here=False)
 
     async def _hand_over(self, task: ComputeTask) -> ComputeTask:
@@ -847,8 +860,11 @@ class ComputeSessions:
         wake: bool,
         inline: bool = False,
         deadline: float | None = None,
-    ) -> bool:
-        """Probe an active task once, and settle it when it ended. True when this call did.
+    ) -> Polled:
+        """Probe an active task once, and settle it when it ended; say whether this call did.
+
+        The task it returns is the one its transaction committed, so a caller that settled
+        it needs no second read.
 
         Under the session lock, one side owns a task its caller waits for. The `inline`
         caller may settle it only while `wait_until` is more than `_INLINE_HANDOVER`
@@ -862,7 +878,7 @@ class ComputeSessions:
         async with self.sm.begin() as db:
             task = await task_store.get(db, tenant_id, task_id)
             if task is None or task.state not in ACTIVE_TASK_STATES:
-                return False
+                return Polled(task)
             # The session lock serializes with stop and deletion. The poller skips
             # a session busy with an inline call and returns next pass.
             async with asyncio.timeout_at(deadline):
@@ -870,11 +886,11 @@ class ComputeSessions:
                     db, tenant_id, task.session_id, lock=True, skip_locked=wake
                 )
             if session is None:
-                return False
+                return Polled(task)
             # Re-read under the lock: another poll may have settled it meanwhile.
             task = await task_store.get(db, tenant_id, task_id)
             if task is None or task.state not in ACTIVE_TASK_STATES:
-                return False
+                return Polled(task)
             now = self.clock()
             held = task.wait_until
             if inline:
@@ -882,7 +898,7 @@ class ComputeSessions:
             else:
                 owns = held is None or now >= held
             if not owns:
-                return False
+                return Polled(task)
             limit = self.settings.wake_run_limit
             if (
                 session.state != "running"
@@ -892,7 +908,7 @@ class ComputeSessions:
                 done = await task_store.finish(
                     db, task, session, state="cancelled", now=now, wake=wake, run_limit=limit
                 )
-                return done is not None
+                return Polled(done or task, settled=done is not None)
             token = session_token(self.settings, session.id)
             overdue = now > task.deadline_at + _DEADLINE_GRACE
             try:
@@ -906,11 +922,11 @@ class ComputeSessions:
                 probe = scripts.parse_probe(answer)
             except ComputeProviderError:
                 if not overdue:
-                    return False
+                    return Polled(task)
                 done = await task_store.finish(
                     db, task, session, state="lost", now=now, wake=wake, run_limit=limit
                 )
-                return done is not None
+                return Polled(done or task, settled=done is not None)
             if probe.status == "exit":
                 assert probe.exit_code is not None
                 state = (
@@ -962,14 +978,17 @@ class ComputeSessions:
             ):
                 await self._renew_for(db, session, task)
                 if probe.status == "running":
-                    await task_store.advance(
-                        db,
-                        task,
-                        state="running",
-                        output_bytes=probe.output_bytes,
-                        output_tail=probe.tail,
+                    task = (
+                        await task_store.advance(
+                            db,
+                            task,
+                            state="running",
+                            output_bytes=probe.output_bytes,
+                            output_tail=probe.tail,
+                        )
+                        or task
                     )
-                return False
+                return Polled(task)
             else:
                 # The process ended without an exit file (machine restart) or never
                 # started. It is reported, never run again. A probe that finds no
@@ -987,4 +1006,4 @@ class ComputeSessions:
                     output_bytes=None if kept else probe.output_bytes,
                     output_tail=None if kept else probe.tail,
                 )
-            return done is not None
+            return Polled(done or task, settled=done is not None)
