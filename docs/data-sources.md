@@ -103,6 +103,40 @@ A public channel is readable by the workspace's active members and by the guests
 private channel is readable by its active members. Direct messages and group direct messages
 are never read. Deactivated people, bots and people from other workspaces read nothing.
 
+### Google Drive
+
+A source of kind `gdrive` reads the files of a Google Workspace domain's shared drives and,
+when asked, its My Drives. It acts through a service account with domain-wide delegation:
+
+1. Create a service account and enable the Drive and Admin SDK APIs in its project.
+2. In the Workspace admin console, under domain-wide delegation, authorize the account's
+   client ID for `https://www.googleapis.com/auth/drive.readonly`,
+   `https://www.googleapis.com/auth/admin.directory.user.readonly` and
+   `https://www.googleapis.com/auth/admin.directory.group.readonly`.
+3. Give the credential the account's key file as `{"service_account_key": "<the JSON>"}`.
+   Without a key, set `service_account` in the config instead; Daimon then signs as its own
+   Google runtime identity, which needs the Token Creator role on that account.
+4. Make `admin` a super admin or a delegated admin who can read users and groups. For
+   shared drives, add that admin to each drive as a manager.
+
+```json
+{"domain": "example.com", "admin": "admin@example.com", "my_drives": "yes",
+ "exclude_folders": ["1AbC..."], "relist_hours": 24}
+```
+
+`drives` lists shared drive IDs (all when empty). `my_drives: yes` also reads the My Drive of
+every active person, or only of the emails in `users`. `include_folders` keeps only files
+under those folders; `exclude_folders` are never read, with everything below them. `max_mb`
+(20) caps the file size read.
+
+Google Docs, Slides and Sheets (first tab) are read as text, and text and Office files through
+attachment extraction; other files keep their title only. A file is readable by the people its
+sharing names: people of the domain by primary email, groups by their members (read from
+the directory by this source), and the whole domain when a share is discoverable. Link-only
+shares, outside people and expiring shares grant nothing, and a file nobody inside can read is
+not stored. Changes arrive through each scope's change feed. Everything is listed again every
+`relist_hours`, which is also how soon a new share on a folder reaches the files below it.
+
 ## People and their accounts
 
 A record a source shares with some of its users reads for a Daimon account only through a

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from daimon.data.sync.connector import register
 from daimon.data.sync.connectors.discord import DiscordConnector
+from daimon.data.sync.connectors.gdrive import GDriveConnector
 from daimon.data.sync.connectors.postgres import PostgresConnector
 from daimon.data.sync.connectors.slack import SlackConnector
 
 register(PostgresConnector())
 register(DiscordConnector())
 register(SlackConnector())
+register(GDriveConnector())
