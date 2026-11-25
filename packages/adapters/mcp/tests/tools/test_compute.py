@@ -176,6 +176,130 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
             )
 
 
+@pytest.fixture
+async def skipped(monkeypatch):
+    """Launch and extend as registered, with `compute_approval` skip and no card on record.
+
+    The service is a fake, so what reaches it is what the tool let through."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def db():
+        yield None
+
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", chat_session_id="chat"
+    )
+    origin = SimpleNamespace(
+        platform="discord",
+        thread_id="thread",
+        responder_ma_agent_id="agent",
+        parent_channel_id="parent",
+    )
+    caller = SimpleNamespace(origin=origin)
+    monkeypatch.setattr(compute, "_caller", AsyncMock(return_value=(auth, caller)))
+    monkeypatch.setattr(compute, "compute_card_skipped", AsyncMock(return_value=True))
+    gap = AsyncMock(return_value="session_not_gated")
+    monkeypatch.setattr(compute._session_gate, "session_card_gap", gap)
+    monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        compute,
+        "get_live_thread_session",
+        AsyncMock(return_value=SimpleNamespace(ma_session_id="parent-session")),
+    )
+    monkeypatch.setattr(
+        compute,
+        "retrieve_session",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="parent-session", agent=SimpleNamespace(id="agent"), metadata={}
+            )
+        ),
+    )
+    session_id = uuid.uuid4()
+    uses = {
+        "compute_launch_session": {
+            "template": "mmm",
+            "origin_context_id": "origin",
+            "region": "us-central1",
+        },
+        "compute_extend_session": {
+            "session_id": str(session_id),
+            "hours": 24,
+            "origin_context_id": "origin",
+        },
+    }
+    # The model's tool uses, and no `user.tool_confirmation`: nobody saw a card.
+    events = [
+        SimpleNamespace(
+            type="agent.mcp_tool_use",
+            name=name,
+            mcp_server_name=compute.DAIMON_SERVER_NAME,
+            input=arguments,
+            id=name,
+        )
+        for name, arguments in uses.items()
+    ]
+    monkeypatch.setattr(
+        compute, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+    )
+    service = SimpleNamespace(
+        launch=AsyncMock(return_value="launched"),
+        extend=AsyncMock(return_value="extended"),
+        get=AsyncMock(return_value=SimpleNamespace(source_metadata={})),
+    )
+    monkeypatch.setattr(compute, "ComputeSessions", lambda *a, **k: service)
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=db,
+        client=None,
+        settings=SimpleNamespace(compute=ComputeSettings()),
+        compute_provider=object(),
+    )
+    compute.register_compute_tools(mcp, runtime)
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    async def call(name, **changes):
+        return await tools[name].fn(ctx=None, **{**uses[name], **changes})
+
+    return SimpleNamespace(call=call, uses=uses, service=service, gap=gap)
+
+
+async def test_compute_skip_runs_launch_and_extend_with_no_card_for_the_default_time(skipped):
+    assert await skipped.call("compute_launch_session") == "launched"
+    assert skipped.service.launch.await_args.kwargs["approval_key"] == (
+        "parent-session:compute_launch_session"
+    ), "the key is still the exact tool use in the owner's conversation"
+    assert await skipped.call("compute_extend_session") == "extended"
+    assert skipped.service.extend.await_args.kwargs["approval_key"] == (
+        "parent-session:compute_extend_session"
+    )
+    skipped.gap.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("name", "changes"),
+    [
+        ("compute_launch_session", {"ttl_hours": 48}),
+        # The default time is 24 hours (`ComputeSettings.default_idle_ttl_hours`).
+        ("compute_extend_session", {"hours": 25}),
+    ],
+)
+async def test_compute_skip_refuses_more_than_the_default_time(skipped, name, changes):
+    skipped.uses[name].update(changes)  # the model asked for this exact call
+    with pytest.raises(ToolError, match="A longer time needs the approval card"):
+        await skipped.call(name)
+    assert skipped.service.launch.await_count == skipped.service.extend.await_count == 0
+
+
+@pytest.mark.parametrize("name", ["compute_launch_session", "compute_extend_session"])
+async def test_compute_skip_still_needs_the_exact_tool_use_in_the_conversation(skipped, name):
+    other = {"template": "other"} if name == "compute_launch_session" else {"hours": 2}
+    with pytest.raises(ToolError, match="from the owner's conversation"):
+        await skipped.call(name, **other)
+    assert skipped.service.launch.await_count == skipped.service.extend.await_count == 0
+
+
 @pytest.mark.parametrize(
     "mode", ["same", "proxied", "proxied_other_tool", "changed", "foreign_tool", "none"]
 )

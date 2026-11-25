@@ -118,6 +118,7 @@ Where each feature can be set, and its default.
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |  |
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
 | Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
+| Approval for cloud computers | `compute_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
@@ -1295,11 +1296,23 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and machine launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs and key rotation keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |
 | Key | `watch_approval` |
+| Values | `skip` (Skip the card), `ask` (Ask) |
+| Default | `ask` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Approval for cloud computers
+
+Ask shows a card before a cloud computer is started or its time is extended. Skip starts it without the card, for the default time. Only a server admin can change it.
+
+| | |
+| --- | --- |
+| Key | `compute_approval` |
 | Values | `skip` (Skip the card), `ask` (Ask) |
 | Default | `ask` |
 | Levels | Workspace, Agent |

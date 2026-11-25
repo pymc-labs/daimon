@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A server admin can turn off the approval card for starting and extending a cloud
+  computer.** The `compute_approval` setting, for the team or for one agent, defaults to Ask,
+  which keeps the card. With Skip, a launch or an extend runs without the card, but only for
+  the default lifetime: a longer one is refused. A turn nobody watches still cannot start or
+  extend a machine. Only a server admin can change it. It applies to Claude agents; OpenAI and
+  Gemini agents keep their own approval card
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **In a thread, Daimon reads a finished background command before it reports.** When a long
   command on a cloud machine ends, the message Daimon posts in the thread can use the whole
   saved result and the machine's files, not only the last 1,500 characters. For that message
