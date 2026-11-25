@@ -19,6 +19,7 @@ from typing import Any, ClassVar, Final
 from uuid import UUID
 
 import psycopg.conninfo
+from daimon.data.identity import SourceAccount
 from daimon.data.sync.rate import RateBudget
 
 Json = dict[str, Any]
@@ -61,6 +62,15 @@ class Source:
     private_hosts: tuple[str, ...] = ()
     deadline: float | None = None
     """Monotonic time after which the run stops at its next checkpoint."""
+
+
+@dataclass(frozen=True)
+class Roster:
+    """A source's whole account listing for one workspace (see `identity.record_accounts`)."""
+
+    provider: str
+    workspace: str
+    accounts: tuple[SourceAccount, ...]
 
 
 @dataclass
@@ -190,6 +200,10 @@ class Connector:
         """The source's permission pass, one unit at a time, before its content. None by default."""
         return
         yield  # pragma: no cover
+
+    async def accounts(self, source: Source) -> Roster | None:
+        """The workspace's users, after the permission pass and before content. None by default."""
+        return None
 
     @classmethod
     def has_permissions(cls) -> bool:

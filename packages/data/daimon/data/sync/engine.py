@@ -26,7 +26,7 @@ from uuid import UUID
 import psycopg
 import structlog
 from daimon.core.config import Settings
-from daimon.data import acl, audit
+from daimon.data import acl, audit, identity
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
 from daimon.data.schema import Schemas
@@ -188,6 +188,20 @@ class _Run:
                 {g: list(members) for g, members in unit.groups.items()},
                 unit.fetched_at,
                 timedelta(minutes=unit.minutes),
+            )
+
+    async def identities(self) -> None:
+        """The source's users, recorded as the identities of its workspace."""
+        roster = await self.connector.accounts(self.src)
+        if roster is not None:
+            await identity.record_accounts(
+                self.conn,
+                self.env.schemas,
+                tenant_id=self.src.tenant_id,
+                provider=roster.provider,
+                workspace=roster.workspace,
+                accounts=roster.accounts,
+                auto_link_domain=self.src.config.get("auto_link_domain"),
             )
 
     async def content(self) -> None:
@@ -558,6 +572,7 @@ async def _locked(
                 raise _Busy
         run = _Run(conn, env, source, connector, started["started_at"])
         await run.permissions()
+        await run.identities()
         await run.content()
         if run.c.partial:
             status = "partial"
