@@ -259,7 +259,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         region: str | None = None,
         ttl_hours: int | None = None,
-    ) -> ComputeSession:
+    ) -> dict[str, JsonValue]:
         """Launch your own temporary machine from an operator image profile.
 
         Needs the owner in the conversation; a card asks first unless an admin turned the
@@ -272,6 +272,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         The result's state is `running` once the machine has started. `launching` means
         it is still starting: read compute_get_session_status until it says `running`
         before you run a command, and do not tell the owner it is ready before then.
+        The result's profile_description says what the image holds and how to use it.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         key, metadata = await _approved(
@@ -293,7 +294,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ):
             raise ToolError("The source conversation is unavailable.")
         try:
-            return await service.launch(
+            session = await service.launch(
                 caller,
                 profile=template,
                 region=region,
@@ -303,6 +304,12 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             )
         except (StoreError, ComputeProviderError) as exc:
             raise ToolError(str(exc)) from None
+        # The operator's text for the agent, read from settings and never stored on the row.
+        profile = runtime.settings.compute.profiles.get(session.profile)
+        return {
+            **session.model_dump(mode="json"),
+            "profile_description": profile.description if profile is not None else "",
+        }
 
     @mcp.tool
     async def compute_extend_session(  # pyright: ignore[reportUnusedFunction]
@@ -574,7 +581,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def compute_list_templates(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, origin_context_id: str
     ) -> dict[str, JsonValue]:
-        """List operator image profiles, fixed CPU/RAM and allowed regions."""
+        """List operator image profiles: what each holds, its fixed CPU/RAM and allowed regions."""
         await _caller(runtime, ctx, origin_context_id)
         return {
             name: profile.model_dump(mode="json")

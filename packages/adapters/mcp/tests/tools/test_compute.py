@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import compute
+from daimon.core.compute_models import ComputeSession
 from daimon.core.compute_thin_mcp import MAX_READ_BYTES
-from daimon.core.config import ComputeSettings
+from daimon.core.config import ComputeProfile, ComputeSettings
 from daimon.core.stores.domain import Role, TurnOriginRow
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -244,30 +245,67 @@ async def skipped(monkeypatch):
     monkeypatch.setattr(
         compute, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
+
+    async def launched(_caller, *, profile, region, ttl_hours, approval_key, source_metadata):
+        now = datetime.now(UTC)
+        return ComputeSession(
+            id=session_id,
+            tenant_id=auth.tenant_id,
+            owner_account_id=auth.account_id,
+            owner_external_user_id="owner",
+            deployment_id="test-deployment",
+            platform="discord",
+            parent_channel_id="parent",
+            thread_id="thread",
+            agent_id="agent",
+            agent_name="Daimon",
+            request_key=approval_key,
+            app_name="app",
+            profile=profile,
+            image="registry.example/mmm@sha256:abc",
+            region=region or "us-central1",
+            cpus=2,
+            memory_mb=4096,
+            ttl_hours=ttl_hours or 24,
+            expires_at=now + timedelta(hours=24),
+            created_at=now,
+        )
+
     service = SimpleNamespace(
-        launch=AsyncMock(return_value="launched"),
+        launch=AsyncMock(side_effect=launched),
         extend=AsyncMock(return_value="extended"),
         get=AsyncMock(return_value=SimpleNamespace(source_metadata={})),
     )
     monkeypatch.setattr(compute, "ComputeSessions", lambda *a, **k: service)
     mcp = FastMCP("test")
+    image = "registry.example/mmm@sha256:abc"
+    settings = ComputeSettings(
+        profiles={
+            "mmm": ComputeProfile(image=image, regions=["us-central1"], description=_HOLDS),
+            "plain": ComputeProfile(image=image, regions=["us-central1"]),
+        }
+    )
     runtime = SimpleNamespace(
         session_factory=db,
         client=None,
-        settings=SimpleNamespace(compute=ComputeSettings()),
+        settings=SimpleNamespace(compute=settings),
         compute_provider=object(),
     )
     compute.register_compute_tools(mcp, runtime)
     tools = {tool.name: tool for tool in await mcp.list_tools()}
 
     async def call(name, **changes):
-        return await tools[name].fn(ctx=None, **{**uses[name], **changes})
+        return await tools[name].fn(ctx=None, **{**uses.get(name, {}), **changes})
 
-    return SimpleNamespace(call=call, uses=uses, service=service, gap=gap)
+    return SimpleNamespace(call=call, uses=uses, service=service, gap=gap, session_id=session_id)
+
+
+#: An operator's description of what an image holds, for the agent.
+_HOLDS = "A checkout of pymc-marketing at /home/work/pymc-marketing; run pymc-marketing-pr."
 
 
 async def test_compute_skip_runs_launch_and_extend_with_no_card_for_the_default_time(skipped):
-    assert await skipped.call("compute_launch_session") == "launched"
+    assert (await skipped.call("compute_launch_session"))["id"] == str(skipped.session_id)
     assert skipped.service.launch.await_args.kwargs["approval_key"] == (
         "parent-session:compute_launch_session"
     ), "the key is still the exact tool use in the owner's conversation"
@@ -281,8 +319,19 @@ async def test_compute_skip_runs_launch_and_extend_with_no_card_for_the_default_
 async def test_a_launch_may_leave_the_region_out(skipped):
     """The tool use without a region is the same call as one with the default of None."""
     del skipped.uses["compute_launch_session"]["region"]
-    assert await skipped.call("compute_launch_session") == "launched"
+    assert (await skipped.call("compute_launch_session"))["region"] == "us-central1"
     assert skipped.service.launch.await_args.kwargs["region"] is None
+
+
+async def test_the_profile_description_is_listed_and_returned_at_launch(skipped):
+    """The operator's text reaches the agent twice: when it lists profiles and at launch."""
+    listed = await skipped.call("compute_list_templates", origin_context_id="origin")
+    assert listed["mmm"]["description"] == _HOLDS and listed["plain"]["description"] == ""
+    started = await skipped.call("compute_launch_session")
+    assert started["profile_description"] == _HOLDS and started["profile"] == "mmm"
+    # A profile with no description still says so, as an empty text.
+    skipped.uses["compute_launch_session"]["template"] = "plain"  # the model's own call
+    assert (await skipped.call("compute_launch_session"))["profile_description"] == ""
 
 
 @pytest.mark.parametrize(

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An operator can give each cloud computer profile a description that the agent sees when it
+  lists profiles and starts a session.** Set `description` on a profile in
+  `DAIMON_COMPUTE__PROFILES`, up to 1,000 characters: what the image holds and how to use it
+  ([Compute sessions](docs/compute.md#turn-it-on)).
+
 - **A server admin can let the agent continue on a cloud computer after a background command
   ends.** With `compute_wake_runs` on, for the team or one agent, the message about a finished
   command in a thread may run the next command, write files and stop that machine. It never
