@@ -7,6 +7,7 @@ license = "MIT"
 authors = [{ name = "PyMC Labs" }]
 dependencies = [
     "daimon-core",
+    "daimon-data",
     "fastmcp>=3.2.4,<4",
     "uvicorn[standard]>=0.30",
     "anthropic>=0.96",

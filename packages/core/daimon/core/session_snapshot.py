@@ -68,6 +68,7 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
     trusted_servers_for,
     with_current_tool_names,
+    with_sandbox_egress_asking,
 )
 from pydantic import (
     BaseModel,
@@ -661,6 +662,8 @@ def session_tools(
         daimon_rule_tools=daimon_rule_tools,
     )
     payload = gated if gated is not None else named
+    if toolset is not None and toolset.data_reads:
+        payload = with_sandbox_egress_asking(payload)
     hidden_tools = frozenset[str]() if toolset is None else toolset.hidden_daimon_tools
     if not legacy_memory_servers and not hidden_tools:
         return visible if payload is dumped else _retyped(visible, dumped, payload)

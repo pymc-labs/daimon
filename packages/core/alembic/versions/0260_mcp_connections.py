@@ -6,8 +6,8 @@ its bearer token encrypted, and an optional data scope; each tool holds the desc
 schema an admin approved beside the ones the server last sent. Downgrading drops both tables
 and with them every shared connection.
 
-Chained on 0229, main's head when written: when rebased onto the stack that adds 0230 to
-0232, re-point `down_revision` at the stack's newest revision.
+Chained on the data-access stack's newest revision; re-point `down_revision` at the head
+before merging.
 
 downgrade: destructive
 """
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 
-revision: str = "0233_mcp_connections"
-down_revision: str | None = "0229_compute_started_by_wake"
+revision: str = "0260_mcp_connections"
+down_revision: str | None = "0241_data_identity"
 branch_labels: str | None = None
 depends_on: str | None = None
 

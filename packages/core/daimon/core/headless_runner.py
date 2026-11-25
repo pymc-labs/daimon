@@ -525,6 +525,7 @@ async def run_turn_impl(
     )
     fragments = True  # `origin_fragments` where the session is placed
     memory_on = False  # `repo_memory` where the session is placed
+    data_reading = False  # `data_reads` there: nothing that could carry data out runs
 
     # Older MCP images reject the claim keys, so only a deployment that opted in sends them.
     relay_routine = (
@@ -534,7 +535,7 @@ async def run_turn_impl(
     )
 
     async def _assemble_session() -> BetaManagedAgentsSession:
-        nonlocal fragments, memory_on
+        nonlocal fragments, memory_on, data_reading
         scope = resource_scope(
             tenant_id=str(tenant_id),
             account_id=str(account_id),
@@ -598,6 +599,7 @@ async def run_turn_impl(
             )
             toolset, identity = await place_session(session_factory, feature_settings, place, agent)
             memory_on = toolset.memory_on
+            data_reading = toolset.data_reads
             fragments = (
                 await resolve_features(
                     session_factory, feature_settings, place, keys=("origin_fragments",)
@@ -697,7 +699,7 @@ async def run_turn_impl(
             usage_record = usage_record_factory(session.id, model_choice_id(session.agent.model))
 
         sandbox_tools = False
-        if sandbox is not None:
+        if sandbox is not None and not data_reading:
             sandbox_tools = await run_matches_pin(
                 anthropic, sandbox.pin, session, tenant_id=tenant_id, records=session_factory
             )
@@ -833,6 +835,7 @@ async def run_turn_impl(
                     channel_id=origin_place.channel_id if origin_place is not None else None,
                     entry_point="routine",
                     routine_sandbox_tools=sandbox_tools,
+                    data_read=data_reading,
                 ),
                 deadline=effective_deadline,
             )

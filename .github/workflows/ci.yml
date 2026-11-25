@@ -195,6 +195,49 @@ jobs:
           path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
 
+  # The data store's tests, on postgres:18-alpine plus pgvector: the same image
+  # docker-compose.data.yml builds (deploy/postgres/Dockerfile).
+  pytest-data:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'pytest-data')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      TMPDIR: /dev/shm
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: deploy/postgres
+          load: true
+          tags: daimon-data-postgres:ci
+          cache-from: type=gha,scope=data-postgres
+          cache-to: type=gha,scope=data-postgres,mode=max
+      - name: start postgres
+        run: |
+          docker run -d --name data-postgres -p 5432:5432 \
+            -e POSTGRES_USER=daimon -e POSTGRES_PASSWORD=daimon -e POSTGRES_DB=daimon \
+            daimon-data-postgres:ci
+          until docker exec data-postgres pg_isready -U daimon -h localhost; do sleep 1; done
+      - uses: ./.github/actions/setup-daimon
+        with:
+          database: "true"
+      - name: pytest (data)
+        run: >-
+          uv run pytest packages/data -n 4 --dist worksteal --timeout=300
+          --durations=20 --junitxml=data-junit.xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: data-junit
+          path: data-junit.xml
+          if-no-files-found: ignore
+
   # Exercise the staging switches together, and the production pins (both
   # backend switches off), through real turn and native agent entry points.
   pytest-staging-config:
@@ -780,7 +823,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
+    needs: [lint, shard-check, pytest-db, pytest-data, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

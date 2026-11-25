@@ -151,6 +151,8 @@ class SessionToolset:
     off_capabilities: frozenset[str] = frozenset()
     """Capabilities that are Off (a tier or their default) or whose setup is missing: their tools
     are not offered. Platform, backend and dependency gaps at the default tier hide nothing."""
+    data_reads: bool = False
+    """`data_reads` is On: the sandbox's bash and web_fetch ask (`with_sandbox_egress_asking`)."""
 
     @classmethod
     def of(

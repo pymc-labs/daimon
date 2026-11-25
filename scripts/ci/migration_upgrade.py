@@ -127,6 +127,8 @@ async def check(admin: str, base: str, workdir: Path, db: str, password: str) ->
     for table in TABLES:
         count = await conn.fetchval(f"SELECT count(*) FROM {table}")
         assert count == 1, f"{table} has {count} rows after the upgrade from {base}, want 1"
+    # The migrator can create roles, so the data store's revision set the store up.
+    assert await conn.fetchval("SELECT to_regnamespace('data') IS NOT NULL"), "no data schema"
     await conn.close()
     print(f"ok: {base} ({', '.join(old_heads)}) -> {heads[0]}")
 

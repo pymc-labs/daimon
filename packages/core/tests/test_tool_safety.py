@@ -27,6 +27,7 @@ from daimon.core.tool_safety import (
     toolset_permission_policy,
     trusted_servers_for,
     unwrap_daimon_call,
+    with_sandbox_egress_asking,
 )
 from daimon.core.turn.approvals import interactive_decider, unattended_decider
 from daimon.core.turn.unattended_capabilities import protected_tools
@@ -1185,3 +1186,42 @@ def test_an_agent_rule_that_denies_or_asks_wins_over_a_skipped_card(
     assert _decided(tool, skipped, policy=rules, rule=found) == outcome
     if rule != "allow":
         assert _asks_in_session(tool, skipped, policy=rules, rule_tools=frozenset({tool}))
+
+
+_DATA_POLICY = ToolSafetyPolicy(enabled=True, agent_rules=True, unattended_writes=("crm/update",))
+_EGRESS = [
+    ToolCall(tool_use_id="tu_w", server_name="crm", tool_name="update"),
+    ToolCall(tool_use_id="tu_b", server_name=None, tool_name="bash"),
+    ToolCall(tool_use_id="tu_f", server_name=None, tool_name="web_fetch"),
+]
+
+
+@pytest.mark.parametrize("call", _EGRESS, ids=["allowed write", "bash", "web_fetch"])
+async def test_after_a_data_read_what_could_carry_data_out_is_carded_or_refused(
+    call: ToolCall,
+) -> None:
+    """An allowlisted write under an agent allow rule, and sandbox egress, run unasked in
+    any session; in a data-reading one a chat turn cards them and a routine refuses them."""
+
+    async def allow(_call: ToolCall) -> ResolvedAgentToolRule:
+        return _rule("allow", "chat_and_routines")
+
+    assert (await unattended_decider(_DATA_POLICY, rules_for=allow)(call)).allow
+    card = AsyncMock(return_value="approved")
+    chat = interactive_decider(
+        _DATA_POLICY, requester_platform_user_id="u1", confirm=card, rules_for=allow, data_read=True
+    )
+    assert (await chat(call)).allow
+    card.assert_awaited_once()
+    routine = unattended_decider(_DATA_POLICY, rules_for=allow, data_read=True)
+    refused = await routine(call)
+    assert not refused.allow and refused.deny_message and "data sources" in refused.deny_message
+
+
+def test_a_data_reading_session_pauses_its_sandbox_egress() -> None:
+    tools = [{"type": "agent_toolset_20260401", "default_config": {"enabled": True}}]
+    (toolset,) = with_sandbox_egress_asking(tools)
+    assert {c["name"]: c["permission_policy"]["type"] for c in toolset["configs"]} == {
+        "bash": "always_ask",
+        "web_fetch": "always_ask",
+    }

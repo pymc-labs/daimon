@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 240 tools Daimon's MCP server registers, plus the 10 on the hub login mounts.
+The 245 tools Daimon's MCP server registers, plus the 10 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -279,6 +279,18 @@ overview, spend by person, agent or channel, and what people said about answers.
 | `get_credits_spend` | admin only | The workspace's spend in billed dollars over ``period``, one row per ``person``, ``agent`` or ``channel``, biggest first. |
 | `get_feedback_summary` | admin only | Thumbs and the reasons picked per agent over the last ``days`` days, as counts. |
 | `get_my_credits` | all callers | The caller's own use in billed dollars over ``period`` (``30d``, ``this`` month or ``last`` month), by agent, and their latest turns. |
+
+## `data`
+
+The `data_*` tools: search and read the workspace's data sources, behind `data_reads`.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `data_file` | all callers | Read a file attached to a record (`index` from `data_get`'s files), fetched now from its source with the source's permissions and never stored. |
+| `data_get` | all callers | Open one record by its `record_id`: its text (12,000 characters from `start`; a `next_start` says where the rest continues) and its attached files for `data_file`. |
+| `data_search` | all callers | Search the data sources for `query`; only what everyone who will see the answer may read. |
+| `data_sources` | all callers | The data sources you can read here, with their ids and how many records each holds, and the datasets `data_sql` can query. |
+| `data_sql` | all callers | Read-only SQL over the data views and datasets (`data_sources` lists them), by plain names. |
 
 ## `environments`
 

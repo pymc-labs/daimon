@@ -164,6 +164,13 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
         input=2.00, output=120.00, cache_write=0.0, cache_read=0.0
     ),
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
+    # The data store's embeddings (input tokens only), at the providers' list prices.
+    "text-embedding-3-small": ModelRates(input=0.02, output=0.0, cache_write=0.0, cache_read=0.0),
+    "text-embedding-3-large": ModelRates(input=0.13, output=0.0, cache_write=0.0, cache_read=0.0),
+    "qwen/qwen3-embedding-8b": ModelRates(input=0.01, output=0.0, cache_write=0.0, cache_read=0.0),
+    # The data store's reranker is priced per request ($1 per 1,000), not per token: one request
+    # is metered as 1,000 input units at $1 per million.
+    "semantic-ranker-fast-005": ModelRates(input=1.0, output=0.0, cache_write=0.0, cache_read=0.0),
 }
 
 SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
