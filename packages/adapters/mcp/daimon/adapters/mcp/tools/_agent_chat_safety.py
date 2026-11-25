@@ -163,12 +163,18 @@ def rules_channel(auth: AuthIdentity, session: BetaManagedAgentsSession) -> str 
 
 
 async def record_turn(
-    runtime: McpRuntime, handle: str, *, turn_event_id: str, rules_channel_id: str | None
+    runtime: McpRuntime,
+    handle: str,
+    *,
+    turn_event_id: str,
+    rules_channel_id: str | None,
+    send: int | None,
 ) -> None:
     """Note that agent chat started `turn_event_id`, after its send was accepted.
 
-    Without this record nobody can resume the turn after a restart, which
-    fails closed; the sending worker does not need it.
+    `send` is the number `record_driver` gave that send, under the same fence.
+    Without this record nobody can resume the turn after a restart, and the next
+    send names nobody, which fails closed; the sending worker does not need it.
     """
     try:
         async with runtime.session_factory.begin() as db:
@@ -177,6 +183,7 @@ async def record_turn(
                 managed_session_id=handle,
                 turn_event_id=turn_event_id,
                 rules_channel_id=rules_channel_id,
+                send=send,
             )
     except Exception:
         # Named boundary: the message was accepted; only a later resume is lost.
@@ -190,11 +197,11 @@ async def _recorded_turn(
         return await session_settle_state.unattended_turn(db, managed_session_id=handle)
 
 
-async def _send_records(
+async def _agent_chat_sends(
     runtime: McpRuntime, handle: str
-) -> session_settle_state.SendRecords | None:
+) -> session_settle_state.AgentChatSends | None:
     async with runtime.session_factory() as db:
-        return await session_settle_state.send_records(db, managed_session_id=handle)
+        return await session_settle_state.agent_chat_sends(db, managed_session_id=handle)
 
 
 def _public_url(runtime: McpRuntime) -> str | None:
@@ -267,17 +274,17 @@ async def earlier_turn_open(
 ) -> bool:
     """Whether a turn sent earlier on `handle` may still be running.
 
-    Read from Daimon's own send records, written before each send is made, not from the
-    session's status or transcript alone: the status can still read idle, and the
-    transcript may not list the message yet, just after a send was accepted.
+    Read from Daimon's own count of the sends (`record_driver`, `record_turn`), written
+    only under the session fence, not from the session's status or transcript alone:
+    the status can still read idle, and the transcript may not list the message yet,
+    just after a send was accepted.
 
-    - On a session this caller just created, any send record is another caller's send,
-      recorded or not (a send that failed with an error that may hide its acceptance
-      leaves its settle request but no turn), so it counts as open.
-    - Otherwise there must be a recorded turn and no pending settle request for any other
-      turn, which would be a send begun after it whose turn may be running. The turn then
-      counts as ended only once the transcript's newest boundary is that turn and an idle
-      that is not a pause follows it. Anything else, or an unreadable transcript, is open.
+    - On a session this caller just created, any send begun is another caller's.
+    - Otherwise the latest send begun must be the one whose turn was recorded; a send
+      that may have been accepted unrecorded (a 5xx or a timeout) is open and logged.
+      The recorded turn then counts as ended only once the transcript's newest
+      boundary is that turn and an idle that is not a pause follows it. Anything else,
+      or an unreadable transcript, is open.
 
     Nothing is read for a caller who is not a signed-in person, or while no server
     names the agent-chat requester: the send then names nobody (counted as open), so
@@ -285,12 +292,19 @@ async def earlier_turn_open(
     """
     if not (auth.signed_in_person and runtime.settings.mcp_identity.names_agent_chat_requester):
         return True
-    records = await _send_records(runtime, handle)
+    sends = await _agent_chat_sends(runtime, handle)
     if new_session:
-        return records is not None
-    if records is None or records.turn_event_id is None:
+        return sends is not None and sends.begun is not None
+    if sends is None or sends.turn_event_id is None:
         return True
-    if records.settle is not None and records.settle.turn_event_id != records.turn_event_id:
+    if sends.begun is None or sends.recorded != sends.begun:
+        log.info(
+            "agent_chat.requester_withheld",
+            session_id=handle,
+            reason="unrecorded_send",
+            sends_begun=sends.begun,
+            send_recorded=sends.recorded,
+        )
         return True
     try:
         turn = await _read_turn(runtime, auth, handle)
@@ -298,7 +312,7 @@ async def earlier_turn_open(
         return True
     stop = turn.state.stop_reason
     return not (
-        turn.boundary_id == records.turn_event_id
+        turn.boundary_id == sends.turn_event_id
         and stop is not None
         and stop.type != "requires_action"
     )

@@ -9,9 +9,17 @@ Only a person signed in to the MCP hub with their platform login counts. The hol
 of an agent key, a coding key or a CLI-minted key is not established as one person,
 so a turn such a key drives names nobody, even on a session a person started. A
 send to a session that is still running another turn names nobody either: the relay
-cannot tell which of the two turns is calling. That is decided from Daimon's own record
-of the latest send (`earlier_turn_open`), not only from the provider's status, which can
-still read idle just after a send was accepted.
+cannot tell which of the two turns is calling. That is decided from Daimon's own count
+of the sends (`earlier_turn_open`), not only from the provider's status, which can
+still read idle just after a send was accepted. Each send counts itself here before it
+is made, and its turn records that number once the send is accepted; a person is named
+only when the latest send was recorded and its turn was seen to end. Both are written
+only under the session's mutation fence, which every send takes.
+
+A send that fails with an error that may hide its acceptance (a 5xx or a timeout) is
+never recorded, so the next send names nobody and logs
+`agent_chat.requester_withheld`; the send after that is named again. A session started
+before sends were counted has no count, so its first send names nobody the same way.
 
 The sign-in is checked when the send is made, not on each relay call: a hub login
 revoked mid-turn still names the person until the turn ends, within the turn ceiling.
@@ -45,19 +53,22 @@ async def record_driver(
     session_status: str | None,
     earlier_turn_open: bool,
     resuming: bool = False,
-) -> None:
+    new_session: bool = False,
+) -> int | None:
     """Record who drives the turn about to be sent or resumed on `managed_session_id`.
 
-    Written before the send, and never swallowed: a send whose driver is not
-    recorded could run under the previous driver's name. `earlier_turn_open` says an
-    earlier send's turn has not been seen to end. A resume carries on a turn
-    someone else may have started, so it can only take a name away: a signed-in
-    person's resume keeps the record, anyone else's clears it.
+    Written under the session fence before the send, and never swallowed: a send whose
+    driver is not recorded could run under the previous driver's name.
+    `earlier_turn_open` says an earlier send's turn has not been seen to end. A send
+    returns its number, which `record_turn` writes once the send is accepted. On a
+    session the caller just created (`new_session`) a row already there names nobody.
+    A resume carries on a turn someone else may have started, so it can only take a
+    name away: a signed-in person's resume keeps the record, anyone else's clears it.
     """
     if resuming and signed_in_person:
-        return
+        return None
     async with sessionmaker.begin() as db:
-        await session_settle_state.record_agent_chat_driver(
+        return await session_settle_state.record_agent_chat_driver(
             db,
             managed_session_id=managed_session_id,
             signed_in=not resuming
@@ -66,6 +77,8 @@ async def record_driver(
                 session_status=session_status,
                 earlier_turn_open=earlier_turn_open,
             ),
+            send=not resuming,
+            new_session=new_session,
         )
 
 

@@ -4457,7 +4457,10 @@ class SessionSettleState(Base):
     is read only on the reserved cutoff rows: `backlog-cutoff`, when this
     settle path was deployed, and `web-search-cutoff`, when search billing
     was. `unattended_turn_event_id` is the latest turn an agent-chat send
-    started (`unattended_turn`), never cleared by a settle.
+    started (`unattended_turn`), never cleared by a settle. The `agent_chat_*`
+    columns say who drives the session and which sends were recorded
+    (`daimon.core.agent_chat_requester`); the settle columns are billing state
+    and never decide that.
 
     The table keeps its original name; the former catch-up's cursor columns
     are no longer mapped and are dropped later. Private to
@@ -4476,6 +4479,11 @@ class SessionSettleState(Base):
     # Whether the latest send or resume on this agent-chat session came from a person
     # signed in to the hub, on an idle session (`daimon.core.agent_chat_requester`).
     agent_chat_signed_in: Mapped[bool | None]
+    # Agent-chat sends begun on this session, and the number of the latest one whose turn
+    # was recorded; both written only under the session fence. A person's send names them
+    # only when the two match.
+    agent_chat_sends: Mapped[int | None]
+    agent_chat_recorded_send: Mapped[int | None]
     updated_at: Mapped[TsNow]
 
 

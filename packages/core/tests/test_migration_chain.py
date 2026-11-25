@@ -192,6 +192,7 @@ TAIL = (
     "0228_compute_task_wait_until",
     "0229_compute_started_by_wake",
     "0230_agent_chat_signed_in",
+    "0231_agent_chat_send_count",
 )
 HEAD = TAIL[-1]
 

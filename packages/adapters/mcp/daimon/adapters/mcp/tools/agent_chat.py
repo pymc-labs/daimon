@@ -1054,12 +1054,13 @@ async def _start_turn_impl(
             await recheck()
         await gate(runtime, auth, session)
         await _bind_relay_vault(runtime, auth, session, now=now)
-        await record_driver(
+        send = await record_driver(
             runtime.session_factory,
             managed_session_id=session.id,
             signed_in_person=auth.signed_in_person,
             session_status=None,
             earlier_turn_open=await earlier_turn_open(runtime, auth, session.id, new_session=True),
+            new_session=True,
         )
         turn_started_at = now()
         turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
@@ -1068,7 +1069,7 @@ async def _start_turn_impl(
         )
         channel = rules_channel(auth, session)
         await record_turn(
-            runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel
+            runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
         )
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
 
@@ -1209,7 +1210,7 @@ async def _continue_turn_impl(
             current = await ready()
         elif message is None:
             raise ToolError(_MESSAGE_REQUIRED_MSG)
-        await record_driver(
+        send = await record_driver(
             runtime.session_factory,
             managed_session_id=handle,
             signed_in_person=auth.signed_in_person,
@@ -1223,7 +1224,9 @@ async def _continue_turn_impl(
             runtime, auth, current, turn_event_id=turn_event_id, message=message
         )
         channel = rules_channel(auth, current)
-        await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
+        await record_turn(
+            runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
+        )
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
     return _turn_handle(handle, turn_event_id, turn_started_at, kept)
 

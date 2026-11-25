@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started from an MCP client signed in to the hub then carries their user id with
   `requester_kind` `"agent_chat"`, with no place and no wake link. Turns started with an agent,
   coding or CLI key name nobody. It is off by default, and a conversation started earlier gains
-  it on its next message ([MCP servers](docs/mcp-servers.md#servers-that-attribute-writes-to-the-requester)).
+  it from its second message ([MCP servers](docs/mcp-servers.md#servers-that-attribute-writes-to-the-requester)).
 
 - **Routines start on time when many sessions are live.** The scheduler's check for due routines
   shared one loop with the GitHub token refresh, which takes about a second for each live

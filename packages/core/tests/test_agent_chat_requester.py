@@ -62,3 +62,52 @@ async def test_each_send_replaces_the_driver_and_a_resume_can_only_clear_it(
     assert await _record(db_session_factory, True), "the person's own next send names them"
     assert await _record(db_session_factory, True, resuming=True), "their resume keeps it"
     assert not await _record(db_session_factory, False, resuming=True), "a key's resume clears it"
+
+
+async def _start(factory: async_sessionmaker[AsyncSession], session_id: str) -> bool:
+    """A signed-in person's start that read no earlier send."""
+    await record_driver(
+        factory,
+        managed_session_id=session_id,
+        signed_in_person=True,
+        session_status=None,
+        earlier_turn_open=False,
+        new_session=True,
+    )
+    return await driver_signed_in(factory, managed_session_id=session_id)
+
+
+async def test_a_start_names_its_person_only_if_its_write_created_the_row(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The start's decision and write are one statement, so a key's send landing
+    between the start's read and its write still names nobody."""
+    assert await _start(db_session_factory, "sesn_fresh"), "nothing was there"
+    await record_driver(
+        db_session_factory,
+        managed_session_id=SESSION,
+        signed_in_person=False,
+        session_status=None,
+        earlier_turn_open=True,
+    )
+    assert not await _start(db_session_factory, SESSION), "another caller wrote first"
+
+
+async def test_each_send_is_numbered_and_a_resume_is_not(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def send(*, resuming: bool = False, person: bool = False) -> int | None:
+        return await record_driver(
+            db_session_factory,
+            managed_session_id=SESSION,
+            signed_in_person=person,
+            session_status="idle",
+            earlier_turn_open=False,
+            resuming=resuming,
+        )
+
+    assert await send() == 1
+    assert await send(person=True) == 2
+    assert await send(resuming=True) is None
+    assert await send(resuming=True, person=True) is None
+    assert await send() == 3, "a resume starts no new turn, so it is not counted"
