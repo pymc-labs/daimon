@@ -604,6 +604,19 @@ def _routine(spec: Spec) -> RoutineNode | None:
     return next((n for n in spec.nodes.values() if isinstance(n, RoutineNode)), None)
 
 
+async def check_routine_run(
+    session: AsyncSession, workflow: WorkflowRow, rights: Rights, version: int | None
+) -> None:
+    """A routine step runs as the owner, so only they or an admin run `version` by hand."""
+    if rights.admin or rights.role == "owner" or version is None:
+        return
+    found = await store.get_version(
+        session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, number=version
+    )
+    if found is not None and _routine(parse_spec(found.spec)) is not None:
+        raise Forbidden("A routine step runs as the owner. Ask the owner or an admin to run it.")
+
+
 async def _routine_publish(
     session: AsyncSession,
     workflow: WorkflowRow,
@@ -1082,6 +1095,8 @@ async def start(
     `origin` is the chat message it started from, which `deliver.to: origin` posts under."""
     async with env.sm() as session:
         workflow, _, rights = await _load(session, env, workflow_id)
+        if test is None and rights.run:
+            await check_routine_run(session, workflow, rights, workflow.live_version)
     if test is not None:
         if not rights.edit:
             raise Forbidden("Only the owner or an editor can test a workflow.")
@@ -1137,7 +1152,10 @@ async def cancel(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
 
 
 async def redrive(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
-    run, _, _ = await _control(env, run_id)
+    run, workflow, rights = await _control(env, run_id)
+    if run.mode == "live":
+        async with env.sm() as session:
+            await check_routine_run(session, workflow, rights, run.version)
     result = await runs.redrive(
         env.sm, env.settings, run_id=run.id, account_id=env.who.account_id, now=env.now
     )
@@ -1192,6 +1210,11 @@ async def rerun(
     )
     if (test or runs_version not in (None, workflow.live_version)) and not rights.edit:
         raise Forbidden("Only the owner or an editor can run the draft or an older version.")
+    if not test:
+        async with env.sm() as session:
+            await check_routine_run(
+                session, workflow, rights, runs_version or workflow.live_version
+            )
     result = await runs.start_run(
         env.sm,
         env.settings,

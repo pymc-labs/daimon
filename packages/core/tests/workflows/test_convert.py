@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from daimon.core._models import (
+    Account,
     Routine,
     Tenant,
     Workflow,
@@ -25,7 +26,7 @@ from daimon.core.stores.routine_move import (
     rollback_rows,
     seed_routines,
 )
-from daimon.core.workflows import convert, triggers
+from daimon.core.workflows import convert, service, triggers
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import AgentLister
 from daimon.core.workflows.routine_translation import STEP
@@ -308,3 +309,42 @@ async def test_a_workflow_on_a_multi_week_or_one_time_schedule_does_not_move_bac
         )
     with pytest.raises(Refused, match="more than a routine can"):
         await convert.to_routine(env, flow)
+
+
+async def test_only_the_owner_or_an_admin_runs_a_moved_routine_by_hand(
+    db_session: AsyncSession,
+) -> None:
+    """Its step runs as the owner, so an editor or a runner cannot start, rerun or retry it."""
+    env = await _env(db_session)
+    tid = env.who.tenant_id
+    flow = await convert.from_routine(env, await _routine(db_session, env))
+    owner = await db_session.scalar(select(Workflow.owner_account_id).where(Workflow.id == flow))
+    editor, runner = Account(tenant_id=tid), Account(tenant_id=tid)
+    db_session.add_all([editor, runner])
+    await db_session.commit()
+    async with env.sm.begin() as s:
+        await workflows.update_settings(s, tenant_id=tid, workflow_id=flow, visibility="shared")
+        for role, person in (("editor", editor), ("runner", runner)):
+            await workflows.set_access(
+                s,
+                tenant_id=tid,
+                workflow_id=flow,
+                role=role,
+                granted_by=owner,
+                account_id=person.id,
+            )
+    assert owner is not None
+
+    def as_(account: uuid.UUID) -> Env:
+        return Env(env.sm, env.settings, Who(tid, account), NOW, env.agents)
+
+    run = uuid.UUID((await service.start(as_(owner), flow, {})).id)  # the owner may
+    refused = [
+        service.start(as_(runner.id), flow, {}),
+        service.start(as_(editor.id), flow, {}),
+        service.rerun(as_(editor.id), run),
+        service.redrive(as_(editor.id), run),
+    ]
+    for call in refused:
+        with pytest.raises(Forbidden, match="Ask the owner or an admin to run it"):
+            await call
