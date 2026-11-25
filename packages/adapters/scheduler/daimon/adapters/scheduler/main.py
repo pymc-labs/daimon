@@ -1487,9 +1487,18 @@ async def _archive_idle_relay_vaults(
         log.exception("scheduler.relay_vault_archive.failed", causes=backend_refusal_causes(error))
 
 
+def _never_stopping() -> bool:
+    return False
+
+
+# The three GitHub session steps end between two sessions once `stopping` is true:
+# a token swap cut in the middle can leave a session without its GitHub access.
 @scheduler_step
 async def _sweep_github_app_tokens(
-    sm: async_sessionmaker[AsyncSession], *, fernet: MultiFernet | None
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    fernet: MultiFernet | None,
+    stopping: Callable[[], bool] = _never_stopping,
 ) -> None:
     if fernet is None:
         return
@@ -1501,6 +1510,8 @@ async def _sweep_github_app_tokens(
     stale = list({row.token_id: row for row in stale}.values())
     async with httpx.AsyncClient() as github:
         for candidate in stale:
+            if stopping():
+                return
             async with (
                 session_mutation_fence(sm, candidate.session_id, check=False),
                 sm.begin() as session,
@@ -1699,6 +1710,7 @@ async def _refresh_github_app_sessions(
     *,
     settings: Settings,
     fernet: MultiFernet | None,
+    stopping: Callable[[], bool] = _never_stopping,
 ) -> None:
     if fernet is None:
         return
@@ -1706,6 +1718,8 @@ async def _refresh_github_app_sessions(
     async with sm() as session:
         live = await list_live_app_sessions(session)
     for candidate in live:
+        if stopping():
+            return
         session_id = candidate.mapping.ma_session_id
         if session_id in _app_refresh_retired:
             continue
@@ -1840,6 +1854,8 @@ async def _refresh_github_app_sessions(
     async with sm() as session:
         mcp_live = await list_live_mcp_app_sessions(session, now=now, include_expired=True)
     for candidate in mcp_live:
+        if stopping():
+            return
         try:
             async with session_mutation_fence(sm, candidate.session_id, check=False):
                 # Continue and close use this fence too. Re-read after acquiring it.
@@ -1983,11 +1999,14 @@ async def _close_github_app_sessions(
     sm: async_sessionmaker[AsyncSession],
     *,
     fernet: MultiFernet | None,
+    stopping: Callable[[], bool] = _never_stopping,
 ) -> None:
     async with sm() as session:
         closed = await list_closed_app_sessions(session, now=datetime.now(UTC))
     async with httpx.AsyncClient() as github:
         for item in closed:
+            if stopping():
+                return
             try:
                 async with session_mutation_fence(sm, item.session_id, check=False):
                     async with sm() as session:
@@ -2045,7 +2064,7 @@ async def _settle_promo_credit(sm: async_sessionmaker[AsyncSession]) -> None:
     """Grant opened timed promo windows, expire closed ones, credit back late spend.
 
     The usage sweep runs on its own loop, so a session's spend can land up to
-    two passes plus one tick interval late. ``LATE_SPEND_GRACE`` assumes that
+    two passes plus one housekeeping pass late. ``LATE_SPEND_GRACE`` assumes that
     is well under its 15 minutes; a debit landing later counts as ordinary
     spend. Idempotent; boundary catch so a DB failure retries on the next tick.
     """
@@ -2084,10 +2103,13 @@ _TICK_LOG_INTERVAL_S = 60.0
 
 
 def _tick_progress(
-    tick: Callable[[], Awaitable[None]], *, clock: Callable[[], float] = time.monotonic
+    tick: Callable[[], Awaitable[None]],
+    *,
+    event: str = "scheduler.tick_completed",
+    clock: Callable[[], float] = time.monotonic,
 ) -> Callable[[], Awaitable[None]]:
-    """`tick` that logs `scheduler.tick_completed` after a tick that finished,
-    at most once per minute (the first always). A tick that raises logs nothing."""
+    """`tick` that logs `event` after a pass that finished, at most once per
+    minute (the first always). A pass that raises logs nothing."""
     last_logged: float | None = None
 
     async def step() -> None:
@@ -2097,7 +2119,7 @@ def _tick_progress(
         now = clock()
         if last_logged is None or now - last_logged >= _TICK_LOG_INTERVAL_S:
             last_logged = now
-            log.info("scheduler.tick_completed", duration_ms=int((now - started) * 1000))
+            log.info(event, duration_ms=int((now - started) * 1000))
 
     return step
 
@@ -2114,6 +2136,8 @@ async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None
 async def _run_loops(
     *,
     tick: Callable[[], Awaitable[None]],
+    housekeeping: Callable[[], Awaitable[None]],
+    github_sessions: Callable[[], Awaitable[None]],
     usage_sweep: Callable[[], Awaitable[None]] | None,
     privacy_sweep: Callable[[], Awaitable[None]],
     compute_sweep: Callable[[], Awaitable[None]],
@@ -2121,7 +2145,12 @@ async def _run_loops(
     interval_s: float,
     stop_event: asyncio.Event,
 ) -> None:
-    """Run ticks and upstream sweeps on separate loops until stopped.
+    """Run routine dispatch, housekeeping and upstream sweeps on separate loops until stopped.
+
+    ``tick`` only claims and dispatches due routines: a slot found late is skipped,
+    so nothing that can be slow may share its loop. ``github_sessions`` walks every
+    live GitHub session one at a time and can outlast many ticks; on its own loop it
+    delays neither dispatch nor ``housekeeping``. Both log their duration.
 
     ``usage_sweep=None`` (the sweep is switched off) runs no usage loop; the
     privacy deletion and compute cleanup loops always run, since deletion must
@@ -2131,11 +2160,23 @@ async def _run_loops(
     neither cleanup nor dispatch.
 
     A usage pass settles whole session histories and can outlast many ticks;
-    inline, routine claims waited for it. On stop the passes in flight are
-    cancelled: each model call commits on its own and an unfinished session
-    keeps its settle request. An uncaught error in any loop ends all loops.
+    inline, routine claims waited for it. On stop the usage, privacy and compute
+    passes in flight are cancelled: each model call commits on its own and an
+    unfinished session keeps its settle request. Dispatch, housekeeping and GitHub
+    sessions finish their pass, and a GitHub pass ends at the next session. An
+    uncaught error in any loop ends all loops.
     """
     async with asyncio.TaskGroup() as loops:
+        # Not cancelled on stop: each ends after the pass in flight.
+        for step, event in (
+            (housekeeping, "scheduler.housekeeping_completed"),
+            (github_sessions, "scheduler.github_sessions_completed"),
+        ):
+            loops.create_task(
+                _repeat_until_stopped(
+                    _tick_progress(step, event=event), interval_s=interval_s, stop_event=stop_event
+                )
+            )
         background = [
             loops.create_task(
                 _repeat_until_stopped(privacy_sweep, interval_s=interval_s, stop_event=stop_event)
@@ -2367,6 +2408,8 @@ async def run(
                 dispatcher=dispatcher,
                 notify_owner=notify_owner,
             )
+
+        async def housekeeping() -> None:
             await _sweep_long_jobs(long_jobs)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
@@ -2384,11 +2427,6 @@ async def run(
             await _sweep_ops_events(sm, retention_days=settings.ops_events.retention_days)
             await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
             await _archive_idle_relay_vaults(client)
-            await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
-            await _refresh_github_app_sessions(
-                client, sm, settings=settings, fernet=push_resync_fernet
-            )
-            await _close_github_app_sessions(client, sm, fernet=push_resync_fernet)
             await _settle_promo_credit(sm)
             await _drain_github_push_resync(
                 engine=engine,
@@ -2398,6 +2436,21 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+
+        async def github_sessions() -> None:
+            await _sweep_github_app_tokens(
+                sm, fernet=push_resync_fernet, stopping=stop_event.is_set
+            )
+            await _refresh_github_app_sessions(
+                client,
+                sm,
+                settings=settings,
+                fernet=push_resync_fernet,
+                stopping=stop_event.is_set,
+            )
+            await _close_github_app_sessions(
+                client, sm, fernet=push_resync_fernet, stopping=stop_event.is_set
+            )
 
         async def usage_sweep() -> None:
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
@@ -2412,6 +2465,8 @@ async def run(
                 log.warning("scheduler.usage_sweep.disabled")
             await _run_loops(
                 tick=tick,
+                housekeeping=housekeeping,
+                github_sessions=github_sessions,
                 usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
                 privacy_sweep=privacy_sweep,
                 compute_sweep=lambda: _sweep_compute(compute),
