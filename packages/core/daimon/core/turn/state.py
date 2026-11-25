@@ -96,6 +96,15 @@ def daimon_tool_input(block: ToolUseBlock, tool: str) -> Mapping[str, object] | 
     return cast("dict[str, object]", arguments) if isinstance(arguments, dict) else None
 
 
+def reported_routine_problem(content: list[ContentBlock]) -> bool:
+    """Whether a routine run told the host something kept it from doing its task."""
+    return any(
+        isinstance(block, ToolUseBlock)
+        and daimon_tool_arguments(block, "report_routine_problem") is not None
+        for block in content
+    )
+
+
 def tool_errors_by_server(content: list[ContentBlock]) -> dict[str, int]:
     """Failed results per MCP server name, daimon's own excluded: its refusals are answers."""
     counts: dict[str, int] = {}
