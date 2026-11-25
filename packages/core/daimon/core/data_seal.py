@@ -14,6 +14,7 @@ from typing import Final
 from daimon.core.config import Settings
 from daimon.core.data_tools import DATA_READS
 from daimon.core.features.snapshot import FeaturePlace, Sessions, resolve_features
+from daimon.core.ports.gate import data_sources_on
 
 AGENT_REQUEST_REFUSAL: Final = (
     "That agent reads data sources, so only its own conversations can ask it. "
@@ -22,5 +23,8 @@ AGENT_REQUEST_REFUSAL: Final = (
 
 
 async def reads_data(sessions: Sessions, settings: Settings | None, place: FeaturePlace) -> bool:
-    """Whether the agent `place` names reads data sources there."""
+    """Whether the agent `place` names reads data sources there; no read while the deployment
+    has data sources off (`data_reads` depends on them)."""
+    if settings is not None and not data_sources_on(settings):
+        return False
     return (await resolve_features(sessions, settings, place, keys=(DATA_READS,))).on(DATA_READS)

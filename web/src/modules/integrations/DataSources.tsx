@@ -111,15 +111,15 @@ function Detail({ s }: { s: SourceState }) {
       <PanelSection>
         <Facts rows={[
           ["State", <State key="s" s={s} />], ["Mode", s.mode === "stored" ? "Stored" : "Live"], ["Items", plural(s.records, "item")], ["Scope", s.default_scope],
-          ["Synced", s.last_sync_at ? <Ago key="a" iso={s.last_sync_at} /> : null], ["Publish", s.publication === "shadow" ? s.blocked : null],
+          ["Synced", s.last_sync_at ? <Ago key="a" iso={s.last_sync_at} /> : null], ["Publish", s.publication === "shadow" && !s.parity?.wrong_more ? s.blocked : null],
         ]} />
       </PanelSection>
       {s.parity && (
         <PanelSection title="Parity">
           <Facts rows={[
             ["Result", s.parity.ok ? <span key="r" className="inline-flex items-center gap-1.5"><CircleCheck className="size-3.5 text-success" />Passed</span> : <span key="r" className="inline-flex items-center gap-1.5"><CircleAlert className="size-3.5 text-destructive" />Not passed</span>],
-            ["People", String(s.parity.people)], ["Checked", String(s.parity.checked)], ["Wrong more", String(s.parity.wrong_more)],
-            ["Wrong less", String(s.parity.wrong_less)], ["Unresolved", s.parity.unresolved],
+            ["People", String(s.parity.people)], ["Checked", String(s.parity.checked)], ["Wider for", plural(s.parity.wrong_more, "person", "people")],
+            ["Narrower for", plural(s.parity.wrong_less, "person", "people")], ["Unresolved", s.parity.unresolved],
           ]} />
         </PanelSection>
       )}
@@ -134,9 +134,11 @@ function Detail({ s }: { s: SourceState }) {
                       {r.status === "failed" || r.status === "error" ? <CircleAlert className="size-3.5 text-destructive" /> : <CircleCheck className="size-3.5 text-success" />}
                       <span className="capitalize">{r.status}</span>
                     </span>
-                    <span className="ml-auto text-xs text-muted-foreground tabular">+{r.added} ~{r.updated} -{r.deleted}</span>
-                    <span className="text-xs text-muted-foreground"><Ago iso={r.started_at} /></span>
+                    <span className="ml-auto text-xs text-muted-foreground"><Ago iso={r.started_at} /></span>
                   </div>
+                  <dl className="mt-1 flex gap-4 text-xs text-muted-foreground tabular">
+                    {([["Added", r.added], ["Changed", r.updated], ["Removed", r.deleted]] as const).map(([k, n]) => <div key={k} className="flex gap-1.5"><dt>{k}</dt><dd className="text-foreground">{n}</dd></div>)}
+                  </dl>
                   {r.error && <div className="mt-1 break-words text-xs text-destructive">{r.error}</div>}
                 </li>
               ))}
@@ -188,7 +190,7 @@ export function Add({ onClose }: { onClose: () => void }) {
             <form id="add-source" className="space-y-4" onSubmit={(e) => { e.preventDefault(); submit() }}>
               <div className="space-y-1.5">
                 <Label>Kind</Label>
-                <Cards label="Kind" value={picked?.kind ?? ""} onChange={(k) => { setKind(k); setValues({}) }} choices={Object.fromEntries(list.map((k) => [k.kind, k.name]))} />
+                <Cards label="Kind" value={picked?.kind ?? ""} onChange={(k) => { setKind(k); setValues({}) }} choices={Object.fromEntries(list.map((k) => [k.kind, k.name]))} className="max-sm:!grid-cols-2" />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="source-name">Name</Label>

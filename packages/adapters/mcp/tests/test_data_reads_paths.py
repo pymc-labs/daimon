@@ -13,6 +13,7 @@ import textwrap
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -88,7 +89,34 @@ def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
     assert set(defs) >= DATA_TOOLS, "every data tool registers in register_data_tools"
     for name in DATA_TOOLS:
         assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
-    assert {"data_audience_for", "read_context"} <= _names(defs["reading"])
+    assert {"data_audience_for", "open_read"} <= _names(defs["reading"])
+
+
+def _attrs(node: ast.AST) -> set[str]:
+    return {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+
+
+#: The web data pages, read as source: adapters never import each other.
+_WEB_PAGES = Path(__file__).parents[2] / "web/daimon/adapters/web/data_pages.py"
+
+
+def test_what_redaction_cannot_cover_is_refused_on_every_surface() -> None:
+    """While names hide, caller SQL and file bytes are refused and a query naming a hidden
+    entity finds nothing (`daimon.data.reading`), in MCP and on the web."""
+    web = {
+        n.name: n
+        for n in ast.walk(ast.parse(_WEB_PAGES.read_text()))
+        if isinstance(n, ast.AsyncFunctionDef)
+    }
+    mcp = _tool_defs()
+    for where, node, guard in (
+        ("data_sql", mcp["data_sql"], "redacted"),
+        ("data_file", mcp["data_file"], "redacted"),
+        ("data_search", mcp["data_search"], "names_hidden"),
+        ("web file", web["file"], "redacted"),
+        ("web search", web["find"], "names_hidden"),
+    ):
+        assert guard in _attrs(node), f"{where} skips {guard}"
 
 
 def test_every_model_spend_bills_the_asker() -> None:

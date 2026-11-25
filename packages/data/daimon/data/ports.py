@@ -22,6 +22,8 @@ from daimon.data.schema import Schemas
 GATED_TOOLS: Final[dict[str, frozenset[str]]] = {}
 
 _PERSON: Final = "'account:' || cast(cast(:account_id as uuid) as text)"
+# Lets these deletes past the bound-row guard (0006); set per row, so only where rows match.
+_ERASING: Final = "set_config('daimon_data.erasing', 'on', true) = 'on' and"
 
 
 def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
@@ -38,11 +40,13 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
         return ErasureStatement(f"data.tenant.{key}", sql, "tenant", d)
 
     return (
-        account("sources", f"delete from {d}.sources where owner_account_id = :account_id"),
+        account(
+            "sources", f"delete from {d}.sources where {_ERASING} owner_account_id = :account_id"
+        ),
         account(
             "created_by", f"update {d}.sources set created_by = null where created_by = :account_id"
         ),
-        account("grants", f"delete from {d}.grants where holder = {_PERSON}"),
+        account("grants", f"delete from {d}.grants where {_ERASING} holder = {_PERSON}"),
         account("acl_refs", f"delete from {d}.acl_refs where ref = {_PERSON}"),
         account("group_members", f"delete from {d}.group_members where subject = {_PERSON}"),
         account("acl_grants", f"delete from {d}.acl_grants where holder = {_PERSON}"),
@@ -91,8 +95,8 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
             " where detail ->> 'account' = cast(cast(:account_id as uuid) as text)",
         ),
         account("forget", f"select {d}.forget_person(cast(:account_id as uuid))"),
-        tenant("sources", f"delete from {d}.sources where tenant_id = :tenant_id"),
-        tenant("scopes", f"delete from {d}.scopes where tenant_id = :tenant_id"),
+        tenant("sources", f"delete from {d}.sources where {_ERASING} tenant_id = :tenant_id"),
+        tenant("scopes", f"delete from {d}.scopes where {_ERASING} tenant_id = :tenant_id"),
         *(
             tenant(table, f"delete from {d}.{table} where tenant_id = :tenant_id")
             for table in (

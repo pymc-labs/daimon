@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import psycopg
 import pytest
-from daimon.data import acl, declared, federated, identity, parity, reads
+from daimon.data import acl, caller_sql, declared, federated, identity, parity, reads
 from daimon.data.access import ReadContext
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.search import search
@@ -155,10 +155,16 @@ async def test_publish_gate_blocks_on_wrong_more(store: Store, fake: Fake) -> No
 
 
 async def test_declared_apply_never_deletes_and_refuses_a_lower_revision(
-    store: Store, fake: Fake
+    store: Store, fake: Fake, db_schema: str
 ) -> None:
     """A removed entry stays, a lower revision changes nothing, retiring keeps the row."""
     schemas = store.data.schemas
+    await store.sql(f"set search_path = {db_schema}")
+    await store.sql(
+        "insert into tenants (id, platform, external_id) values (%s, 'discord', %s)",
+        store.tenant,
+        f"guild-{uuid.uuid4().hex[:8]}",
+    )
 
     def file(revision: int, **tenant: object) -> declared.Declaration:
         return declared.Declaration.model_validate(
@@ -261,7 +267,8 @@ async def test_a_live_source_is_scope_gated_failing_open_and_stores_nothing(
 async def test_a_record_the_source_now_refuses_is_not_shown(
     store: Store, fake: Fake, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A source that re-checks reads is asked at read time; its refusal hides the record."""
+    """A source that re-checks reads is asked at read time; its refusal hides the record.
+    Caller SQL cannot be re-checked, so it never sees such a source."""
     monkeypatch.setattr(Fake, "recheck_reads", True)
     src = await store.source("published")
     record = await store.record(src)
@@ -269,8 +276,14 @@ async def test_a_record_the_source_now_refuses_is_not_shown(
     schemas = store.data.schemas
 
     assert await reads.get(store.conn, schemas, ctx, record, store.env), "the source opens it"
+    page = await reads.browse(store.conn, schemas, ctx, src, env=store.env)
+    assert len(page.items) == 1, "browse lists what the source opens"
+    sql = await caller_sql.data_sql(store.conn, schemas, ctx, "select id from records")
+    assert sql.rows == [], "caller SQL leaves out a source that re-checks reads"
     fake.verdict = False
     assert await reads.get(store.conn, schemas, ctx, record, store.env) is None, "now refused"
+    page = await reads.browse(store.conn, schemas, ctx, src, env=store.env)
+    assert page.items == [], "browse drops it too"
     found = await search(
         store.conn, schemas, ctx, "launch plan", settings=store.data.settings,
         use_vectors=False, use_rerank=False, env=store.env,

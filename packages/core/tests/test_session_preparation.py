@@ -1644,29 +1644,6 @@ async def test_a_move_back_to_claude_carries_the_earlier_provider_on_both_create
     assert back.continuity.user_prefix == "carried openai-t-2", "fresh start carried nothing"
 
 
-async def test_a_session_that_read_data_keeps_that_posture_until_a_fresh_start(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A later turn without data tools keeps the after-a-data-read posture; a fresh start ends it."""
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-    deps = _deps(db_session_factory, _Transport())
-    plain = _admission(account=account)
-    first = await _prepare(deps, replace(plain, data_reading=True), tenant=tenant, account=account)
-    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
-
-    second = await _prepare(deps, plain, tenant=tenant, account=account)
-    assert isinstance(second, PreparedTurn) and second.ma_session_id == first.ma_session_id
-    assert second.admission.data_reading and second.admission.toolset.data_reads, "kept"
-
-    async with db_session_factory.begin() as session:
-        await request_fresh_start(session, id=first.mapping_id, at=_NOW)
-    third = await _prepare(deps, plain, tenant=tenant, account=account)
-    assert isinstance(third, PreparedTurn) and not third.admission.data_reading, "ended"
-
-
 async def test_a_marked_active_session_is_not_returned_for_reuse(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

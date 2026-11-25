@@ -28,7 +28,7 @@ const accounts: ConnectedAccount[] = [
 const preview: DeletePreview = { enabled: true, scope: ["It tries the same at OpenAI."], held: ["2 routines"], kept: ["3 conversations shared with other people"] }
 
 const view = () => {
-  vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/profile" ? data : path === "/api/me" ? { workspace: { name: "Fernhill" }, capabilities: [], accounts } : preview) as never)
+  vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/profile" ? data : path === "/api/me" ? { workspace: { name: "Fernhill" }, capabilities: [], modules: [], accounts } : preview) as never)
   vi.mocked(api.post).mockResolvedValue({} as never)
   render(
     <QueryClientProvider client={new QueryClient()}>

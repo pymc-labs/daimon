@@ -3921,7 +3921,8 @@
       'description': '''
         Read a file attached to a record (`index` from `data_get`'s files), fetched now from
         its source with the source's permissions and never stored. Text files return their
-        text; other files only their type and size.
+        text; other files only their type and size. Refused when names are hidden from someone
+        the answer is for.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3966,7 +3967,8 @@
       'description': '''
         Search the data sources for `query`; only what everyone who will see the answer may
         read. Filter by source ids (`data_sources`), record kind and date range. Each hit has a
-        `record_id` to open with `data_get`. No hit is not proof that nothing exists.
+        `record_id` to open with `data_get`; `live` holds what live sources answered now. No
+        hit is not proof that nothing exists.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4049,7 +4051,8 @@
     'data_sql': dict({
       'description': '''
         Read-only SQL over the data views and datasets (`data_sources` lists them), by plain
-        names. One statement, at most 500 rows, five seconds.
+        names. One statement, at most 500 rows, five seconds. Refused when names are hidden
+        from someone the answer is for.
       ''',
       'parameters': dict({
         'additionalProperties': False,

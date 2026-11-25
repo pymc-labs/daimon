@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
-import { CircleAlert, CircleCheck, Download, ExternalLink } from "lucide-react"
+import { CircleAlert, CircleCheck, Download, ExternalLink, Zap } from "lucide-react"
 import { useState } from "react"
 import { Link, Navigate, Route, Routes, useMatch, useParams } from "react-router"
 import { Ago, Prose, StatusDot } from "@/components/common"
@@ -70,44 +70,46 @@ function Searching({ sources }: { sources: DataSource[] }) {
         <QueryState query={found} empty="Nothing matches" isEmpty={(d) => !d.hits.length && !d.live.length}>
           {(d) => (
             <>
-              {d.hits.length > 0 && (
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead>Title</TableHead><TableHead className="max-md:hidden">Source</TableHead>
-                      <TableHead className="max-sm:hidden">Freshness</TableHead><TableHead className="text-right">Date</TableHead>
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead>Title</TableHead><TableHead>Source</TableHead>
+                    <TableHead className="max-sm:hidden">Freshness</TableHead><TableHead className="text-right">Date</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {d.hits.map((h) => (
+                    <TableRow key={h.record_id} {...rowProps(() => setItem(h.record_id))}>
+                      <TableCell className="max-w-0 min-w-48 align-top">
+                        <div className="truncate font-medium">{h.title}</div>
+                        <div className="truncate text-xs text-muted-foreground">{h.snippet}</div>
+                      </TableCell>
+                      <TableCell className="align-top">{byId.get(h.source_id)?.name}</TableCell>
+                      <TableCell className="align-top max-sm:hidden"><Freshness source={byId.get(h.source_id)} /></TableCell>
+                      <TableCell className="text-right align-top text-muted-foreground">{shortDate(h.occurred_at)}</TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {d.hits.map((h) => (
-                      <TableRow key={h.record_id} {...rowProps(() => setItem(h.record_id))}>
-                        <TableCell className="max-w-0 min-w-48 align-top">
-                          <div className="truncate font-medium">{h.title}</div>
-                          <div className="truncate text-xs text-muted-foreground">{h.snippet}</div>
-                        </TableCell>
-                        <TableCell className="max-md:hidden">{byId.get(h.source_id)?.name}</TableCell>
-                        <TableCell className="max-sm:hidden"><Freshness source={byId.get(h.source_id)} /></TableCell>
-                        <TableCell className="text-right text-muted-foreground">{shortDate(h.occurred_at)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-              {d.live.map((l) => (
-                <section key={l.source_id} className="pt-6">
-                  <h2 className="mb-2 text-sm font-semibold">{l.source_name}</h2>
-                  {l.skipped ? <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground"><CircleAlert className="size-3.5" />{l.skipped === "timeout" ? "Timed out" : "Couldn't search"}</span> : (
-                    <ul className="divide-y rounded-lg border">
-                      {l.hits.map((h, i) => (
-                        <li key={i} className="flex min-h-9 items-center gap-3 px-4 py-1.5 text-sm">
-                          <span className="min-w-0 flex-1 truncate font-medium">{h.title}</span>
-                          {h.url && <a href={h.url} target="_blank" rel="noreferrer" aria-label={`Open ${h.title}`} className="text-muted-foreground hover:text-foreground"><ExternalLink className="size-3.5" /></a>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </section>
-              ))}
+                  ))}
+                  {d.live.map((l) => l.skipped ? (
+                    <TableRow key={l.source_id} className="hover:bg-transparent">
+                      <TableCell className="text-muted-foreground"><span className="inline-flex items-center gap-1.5"><CircleAlert className="size-3.5" />{l.skipped === "timeout" ? "Timed out" : "Couldn't search"}</span></TableCell>
+                      <TableCell>{l.source_name}</TableCell><TableCell className="max-sm:hidden" /><TableCell />
+                    </TableRow>
+                  ) : l.hits.map((h, i) => (
+                    <TableRow key={`${l.source_id}|${i}`} className="hover:bg-transparent">
+                      <TableCell className="max-w-0 min-w-48 align-top">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate font-medium">{h.title}</span>
+                          {h.url && <a href={h.url} target="_blank" rel="noreferrer" aria-label={`Open ${h.title}`} className="shrink-0 text-muted-foreground hover:text-foreground"><ExternalLink className="size-3.5" /></a>}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">{h.text}</div>
+                      </TableCell>
+                      <TableCell className="align-top">{l.source_name}</TableCell>
+                      <TableCell className="align-top text-muted-foreground max-sm:hidden"><span className="inline-flex items-center gap-1.5"><Zap className="size-3.5" />Live</span></TableCell>
+                      <TableCell />
+                    </TableRow>
+                  )))}
+                </TableBody>
+              </Table>
             </>
           )}
         </QueryState>

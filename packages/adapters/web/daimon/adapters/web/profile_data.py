@@ -71,6 +71,8 @@ class Started(BaseModel):
     pending_id: uuid.UUID
     user_code: str
     interval: int
+    source: str
+    expires_at: datetime | None
 
 
 class Polled(BaseModel):
@@ -116,7 +118,8 @@ def profile_data_router(runtime: WebRuntime) -> APIRouter:
                 raise HTTPException(status_code=502, detail=UNREACHABLE) from None
         return Started(
             flow=begun.flow, url=begun.url, pending_id=begun.pending_id,
-            user_code=begun.user_code, interval=begun.interval,
+            user_code=begun.user_code, interval=begun.interval, source=begun.source,
+            expires_at=begun.expires_at,
         )  # fmt: skip
 
     @router.get("/connect/callback")

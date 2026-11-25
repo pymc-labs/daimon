@@ -2,7 +2,7 @@
 `library_skills`: list them and read their files. Chat turns never get these tools.
 
 A scoped skill shows only to a caller who holds its scope under the data audience rule
-(`data_audience_for`, `read_context`); one refused data sees unscoped skills only. A skill
+(`data_audience_for`, `open_read`); one refused data sees unscoped skills only. A skill
 of an agent across an isolated channel's line stays hidden, as `get_skill` hides it.
 """
 
@@ -15,13 +15,13 @@ from daimon.adapters.mcp.data_access import data_audience_for
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._hub_workspace import hub_workspace_tool
-from daimon.adapters.mcp.tools.data import read_context
 from daimon.adapters.mcp.tools.skills import skill_hider
 from daimon.core.skill_serving import MAIN_FILE, ServedSkill, read_served, served
 from daimon.core.stores import workspace_skills as store
 from daimon.core.stores.domain import WorkspaceSkillRow
 from daimon.core.workspace_skills import may_read
 from daimon.data import pool
+from daimon.data.reading import open_read
 from daimon.data.schema import Schemas
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -61,10 +61,12 @@ async def _held_scopes(runtime: McpRuntime, auth: AuthIdentity) -> tuple[str, ..
     try:
         audience = await data_audience_for(runtime, auth)
         async with pool.connection(runtime.settings) as conn:
-            context = await read_context(conn, Schemas.of(runtime.settings.data), auth, audience)
+            schemas = Schemas.of(runtime.settings.data)
+            salt = f"agent:{auth.chat_agent_id or auth.agent_id}"
+            r = await open_read(conn, schemas, auth.tenant_id, audience, salt=salt)
     except (ToolError, Error):
         return ()
-    return context.scopes
+    return r.ctx.scopes
 
 
 async def visible_skills(runtime: McpRuntime, auth: AuthIdentity) -> list[WorkspaceSkillRow]:

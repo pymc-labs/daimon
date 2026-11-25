@@ -46,9 +46,18 @@ begin
   return new;
 end $$;
 
+-- Deleting a bound row needs the declared apply or erasure (`ports.erasure` sets
+-- daimon_data.erasing). Pause, unpublish and retire stay guarded in the app (`manage.act`).
 create or replace function {{data}}.guard_bound() returns trigger language plpgsql
   set search_path = {{data}}, pg_catalog, pg_temp as $$
 begin
+  if tg_op = 'DELETE' then
+    if old.bound and coalesce(current_setting('daimon_data.declared', true), '') <> 'on'
+       and coalesce(current_setting('daimon_data.erasing', true), '') <> 'on' then
+      raise exception 'a % row is managed by the deployment', tg_table_name using errcode = '42501';
+    end if;
+    return old;
+  end if;
   if not old.bound or coalesce(current_setting('daimon_data.declared', true), '') = 'on' then
     return new;
   end if;
@@ -69,3 +78,28 @@ begin
   end if;
   return new;
 end $$;
+create trigger guard_bound_delete before delete on {{data}}.sources
+  for each row execute function {{data}}.guard_bound();
+create trigger guard_bound_delete before delete on {{data}}.scopes
+  for each row execute function {{data}}.guard_bound();
+create trigger guard_bound_delete before delete on {{data}}.grants
+  for each row execute function {{data}}.guard_bound();
+
+-- Sources whose reads a connector re-checks live (`recheck`): caller SQL cannot be re-checked,
+-- so its context names them and no read in that transaction sees them.
+alter table {{data}}.read_contexts add column hidden_sources uuid[] not null default '{}';
+create or replace function {{data}}.visible_sources() returns setof uuid language sql stable security definer rows 10
+  set search_path = {{data}}, pg_catalog, pg_temp as $$
+  select s.id from sources s join read_contexts c on s.tenant_id = any (c.tenant_ids)
+  where c.pid = pg_backend_pid() and c.xact = pg_current_xact_id_if_assigned()
+    and s.publication = 'published' and s.status <> 'disabled' and source_fresh(s.id)
+    and s.id <> all (c.hidden_sources)
+$$;
+
+-- Linked subjects honour the listing for every proof: an account the source deactivated
+-- holds nothing, a sign-in included.
+create or replace function {{data}}.linked_subjects(account uuid, tenant_ids uuid[]) returns setof text
+  language sql stable set search_path = {{data}}, pg_catalog, pg_temp as $$
+  select provider || '/' || workspace || ':user:' || subject from identities
+  where account_id = account and tenant_id = any (tenant_ids) and active
+$$;

@@ -28,8 +28,9 @@ begin
   end if;
 end $$;
 
--- What caller SQL may select from. Access columns and the search vector stay out.
+-- What caller SQL may select from. Access columns, the search vector and the connector's own
+-- payload (which ingest redaction never touches) stay out.
 select {{data}}.protect_view('{{data}}.sources');
-select {{data}}.protect_view('{{data}}.records', array['acl', 'tsv']);
+select {{data}}.protect_view('{{data}}.records', array['acl', 'tsv', 'payload']);
 select {{data}}.protect_view('{{data}}.datasets');
 select {{data}}.protect_view('{{data}}.metrics');

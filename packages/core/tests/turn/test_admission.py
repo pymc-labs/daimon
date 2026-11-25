@@ -32,14 +32,18 @@ from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef
+from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import FeatureTarget, FundingMode, Role, TenantRow
 from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
+from daimon.core.stores.thread_session_lineage import request_fresh_start
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.turn.admission import (
     Admission,
     AdmissionDenied,
@@ -623,6 +627,44 @@ async def test_a_failed_data_reads_lookup_runs_the_turn_without_data_tools(
 
     assert not admission.data_reading
     assert admission.features is not None and not admission.features.on(DATA_READS)
+
+
+async def test_a_session_that_read_data_keeps_the_data_seal_until_a_fresh_start(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """With `data_reads` Off now, a live session that read data stays sealed: relay scoped,
+    no long-term memory. Only a fresh start ends it."""
+    tenant = await make_tenant(db_session)
+    await _tenant_config(db_session, tenant=tenant)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="discord", external_id="user-1"
+    )
+    snapshot = SessionSnapshot(
+        ma_agent_id="ag_1", model_id="claude-sonnet-4-6", environment_id="env_1",
+        system_sha256="s", skills_sha256="s", tools_sha256="s", mcp_servers_sha256="s",
+        env_sha256=None, agent_version=1, agent_name="daimon", repo_url=None, repo_branch=None,
+        memory_store_id=None, vault_id=None, data_read=True,
+    )  # fmt: skip
+    row = await create_thread_session(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="chan-1",
+        account_id=principal.account_id, ma_session_id="ses_1", effective_config=snapshot,
+    )  # fmt: skip
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    sealed = await admit_chat(deps, tenant, now=_NOW)
+    assert sealed.data_reading and sealed.relay_scoped, "the read keeps the seal"
+    async with db_session_factory.begin() as session:
+        await request_fresh_start(session, id=row.id, at=_NOW)
+    fresh = await admit_chat(deps, tenant, now=_NOW)
+    assert not fresh.data_reading and not fresh.relay_scoped, "a fresh start ends it"
 
 
 async def test_admission_limits_follow_their_settings(

@@ -15,7 +15,7 @@ import re
 import secrets
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
@@ -31,6 +31,8 @@ from psycopg.rows import DictRow
 
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 PENDING = timedelta(minutes=10)
+# A device code works for whoever types it, so it lives briefly (the prompt shows until when).
+DEVICE_TTL = timedelta(minutes=5)
 SKEW = timedelta(seconds=60)
 """A token this close to its end is refreshed first."""
 DENIED = frozenset({400, 401, 403})
@@ -104,6 +106,9 @@ class Started:
     pending_id: uuid.UUID
     user_code: str = ""
     interval: int = 5
+    source: str = ""
+    """The source's name, shown with the code so the person knows what they approve."""
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -256,18 +261,18 @@ class Connector:
 
     async def _source(
         self, conn: AsyncConnection[DictRow], tenant_id: uuid.UUID, source_id: uuid.UUID
-    ) -> tuple[Provider, str]:
-        """The source's provider and the workspace its identities live in."""
+    ) -> tuple[Provider, str, str]:
+        """The source's provider, the workspace its identities live in, and its name."""
         cur = await conn.execute(
-            f"select provider, kind, config from {self._d}.sources where id = %s and tenant_id = %s"
-            " and status <> 'disabled'".encode(),
+            f"select name, provider, kind, config from {self._d}.sources where id = %s"
+            " and tenant_id = %s and status <> 'disabled'".encode(),
             (source_id, tenant_id),
         )
         row = await cur.fetchone()
         p = self.providers.get(row["provider"] or row["kind"]) if row else None
         if row is None or p is None:
             raise Missing("You can't sign in to that source here.")
-        return p, str(row["config"].get("workspace") or source_id)
+        return p, str(row["config"].get("workspace") or source_id), row["name"]
 
     # ---- sign in ------------------------------------------------------------------------------
 
@@ -283,7 +288,7 @@ class Connector:
         async with conn.transaction():
             await fence_account(conn, self.schemas, account_id)
             await self._lock(conn, account_id, source_id)
-            p, _ = await self._source(conn, tenant_id, source_id)
+            p, _, name = await self._source(conn, tenant_id, source_id)
             cl, ep = await self._client(conn, p), await self._endpoints(p)
             await conn.execute(
                 f"delete from {self._d}.connect_pending where account_id = %s"
@@ -318,7 +323,7 @@ class Connector:
                     raise Failed(_short(r))
                 d = r.json()
                 secret = {"device_code": str(d["device_code"])}
-                expires = _now() + timedelta(seconds=int(d.get("expires_in", 600)))
+                expires = _now() + min(timedelta(seconds=int(d.get("expires_in", 600))), DEVICE_TTL)
                 url = str(d.get("verification_uri_complete") or d["verification_uri"])
                 started = Started(
                     "device", url, pending, str(d["user_code"]), int(d.get("interval", 5))
@@ -339,7 +344,7 @@ class Connector:
                     expires,
                 ),
             )
-        return started
+        return replace(started, source=name, expires_at=expires)
 
     async def _pending(
         self, conn: AsyncConnection[DictRow], account_id: uuid.UUID, where: str, arg: object
@@ -368,7 +373,7 @@ class Connector:
             row = await self._pending(
                 conn, account_id, "flow = 'code' and state_hash = %s", _sha(state)
             )
-            p, ws = await self._source(conn, row["tenant_id"], row["source_id"])
+            p, ws, _ = await self._source(conn, row["tenant_id"], row["source_id"])
             verifier = unseal(self.keys, row["secret"])["verifier"]
             status, tok = await self._exchange(
                 conn,
@@ -391,7 +396,7 @@ class Connector:
         failed: str | None = None
         async with conn.transaction():
             row = await self._pending(conn, account_id, "flow = 'device' and id = %s", pending_id)
-            p, ws = await self._source(conn, row["tenant_id"], row["source_id"])
+            p, ws, _ = await self._source(conn, row["tenant_id"], row["source_id"])
             device = unseal(self.keys, row["secret"])["device_code"]
             status, tok = await self._exchange(
                 conn, p, {"grant_type": DEVICE_GRANT, "device_code": device}

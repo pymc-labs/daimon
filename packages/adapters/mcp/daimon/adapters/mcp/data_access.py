@@ -10,15 +10,19 @@ Readers are subjects in the form the store's identities take (`user_subject`).
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.channel_audience import channel_has_outsiders
+from daimon.core.config import Settings
 from daimon.core.data_audience import (
     CAP,
     DataAudience,
@@ -30,17 +34,23 @@ from daimon.core.data_audience import (
     user_subject,
 )
 from daimon.core.data_seal import reads_data
-from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.mcp_identity import matching_turn
+from daimon.core.ports.gate import data_sources_on
 from daimon.core.stores.agent_owners import owner_of
 from daimon.core.stores.direct_messages import is_dm_thread
 from daimon.core.stores.identity import accounts_of
 from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
+from daimon.data import identity, pool
+from daimon.data.schema import Schemas
 from fastmcp.exceptions import ToolError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger()
 
 _REFUSALS: Final[dict[RefusalReason, str]] = {
     "no_person": "Data sources answer only for a person in this conversation. Nothing was read.",
@@ -52,6 +62,10 @@ _REFUSALS: Final[dict[RefusalReason, str]] = {
 }
 #: Members a Slack room may page through before its viewers count as unknown.
 _SLACK_PAGE_LIMIT: Final = 4 * CAP
+#: Slack lookups at once, and how long a member's bot or deactivated status is believed.
+_SLACK_LOOKUPS: Final = 8
+_SLACK_PERSON_TTL_S: Final = 300.0
+_slack_person: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
 async def data_audience_for(runtime: McpRuntime, auth: AuthIdentity) -> DataAudience:
@@ -71,6 +85,8 @@ async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime)
     platform = auth.platform
     if auth.client:
         return DataOrigin("private", contained=True)
+    if auth.chat_agent_id is not None and auth.chat_session_id is None:
+        return DataOrigin("none")  # an agent's own credential reads only within a chat turn
     if auth.chat_session_id is not None:
         return await _turn_origin(runtime, auth, now=now)
     if platform is None or auth.platform_user_id is None:
@@ -240,17 +256,56 @@ async def _slack_people(
     runtime: McpRuntime, team_id: str, users: Collection[str], linked: dict[str, uuid.UUID]
 ) -> frozenset[str] | None:
     """`users` without bots and deactivated users. A linked account is a person; any other
-    member is looked up. None on any Slack error."""
+    member is looked up, a few at a time, and believed for a few minutes. None on any Slack
+    error."""
     client: AsyncWebClient = await slack_web_client(runtime, team_id=team_id)
-    people = {user for user in users if user in linked}
-    try:
-        for user in users:
-            if user in linked:
-                continue
+    gate = asyncio.Semaphore(_SLACK_LOOKUPS)
+
+    async def is_person(user: str) -> bool:
+        now = time.monotonic()
+        known = _slack_person.get((team_id, user))
+        if known is not None and known[0] > now:
+            return known[1]
+        async with gate:
             resp = await client.users_info(user=user)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            info = cast(dict[str, Any], resp["user"])
-            if not (info.get("is_bot") or info.get("deleted") or user == "USLACKBOT"):
-                people.add(user)
+        info = cast(dict[str, Any], resp["user"])
+        person = not (info.get("is_bot") or info.get("deleted") or user == "USLACKBOT")
+        if len(_slack_person) > 50 * CAP:
+            _slack_person.clear()
+        _slack_person[(team_id, user)] = (now + _SLACK_PERSON_TTL_S, person)
+        return person
+
+    unlinked = [user for user in users if user not in linked]
+    try:
+        verdicts = await asyncio.gather(*map(is_person, unlinked))
     except SlackApiError:
         return None
-    return frozenset(people)
+    people = {user for user in users if user in linked}
+    return frozenset(people | {u for u, ok in zip(unlinked, verdicts, strict=True) if ok})
+
+
+async def link_github(
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    account_id: uuid.UUID,
+    github_user_id: int,
+) -> None:
+    """A personal GitHub link, as the person's GitHub identity in the data store where the
+    workspace has data sources on (`identity.github_proof`). Never fails the link."""
+    if not data_sources_on(settings):
+        return
+    try:
+        async with sessionmaker() as session:
+            place = FeaturePlace(tenant_id, platform)
+            if not (await feature_in(session, settings, place, "data_sources")).on:
+                return
+        async with pool.connection(settings) as conn:
+            await identity.link(
+                conn, Schemas.of(settings.data), tenant_id=tenant_id, account_id=account_id,
+                proof=identity.github_proof(github_user_id),
+            )  # fmt: skip
+    except Exception as e:
+        log.warning("data.github_link_failed", why=type(e).__name__)

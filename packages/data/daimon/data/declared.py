@@ -534,13 +534,17 @@ class Report:
 
 
 async def tenant_of(conn: AsyncConnection[DictRow], workspace: uuid.UUID | str) -> uuid.UUID | None:
-    """The tenant a declared `workspace` names: its id, or its `<platform>:<id>`."""
+    """The tenant a declared `workspace` names, by its id or its `<platform>:<id>`; None when
+    no such tenant exists. The store's pool opens core's own database (`pool`), so core's
+    `tenants` is on its search path."""
     if isinstance(workspace, uuid.UUID):
-        return workspace
-    platform, external_id = workspace.split(":", 1)
-    cur = await conn.execute(
-        b"select id from tenants where platform = %s and external_id = %s", (platform, external_id)
-    )
+        cur = await conn.execute(b"select id from tenants where id = %s", (workspace,))
+    else:
+        platform, external_id = workspace.split(":", 1)
+        cur = await conn.execute(
+            b"select id from tenants where platform = %s and external_id = %s",
+            (platform, external_id),
+        )
     row = await cur.fetchone()
     return row["id"] if row else None
 

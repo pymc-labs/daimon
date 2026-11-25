@@ -7,7 +7,7 @@ import pytest
 from daimon.core.config import DataSettings
 from daimon.data.init import PsycopgSql, init_data
 from daimon.data.migrate import ROLES, STORE_FILES, apply
-from daimon.data.schema import Schemas
+from daimon.data.schema import Schemas, read_sql, render
 from daimon.testing.data_db import DataDb
 from sqlalchemy import make_url
 
@@ -155,3 +155,52 @@ def test_reapplying_the_store_is_a_no_op_and_puts_back_grants_a_no_privileges_re
         assert policies == 6 + int(vectors), (
             "a policy went missing"
         )  # sources, records, chunks, attachments, datasets, metrics
+
+
+def _shape(conn: Any, schemas: Schemas) -> set[tuple[str, ...]]:
+    """The store's columns, functions, triggers, constraints, indexes, policies and files,
+    with its schema names written as placeholders."""
+    names = [schemas.data, schemas.views]
+    rows = conn.execute(
+        "select 'column', table_schema, table_name || '.' || column_name || ' ' || data_type"
+        " from information_schema.columns where table_schema = any(%(s)s)"
+        " union all select 'function', n.nspname, pg_get_functiondef(p.oid)"
+        " from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = any(%(s)s)"
+        " union all select 'trigger', n.nspname, c.relname || ' ' || pg_get_triggerdef(t.oid)"
+        " from pg_trigger t join pg_class c on c.oid = t.tgrelid"
+        " join pg_namespace n on n.oid = c.relnamespace where n.nspname = any(%(s)s)"
+        " and not t.tgisinternal"
+        " union all select 'constraint', n.nspname, conname || ' ' || pg_get_constraintdef(o.oid)"
+        " from pg_constraint o join pg_namespace n on n.oid = o.connamespace"
+        " where n.nspname = any(%(s)s)"
+        " union all select 'index', schemaname, indexdef from pg_indexes"
+        " where schemaname = any(%(s)s)"
+        " union all select 'policy', schemaname, tablename || ' ' || policyname || ' ' || qual"
+        " from pg_policies where schemaname = any(%(s)s)",
+        {"s": names},
+    ).fetchall()
+    files = conn.execute(f"select file from {schemas.data}.schema_version").fetchall()
+    normal = {(kind, *(t.replace(schemas.views, "{v}").replace(schemas.data, "{d}") for t in rest))
+              for kind, *rest in rows}  # fmt: skip
+    return normal | {("file", f) for (f,) in files}
+
+
+def test_the_down_files_return_the_store_to_its_0003_shape(data_db: DataDb) -> None:
+    """0004-0006 undone, newest first, leave what 0001-0003 alone make."""
+    full, base = (
+        Schemas.of(DataSettings(schema_name=f"{data_db.schemas.data}_{uuid.uuid4().hex[:8]}"))
+        for _ in range(2)
+    )
+    later = STORE_FILES[3:]
+    with data_db.connect() as conn:
+        sql = PsycopgSql(conn)
+        try:
+            apply(sql, full, STORE_FILES)
+            apply(sql, base, STORE_FILES[:3])
+            assert _shape(conn, full) != _shape(conn, base), "the later files change nothing"
+            for file in reversed(later):
+                sql.script(render(read_sql(file.removesuffix(".sql") + "_down.sql"), full))
+            assert _shape(conn, full) == _shape(conn, base)
+        finally:
+            for s in (full, base):
+                conn.execute(f"drop schema if exists {s.views}, {s.data} cascade")
