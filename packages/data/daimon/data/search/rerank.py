@@ -18,7 +18,9 @@ CHARS: Final = 2000
 """Of each candidate the ranker reads."""
 TIMEOUT: Final = 4.0
 UNITS: Final = 1000
-"""Metered input units of one ranking request, which the rate table prices per thousand."""
+"""Metered input units of one ranking query, which the rate table prices per thousand."""
+RECORDS_PER_QUERY: Final = 100
+"""Vertex bills a request as one query per 100 records, rounded up."""
 URL: Final = (
     "https://us-discoveryengine.googleapis.com/v1/projects/{project}/locations/us"
     "/rankingConfigs/default_ranking_config:rank"
@@ -81,7 +83,7 @@ async def order(
                 tenant_id=payer.tenant_id,
                 platform_user_id=payer.platform_user_id,
                 model=MODEL,
-                units=UNITS,
+                units=UNITS * -(-len(texts) // RECORDS_PER_QUERY),
             )
         except Exception:
             log.exception("data.rerank_unbilled", tenant=str(payer.tenant_id))

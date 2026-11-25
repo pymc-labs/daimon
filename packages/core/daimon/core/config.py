@@ -3142,7 +3142,12 @@ class DataSettings(BaseModel):
     embed_model: str = Field(default="", description="Embedding model name sent to the API.")
     embed_key: SecretStr | None = Field(default=None, description="API key for the embeddings API.")
     embed_provider: str = Field(
-        default="openai", description="Embeddings API dialect: `openai` or a named provider."
+        default="",
+        description=(
+            "Who serves the embeddings: `openai` for OpenAI's API, or the providers an "
+            "OpenRouter-style router may use, comma-separated. Usage rows name it, "
+            "or `selfhosted` for anything else."
+        ),
     )
     embed_query_prefix: str = Field(
         default="", description="Text put before a search query when it is embedded."
@@ -3172,6 +3177,13 @@ class DataSettings(BaseModel):
     )
 
     _split_lists = field_validator("private_hosts", mode="before")(_split_csv)
+
+    @field_validator("schema_name")
+    @classmethod
+    def _own_schema(cls, name: str) -> str:
+        if name in ("public", "information_schema") or name.startswith("pg_"):
+            raise ValueError("the data store needs a schema of its own, not a system one")
+        return name
 
 
 class RepoMemorySettings(BaseModel):
