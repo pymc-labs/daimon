@@ -1311,6 +1311,24 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Lead intake",
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
     ),
+    # Stand-in for the data store's own `data_sources` spec; that change replaces it.
+    FeatureSpec(
+        key="data_sources",
+        name="Data sources",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "The data store: connected sources, their synced content and the tools that search "
+            "it. Whoever runs Daimon turns it on for the deployment and sets the store up with "
+            "`daimon data init`; a workspace can then turn it off for itself."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+    ),
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",
