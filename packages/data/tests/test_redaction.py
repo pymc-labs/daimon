@@ -76,7 +76,10 @@ class Store:
         rows = await self.sql(
             f"select r.title || ' ' || r.body || ' ' || coalesce(r.author, '') || ' '"
             f" || coalesce(string_agg(c.text, ' '), '') as t from {self.d}.records r"
-            f" left join {self.d}.chunks c on c.record_id = r.id group by r.id"
+            f" left join {self.d}.chunks c on c.record_id = r.id"
+            f" where r.source_id in (select id from {self.d}.sources where tenant_id = %s)"
+            " group by r.id",
+            self.tenant,
         )
         return " ".join(r["t"] for r in rows)
 
@@ -106,7 +109,11 @@ async def test_removed_text_is_never_stored_and_excluded_records_are_dropped(
     for gone in ("Acme", "Alice", "Smith", "zx9", "asked", "never stored"):
         assert gone not in text, "the source's words are rewritten before storing and chunking"
     assert "client A wrote. An engineer approved it" in text, "an article moves with the alias"
-    ids = await store.sql(f"select external_id from {store.d}.records")
+    ids = await store.sql(
+        f"select external_id from {store.d}.records where source_id in"
+        f" (select id from {store.d}.sources where tenant_id = %s)",
+        store.tenant,
+    )
     assert [r["external_id"] for r in ids] == ["doc:1"], "an excluded id is never stored"
 
 
@@ -167,7 +174,11 @@ async def test_a_changed_pinned_file_stops_its_source_until_approved(
     served["file"] = _file({"aliases": {"Acme": "client B"}})
     await redaction.refresh_all(store.conn, schemas)
     assert await store.sync() == "skipped", "a changed file waits for approval"
-    (cursor,) = await store.sql(f"select last_error from {store.d}.source_cursors")
+    (cursor,) = await store.sql(
+        f"select c.last_error from {store.d}.source_cursors c join {store.d}.sources s"
+        " on s.id = c.source_id where s.tenant_id = %s",
+        store.tenant,
+    )
     assert "await approval" in cursor["last_error"]
 
     admin = uuid.uuid4()
