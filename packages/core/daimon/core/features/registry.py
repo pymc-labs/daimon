@@ -964,9 +964,9 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card before a cloud computer is started or its time is extended. "
-            "Skip starts it without the card, for the default time. On OpenAI and Gemini "
-            "agents the card still shows. Only a server admin can change it."
+            "Ask shows a card before a cloud computer starts or gets more time. Skip runs "
+            "both without it, for the default time only. OpenAI and Gemini agents still get "
+            "the card. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -983,11 +983,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "When a background command ends and nobody is in the conversation, the agent "
-            "may run the next command on that cloud computer. After a set number in a row it "
-            "waits until the owner runs a command or writes a file there; a message alone "
-            "does not count. Off: it only reads the result and reports. Only a server admin "
-            "can change it."
+            "When a background command ends with nobody in the conversation, the agent may "
+            "run the next command on that cloud computer. After a set number in a row it waits "
+            "for the owner to run a command or write a file there; a message does not count. "
+            "Off: it only reports the result. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),
@@ -1198,9 +1197,13 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "compute",
         "Cloud computers",
-        "The agent can start a short-lived cloud computer to run code and keep files. Off "
-        "removes the computer tools here.",
+        (
+            "The agent can start a short-lived cloud computer to run code and keep files. "
+            "Only a server admin turns it on; Off removes its tools here."
+        ),
         requires=("compute_setup",),
+        default="off",
+        authority=_SERVER_ADMIN,
     ),
     _capability(
         "notebooks",

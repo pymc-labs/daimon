@@ -86,7 +86,7 @@ Where each feature can be set, and its default.
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Secret sharing | `secret_sharing` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
 | Wait for bot access | `bot_access_wait` | Capability | Off |  | ✓ |  |  |  |  | Only Discord |
-| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Cloud computers | `compute` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -952,13 +952,13 @@ Work for a channel Daimon cannot reach waits, without failing, and runs once it 
 
 ## Cloud computers
 
-The agent can start a short-lived cloud computer to run code and keep files. Off removes the computer tools here.
+The agent can start a short-lived cloud computer to run code and keep files. Only a server admin turns it on; Off removes its tools here.
 
 | | |
 | --- | --- |
 | Key | `compute` |
 | Values | `on` (On), `off` (Off) |
-| Default | `on` |
+| Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
 
@@ -1309,7 +1309,7 @@ Ask shows a card with the destination and duration before a watch is made or res
 
 ## Approval for cloud computers
 
-Ask shows a card before a cloud computer is started or its time is extended. Skip starts it without the card, for the default time. On OpenAI and Gemini agents the card still shows. Only a server admin can change it.
+Ask shows a card before a cloud computer starts or gets more time. Skip runs both without it, for the default time only. OpenAI and Gemini agents still get the card. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1321,7 +1321,7 @@ Ask shows a card before a cloud computer is started or its time is extended. Ski
 
 ## Cloud computers continue after a job
 
-When a background command ends and nobody is in the conversation, the agent may run the next command on that cloud computer. After a set number in a row it waits until the owner runs a command or writes a file there; a message alone does not count. Off: it only reads the result and reports. Only a server admin can change it.
+When a background command ends with nobody in the conversation, the agent may run the next command on that cloud computer. After a set number in a row it waits for the owner to run a command or write a file there; a message does not count. Off: it only reports the result. Only a server admin can change it.
 
 | | |
 | --- | --- |

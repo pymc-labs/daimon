@@ -31,7 +31,8 @@ from daimon.core.continuity.wakes import WAKE_RUN_LEASE, claim_wake, settle_wake
 from daimon.core.errors import StoreError
 from daimon.core.stores import compute_sessions as session_store
 from daimon.core.stores import compute_tasks as task_store
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import FeatureTarget, Role
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin, get_active_origin
 from daimon.testing.compute import FakeComputeProvider
@@ -72,7 +73,18 @@ async def caller(
     helper_of=None,
 ):
     async with sm.begin() as db:
-        tenant = tenant or await make_tenant(db)
+        if tenant is None:
+            tenant = await make_tenant(db)
+            # Cloud computers are Off until a server admin turns them on for the workspace.
+            await set_feature_value(
+                db,
+                tenant_id=tenant.id,
+                target=FeatureTarget("workspace"),
+                key="compute",
+                value="on",
+                set_by=None,
+                surface="cli",
+            )
         account = account or await make_account(db, tenant=tenant)
         origin = await create_origin(
             db,
@@ -437,6 +449,60 @@ async def test_disabling_launch_cleans_partial_creation_without_starting_a_machi
     await disabled.reconcile()
     assert (await disabled.get(owner, session.id)).state == "deleted"
     assert fake.resources == {} and fake.machine_env == {}
+
+
+async def test_a_launching_session_stops_where_compute_is_left_off(db_engine, db_clean):
+    """Off until a server admin turns it on: a session still launching in a workspace that
+    never turned cloud computers on is stopped, not provisioned."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+    owner, _, _ = await caller(sm, tenant=tenant)
+    fake = FakeComputeProvider()
+    fake.fail_create = True
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    with pytest.raises(ComputeProviderError):
+        await launch(service, owner)
+    fake.fail_create = False
+    [session] = await service.list(owner)
+    await service.reconcile()
+    assert (await service.get(owner, session.id)).state == "deleted"
+    assert fake.machine_env == {}, "no machine started"
+
+
+async def test_turning_compute_off_leaves_a_running_machine_to_stop_or_expire(db_engine, db_clean):
+    """Off removes the computer tools here (the MCP gate refuses all but list and stop), but
+    a machine already running keeps running: its command is still polled, the owner can
+    list and stop it, and otherwise it ends at its idle time."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    now = NOW
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: now)
+    kept, stopped = await launch(service, owner), await launch(service, owner, "second")
+    task = await service.start_task(
+        owner, kept.id, command="python fit.py", timeout_minutes=60, request_key="use"
+    )
+    async with sm.begin() as db:
+        await set_feature_value(
+            db,
+            tenant_id=tenant.id,
+            target=FeatureTarget("workspace"),
+            key="compute",
+            value="off",
+            set_by=None,
+            surface="cli",
+        )
+    await service.reconcile()
+    assert (await service.get(owner, kept.id)).state == "running", "Off stops nothing running"
+    fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
+    await service.poll_tasks()
+    assert (await service.task_result(owner, task.id)).state == "succeeded", "still polled"
+    assert {s.id for s in await service.list(owner)} == {kept.id, stopped.id}
+    assert (await service.stop(owner, stopped.id)).state == "deleted"
+    now = kept.expires_at + timedelta(minutes=1)
+    await service.reconcile()
+    assert (await service.get(owner, kept.id)).state == "deleted", "it ends at its idle time"
 
 
 async def test_a_launching_session_waits_while_compute_cannot_be_read(

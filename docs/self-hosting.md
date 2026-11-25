@@ -120,7 +120,7 @@ Each of these is off until you set it up:
 | Service | Needs | Page |
 | --- | --- | --- |
 | Watches | the `sidecar` and `watch-executor` services and their own database login | [Watches](watches.md) |
-| Compute sessions | a Google Cloud project and a session service account, on the MCP service and scheduler | [Compute sessions](compute.md) |
+| Compute sessions | a Google Cloud project and a session service account, on the MCP service and scheduler, then the `compute` feature turned on | [Compute sessions](compute.md) |
 | Long jobs | a tenant policy set by an admin | [Long jobs](long-jobs.md) |
 | Repository memory | an import of existing memory, then a switch on every process | [Repository memory](repo-memory.md) |
 | Context providers | a binding per tenant and an HTTPS provider | [Context providers](context-providers.md) |
