@@ -540,6 +540,13 @@ async def _connection(ctx: Ctx, e: ConnectionEntry) -> Result:
         b" scope = excluded.scope, updated_at = now()",
         (ctx.tenant_id, e.id, url, sealed, e.scope),
     )
+    if row is not None and row["url"] != url:  # a new address: its tools wait for review
+        await ctx.conn.execute(
+            b"update mcp_connection_tools set enabled = false from mcp_connections c"
+            b" where c.id = mcp_connection_tools.connection_id"
+            b" and c.tenant_id = %s and c.name = %s",
+            (ctx.tenant_id, e.id),
+        )
     return {"action": "create" if row is None else "update"}
 
 

@@ -96,12 +96,15 @@ async def mark_connection(
     status: McpConnectionStatus,
     last_error: str | None,
 ) -> None:
-    """Record how the last read of the upstream went."""
+    """Record how the last read of the upstream went; a pause stays."""
     await update_connection(
         session,
         tenant_id=tenant_id,
         connection_id=connection_id,
-        values={"status": status, "last_error": last_error},
+        values={
+            "status": case((McpConnection.status == "paused", McpConnection.status), else_=status),
+            "last_error": last_error,
+        },
     )
 
 
@@ -115,7 +118,8 @@ async def record_refresh(
         connection_id=connection_id,
         values={
             "status": case((McpConnection.status == "error", "active"), else_=McpConnection.status),
-            "last_error": note,
+            "last_error": None,
+            "note": note,
             "refreshed_at": func.now(),
         },
     )

@@ -192,14 +192,13 @@ async def served_tools(session: AsyncSession, caller: SharedCaller) -> list[Shar
         return allowed[scope]
 
     out: list[SharedTool] = []
+    taken: set[str] = set()  # the first connection, by name, keeps a served name
     for connection, tool in await store.list_served(session, tenant_id=caller.tenant_id):
         name = _served_name(connection.name, tool.name)
-        if (
-            name is not None
-            and not tool.changed
-            and await within(connection.scope)
-            and await within(tool.scope)
-        ):
+        if name is None or name in DAIMON_TOOL_NAMES or name in taken:
+            continue
+        taken.add(name)
+        if not tool.changed and await within(connection.scope) and await within(tool.scope):
             out.append(SharedTool(name, connection, tool))
     return out
 
@@ -213,11 +212,14 @@ def decide_shared_call(
     attended: bool,
     agent_rule: ResolvedAgentToolRule | None,
     outside: bool = False,
+    data_read: bool = False,
 ) -> ToolVerdict:
     """Run, ask or refuse one call by the rules for any third-party tool: never trusted, a
     write asks (and is refused unattended), the operator's and the agent's rules apply.
     `name` is the served name; `writes` is the tool's flag. An `outside` client (no card, no
-    routine: the hub, a CLI) gets reads only, whatever `unattended_writes` allows."""
+    routine: the hub, a CLI) gets reads only, whatever `unattended_writes` allows. After a
+    `data_read`, any call that would run asks, or is refused unattended: its arguments go
+    to a third party."""
     call = ToolCall(
         tool_use_id=f"shared-{uuid.uuid4()}",
         server_name=DAIMON_SERVER_NAME,
@@ -235,6 +237,10 @@ def decide_shared_call(
     )
     if outside and verdict.outcome == "allow" and verdict.effect == "write":
         return ToolVerdict(outcome="deny", effect="write", reason="unattended_write")
+    if data_read and verdict.outcome == "allow":
+        return ToolVerdict(
+            outcome="ask" if attended else "deny", effect="write", reason="data_read"
+        )
     return verdict
 
 
@@ -343,11 +349,19 @@ async def add_connection(
         raise taken from err
 
 
+def _printable(text: str) -> str:
+    return "".join(ch for ch in text if ch == "\n" or ch.isprintable())
+
+
 def _discovered(
-    policy: ToolSafetyPolicy, connection: str, listed: tuple[dict[str, JsonValue], ...]
+    policy: ToolSafetyPolicy,
+    connection: str,
+    listed: tuple[dict[str, JsonValue], ...],
+    taken: frozenset[str] = frozenset(),
 ) -> tuple[list[DiscoveredTool], list[str]]:
-    """The tools to store, and those left out with why: a Daimon tool's name, a schema that
-    is not an object or past `_SCHEMA_MAX`, and any past the first `_TOOLS_MAX`."""
+    """The tools to store, and those left out with why: a Daimon tool's name, a name another
+    connection serves (`taken`), a schema that is not an object or past `_SCHEMA_MAX`, and
+    any past the first `_TOOLS_MAX`. Descriptions lose control and bidi characters."""
     found: list[DiscoveredTool] = []
     left_out: list[str] = []
     for item in listed:
@@ -362,6 +376,9 @@ def _discovered(
         schema: JsonValue = {"type": "object"} if schema is None else schema
         if served in DAIMON_TOOL_NAMES:
             left_out.append(f"{served} (a Daimon tool's name)")
+            continue
+        if served in taken:
+            left_out.append(f"{served} (served by another connection)")
             continue
         if len(found) >= _TOOLS_MAX:
             left_out.append(f"{served} (past the first {_TOOLS_MAX})")
@@ -378,7 +395,7 @@ def _discovered(
         found.append(
             DiscoveredTool(
                 name=name,
-                description=(description if isinstance(description, str) else "")[
+                description=_printable(description if isinstance(description, str) else "")[
                     :_DESCRIPTION_MAX
                 ],
                 input_schema=schema,
@@ -413,7 +430,18 @@ async def refresh_connection(
                 last_error=f"The server could not be read ({err.kind}).",
             )
         raise SharedConnectionError("The server could not be read.") from err
-    found, left_out = _discovered(policy, connection.name, listed)
+    async with sessions() as session:
+        others = {
+            c.id: c.name
+            for c in await store.list_connections(session, tenant_id=connection.tenant_id)
+        }
+        tools = await store.list_tools(session, tenant_id=connection.tenant_id)
+    taken = frozenset(
+        f"{others[t.connection_id]}_{t.name}"
+        for t in tools
+        if t.connection_id != connection.id and t.connection_id in others
+    )
+    found, left_out = _discovered(policy, connection.name, listed, taken)
     more = f" and {len(left_out) - 10} more" if len(left_out) > 10 else ""
     note = f"Left out: {', '.join(left_out[:10])}{more}." if left_out else None
     async with sessions.begin() as session:

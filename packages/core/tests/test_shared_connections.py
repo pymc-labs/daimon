@@ -152,7 +152,7 @@ def test_daimon_tool_names_are_left_out() -> None:
 
 
 async def test_refresh_keeps_a_pause(db_session: AsyncSession) -> None:
-    """A good read clears an error but never resumes a paused connection."""
+    """A good read clears an error, and no read, good or failed, resumes a pause."""
     tenant = await make_tenant(db_session)
     connection = await _connection(db_session, tenant.id)
     for before, after in (("paused", "paused"), ("error", "active")):
@@ -164,6 +164,14 @@ async def test_refresh_keeps_a_pause(db_session: AsyncSession) -> None:
         )
         row = await store.get_connection(db_session, tenant_id=tenant.id, connection_id=connection)
         assert row is not None and row.status == after, f"{before} became {row}"
+    await store.update_connection(
+        db_session, tenant_id=tenant.id, connection_id=connection, values={"status": "paused"}
+    )
+    await store.mark_connection(
+        db_session, tenant_id=tenant.id, connection_id=connection, status="error", last_error="x"
+    )
+    row = await store.get_connection(db_session, tenant_id=tenant.id, connection_id=connection)
+    assert row is not None and row.status == "paused", f"a failed read resumed it: {row}"
 
 
 async def test_visitors_get_no_shared_tools(db_session: AsyncSession) -> None:

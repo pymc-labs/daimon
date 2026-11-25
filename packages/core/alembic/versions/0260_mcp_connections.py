@@ -35,6 +35,7 @@ def upgrade() -> None:
         sa.Column("scope", sa.Text(), nullable=True),
         sa.Column("status", sa.Text(), server_default="active", nullable=False),
         sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column("note", sa.Text(), nullable=True),
         sa.Column("refreshed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("declared", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column(

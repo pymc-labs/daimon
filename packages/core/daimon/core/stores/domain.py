@@ -1706,6 +1706,7 @@ class McpConnectionRow(BaseModel):
     scope: str | None
     status: McpConnectionStatus
     last_error: str | None
+    note: str | None
     refreshed_at: datetime | None
     declared: bool
     created_at: datetime

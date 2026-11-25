@@ -6001,6 +6001,8 @@ class McpConnection(Base):
     scope: Mapped[str | None]
     status: Mapped[str] = mapped_column(server_default="active")
     last_error: Mapped[str | None]
+    note: Mapped[str | None]
+    """What the last good refresh left out, and why."""
     refreshed_at: Mapped[datetime | None]
     declared: Mapped[FalseFlag]
     created_at: Mapped[TsNow]
