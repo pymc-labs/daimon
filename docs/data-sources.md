@@ -104,6 +104,7 @@ tenants:
     scopes: [{id: shared:eng, kind: shared, name: Engineering}]
     sources:
       - {id: wiki, kind: postgres, name: Wiki, credentials: {dsn: "env:WIKI_DSN"}, publish: true}
+    skill_repos: [{repo: owner/skills, branch: main, paths: [skills], scope: shared:eng}]
 ```
 
 A `workspace` is Daimon's workspace id, or `<platform>:<id>` with the platform's own id for
@@ -112,6 +113,8 @@ read-only in the app. Daimon never deletes one: a removed entry stays, and
 `retire: true` retires a source for good. A source is created in shadow and published only
 with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
 below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
+
+`skill_repos` adds each repository's skills to the library with that scope.
 
 ## Who can read a record
 
@@ -188,10 +191,11 @@ limited channel keeps that channel's rule. The hub's data tools take a `workspac
 or id, among the workspaces the caller belongs to, and are listed only where `data_reads`
 is On in one of them.
 
-A skill in the workspace library may carry a scope. `list_library_skills` and
-`read_library_skill` (on the MCP server and, with a `workspace`, on the hub) show a scoped
-skill only to someone who holds that scope in the data store. Chat turns and outside
-clients see unscoped skills only.
+With `library_skills` On, `list_library_skills` and `read_library_skill` serve the
+workspace's skill library to coding keys, the hub (with a `workspace`) and outside clients.
+A skill may carry a scope; a scoped skill shows only to someone whose data reads include
+that scope. A caller who may read no data sees unscoped skills only. Chat agents use
+`list_skills` and `get_skill` instead.
 
 ## After a restore
 

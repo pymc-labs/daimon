@@ -10,6 +10,7 @@ A YAML or JSON file, applied at start and every 10 minutes:
         sources:
           - {id: wiki, kind: postgres, name: Wiki, credentials: {dsn: "env:WIKI_DSN"},
              publish: true}
+        skill_repos: [{repo: owner/skills, branch: main, paths: [skills], scope: shared:eng}]
 
 What it never does: delete. A removed entry is left as it was; a source is retired only by
 `retire: true`, and a retired source never reopens. A `revision` below the last applied one
@@ -35,9 +36,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final, Literal
 
+import psycopg
 import structlog
 import yaml
 from daimon.core.config import Settings
+from daimon.core.ports.skill_repos import SkillRepoDecl, valid_branch
 from daimon.data import audit, parity, pool
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
@@ -48,7 +51,7 @@ from daimon.data.sync.engine import Env
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 log = structlog.get_logger()
 
@@ -95,6 +98,21 @@ class GrantEntry(BaseModel):
     scope: str = Field(min_length=1)
     holder: str = Field(min_length=1)
     release: bool = False
+
+
+class SkillRepoEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repo: str = Field(pattern=r"^[\w.-]+/[\w.-]+$", max_length=200)
+    branch: str = "main"
+    paths: list[str] = []
+    scope: str | None = Field(default=None, min_length=1)
+
+    @field_validator("branch")
+    @classmethod
+    def _branch(cls, value: str) -> str:
+        if not valid_branch(value):
+            raise ValueError("not a branch name")
+        return value
 
 
 class TenantDecl(BaseModel):
@@ -396,7 +414,14 @@ async def _grants(ctx: Ctx, raw: object) -> list[Result]:
     return await _each(ctx, "grants", raw, GrantEntry, _grant)
 
 
+async def _skill_repos(ctx: Ctx, raw: object) -> list[Result]:
+    """Only checked here: the web app's skill loop adds the skills (`DeclaredSkillRepos`)."""
+    entries = TypeAdapter(list[SkillRepoEntry]).validate_python(raw)
+    return [{"section": "skill_repos", "id": e.repo, "action": "declared"} for e in entries]
+
+
 register_section("scopes", _scopes)
+register_section("skill_repos", _skill_repos)
 register_section("grants", _grants)
 register_section("sources", _sources)
 
@@ -412,7 +437,7 @@ class Report:
     results: list[Result] | None = None
 
 
-async def _tenant(conn: AsyncConnection[DictRow], workspace: uuid.UUID | str) -> uuid.UUID | None:
+async def tenant_of(conn: AsyncConnection[DictRow], workspace: uuid.UUID | str) -> uuid.UUID | None:
     """The tenant a declared `workspace` names: its id, or its `<platform>:<id>`."""
     if isinstance(workspace, uuid.UUID):
         return workspace
@@ -445,7 +470,7 @@ async def apply(
             return Report(decl.revision, ignored=True)
         await conn.execute(f"select set_config('{GUC}', 'on', true)".encode())
         for tenant in decl.tenants:
-            tenant_id = await _tenant(conn, tenant.workspace)
+            tenant_id = await tenant_of(conn, tenant.workspace)
             if tenant_id is None:
                 log.warning("data.declared_workspace_unknown")
                 results.append({"section": "workspace", "id": "", "action": "error",
@@ -477,6 +502,38 @@ async def apply(
         if r.get("unreadable"):
             log.error("data.declared_credentials_unreadable", id=r["id"], count=r["unreadable"])
     return Report(decl.revision, results=results)
+
+
+@dataclass(frozen=True)
+class DeclaredSkillRepos:
+    """The declared file's `skill_repos`, per workspace; none when it is unset or unreadable."""
+
+    settings: Settings
+
+    async def declared(self) -> list[SkillRepoDecl]:
+        if not self.settings.data.declared:
+            return []
+        out: list[SkillRepoDecl] = []
+        try:
+            decl = load(self.settings.data.declared)
+            async with pool.connection(self.settings) as conn:
+                for tenant in decl.tenants:
+                    raw = (tenant.model_extra or {}).get("skill_repos")
+                    tenant_id = None if raw is None else await tenant_of(conn, tenant.workspace)
+                    if tenant_id is None:
+                        continue
+                    try:
+                        entries = TypeAdapter(list[SkillRepoEntry]).validate_python(raw)
+                    except ValidationError:
+                        continue  # `apply` reports it
+                    out += [
+                        SkillRepoDecl(tenant_id, e.repo, e.branch, tuple(e.paths), e.scope)
+                        for e in entries
+                    ]
+        except (DeclaredError, psycopg.Error) as e:
+            log.error("data.declared_skill_repos_failed", why=_why(e))
+            return []
+        return out
 
 
 async def apply_from_settings(settings: Settings, env: Env) -> Report | None:

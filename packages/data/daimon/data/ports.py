@@ -1,9 +1,9 @@
 """What the store registers with core at startup (the `daimon.ports` entry point).
 
-Erasure statements, the `data` audit source and the skill scope checker; M5 fills
+Erasure statements, the `data` audit source and the declared skill repositories; M5 fills
 `GATED_TOOLS`. Everything here is read only where the package is installed and does nothing
 for a deployment that never set the store up: erasure skips a schema that does not exist,
-the audit source reads no rows, and no grants hide every scoped skill.
+the audit source reads no rows.
 """
 
 from __future__ import annotations
@@ -13,11 +13,11 @@ from typing import Final
 from daimon.core.config import load_data_settings
 from daimon.core.ports.audit import register_audit_source
 from daimon.core.ports.erasure import ErasureStatement, register_erasure
-from daimon.core.ports.skill_scopes import register_skill_scopes
+from daimon.core.ports.skill_repos import register_skill_repo_loader
 from daimon.core.ports.tool_gate import register_gated_tools
 from daimon.data.audit import AUDIT_SOURCE
+from daimon.data.declared import DeclaredSkillRepos
 from daimon.data.schema import Schemas
-from daimon.data.skill_scopes import GrantedScopes
 
 GATED_TOOLS: Final[dict[str, frozenset[str]]] = {}
 
@@ -104,6 +104,6 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
 def register() -> None:
     register_erasure(erasure(Schemas.of(load_data_settings())))
     register_audit_source("data", AUDIT_SOURCE)
-    register_skill_scopes(GrantedScopes)
+    register_skill_repo_loader(DeclaredSkillRepos)
     for key, tools in GATED_TOOLS.items():
         register_gated_tools(key, tools)
