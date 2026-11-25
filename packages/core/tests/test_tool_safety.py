@@ -9,10 +9,12 @@ from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME
 from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
+    COMPUTE_APPROVAL_TOOLS,
     CONFIRMED_DAIMON_TOOLS,
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
     PUBLISH_TOOLS,
+    WATCH_APPROVAL_TOOLS,
     ResolvedAgentToolRule,
     ToolAnnotations,
     ToolCall,
@@ -27,6 +29,7 @@ from daimon.core.tool_safety import (
     unwrap_daimon_call,
 )
 from daimon.core.turn.approvals import interactive_decider, unattended_decider
+from daimon.core.turn.unattended_capabilities import protected_tools
 
 _ON = ToolSafetyPolicy(enabled=True)
 
@@ -1055,3 +1058,86 @@ def test_change_setting_is_carded_protected_and_never_auto_allowed() -> None:
     assert CARDED_TOOLS["change_setting"] == "origin_context_id"
     assert "change_setting" in PERMISSION_SETTER_TOOLS
     assert gate_protected_tool("change_setting")
+
+
+# --- An approval setting's skip, with the policy on ---------------------------------
+
+#: Each tool an approval setting can skip, and the group its setting skips with it.
+_SKIP_GROUPS = {
+    tool: group for group in (WATCH_APPROVAL_TOOLS, COMPUTE_APPROVAL_TOOLS) for tool in group
+}
+
+
+def _turn_set() -> frozenset[str]:
+    """A chat turn's confirmed tools with every card asking (`confirmed_tools_for_turn`)."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from daimon.core.confirmation import confirmed_tools_for_turn
+
+    deps = SimpleNamespace(backend_selection_enabled=True, microsoft_send=True, tool_safety=_ON)
+    return confirmed_tools_for_turn(cast(Any, deps))
+
+
+def _skippable(tool: str) -> ToolCall:
+    """A real call of `tool` on Daimon's own server, with its confirmation field."""
+    field = CONFIRMED_DAIMON_TOOLS[tool]
+    assert field is not None
+    return ToolCall(
+        tool_use_id="tu_1", server_name=DAIMON_SERVER_NAME, tool_name=tool, input={field: "x"}
+    )
+
+
+def _decided(tool: str, confirmed: frozenset[str], *, attended: bool = True) -> str:
+    return decide_tool_call(
+        _ON,
+        _skippable(tool),
+        attended=attended,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=confirmed,
+    ).outcome
+
+
+def _asks_in_session(tool: str, confirmed: frozenset[str]) -> bool:
+    out = session_tools_for_policy(
+        _ON, _tools(), trusted_servers=frozenset({DAIMON_SERVER_NAME}), confirmed_tools=confirmed
+    )
+    return has_confirmation_gate(out or _tools(), tool_name=tool)
+
+
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_a_skipped_card_does_not_ask_with_the_policy_on(tool: str) -> None:
+    """With tool safety on, a turn whose setting skips the card runs the tool unasked:
+    neither the session's always_ask list nor the decider asks."""
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    assert _decided(tool, skipped) == "allow", "the decider asks no card"
+    assert not _asks_in_session(tool, skipped), "the session holds no always_ask for it"
+    assert _decided(tool, _turn_set()) == "ask", "with Ask the card stays"
+    assert _asks_in_session(tool, _turn_set())
+
+
+@pytest.mark.parametrize(
+    "confirmed",
+    [
+        frozenset[str](),
+        protected_tools(_ON),
+        protected_tools(_ON) | {"approve_reach"},
+        frozenset({"lead_intake_resolve", "approve_reach"}),
+    ],
+    ids=["none", "protected", "host_call_gate", "partial"],
+)
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_a_caller_that_does_not_read_the_settings_still_asks(
+    tool: str, confirmed: frozenset[str]
+) -> None:
+    """Only a set built from the approval settings can skip; any other set asks."""
+    assert _decided(tool, confirmed) == "ask"
+    assert _asks_in_session(tool, confirmed)
+
+
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_an_unattended_turn_is_refused_a_skipped_tool(tool: str) -> None:
+    """Nobody can see a card in an unattended turn, so a skip never applies there."""
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    assert _decided(tool, skipped | protected_tools(_ON), attended=False) == "deny"
+    assert _decided(tool, skipped, attended=False) == "deny", "even without protected_tools"

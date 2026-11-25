@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current conversation can use. Commands, files and more time still work only in the
   conversation the machine started in ([Compute sessions](docs/compute.md#how-sessions-work)).
 
+- **Skip for the watch and cloud computer approval cards works with tool safety on.** There,
+  `watch_approval` or `compute_approval` set to Skip still showed the card, and a launch for
+  longer than the default showed a card instead of being refused. A turn nobody watches is
+  still refused them ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **A server admin can turn off the approval card for starting and extending a cloud
   computer.** The `compute_approval` setting, for the team or for one agent, defaults to Ask,
   which keeps the card. With Skip, a launch or an extend runs without the card, but only for

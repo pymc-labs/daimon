@@ -17,6 +17,7 @@ from daimon.core.tool_safety import (
     OPEN_TOOL_SAFETY,
     WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
+    ToolSafetyPolicy,
 )
 
 from .test_session_gate_rules import (  # pyright: ignore[reportPrivateUsage]
@@ -95,17 +96,20 @@ async def test_an_unattended_origin_is_refused_even_when_skipped(
     assert gap == "no_origin", "skip never lets a turn nobody watches enroll a watch"
 
 
+@pytest.mark.parametrize(
+    "policy", [OPEN_TOOL_SAFETY, ToolSafetyPolicy(enabled=True)], ids=["safety_off", "safety_on"]
+)
 @pytest.mark.parametrize("tool", ["rotate_watch_key", "start_long_job"])
 async def test_a_session_bound_under_skip_still_proves_the_other_cards(
-    monkeypatch: pytest.MonkeyPatch, tool: str
+    monkeypatch: pytest.MonkeyPatch, tool: str, policy: ToolSafetyPolicy
 ) -> None:
     runtime = _runtime()
-    runtime.settings.tool_safety = OPEN_TOOL_SAFETY
+    runtime.settings.tool_safety = policy
     monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
     recorded = session_tools(
         AGENT,
         frozenset(),
-        tool_safety=OPEN_TOOL_SAFETY,
+        tool_safety=policy,
         public_url="https://mcp.example/mcp",
         confirmed_tools=WATCH_CONFIRMED_TOOLS - WATCH_APPROVAL_TOOLS,
     )
@@ -181,19 +185,29 @@ async def test_an_unattended_origin_is_refused_even_when_compute_is_skipped(
             ["rotate_watch_key", "start_long_job", "update_watch"],
             sorted(COMPUTE_APPROVAL_TOOLS | WATCH_APPROVAL_TOOLS),
         ),
+        # With tool safety on, a session bound under skip before the policy read the
+        # skip held every card; it still proves them all.
+        (WATCH_CONFIRMED_TOOLS, sorted(WATCH_CONFIRMED_TOOLS), []),
     ],
-    ids=["compute_skip", "both_skips"],
+    ids=["compute_skip", "both_skips", "every_card"],
+)
+@pytest.mark.parametrize(
+    "policy", [OPEN_TOOL_SAFETY, ToolSafetyPolicy(enabled=True)], ids=["safety_off", "safety_on"]
 )
 async def test_a_session_bound_under_compute_skip_still_proves_the_other_cards(
-    monkeypatch: pytest.MonkeyPatch, bound: frozenset[str], proves: list[str], never: list[str]
+    monkeypatch: pytest.MonkeyPatch,
+    bound: frozenset[str],
+    proves: list[str],
+    never: list[str],
+    policy: ToolSafetyPolicy,
 ) -> None:
     runtime = _runtime()
-    runtime.settings.tool_safety = OPEN_TOOL_SAFETY
+    runtime.settings.tool_safety = policy
     monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
     recorded = session_tools(
         AGENT,
         frozenset(),
-        tool_safety=OPEN_TOOL_SAFETY,
+        tool_safety=policy,
         public_url="https://mcp.example/mcp",
         confirmed_tools=bound,
     )

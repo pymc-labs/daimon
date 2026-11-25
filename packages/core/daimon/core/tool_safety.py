@@ -60,6 +60,7 @@ from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_endpoint
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "APPROVAL_SKIPPABLE_TOOLS",
     "APPROVAL_TOOLS",
     "CARDED_TOOLS",
     "COMPUTE_APPROVAL_TOOLS",
@@ -271,6 +272,10 @@ COMPUTE_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset(
     {"compute_launch_session", "compute_extend_session"}
 )
 
+#: Every confirmed tool an approval setting can let run without its card, and no other.
+#: `confirmation.confirmed_tools_for_tenant` leaves a skipped one out of a turn's set.
+APPROVAL_SKIPPABLE_TOOLS: Final[frozenset[str]] = WATCH_APPROVAL_TOOLS | COMPUTE_APPROVAL_TOOLS
+
 
 #: Asked on every turn: the requester approves a reach over the budget (`daimon.core.outbound`).
 REACH_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({"approve_reach"})
@@ -330,6 +335,27 @@ def _always_confirmed_tools() -> frozenset[str]:
         - backend_switch_tools(enabled=True)
         - microsoft_send_tools(enabled=True, tool_safety_on=True)
     )
+
+
+def approval_skipped_tools(confirmed_tools: frozenset[str]) -> frozenset[str]:
+    """The tools whose card an approval setting skips, as a turn's `confirmed_tools` says.
+
+    Only a set built from the settings can skip (`confirmation.confirmed_tools_for_tenant`):
+    it always holds the watch tools that no setting skips, and leaves a skipped one out.
+    Any other set, such as none, the protected tools or a part, skips nothing.
+    """
+    if not confirmed_tools >= WATCH_CONFIRMED_TOOLS - APPROVAL_SKIPPABLE_TOOLS:
+        return frozenset()
+    return APPROVAL_SKIPPABLE_TOOLS - confirmed_tools
+
+
+def _policy_confirmed_tools(confirmed_tools: frozenset[str], *, skips: bool) -> frozenset[str]:
+    """The confirmed tools that ask with the policy on: all but the ones a setting skips.
+
+    ``skips`` is false for an unattended turn: nobody could see the card it would skip.
+    """
+    skipped = approval_skipped_tools(confirmed_tools) if skips else frozenset[str]()
+    return _always_confirmed_tools() - skipped
 
 
 #: Daimon's own tools that put content behind a link whoever holds it opens.
@@ -777,10 +803,12 @@ def _confirmed_daimon_write(
     *,
     trusted_servers: frozenset[str],
     confirmed_tools: frozenset[str] = frozenset(),
+    skips: bool = False,
 ) -> bool:
     field = (
         CONFIRMED_DAIMON_TOOLS.get(call.tool_name)
-        if call.tool_name in _always_confirmed_tools() or call.tool_name in confirmed_tools
+        if call.tool_name in _policy_confirmed_tools(confirmed_tools, skips=skips)
+        or call.tool_name in confirmed_tools
         else None
     )
     # Keep the reserved-name unattended refusal even without a binding. Aliases
@@ -965,7 +993,7 @@ def _decide_tool_call(
     trusted_rule = agent_rule if trusted and policy.enabled and policy.agent_rules else None
     if trusted_rule is not None and trusted_rule.rule == "deny":
         confirmed = _confirmed_daimon_write(
-            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
         )
         assert call.server_name is not None
         if confirmed and _listed(
@@ -988,7 +1016,7 @@ def _decide_tool_call(
         and call.server_name in trusted_servers
         and call.tool_name in confirmed_tools
         and _confirmed_daimon_write(
-            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
         )
     ):
         return ToolVerdict(
@@ -1025,7 +1053,7 @@ def _decide_tool_call(
             policy, server_name=call.server_name, tool_name=call.tool_name, annotations=annotations
         )
     elif _confirmed_daimon_write(
-        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
     ):
         effect = "write"
     elif trusted_rule is not None and trusted_rule.rule == "ask":
@@ -1054,7 +1082,7 @@ def _decide_tool_call(
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
     if not _confirmed_daimon_write(
-        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools, skips=attended
     ) and (
         ANY_KEY in policy.unattended_writes
         or _listed(policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name)
@@ -1096,7 +1124,8 @@ def session_tools_for_policy(
     Otherwise each gated toolset gets `always_ask` as its default and on every
     per-tool config under it, since a per-tool `always_allow` would let that
     one tool skip the pause. Daimon's own trusted toolset stays `always_allow`
-    except for its `CONFIRMED_DAIMON_TOOLS`, which ask, and with
+    except for its `CONFIRMED_DAIMON_TOOLS`, which ask unless the turn's
+    `confirmed_tools` skips one (`approval_skipped_tools`), and with
     `asks_before_publishing` its `PUBLISH_TOOLS`; with the policy off only
     publish and explicitly selected confirmed-tool configs are written.
     With the policy and `agent_rules` on, `daimon_rule_tools` (the daimon tools
@@ -1120,7 +1149,8 @@ def session_tools_for_policy(
         else set[str]()
     )
     asked = (
-        *(sorted(_always_confirmed_tools()) if policy.enabled else ()),
+        # A turn's set may skip a card (`approval_skipped_tools`); no other set can.
+        *(sorted(_policy_confirmed_tools(confirmed_tools, skips=True)) if policy.enabled else ()),
         *sorted(confirmed_tools),
         *(sorted(PUBLISH_TOOLS) if asks_before_publishing else ()),
         *sorted(rule_asked),
