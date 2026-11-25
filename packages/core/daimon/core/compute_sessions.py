@@ -461,12 +461,35 @@ class ComputeSessions:
             if session.state != "deleted":
                 session = session.model_copy(update={"state": "stopping"})
                 await store.save(db, session)
+            if session.owner_account_id == caller.account_id:
+                await self._stopped_by_owner(db, session)
         # Stopping intent survives failed provider calls and process restarts.
         await self._delete(session)
         async with self.sm.begin() as db:
             result = await store.get(db, caller.tenant_id, session_id)
             assert result is not None
             return result
+
+    async def _stopped_by_owner(self, db: AsyncSession, session: ComputeSession) -> None:
+        """The owner, or their wake turn, stopped the machine, so they know: each command
+        still running ends as cancelled with no message, and a message nobody claimed yet
+        for one that ended is withdrawn (`_seen`). Under the session lock the stop took.
+        An admin's emergency stop and expiry keep one message per command: the owner was
+        not there to see it."""
+        now = self.clock()
+        for task in await task_store.list_for_session(db, session.tenant_id, session.id):
+            if task.state in ACTIVE_TASK_STATES:
+                await task_store.finish(
+                    db,
+                    task,
+                    session,
+                    state="cancelled",
+                    now=now,
+                    wake=False,
+                    run_limit=self.settings.wake_run_limit,
+                )
+            else:
+                await self._seen(db, task)
 
     async def _delete(self, session: ComputeSession) -> None:
         async with self.sm.begin() as db:
@@ -815,6 +838,9 @@ class ComputeSessions:
                 ):
                     handed = await task_store.advance(db, current, wait_until=None)
                     current = handed or await task_store.get(db, task.tenant_id, task.id)
+                if current is not None:
+                    # Another poll settled it: its caller is told so and reads it here.
+                    await self._seen(db, current)
                 return current or task
         except SQLAlchemyError:
             log.warning("compute.inline_handover_retry", task_id=str(task.id))
@@ -853,11 +879,11 @@ class ComputeSessions:
         """Read a task and, while it is active, probe the machine until it ends or
         `wait_seconds` pass. A task that already ended returns at once.
 
-        Each probe follows today's rules for a status read (`_poll_task`). An owner who
-        is present sees an ending here, so no separate wake is queued for it; a wake's
-        turn has no owner watching, so the wake stays. While an inline caller still owns
-        the task, a probe only reads it. Like a poll, a probe that finds the command
-        running keeps the lease alive.
+        Only a turn of the session's own conversation gets here (the owner present, or
+        the session's own wake turn), so an end it reads is the conversation's: no wake
+        is queued for it, and an unclaimed one is withdrawn (`_seen`). While an inline
+        caller still owns the task, a probe only reads it. Like a poll, a probe that
+        finds the command running keeps the lease alive.
 
         One deadline on the event loop's clock, taken when the call starts unless the
         caller passes the one its own call started (`deadline`), bounds every step before
@@ -879,17 +905,17 @@ class ComputeSessions:
             async with self.sm.begin() as db:
                 async with asyncio.timeout_at(deadline):
                     task = await self._owned_task(db, caller, task_id)
+                await self._seen(db, task)
         except (TimeoutError, SQLAlchemyError):
             log.warning("compute.task_status_retry", task_id=str(task_id))
             raise StoreError(STATUS_REFUSED) from None
         if task.state not in ACTIVE_TASK_STATES:
             return task
-        wake = not owner_present(caller.origin)
         probed = False
         while True:
             try:
                 polled = await self._poll_task(
-                    task.tenant_id, task.id, wake=wake, deadline=deadline
+                    task.tenant_id, task.id, wake=False, deadline=deadline
                 )
             except TimeoutError:
                 # Rolled back before any write: this call settled nothing.
@@ -917,8 +943,23 @@ class ComputeSessions:
             await self.sleep(min(_STATUS_POLL_SECONDS, left))
 
     async def task_result(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
+        """A task, read by a turn of its session's own conversation (`_owned_task`)."""
         async with self.sm.begin() as db:
-            return await self._owned_task(db, caller, task_id)
+            task = await self._owned_task(db, caller, task_id)
+            await self._seen(db, task)
+            return task
+
+    async def _seen(self, db: AsyncSession, task: ComputeTask) -> None:
+        """A turn of the session's own conversation was given this task's end: withdraw
+        the wake that would tell the conversation again, unless a dispatcher claimed it.
+
+        The one rule for every path that hands such a turn a finished task: a result or
+        status read, an inline caller's result and the owner's stop. It runs in the
+        transaction that read the end. A claimed wake (its turn is starting or running)
+        is left alone, and a withdrawn wake never runs, so it is no wake turn.
+        """
+        if task.state not in ACTIVE_TASK_STATES:
+            await task_store.withdraw_wake(db, task)
 
     async def poll_tasks(self) -> None:
         """One scheduler pass over active tasks; each task's failure is isolated."""
@@ -965,21 +1006,23 @@ class ComputeSessions:
         cut short.
         """
         async with self.sm.begin() as db:
+            session = None
             async with asyncio.timeout_at(deadline):
                 task = await task_store.get(db, tenant_id, task_id)
-                if task is None or task.state not in ACTIVE_TASK_STATES:
-                    return Polled(task)
-                # The session lock serializes with stop and deletion. The poller skips
-                # a session busy with an inline call and returns next pass.
-                session = await store.get(
-                    db, tenant_id, task.session_id, lock=True, skip_locked=wake
-                )
-                if session is None:
-                    return Polled(task)
-                # Re-read under the lock: another poll may have settled it meanwhile.
-                task = await task_store.get(db, tenant_id, task_id)
-                if task is None or task.state not in ACTIVE_TASK_STATES:
-                    return Polled(task)
+                if task is not None and task.state in ACTIVE_TASK_STATES:
+                    # The session lock serializes with stop and deletion. The poller skips
+                    # a session busy with an inline call and returns next pass.
+                    session = await store.get(
+                        db, tenant_id, task.session_id, lock=True, skip_locked=wake
+                    )
+                    if session is not None:
+                        # Re-read under the lock: another poll may have settled it meanwhile.
+                        task = await task_store.get(db, tenant_id, task_id)
+            if task is None or task.state not in ACTIVE_TASK_STATES or session is None:
+                if task is not None and not wake:
+                    # A caller of the session's conversation gets this end now.
+                    await self._seen(db, task)
+                return Polled(task)
             now = self.clock()
             held = task.wait_until
             if inline:
