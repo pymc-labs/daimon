@@ -1467,12 +1467,36 @@ async def test_a_slow_start_never_lets_the_caller_and_the_scheduler_both_report_
             await _ended(fake)()
         await service.poll_tasks()
 
+    # The start takes 20 of the 30 seconds; the caller still looks until then.
     service, clock = _waiting(sm, fake, on_sleep=meanwhile)
     session = await launch(service, owner)
-    ran = await _inline(service, owner, session, wait_seconds=10)
+    ran = await _inline(service, owner, session, wait_seconds=30)
     assert ran.ended_here and ran.task.state == "succeeded", "the caller saw the end"
     await service.poll_tasks()
     assert await wakes_for(sm, owner) == [], "so the conversation is not told again"
+
+
+async def test_a_start_slower_than_the_wait_leaves_the_end_to_the_scheduler(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+
+    class SlowStart(FakeComputeProvider):
+        async def call(self, session, token, tool, arguments):
+            if str(arguments.get("command", "")).startswith("# daimon-task start"):
+                clock["now"] += timedelta(seconds=20)
+            return await super().call(session, token, tool, arguments)
+
+    fake = SlowStart()
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    ran = await _inline(service, owner, session, wait_seconds=10)
+    assert not ran.ended_here and ran.task.state == "running"
+    assert _scripts(fake, "probe") == [], "the start used the whole wait: no look"
+    assert ran.task.wait_until is None, "handed to the scheduler"
+    await _ended(fake)()
+    await service.poll_tasks()
+    assert (await service.task_result(owner, ran.task.id)).state == "succeeded"
+    assert len(await wakes_for(sm, owner)) == 1
 
 
 async def test_an_inline_command_starts_while_background_commands_fill_the_machine(

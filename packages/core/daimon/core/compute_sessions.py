@@ -664,10 +664,17 @@ class ComputeSessions:
         is decided under the session lock (`_poll_task`). `start_task` never settles a
         task; a retried background key can return one that ended elsewhere.
 
-        Locks: `start_task` takes the session lock before the wait starts. Each poll takes
-        it within the deadline; once a poll settles the task, nothing else runs. The
-        hand-over writes only the task row.
+        Locks: `start_task` takes the session lock; its time counts against the wait, but
+        it is never cut short. Each poll takes the lock within the deadline; once a poll
+        settles the task, nothing else runs. The hand-over writes only the task row.
         """
+        # The wait starts now: a slow start uses part of it. A probe or a lock wait can take
+        # far longer than the wait (the transport allows 50 s), so each poll is bounded by
+        # this deadline on the loop's clock. The start itself is not: a cancelled start
+        # would leave a command nobody knows the state of.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, wait_seconds)
+        give_up = self.clock() + timedelta(seconds=wait_seconds)
         task = await self.start_task(
             caller,
             session_id,
@@ -679,19 +686,16 @@ class ComputeSessions:
             extra_cap=_INLINE_EXTRA_TASKS if wait_seconds > 0 else 0,
             wait_seconds=wait_seconds,
         )
-        give_up = self.clock()
-        if task.wait_until is not None:
-            # A row with no `wait_until` (a retried background start) is the scheduler's.
-            give_up = min(
-                give_up + timedelta(seconds=wait_seconds),
-                task.wait_until - timedelta(seconds=_INLINE_HANDOVER),
-            )
-        # A probe or a lock wait can take far longer than the wait (the transport allows
-        # 50 s), so every step is bounded by the time that remains, on the loop's clock.
-        remaining = (give_up - self.clock()).total_seconds()
-        deadline = asyncio.get_running_loop().time() + max(0.0, remaining)
+        # A row with no `wait_until` (a retried background start) is the scheduler's.
+        give_up = (
+            min(give_up, task.wait_until - timedelta(seconds=_INLINE_HANDOVER))
+            if task.wait_until is not None
+            else self.clock()
+        )
         polls = iter(_INLINE_POLLS)
-        while task.state in ACTIVE_TASK_STATES and self.clock() < give_up:
+        while (
+            task.state in ACTIVE_TASK_STATES and self.clock() < give_up and loop.time() < deadline
+        ):
             await self.sleep(min(next(polls, 2.0), (give_up - self.clock()).total_seconds()))
             try:
                 polled = await self._poll_task(
