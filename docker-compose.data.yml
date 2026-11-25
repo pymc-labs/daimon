@@ -1,0 +1,11 @@
+# Optional: Postgres with pgvector for the data store's embedding search. The store runs
+# without it (full-text search only), so the default compose file keeps the plain image.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build postgres
+#
+# Same data volume and major version, so an existing database keeps working. See
+# docs/data-sources.md.
+services:
+  postgres:
+    image: daimon-postgres-pgvector:18
+    build: ./deploy/postgres
