@@ -352,7 +352,8 @@ def _message(r: httpx.Response) -> Json:
 
 def _result_text(r: httpx.Response) -> str | None:
     """The text of a successful tool call, else None: a denial is HTTP 200 with `isError`,
-    and an error answer, an error object as the text or an empty answer count as not opened."""
+    and an error answer, an error object as the text, a trashed or archived page or an empty
+    answer count as not opened."""
     body = _message(r)
     result = obj(body.get("result"))
     if r.status_code != 200 or "error" in body or not result or result.get("isError"):
@@ -360,9 +361,10 @@ def _result_text(r: httpx.Response) -> str | None:
     texts = [str(x.get("text", "")) for x in rows(result.get("content")) if x.get("type") == "text"]
     out = texts[0] if texts else ""
     try:
-        refused = isinstance(obj(json.loads(out)).get("code"), str)
+        page = obj(json.loads(out))
     except ValueError:
-        refused = False
+        page = {}
+    refused = isinstance(page.get("code"), str) or is_trashed(page)
     return None if refused or not out.strip() else out
 
 

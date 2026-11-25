@@ -130,6 +130,8 @@ class FakeNotion:
         self.users_refused = False
         self.refuse: set[str] = set()
         """Pages whose blocks answer not-found."""
+        self.trashed: set[str] = set()
+        """Pages the MCP fetch returns with `in_trash` set."""
         self.broken = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -142,6 +144,8 @@ class FakeNotion:
                 page_id = msg["params"]["arguments"]["id"]
                 if page_id not in self.opens.get(token, set()):
                     text, error = json.dumps({"code": "object_not_found"}), True
+                elif page_id in self.trashed:
+                    text, error = json.dumps({"id": page_id, "in_trash": True}), False
                 else:
                     text, error = f"<page>{page_id}</page>", False
                 result = {"isError": error, "content": [{"type": "text", "text": text}]}
@@ -261,6 +265,8 @@ async def test_a_notion_page_opens_only_through_the_readers_own_session(
         "bob's own fetch fails"
     )
     assert await connector.can_open(source, f"page:{A}", ["u-nobody"]) is None, "not signed in"
+    notion.trashed = {A}
+    assert await connector.can_open(source, f"page:{A}", ["u-alice"]) is False, "a trashed page"
 
 
 async def test_a_notion_page_that_vanishes_from_a_complete_listing_is_removed_and_a_refusal_keeps_it(
