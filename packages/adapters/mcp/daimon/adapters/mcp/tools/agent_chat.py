@@ -1067,7 +1067,7 @@ async def _continue_turn_impl(
     require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     require_session_driver(session, auth)
-    await _refuse_data_agent(runtime, auth, (await _resolve_ma_agent(runtime, auth)).id)
+    await _refuse_data_agent(runtime, auth, str(session.agent.id))
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
