@@ -34,12 +34,13 @@ outside MCP clients use it without a sign-in of their own. Turn on the
 connections, and add the server's name, URL and token. The token is stored
 encrypted.
 
-Daimon lists the server's tools and shows each one's description and arguments.
-Read them, then turn on the tools you want. A tool whose text changes upstream
-stays off until you approve it again. Each tool appears as `<name>_<tool>` on
-Daimon's MCP server. Mark a tool that changes data: chat users approve each call
-on a card, and outside MCP clients can only use read tools. Agent tool rules
-apply, and every call is audited.
+Daimon lists the server's tools and shows each one's description and full input
+schema. Read them, then turn on the tools you want. A tool whose text changes
+upstream stays off until you approve it again, and one named like a Daimon tool is
+left out. Each tool appears as `<name>_<tool>` on Daimon's MCP server, for
+members, not web guests. Daimon marks a tool that changes data by its name, and you
+can change the mark: chat users approve each call on a card, and outside MCP
+clients can only use read tools. Agent tool rules apply, and every call is audited.
 
 ## Register a client for servers without dynamic registration
 

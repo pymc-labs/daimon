@@ -5981,7 +5981,8 @@ class McpConnection(Base):
     The credential is a bearer token, encrypted with the shared MultiFernet and never read
     back by a page. `scope` names the data scope a caller must hold (None: any member of the
     workspace); the data package decides what a scope means. A `declared` row comes from the
-    deployment's declared configuration and is read-only in the web app.
+    deployment's declared file (its `connections` section): its address, token and scope are
+    read-only in the web app.
     """
 
     __tablename__ = "mcp_connections"
@@ -6013,10 +6014,12 @@ class McpConnectionTool(Base):
     callers see and what a call is checked against, `seen_*` is what the upstream last sent.
     They differ after the server changes a tool, until an admin approves again, so a server
     cannot change what its tools claim after review. A new tool starts disabled. `writes` is
-    read from the tool's hints at discovery and stays as an admin set it (`writes_set`).
+    Daimon's name rule at discovery, never lowered by a later read, and stays as an admin set
+    it (`writes_set`); `approved_writes` is what was approved, so a rise holds the tool too.
     """
 
     __tablename__ = "mcp_connection_tools"
+    __table_args__ = (Index("ix_mcp_connection_tools_tenant", "tenant_id"),)
 
     connection_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("mcp_connections.id", ondelete="CASCADE"), primary_key=True
@@ -6028,6 +6031,7 @@ class McpConnectionTool(Base):
     seen_description: Mapped[str] = mapped_column(server_default="")
     seen_schema: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
     writes: Mapped[bool] = mapped_column(server_default=text("true"))
+    approved_writes: Mapped[bool] = mapped_column(server_default=text("true"))
     writes_set: Mapped[FalseFlag]
     enabled: Mapped[FalseFlag]
     scope: Mapped[str | None]

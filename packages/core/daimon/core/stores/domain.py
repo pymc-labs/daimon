@@ -1724,6 +1724,7 @@ class McpConnectionToolRow(BaseModel):
     seen_description: str
     seen_schema: dict[str, JsonValue]
     writes: bool
+    approved_writes: bool
     writes_set: bool
     enabled: bool
     scope: str | None
@@ -1732,8 +1733,12 @@ class McpConnectionToolRow(BaseModel):
 
     @property
     def changed(self) -> bool:
-        """The upstream sends something other than what was approved."""
-        return self.seen_description != self.description or self.seen_schema != self.input_schema
+        """The upstream sends, or the tool does, something other than what was approved."""
+        return (
+            self.seen_description != self.description
+            or self.seen_schema != self.input_schema
+            or self.writes != self.approved_writes
+        )
 
 
 class DiscoveredTool(BaseModel):

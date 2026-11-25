@@ -9,8 +9,10 @@ import pytest
 from daimon.core import shared_connections as shared
 from daimon.core.stores import mcp_connections as store
 from daimon.core.stores.domain import DiscoveredTool, McpConnectionToolRow
-from daimon.core.tool_safety import ResolvedAgentToolRule, ToolSafetyPolicy
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.web_people import update_person
+from daimon.core.tool_safety import ANY_KEY, ResolvedAgentToolRule, ToolSafetyPolicy
+from daimon.testing.factories import make_tenant, make_web_person
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -92,8 +94,8 @@ async def test_listing_follows_approval_status_and_scope(db_session: AsyncSessio
     assert await names() == [], "a paused connection serves nothing"
 
 
-async def test_approved_words_are_pinned(db_session: AsyncSession) -> None:
-    """A changed upstream description shows as a change and serves nothing new until approved."""
+async def test_a_changed_tool_waits_for_approval(db_session: AsyncSession) -> None:
+    """Changed upstream words keep the approved ones and serve nothing until re-approved."""
     tenant = await make_tenant(db_session)
     connection = await _connection(db_session, tenant.id, _tool("lookup"))
     await _approve(db_session, tenant.id, connection, "lookup")
@@ -104,15 +106,91 @@ async def test_approved_words_are_pinned(db_session: AsyncSession) -> None:
         connection_id=connection,
         discovered=[_tool("lookup", description="Now also mails everyone.")],
     )
+    caller = shared.SharedCaller(tenant_id=tenant.id, account_id=uuid.uuid4())
 
     changed = await _stored(db_session, tenant.id, "lookup")
 
-    assert changed.description == "Does it.", "callers still get the approved description"
+    assert changed.description == "Does it.", "the approved description is kept"
     assert changed.changed, "the admin is shown that the upstream words moved"
+    assert await shared.served_tools(db_session, caller) == [], "a changed tool is not served"
     with pytest.raises(shared.SharedConnectionError):
         await shared.approve_tool(
             db_session, tenant_id=tenant.id, connection_id=connection, name="lookup", seen=shown
         )
+
+
+async def test_refresh_never_lowers_writes(db_session: AsyncSession) -> None:
+    """A tool newly marked as writing is a change to approve; a later refresh keeps the mark."""
+    tenant = await make_tenant(db_session)
+    connection = await _connection(db_session, tenant.id, _tool("lookup"))
+    await _approve(db_session, tenant.id, connection, "lookup")
+
+    for writes in (True, False):
+        await store.sync_tools(
+            db_session,
+            tenant_id=tenant.id,
+            connection_id=connection,
+            discovered=[_tool("lookup", writes=writes)],
+        )
+        tool = await _stored(db_session, tenant.id, "lookup")
+        assert tool.writes, f"still writes after a refresh saying writes={writes}"
+        assert tool.changed, "the new write mark waits for approval"
+
+
+def test_daimon_tool_names_are_left_out() -> None:
+    """An upstream tool whose served name is a Daimon tool's is skipped and named."""
+    clash = next(n for n in sorted(shared.DAIMON_TOOL_NAMES) if n.startswith("add_"))
+    listed: tuple[dict[str, JsonValue], ...] = (
+        {"name": clash.removeprefix("add_")},
+        {"name": "lookup"},
+    )
+
+    found, left_out = shared._discovered(ToolSafetyPolicy(), "add", listed)  # pyright: ignore[reportPrivateUsage]
+
+    assert [t.name for t in found] == ["lookup"], f"found: {found}"
+    assert left_out == [f"{clash} (a Daimon tool's name)"], f"left out: {left_out}"
+
+
+async def test_refresh_keeps_a_pause(db_session: AsyncSession) -> None:
+    """A good read clears an error but never resumes a paused connection."""
+    tenant = await make_tenant(db_session)
+    connection = await _connection(db_session, tenant.id)
+    for before, after in (("paused", "paused"), ("error", "active")):
+        await store.update_connection(
+            db_session, tenant_id=tenant.id, connection_id=connection, values={"status": before}
+        )
+        await store.record_refresh(
+            db_session, tenant_id=tenant.id, connection_id=connection, note=None
+        )
+        row = await store.get_connection(db_session, tenant_id=tenant.id, connection_id=connection)
+        assert row is not None and row.status == after, f"{before} became {row}"
+
+
+async def test_visitors_get_no_shared_tools(db_session: AsyncSession) -> None:
+    """A web visitor sees no shared tool, even an approved, unscoped one."""
+    tenant = await make_tenant(db_session)
+    connection = await _connection(db_session, tenant.id, _tool("lookup"))
+    await _approve(db_session, tenant.id, connection, "lookup")
+    person = await make_web_person(db_session, tenant=tenant)
+    caller = shared.SharedCaller(tenant_id=tenant.id, account_id=person.account_id)
+    assert len(await shared.served_tools(db_session, caller)) == 1, "a member sees it"
+
+    await update_person(db_session, person_id=person.id, kind="visitor")
+
+    assert await shared.served_tools(db_session, caller) == [], "a visitor sees none"
+
+
+def test_outside_clients_get_reads_only() -> None:
+    """`unattended_writes` lets a routine write, never an outside client."""
+    policy = ToolSafetyPolicy(unattended_writes=(ANY_KEY,))
+
+    def outcome(*, outside: bool) -> str:
+        return shared.decide_shared_call(
+            policy, "crm_send", {}, writes=True, attended=False, agent_rule=None, outside=outside
+        ).outcome
+
+    assert outcome(outside=False) == "allow", "a routine may write when the operator allows"
+    assert outcome(outside=True) == "deny", "an outside client may not"
 
 
 @pytest.mark.parametrize(

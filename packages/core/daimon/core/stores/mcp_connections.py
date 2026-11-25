@@ -62,15 +62,9 @@ async def create_connection(
     url: str,
     encrypted_auth: bytes | None,
     scope: str | None,
-    declared: bool = False,
 ) -> McpConnectionRow:
     row = McpConnection(
-        tenant_id=tenant_id,
-        name=name,
-        url=url,
-        encrypted_auth=encrypted_auth,
-        scope=scope,
-        declared=declared,
+        tenant_id=tenant_id, name=name, url=url, encrypted_auth=encrypted_auth, scope=scope
     )
     session.add(row)
     await session.flush()
@@ -111,6 +105,22 @@ async def mark_connection(
     )
 
 
+async def record_refresh(
+    session: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, note: str | None
+) -> None:
+    """A read of the upstream went through: an error clears, a pause stays, `note` is kept."""
+    await update_connection(
+        session,
+        tenant_id=tenant_id,
+        connection_id=connection_id,
+        values={
+            "status": case((McpConnection.status == "error", "active"), else_=McpConnection.status),
+            "last_error": note,
+            "refreshed_at": func.now(),
+        },
+    )
+
+
 async def delete_connection(
     session: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID
 ) -> bool:
@@ -135,7 +145,8 @@ async def list_tools(
 async def list_served(
     session: AsyncSession, *, tenant_id: uuid.UUID
 ) -> list[tuple[McpConnectionRow, McpConnectionToolRow]]:
-    """Every approved tool of an active connection, by connection then tool name."""
+    """Every enabled tool of an active connection, by connection then tool name; the caller
+    drops a changed one (`McpConnectionToolRow.changed`)."""
     result = await session.execute(
         select(McpConnection, McpConnectionTool)
         .join(
@@ -162,7 +173,8 @@ async def sync_tools(
     discovered: Sequence[DiscoveredTool],
 ) -> None:
     """Store what the upstream lists. A new tool starts disabled and unapproved; a known
-    tool keeps its approved text and only its `seen_*` moves; a tool the upstream dropped goes."""
+    tool keeps its approved text and only its `seen_*` moves; a tool the upstream dropped goes.
+    `writes` only rises on a read, unless an admin set it."""
     names = [tool.name for tool in discovered]
     await session.execute(
         delete(McpConnectionTool).where(
@@ -185,10 +197,10 @@ async def sync_tools(
                 set_={
                     "seen_description": stmt.excluded.seen_description,
                     "seen_schema": stmt.excluded.seen_schema,
-                    # An admin's own setting stays.
+                    # An admin's own setting stays; a read never lowers it.
                     "writes": case(
                         (McpConnectionTool.writes_set.is_(True), McpConnectionTool.writes),
-                        else_=stmt.excluded.writes,
+                        else_=McpConnectionTool.writes | stmt.excluded.writes,
                     ),
                     "updated_at": func.now(),
                 },

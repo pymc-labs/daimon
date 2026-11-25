@@ -810,8 +810,9 @@ Tool surface for the hub mounts: every Daimon a logged-in person can reach.
 A second surface, separate from the tools above: one app per platform, mounted at
 `/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
 when the matching `DAIMON_HUB__*` client credentials are set. These tools carry no
-visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id` from
-`list_daimons`, because one person reaches several workspaces here.
+visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id` (the
+shared tools a `workspace_id`) from `list_daimons`, because one person reaches several
+workspaces here.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -831,8 +832,9 @@ The hub's view of a workspace's shared MCP connections, for an outside client.
 A second surface, separate from the tools above: one app per platform, mounted at
 `/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only
 when the matching `DAIMON_HUB__*` client credentials are set. These tools carry no
-visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id` from
-`list_daimons`, because one person reaches several workspaces here.
+visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id` (the
+shared tools a `workspace_id`) from `list_daimons`, because one person reaches several
+workspaces here.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |

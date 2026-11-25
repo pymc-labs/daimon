@@ -60,6 +60,7 @@ def upgrade() -> None:
         sa.Column("seen_description", sa.Text(), server_default="", nullable=False),
         sa.Column("seen_schema", JSONB(), server_default=sa.text("'{}'::jsonb"), nullable=False),
         sa.Column("writes", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("approved_writes", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.Column("writes_set", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("scope", sa.Text(), nullable=True),
@@ -73,6 +74,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("connection_id", "name"),
     )
+    op.create_index("ix_mcp_connection_tools_tenant", "mcp_connection_tools", ["tenant_id"])
 
 
 def downgrade() -> None:
