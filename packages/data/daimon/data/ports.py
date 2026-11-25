@@ -22,8 +22,9 @@ _PERSON: Final = "'account:' || cast(cast(:account_id as uuid) as text)"
 
 
 def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
-    """A person's own sources (and so their records), scope grants and trail details; a
-    tenant's sources, scopes and trail. Records of shared sources stay: they are the source's."""
+    """A person's own sources (and so their records), scope grants, access-list entries and
+    trail details; a tenant's sources (and so their access lists), scopes and trail. Records
+    of shared sources stay: they are the source's."""
     d = schemas.data
 
     def account(key: str, sql: str) -> ErasureStatement:
@@ -38,6 +39,10 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
             "created_by", f"update {d}.sources set created_by = null where created_by = :account_id"
         ),
         account("grants", f"delete from {d}.grants where holder = {_PERSON}"),
+        account("acl_refs", f"delete from {d}.acl_refs where ref = {_PERSON}"),
+        account("group_members", f"delete from {d}.group_members where subject = {_PERSON}"),
+        account("acl_grants", f"delete from {d}.acl_grants where holder = {_PERSON}"),
+        account("holder_sets", f"delete from {d}.holder_sets where holder = {_PERSON}"),
         account(
             "granted_by", f"update {d}.grants set granted_by = null where granted_by = :account_id"
         ),

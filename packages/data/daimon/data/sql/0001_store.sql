@@ -279,14 +279,15 @@ create trigger acl_epoch after update on {{data}}.sources for each row
 create trigger acl_epoch_delete after delete on {{data}}.sources for each row
   execute function {{data}}.bump_epoch_trigger();
 
+-- A holder left with no grant has no row, so no subject outlives its last grant.
 create function {{data}}.rebuild_holders(holders text[]) returns void language sql
   set search_path = {{data}}, pg_catalog, pg_temp as $$
-  with agg as (
-    select g.holder, arr_sort(array_agg(g.acl_id)) as acls,
-           coalesce(array_agg(distinct g.unit_id order by g.unit_id) filter (where g.unit_id is not null), '{}') as units
-    from acl_grants g where g.holder = any (holders) group by g.holder)
+  delete from holder_sets s where s.holder = any (holders)
+    and not exists (select 1 from acl_grants g where g.holder = s.holder);
   insert into holder_sets (holder, acls, units)
-    select h, coalesce(a.acls, '{}'), coalesce(a.units, '{}') from unnest(holders) h left join agg a on a.holder = h order by h
+    select g.holder, arr_sort(array_agg(g.acl_id)),
+           coalesce(array_agg(distinct g.unit_id order by g.unit_id) filter (where g.unit_id is not null), '{}')
+    from acl_grants g where g.holder = any (holders) group by g.holder order by g.holder
   on conflict (holder) do update set acls = excluded.acls, units = excluded.units
 $$;
 
@@ -590,9 +591,8 @@ begin
     perform set_config('daimon_data.acl_maint', 'on', true);
     delete from acl_grants;
     insert into acl_grants (holder, acl_id, unit_id) select holder, acl_id, unit_id from acl_grant_truth;
-    update holder_sets set acls = '{}', units = '{}';
-    insert into holder_sets (holder, acls, units) select holder, acls, units from acl_holder_truth
-      on conflict (holder) do update set acls = excluded.acls, units = excluded.units;
+    delete from holder_sets;
+    insert into holder_sets (holder, acls, units) select holder, acls, units from acl_holder_truth;
     perform set_config('daimon_data.acl_maint', 'off', true);
     perform bump_epoch();
   end if;
