@@ -2,8 +2,8 @@
 
 Every read goes through `access.scoped` with what this person may read (`data_common`), so a
 hit, an item or a file is there only if they could read it. A person marked redacted sees the
-workspace's redaction lists applied, as an agent answering them would. Files download as
-attachments, never rendered by the browser.
+workspace's redaction lists applied, as an agent answering them would, and gets no file
+bytes. Files download as attachments, never rendered by the browser.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from pydantic import BaseModel
 TEXT_CHARS: Final = 12_000
 """Characters of a record's text one answer holds."""
 QUERY_CHARS: Final = 500
+REDACTED: Final = "Files aren't shown while some names are hidden from you."
 
 
 class SourceOut(BaseModel):
@@ -111,8 +112,8 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/sources")
     async def list_sources(caller: Viewer) -> list[SourceOut]:  # pyright: ignore[reportUnusedFunction]
-        async with reading(runtime, caller) as (conn, ctx, show):
-            found = await reads.sources(conn, schemas, ctx)
+        async with reading(runtime, caller) as (conn, r):
+            found = await reads.sources(conn, schemas, r.ctx)
             fresh = {s.id: await freshness.state(conn, schemas, s.id) for s in found}
         out = [
             SourceOut(
@@ -122,7 +123,7 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
             for s in found
             for f in [fresh[s.id]]
         ]  # fmt: skip
-        return [shown(show, o) for o in out]
+        return [shown(r, o) for o in out]
 
     @router.get("/search")
     async def find(  # pyright: ignore[reportUnusedFunction]
@@ -134,12 +135,16 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
     ) -> SearchOut:
         person = caller.person
         tenant = person.tenant_id
-        async with reading(runtime, caller) as (conn, ctx, show):
+        async with runtime.sessionmaker.begin() as db:
+            principal = await caller.principal(db)
+        async with reading(runtime, caller) as (conn, r):
+            if r.names_hidden(q):
+                return SearchOut(hits=[], live=[], notes=[])
             result = await search(
-                conn, schemas, ctx, q,
+                conn, schemas, r.ctx, q,
                 settings=settings.data,
                 meter=SessionMeter(runtime.sessionmaker, settings.billing.markup),
-                payer=Payer(tenant, None),
+                payer=Payer(tenant, principal.external_id),
                 limit=limit,
                 filters=Filters(sources=tuple(source or ()), kinds=(kind,) if kind else ()),
                 env=env,
@@ -156,7 +161,7 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
             ],
             notes=result.notes,
         )  # fmt: skip
-        return shown(show, out)
+        return shown(r, out)
 
     @router.get("/sources/{source_id}/items")
     async def browse(  # pyright: ignore[reportUnusedFunction]
@@ -167,16 +172,23 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
         cursor: Annotated[str | None, Query(max_length=200)] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 25,
     ) -> list[ItemOut]:
-        async with reading(runtime, caller) as (conn, ctx, show):
+        async with reading(runtime, caller) as (conn, r):
             try:
                 page = await reads.browse(
-                    conn, schemas, ctx, uuid_of(source_id), kind=kind, after=cursor, limit=limit
+                    conn,
+                    schemas,
+                    r.ctx,
+                    uuid_of(source_id),
+                    kind=kind,
+                    after=cursor,
+                    limit=limit,
+                    env=env,
                 )
             except ValueError:
                 raise HTTPException(status_code=422, detail="That page doesn't exist.") from None
         if page.next:
             response.headers[NEXT_HEADER] = page.next
-        return [shown(show, ItemOut.model_validate(i, from_attributes=True)) for i in page.items]
+        return [shown(r, ItemOut.model_validate(i, from_attributes=True)) for i in page.items]
 
     @router.get("/records/{record_id}")
     async def record(  # pyright: ignore[reportUnusedFunction]
@@ -184,12 +196,11 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
         record_id: str,
         start: Annotated[int, Query(ge=0)] = 0,
     ) -> RecordOut:
-        async with reading(runtime, caller) as (conn, ctx, show):
-            found = await reads.get(conn, schemas, ctx, uuid_of(record_id), env)
+        async with reading(runtime, caller) as (conn, r):
+            found = await reads.get(conn, schemas, r.ctx, uuid_of(record_id), env)
         if found is None:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
-        body = show(found.body)
-        assert isinstance(body, str), "redaction keeps text as text"
+        body = r.show(found.body)
         end = start + TEXT_CHARS
         out = RecordOut(
             item=ItemOut.model_validate(found.item, from_attributes=True),
@@ -197,17 +208,19 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
             next_start=end if end < len(body) else None,
             files=[FileOut.model_validate(a, from_attributes=True) for a in found.attachments],
         )
-        return shown(show, out)
+        return shown(r, out)
 
     @router.get("/records/{record_id}/files/{index}")
     async def file(caller: Viewer, record_id: str, index: int) -> Response:  # pyright: ignore[reportUnusedFunction]
-        async with reading(runtime, caller) as (conn, ctx, _show):
+        async with reading(runtime, caller) as (conn, r):
+            if r.redacted:
+                raise HTTPException(status_code=403, detail=REDACTED)
             rid = uuid_of(record_id)
-            found = await reads.get(conn, schemas, ctx, rid, env)
+            found = await reads.get(conn, schemas, r.ctx, rid, env)
             name = (
                 next((a.name for a in found.attachments if a.ord == index), None) if found else None
             )
-            got = await reads.read_file(conn, schemas, ctx, env, rid, index) if name else None
+            got = await reads.read_file(conn, schemas, r.ctx, env, rid, index) if name else None
         if got is None or name is None:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
         data, content_type = got

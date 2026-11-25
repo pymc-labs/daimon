@@ -59,7 +59,6 @@ class Attachment:
 class Record:
     item: Item
     body: str
-    payload: dict[str, Any]
     attachments: list[Attachment]
 
 
@@ -128,8 +127,10 @@ async def browse(
     kind: str | None = None,
     after: str | None = None,
     limit: int = PAGE,
+    env: Env | None = None,
 ) -> Page:
-    """A source's records, newest first, a page at a time."""
+    """A source's records, newest first, a page at a time. With `env`, a source that
+    re-checks reads is asked again for each (`recheck`); one it refuses is left out."""
     d = schemas.data
     args: dict[str, Any] = {"source": source_id, "kind": kind, "n": limit + 1}
     seek = ""
@@ -145,7 +146,12 @@ async def browse(
         )
         rows = await cur.fetchall()
     items = [_item(r) for r in rows[:limit]]
-    return Page(items, _cursor(items[-1]) if len(rows) > limit else None)
+    after_page = _cursor(items[-1]) if len(rows) > limit else None
+    if env is not None and items:
+        refs = [(i.source_id, i.external_id) for i in items]
+        ok = await recheck.allowed(conn, schemas, env, ctx.readers, refs, limit=len(refs))
+        items = [i for i in items if (i.source_id, i.external_id) in ok]
+    return Page(items, after_page)
 
 
 async def get(
@@ -161,7 +167,7 @@ async def get(
     d = schemas.data
     async with access.scoped(conn, schemas, ctx):
         cur = await conn.execute(
-            f"select {_ITEM}, r.body, r.payload from {d}.records r where r.id = %s".encode(),
+            f"select {_ITEM}, r.body from {d}.records r where r.id = %s".encode(),
             (record_id,),
         )
         row = await cur.fetchone()
@@ -179,7 +185,7 @@ async def get(
     ref = (row["source_id"], row["external_id"])
     if env is not None and ref not in await recheck.allowed(conn, schemas, env, ctx.readers, [ref]):
         return None
-    return Record(_item(row), row["body"], row["payload"], files)
+    return Record(_item(row), row["body"], files)
 
 
 async def read_file(

@@ -216,32 +216,35 @@ async def search(
             vt.cancel()
     if env is not None and hits:
         ok = await recheck.allowed(
-            conn, schemas, env, ctx.readers, [(h.source_id, h.external_id) for h in hits]
-        )
-        hits = [h for h in hits if (h.source_id, h.external_id) in ok]
-    live = (
-        asyncio.ensure_future(
-            federated.search(
-                conn, schemas, env, ctx, q, seconds=max(1.0, _left(end)), meter=live_meter
-            )
-        )
-        if env is not None
-        else None
-    )
-    status = "off"
-    if use_rerank and hits:
-        order, status = await rerank.order(
-            settings,
-            text,
-            [h.text for h in hits[:RERANK_TOP]],
-            meter=meter,
-            payer=payer,
+            conn, schemas, env, ctx.readers, [(h.source_id, h.external_id) for h in hits],
             seconds=max(1.0, _left(end)),
+        )  # fmt: skip
+        hits = [h for h in hits if (h.source_id, h.external_id) in ok]
+    status = "off"
+    # The live sources answer beside the rerank, and never outlive this search's connection.
+    async with asyncio.TaskGroup() as tg:
+        live = (
+            tg.create_task(
+                federated.search(
+                    conn, schemas, env, ctx, q, seconds=max(1.0, _left(end)), meter=live_meter
+                )
+            )
+            if env is not None
+            else None
         )
-        if order is not None:
-            head = hits[:RERANK_TOP]
-            hits = [head[i] for i in order] + hits[RERANK_TOP:]
-    return Result(hits[:limit], notes, status, win, await live if live is not None else [])
+        if use_rerank and hits:
+            order, status = await rerank.order(
+                settings,
+                text,
+                [h.text for h in hits[:RERANK_TOP]],
+                meter=meter,
+                payer=payer,
+                seconds=max(1.0, _left(end)),
+            )
+            if order is not None:
+                head = hits[:RERANK_TOP]
+                hits = [head[i] for i in order] + hits[RERANK_TOP:]
+    return Result(hits[:limit], notes, status, win, live.result() if live is not None else [])
 
 
 async def _embedded(

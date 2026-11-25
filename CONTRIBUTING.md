@@ -27,8 +27,8 @@ Dependency rule (enforced by `import-linter` in CI):
 - `daimon.core` must not import `daimon.adapters.*`.
 - `daimon.adapters.X` must not import `daimon.adapters.Y`.
 - `daimon.core` must not import `daimon.data`, the optional data store. It reaches core
-  only through settings, stores and `daimon.core.ports`, which the package fills at
-  startup through its `daimon.ports` entry point.
+  only through settings, stores, the read audience (`daimon.core.data_audience`) and
+  `daimon.core.ports`, which the package fills at startup through its `daimon.ports` entry point.
 - `daimon.core._models` (the ORM schema) is private to `daimon.core.stores.**`
   and `daimon.core.defaults.**`. Stores map ORM rows to Pydantic models at the
   boundary; callers never see a session object.
