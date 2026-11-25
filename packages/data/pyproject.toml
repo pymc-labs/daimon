@@ -1,0 +1,27 @@
+[project]
+name = "daimon-data"
+version = "0.2.0"
+description = "Daimon data sources: a store of synced records with access rules, plus sync and search"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+dependencies = [
+    "daimon-core",
+    "psycopg[binary,pool]>=3.2",
+    "pydantic>=2.7",
+    "sqlalchemy[asyncio]>=2",
+    "structlog>=24",
+]
+
+[project.entry-points."daimon.ports"]
+data = "daimon.data.ports:register"
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["daimon"]
