@@ -112,4 +112,6 @@ def test_reapplying_the_store_is_a_no_op_and_puts_back_grants_a_no_privileges_re
         ), "the reader reads credentials"
         policies = _one(conn, f"select count(*) from pg_policies where schemaname = '{d}'")
         vectors = _one(conn, f"select to_regclass('{d}.chunk_vectors') is not null")
-        assert policies == 3 + int(vectors), "a policy went missing"
+        assert policies == 4 + int(vectors), (
+            "a policy went missing"
+        )  # sources, records, chunks, attachments
