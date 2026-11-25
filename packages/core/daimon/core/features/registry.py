@@ -1311,24 +1311,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Lead intake",
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
     ),
-    # Stand-in for the data store's own `data_sources` spec; that change replaces it.
-    FeatureSpec(
-        key="data_sources",
-        name="Data sources",
-        category="capabilities",
-        effect="capability",
-        values=_ON_OFF,
-        default="off",
-        tiers=("deployment", "workspace"),
-        binds="turn",
-        doc=(
-            "The data store: connected sources, their synced content and the tools that search "
-            "it. Whoever runs Daimon turns it on for the deployment and sets the store up with "
-            "`daimon data init`; a workspace can then turn it off for itself."
-        ),
-        platforms=EVERY_PLATFORM,
-        authority=_ADMIN,
-    ),
     FeatureSpec(
         key="data_reads",
         name="Data source reads",
@@ -1561,6 +1543,22 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         platforms=EVERY_PLATFORM,
         requires=("repo_memory_setup",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="data_sources",
+        name="Data sources",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "The data store, with its connected sources and search. Turned on for the "
+            "deployment first; a workspace can turn it off for itself."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
     ),
     FeatureSpec(
         key="context_provider",

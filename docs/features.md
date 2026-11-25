@@ -69,6 +69,7 @@ Where each feature can be set, and its default.
 | /new in threads | `thread_new` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Data sources | `data_sources` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
@@ -96,7 +97,6 @@ Where each feature can be set, and its default.
 | Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Data sources | `data_sources` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Data source reads | `data_reads` | Capability | Off |  | ✓ | ✓ | ✓ |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
@@ -187,6 +187,18 @@ Each message starts with the notes in the agent's repository memory, and the age
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+
+## Data sources
+
+The data store, with its connected sources and search. Turned on for the deployment first; a workspace can turn it off for itself.
+
+| | |
+| --- | --- |
+| Key | `data_sources` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
 ## Context provider
@@ -1083,18 +1095,6 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
-| Combines | Off above is a ceiling |
-
-## Data sources
-
-The data store: connected sources, their synced content and the tools that search it. Whoever runs Daimon turns it on for the deployment and sets the store up with `daimon data init`; a workspace can then turn it off for itself.
-
-| | |
-| --- | --- |
-| Key | `data_sources` |
-| Values | `on` (On), `off` (Off) |
-| Default | `off` |
-| Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
 ## Data source reads

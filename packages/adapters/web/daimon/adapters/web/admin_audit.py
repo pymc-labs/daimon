@@ -11,7 +11,7 @@ from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import audit_trail
-from daimon.core.audit_trail import AuditEntry, AuditFilter, AuditSource
+from daimon.core.audit_trail import AuditEntry, AuditFilter, AuditSource, SourceAuditRow
 from daimon.core.stores import web_invites
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import WebAuditRow, WebPersonRow
@@ -179,6 +179,17 @@ def _shown(
         if row.detail is not None:
             out["detail"] = row.detail
         return out
+    if isinstance(row, SourceAuditRow):
+        return {
+            "id": str(row.id),
+            "source": entry.source,
+            "at": row.at.isoformat(),
+            "who": who or "Someone",
+            "actor_id": str(actor.id) if actor else None,
+            "action": row.kind,
+            "target": {"kind": "other", "id": None, "name": row.target or ""},
+            "detail": row.detail,
+        }
     return {
         "id": str(row.id),
         "source": entry.source,

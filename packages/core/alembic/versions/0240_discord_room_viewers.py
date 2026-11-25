@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0231_discord_room_viewers"
-down_revision: str | None = "0229_compute_started_by_wake"
+revision: str = "0240_discord_room_viewers"
+down_revision: str | None = "0232_data_sync"
 branch_labels: str | None = None
 depends_on: str | None = None
 

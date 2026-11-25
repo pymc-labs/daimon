@@ -43,6 +43,7 @@ typo is silent — check the spelling here.
 - [GitHub](#github)
 - [GitHub App](#github-app)
 - [Repo Memory](#repo-memory)
+- [Data](#data)
 - [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
@@ -1334,6 +1335,93 @@ verified import. Once set up, the `repo_memory` feature turns it on or off
 Legacy MCP server names whose repo_memory_list and repo_memory_view tools are disabled
 in sessions when native repository memory is enabled. Set these before cutover so the
 agent sees one memory source.
+
+## Data
+
+Read from `daimon.core.config.DataSettings`. Prefix `DAIMON_DATA__`.
+
+The data store: where it lives, how it embeds and searches. Whether it runs at all is
+the `data_sources` feature (`DAIMON_FEATURES__DATA_SOURCES`).
+
+### `DAIMON_DATA__SCHEMA_NAME`
+
+`str` · optional · default `data`
+
+Postgres schema holding the store; its read views live in the same name plus `_views`.
+Set before the first start; a changed name is a different, empty store.
+
+### `DAIMON_DATA__POOL_SIZE`
+
+`int` · optional · default `4`
+
+Connections one process keeps open to the store, opened on first use.
+
+### `DAIMON_DATA__EMBED_URL`
+
+`str | None` · optional · default unset
+
+Base URL of the embeddings API (OpenAI-compatible). Unset: no embeddings.
+
+### `DAIMON_DATA__EMBED_MODEL`
+
+`str` · optional · default unset
+
+Embedding model name sent to the API.
+
+### `DAIMON_DATA__EMBED_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+API key for the embeddings API.
+
+### `DAIMON_DATA__EMBED_PROVIDER`
+
+`str` · optional · default `openai`
+
+Embeddings API dialect: `openai` or a named provider.
+
+### `DAIMON_DATA__EMBED_QUERY_PREFIX`
+
+`str` · optional · default unset
+
+Text put before a search query when it is embedded.
+
+### `DAIMON_DATA__EMBED_DIM`
+
+`int` · optional · default `384`
+
+Length of the embedding vectors.
+
+### `DAIMON_DATA__RERANK`
+
+`'off' | 'vertex'` · optional · default `off`
+
+Reranker applied to search results.
+
+### `DAIMON_DATA__RERANK_PROJECT`
+
+`str` · optional · default unset
+
+Cloud project the reranker bills to.
+
+### `DAIMON_DATA__WORKER_CONCURRENCY`
+
+`int` · optional · default `3`
+
+Sources the sync worker syncs at once.
+
+### `DAIMON_DATA__SEARCH_SECONDS`
+
+`float` · optional · default `8.0`
+
+Seconds a search may run before it returns what it has.
+
+### `DAIMON_DATA__PRIVATE_HOSTS`
+
+`tuple[str, ...]` · optional · default unset
+
+Private hosts or ranges, comma-separated, that database connections to external Postgres
+servers may reach. Public hosts need no entry.
 
 ## Microsoft Accounts
 

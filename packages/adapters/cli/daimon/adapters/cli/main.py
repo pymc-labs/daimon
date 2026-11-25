@@ -17,6 +17,7 @@ from daimon.adapters.cli.commands.channels import channels_app
 from daimon.adapters.cli.commands.config import config_app
 from daimon.adapters.cli.commands.context_provider import context_provider_app
 from daimon.adapters.cli.commands.crypto import crypto_app
+from daimon.adapters.cli.commands.data import data_app
 from daimon.adapters.cli.commands.defaults import defaults_app
 from daimon.adapters.cli.commands.deployment import deployment_app
 from daimon.adapters.cli.commands.dm import dm_app
@@ -63,6 +64,7 @@ app.add_typer(monitoring_app, name="monitoring")
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")
 app.add_typer(crypto_app, name="crypto")
+app.add_typer(data_app, name="data")
 app.add_typer(context_provider_app, name="context-provider")
 app.add_typer(defaults_app, name="defaults")
 app.add_typer(skills_app, name="skills")
