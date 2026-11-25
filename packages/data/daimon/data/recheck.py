@@ -19,12 +19,14 @@ import structlog
 from daimon.data.schema import Schemas
 from daimon.data.sync import request_cache
 from daimon.data.sync.connector import CONNECTORS, Source
-from daimon.data.sync.engine import Env, build_source, with_people
+from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
 log = structlog.get_logger()
 
+CONCURRENT: Final = 4
+"""Checks one request runs at once."""
 MAX_CHECKS: Final = 12
 """Records one request may check; the rest of those that need it are dropped."""
 SECONDS: Final = 10.0
@@ -80,6 +82,16 @@ async def reader_subjects(
         else ()
         for r in readers
     ]
+
+
+def _accounts(readers: Sequence[str]) -> list[uuid.UUID] | None:
+    """The accounts of `readers`; None when one is not an account (any sign-in may be asked)."""
+    if not all(r.startswith("account:") for r in readers):
+        return None
+    try:
+        return [uuid.UUID(r.removeprefix("account:")) for r in readers]
+    except ValueError:
+        return None
 
 
 async def _ask(
@@ -147,24 +159,22 @@ async def _allowed(
         else:
             out.add(ref)
     asked = pending[:limit]
+    only = _accounts(readers)
     for sid in {r[0] for r in asked}:
-        sources[sid] = await with_people(conn, env, sources[sid])
+        sources[sid] = await ready(conn, env, sources[sid], only)
     subjects = {
         sid: await reader_subjects(conn, schemas, sources[sid], readers)
         for sid in {r[0] for r in asked}
     }
+    gate = asyncio.Semaphore(CONCURRENT)
+
+    async def check(sid: uuid.UUID, ext: str) -> bool:
+        if not (readers and all(subjects[sid])):
+            return False
+        async with gate:
+            return await _ask(sources[sid], ext, subjects[sid], seconds)
+
     async with request_cache.scope():
-        verdicts = await asyncio.gather(
-            *(
-                _ask(sources[sid], ext, subjects[sid], seconds)
-                if readers and all(subjects[sid])
-                else _no()
-                for sid, ext in asked
-            )
-        )
+        verdicts = await asyncio.gather(*(check(sid, ext) for sid, ext in asked))
     out.update(ref for ref, ok in zip(asked, verdicts, strict=True) if ok)
     return out
-
-
-async def _no() -> bool:
-    return False

@@ -17,7 +17,7 @@ from daimon.data import access, recheck, redaction
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS
-from daimon.data.sync.engine import Env, build_source
+from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -226,7 +226,7 @@ async def read_file(
         )
     except redaction.NotApproved:
         return None
-    source = build_source(row, env, None)
+    source = await ready(conn, env, build_source(row, env, None))
     try:
         got = await connector.fetch_file(
             source, payload, record.item.external_id, file.name, file.ord

@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -74,7 +74,8 @@ class Env:
     crypto_keys: tuple[str, ...] = ()
     private_hosts: tuple[str, ...] = ()
     keyless_accounts: tuple[str, ...] = ()
-    """`domain=account` entries: the service accounts a Google source may sign as without a key."""
+    """`workspace=account` entries: the service accounts a workspace's Google sources may sign
+    as without a key."""
     embed: bool = False
     clients: Mapping[str, connect.Client] = field(default_factory=dict[str, connect.Client])
     """Daimon's own sign-in clients, for refreshing a connected person's token."""
@@ -539,35 +540,57 @@ def build_source(row: DictRow, env: Env, deadline: float | None) -> Source:
         private_hosts=env.private_hosts,
         deadline=deadline,
     )
-    connector = CONNECTORS.get(source.kind)
-    if connector is None or not env.keyless_accounts:
-        return source
-    try:
-        ws = connector.workspace_of(source).lower()
-    except ValueError:
-        return source
-    allowed = tuple(
-        a.strip().lower()
-        for w, _, a in (e.partition("=") for e in env.keyless_accounts)
-        if w.strip().lower() == ws
-    )
-    return replace(source, keyless_accounts=allowed)
+    return source
 
 
-async def with_people(conn: AsyncConnection[DictRow], env: Env, source: Source) -> Source:
-    """The source with the people signed in at it, when its connector reads as each person."""
+async def _keyless(conn: AsyncConnection[DictRow], env: Env, source: Source) -> tuple[str, ...]:
+    """The service accounts the deployment lets this source's Daimon workspace sign as without a
+    key: entries `<workspace>=<account>`, the workspace a tenant id or `<platform>:<id>` (as in
+    the declared file). Never keyed by anything a source's own config says."""
+    found: list[str] = []
+    for entry in env.keyless_accounts:
+        ws, _, account = entry.partition("=")
+        ws = ws.strip()
+        try:
+            same = UUID(ws) == source.tenant_id
+        except ValueError:
+            platform, _, ext = ws.partition(":")
+            cur = await conn.execute(
+                b"select 1 from tenants where id = %s and platform = %s and external_id = %s",
+                (source.tenant_id, platform, ext),
+            )
+            same = await cur.fetchone() is not None
+        if same and account.strip():
+            found.append(account.strip().lower())
+    return tuple(found)
+
+
+async def ready(
+    conn: AsyncConnection[DictRow],
+    env: Env,
+    source: Source,
+    accounts: Collection[UUID] | None = None,
+) -> Source:
+    """The source with what needs the store: the people signed in at it (those of `accounts`
+    only, when given), when its connector reads as each person, and the keyless accounts its
+    workspace may sign as."""
     connector = CONNECTORS.get(source.kind)
-    if connector is None or not connector.person_sign_in:
+    if connector is None:
         return source
-    people = await connect.connected_people(
-        conn,
-        env.schemas,
-        env.crypto_keys,
-        env.clients,
-        GuardedTransport(env.private_hosts),
-        source.id,
-    )
-    return replace(source, people=people)
+    if connector.person_sign_in:
+        people = await connect.connected_people(
+            conn,
+            env.schemas,
+            env.crypto_keys,
+            env.clients,
+            GuardedTransport(env.private_hosts),
+            source.id,
+            accounts,
+        )
+        source = replace(source, people=people)
+    if env.keyless_accounts:
+        source = replace(source, keyless_accounts=await _keyless(conn, env, source))
+    return source
 
 
 _LOAD: Final = (
@@ -649,7 +672,7 @@ async def _locked(
     source: Source | None = None
     try:
         source = build_source(row, env, deadline)
-        source = await with_people(conn, env, source)
+        source = await ready(conn, env, source)
         key = connector.scan_key(source)
         if key:
             scan = advisory_key(d, f"scan:{key}")

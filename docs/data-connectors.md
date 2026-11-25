@@ -84,10 +84,11 @@ when asked, its My Drives. It acts through a service account with domain-wide de
    `https://www.googleapis.com/auth/admin.directory.group.readonly`.
 3. Give the credential the account's key file as `{"service_account_key": "<the JSON>"}`.
    Without a key, Daimon signs as its own Google runtime identity, which needs the Token
-   Creator role on the account. Set `service_account` in the config, and list the account
-   for the domain in `DAIMON_DATA__GOOGLE_KEYLESS_ACCOUNTS` (`example.com=sa@project.iam.gserviceaccount.com`).
-   An account the deployment does not list is refused, and with no entry no source can sign
-   without a key.
+   Creator role on the account. Set `service_account` in the config, and have the deployment
+   list the account for the Daimon workspace in `DAIMON_DATA__GOOGLE_KEYLESS_ACCOUNTS`, as
+   `<workspace>=<account>` entries where the workspace is a tenant id or `<platform>:<id>`.
+   An account not listed for the source's workspace is refused, whatever domain the source
+   names, and with no entry no source can sign without a key.
 4. Make `admin` a super admin or a delegated admin who can read users and groups. For
    shared drives, add that admin to each drive as a manager.
 

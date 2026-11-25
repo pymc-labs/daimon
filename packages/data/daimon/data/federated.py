@@ -25,7 +25,7 @@ from daimon.data.recheck import reader_subjects
 from daimon.data.schema import Schemas
 from daimon.data.sync import request_cache
 from daimon.data.sync.connector import CONNECTORS, LiveHit, Source
-from daimon.data.sync.engine import Env, build_source
+from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -128,7 +128,7 @@ async def search(
             )
         except redaction.NotApproved:
             return LiveResult(row["id"], row["name"], (), "error")
-        source = build_source(row, env, None)
+        source = await ready(conn, env, build_source(row, env, None))
         connector = CONNECTORS[source.kind]
         try:
             hits = await read(source, query, limit)

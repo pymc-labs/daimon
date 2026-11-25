@@ -3182,9 +3182,11 @@ class DataSettings(BaseModel):
     google_keyless_accounts: Annotated[tuple[str, ...], NoDecode] = Field(
         default=(),
         description=(
-            "Service accounts a Google Workspace data source may sign as without a key file, "
-            "comma-separated `domain=account` entries (Daimon's own identity needs Token Creator "
-            "on each account). A source with no key and no entry for its domain is refused."
+            "Service accounts a Daimon workspace's Google data sources may sign as without a "
+            "key file, comma-separated `workspace=account` entries; the workspace is a tenant "
+            "id or `<platform>:<workspace id>` (Daimon's own identity needs Token Creator on "
+            "each account). A source with no key whose workspace has no entry for its account "
+            "is refused."
         ),
     )
     declared: str | None = Field(

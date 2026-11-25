@@ -24,7 +24,7 @@ from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS, Json, Source
 from daimon.data.sync.connectors.gdrive import GDriveConnector
 from daimon.data.sync.credentials import seal
-from daimon.data.sync.engine import Env, run_source
+from daimon.data.sync.engine import Env, build_source, ready, run_source
 from daimon.data.sync.rate import RateBudget
 from daimon.testing.data_db import DataDb
 from psycopg import AsyncConnection
@@ -467,6 +467,32 @@ async def test_delegation_without_a_key_signs_through_iam_and_a_person_can_be_ch
     assert await connector.can_open(source, "file:f", ["alice"])
     assert not await connector.can_open(source, "file:nothing", ["alice"])
     assert await connector.can_open(source, "file:f", ["gone"]) is None, "a suspended person"
+
+
+async def test_keyless_accounts_are_allowed_by_daimon_workspace_never_by_the_domain_typed(
+    store: Store, google: FakeGoogle
+) -> None:
+    src = await add_source(store)
+    await store.conn.execute(
+        b"insert into tenants (id, platform, external_id) values (%s, 'discord', %s)",
+        (store.tenant, f"guild-{store.tenant.hex[:8]}"),
+    )
+    cur = await store.conn.execute(
+        f"select s.*, null::jsonb as state, null::timestamptz as last_sync_at"
+        f" from {store.d}.sources s where s.id = %s".encode(),
+        (src,),
+    )
+    row = await cur.fetchone()
+    assert row
+
+    async def allowed(*entries: str) -> tuple[str, ...]:
+        env = replace(store.env, keyless_accounts=entries)
+        return (await ready(store.conn, env, build_source(row, env, None))).keyless_accounts
+
+    other = uuid.uuid4()
+    assert await allowed(f"{other}={SERVICE}", f"discord:guild-x={SERVICE}") == ()
+    assert await allowed(f"{store.tenant}={SERVICE}") == (SERVICE,)
+    assert await allowed(f"discord:guild-{store.tenant.hex[:8]}={SERVICE}") == (SERVICE,)
 
 
 async def link(store: Store, person: str) -> str:

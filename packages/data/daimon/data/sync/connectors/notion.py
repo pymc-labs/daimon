@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -58,6 +57,7 @@ from daimon.data.sync.connector import (
 )
 from daimon.data.sync.connectors.chat import names, obj, rows
 from daimon.data.sync.http import GuardedTransport, Upstream
+from daimon.data.sync.rate import RateBudget
 
 log = structlog.get_logger()
 
@@ -305,8 +305,9 @@ def _headers(token: str, session: str | None = None) -> dict[str, str]:
     return {**h, "Mcp-Session-Id": session} if session else h
 
 
-async def _session(h: httpx.AsyncClient, token: str) -> str | None:
+async def _session(h: httpx.AsyncClient, budget: RateBudget, token: str) -> str | None:
     """A new MCP session for this person's token, or None when Notion refuses it."""
+    await budget.take()
     r = await h.post(
         MCP,
         headers=_headers(token),
@@ -324,46 +325,62 @@ async def _session(h: httpx.AsyncClient, token: str) -> str | None:
     return r.headers.get("mcp-session-id") if r.status_code == 200 else None
 
 
-async def accepted(transport: httpx.AsyncBaseTransport, token: str) -> bool:
+async def accepted(transport: httpx.AsyncBaseTransport, budget: RateBudget, token: str) -> bool:
     """Whether Notion accepts this person's token now: its MCP server opens a session for it."""
     try:
         async with httpx.AsyncClient(timeout=8, transport=transport) as h:
-            return bool(await _session(h, token))
+            return bool(await _session(h, budget, token))
     except httpx.HTTPError:
         return False
 
 
-def _result_text(r: httpx.Response) -> str | None:
-    """The text of a successful tool call, else None: a denial is HTTP 200 with `isError`, and
-    an error object, an empty answer or a trashed page also count as not opened."""
-    text = r.text
+def _message(r: httpx.Response) -> Json:
+    """The JSON-RPC answer of a call: the body, or the first event of a stream that carries a
+    `result` or an `error` (progress and log events before it are skipped)."""
+    texts = [r.text]
     if r.headers.get("content-type", "").startswith("text/event-stream"):
-        text = next((x[5:] for x in text.splitlines() if x.startswith("data:")), "")
-    try:
-        body = json.loads(text)
-    except ValueError:
-        return None
-    result = obj(obj(body).get("result"))
-    if r.status_code != 200 or not result or result.get("isError"):
+        texts = [x[5:] for x in r.text.splitlines() if x.startswith("data:")]
+    for text in texts:
+        try:
+            body = obj(json.loads(text))
+        except ValueError:
+            continue
+        if "result" in body or "error" in body:
+            return body
+    return {}
+
+
+def _result_text(r: httpx.Response) -> str | None:
+    """The text of a successful tool call, else None: a denial is HTTP 200 with `isError`,
+    and an error answer, an error object as the text or an empty answer count as not opened."""
+    body = _message(r)
+    result = obj(body.get("result"))
+    if r.status_code != 200 or "error" in body or not result or result.get("isError"):
         return None
     texts = [str(x.get("text", "")) for x in rows(result.get("content")) if x.get("type") == "text"]
     out = texts[0] if texts else ""
-    if not out.strip() or re.search(r'"(code|in_trash|archived)":\s*("[a-z_]+"|true)', out):
-        return None
-    return out
+    try:
+        refused = isinstance(obj(json.loads(out)).get("code"), str)
+    except ValueError:
+        refused = False
+    return None if refused or not out.strip() else out
 
 
-async def opens(transport: httpx.AsyncBaseTransport, token: str, object_id: str) -> bool:
+async def opens(
+    transport: httpx.AsyncBaseTransport, budget: RateBudget, token: str, object_id: str
+) -> bool:
     """Whether this person's own Notion session fetches the page or database now."""
     try:
         async with httpx.AsyncClient(timeout=8, transport=transport) as h:
-            if not (sid := await _session(h, token)):
+            if not (sid := await _session(h, budget, token)):
                 return False
+            await budget.take()
             await h.post(
                 MCP,
                 headers=_headers(token, sid),
                 json={"jsonrpc": "2.0", "method": "notifications/initialized"},
             )
+            await budget.take()
             r = await h.post(
                 MCP,
                 headers=_headers(token, sid),
@@ -377,6 +394,11 @@ async def opens(transport: httpx.AsyncBaseTransport, token: str, object_id: str)
     except httpx.HTTPError:
         return False
     return _result_text(r) is not None
+
+
+def same_user(a: str, b: str) -> bool:
+    """Whether two Notion user ids are the same, whatever their dashes and case."""
+    return a.replace("-", "").lower() == b.replace("-", "").lower()
 
 
 # ---- the connector ---------------------------------------------------------------------------
@@ -443,17 +465,18 @@ class NotionConnector(Connector):
         cfg = Config.of(source.config)
         group = connected_group(cfg.workspace)
         users = await self._users(source)
-        roster = {str(u["id"]) for u in users or ()}
+        ids = [str(u["id"]) for u in users or ()]
         for p in source.people:
             ref = f"person:{p.account_id}"
-            if p.token is None or p.subject not in roster:
+            listed = next((i for i in ids if same_user(i, p.subject)), None)
+            if p.token is None or listed is None:
                 yield PermissionUnit("connection", ref, 0, {group: ()}, time.time_ns() // 1000)
-            elif await accepted(self._guard(source), p.token):
+            elif await accepted(self._guard(source), source.budget, p.token):
                 yield PermissionUnit(
                     "connection",
                     ref,
                     UNIT_MINUTES,
-                    {group: (subject(PROVIDER, cfg.workspace, "user", p.subject),)},
+                    {group: (subject(PROVIDER, cfg.workspace, "user", listed),)},
                     time.time_ns() // 1000,
                 )
 
@@ -481,11 +504,15 @@ class NotionConnector(Connector):
     ) -> bool | None:
         """Whether Notion opens the page for this person through their own session now.
         None: none of these subjects has a sign-in with a working token here."""
-        tokens = [p.token for p in source.people if p.subject in subjects and p.token]
+        tokens = [
+            p.token
+            for p in source.people
+            if p.token and any(same_user(p.subject, i) for i in subjects)
+        ]
         if not tokens:
             return None
         oid = external_id.partition(":")[2]
-        return any([await opens(self._guard(source), t, oid) for t in tokens])
+        return any([await opens(self._guard(source), source.budget, t, oid) for t in tokens])
 
     # ---- content ----
 

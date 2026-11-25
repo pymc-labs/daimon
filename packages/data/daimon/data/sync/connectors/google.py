@@ -145,10 +145,9 @@ class Google:
             )
             for api, host in HOSTS.items()
         }
-        self._plain = httpx.AsyncClient(timeout=30, transport=make(()))
 
     async def aclose(self) -> None:
-        for client in (*self._clients.values(), self._plain):
+        for client in self._clients.values():
             await client.aclose()
 
     def forget(self, who: str, api: str) -> None:
@@ -164,6 +163,12 @@ class Google:
         return token
 
     async def _mint(self, who: str, api: str) -> str:
+        """A new token, on a client of its own: a request's other callers share the result,
+        and the one that started it may be gone."""
+        async with httpx.AsyncClient(timeout=30, transport=self._make(())) as plain:
+            return await self._mint_on(plain, who, api)
+
+    async def _mint_on(self, plain: httpx.AsyncClient, who: str, api: str) -> str:
         now = int(time.time())
         claims = {
             "iss": self._account,
@@ -173,8 +178,8 @@ class Google:
             "iat": now,
             "exp": now + 3600,
         }
-        assertion = self._sign(claims) if self._key else await self._sign_by_iam(claims)
-        r = await self._plain.post(TOKEN_URL, data={"grant_type": GRANT, "assertion": assertion})
+        assertion = self._sign(claims) if self._key else await self._sign_by_iam(plain, claims)
+        r = await plain.post(TOKEN_URL, data={"grant_type": GRANT, "assertion": assertion})
         if r.status_code != 200:
             try:
                 code = str(r.json().get("error") or r.status_code)
@@ -191,14 +196,14 @@ class Google:
         assert isinstance(pem, rsa.RSAPrivateKey), "a Google key file holds an RSA key"
         return f"{body}.{_b64(pem.sign(body.encode(), padding.PKCS1v15(), hashes.SHA256()))}"
 
-    async def _sign_by_iam(self, claims: Json) -> str:
+    async def _sign_by_iam(self, plain: httpx.AsyncClient, claims: Json) -> str:
         """The assertion, signed by the IAM Credentials API as this runtime's identity. The
         metadata server is private by design: only its own name is allowed past the guard."""
         async with httpx.AsyncClient(timeout=10, transport=self._make((METADATA_HOST,))) as meta:
             r = await meta.get(METADATA_URL, headers={"Metadata-Flavor": "Google"})
         if r.status_code != 200:
             raise Upstream("keyless delegation needs a Google runtime identity, and none answered")
-        r = await self._plain.post(
+        r = await plain.post(
             SIGN_URL.format(quote(self._account)),
             json={"payload": json.dumps(claims)},
             headers={"Authorization": f"Bearer {r.json()['access_token']}"},

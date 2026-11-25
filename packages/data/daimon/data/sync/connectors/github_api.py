@@ -96,7 +96,8 @@ class Api:
             url = obj(r.links.get("next")).get("url")
             if not url:
                 return
-            if httpx.URL(url).host != self.client.base_url.host:
+            nxt, base = httpx.URL(url), self.client.base_url
+            if (nxt.scheme, nxt.host, nxt.port) != (base.scheme, base.host, base.port):
                 raise Upstream("GitHub paged to a host other than its API")
         raise Upstream(f"GitHub returned more than {PAGES} pages of {path}")
 

@@ -229,9 +229,9 @@ async def test_a_notion_sign_in_outside_the_integrations_users_reads_nothing(
     store: Store, notion: FakeNotion
 ) -> None:
     src = await store.add("notion", {"token": "secret"}, workspace="ws")
-    await store.connect(src, "u-alice")
+    await store.connect(src, "U-Alice")  # the same id as the user list's, in another case
     await store.connect(src, "u-mallory")
-    notion.valid.add("tok-u-mallory")
+    notion.valid |= {"tok-u-mallory", "tok-U-Alice"}
     await store.ok(src)
     assert await store.sees("notion", "ws", "u-alice") == {f"page:{i}" for i in (A, B, X, Y)}
     assert await store.sees("notion", "ws", "u-mallory") == set(), (

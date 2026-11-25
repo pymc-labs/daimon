@@ -15,7 +15,7 @@ import json
 import re
 import secrets
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -716,13 +716,16 @@ async def connected_people(
     clients: Mapping[str, Client],
     transport: httpx.AsyncBaseTransport,
     source_id: uuid.UUID,
+    accounts: Collection[uuid.UUID] | None = None,
 ) -> tuple[Person, ...]:
-    """The people connected to a source, each with a good access token (refreshed when it ends
-    soon), or none when the connection no longer proves itself."""
+    """The people connected to a source (those of `accounts` only, when given), each with a
+    good access token (refreshed when it ends soon), or none when the connection no longer
+    proves itself."""
+    only = "" if accounts is None else " and account_id = any(%s)"
     cur = await conn.execute(
         f"select account_id, subject, status from {schemas.data}.person_connections"
-        " where source_id = %s order by account_id".encode(),
-        (source_id,),
+        f" where source_id = %s{only} order by account_id".encode(),
+        (source_id,) if accounts is None else (source_id, list(accounts)),
     )
     rows = await cur.fetchall()
     out: list[Person] = []

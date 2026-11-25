@@ -143,23 +143,6 @@ def comment_text(c: Json, depth: int = 0) -> str:
     return "  " * depth + f"{who}: {str(c.get('body') or '').strip()}"
 
 
-async def _list_readers(api: Api, repo: Json) -> frozenset[str] | None:
-    try:
-        return frozenset(
-            [
-                str(u["id"])
-                async for u in api.pages(
-                    f"/repositories/{repo['id']}/collaborators", {"affiliation": "all"}
-                )
-                if obj(u.get("permissions")).get("pull") is True
-            ]
-        )
-    except Refused as e:
-        if e.status in (403, 404):
-            return None
-        raise
-
-
 class GitHubConnector(Connector):
     kind: ClassVar[str] = "github"
     name: ClassVar[str] = "GitHub"
@@ -212,13 +195,29 @@ class GitHubConnector(Connector):
 
     # ---- who reads ----
 
-    @staticmethod
-    async def _readers(api: Api, repo: Json) -> set[str] | None:
+    async def _readers(self, api: Api, repo: Json) -> set[str] | None:
         """The ids of the people with read access to the repository; None: not listable now.
-        Listed once per request."""
+        Listed once per request, on a client of its own (the first caller may be gone)."""
         key = ("github-readers", api.source.id, repo["id"])
-        found = await once(key, lambda: _list_readers(api, repo))
+        found = await once(key, lambda: self._list_readers(api.source, repo))
         return None if found is None else set(found)
+
+    async def _list_readers(self, source: Source, repo: Json) -> frozenset[str] | None:
+        async with client_of(source, self.transport) as client:
+            try:
+                return frozenset(
+                    [
+                        str(u["id"])
+                        async for u in Api(client, source).pages(
+                            f"/repositories/{repo['id']}/collaborators", {"affiliation": "all"}
+                        )
+                        if obj(u.get("permissions")).get("pull") is True
+                    ]
+                )
+            except Refused as e:
+                if e.status in (403, 404):
+                    return None
+                raise
 
     async def permissions(self, source: Source) -> AsyncGenerator[PermissionUnit]:
         """One unit per repository, every run: its readers, and the organization's members
