@@ -112,6 +112,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "lint",
         "shard-check",
         "pytest-db",
+        "pytest-data",
         "pytest-discord",
         "pytest-light",
         "mux-standalone",
@@ -143,6 +144,7 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
     pytest_jobs = {name: job for name, job in jobs.items() if _pytest_commands(job)}
     assert set(pytest_jobs) == {
         "pytest-db",
+        "pytest-data",
         "pytest-discord",
         "pytest-staging-config",
         "pytest-light",
