@@ -95,6 +95,14 @@ of linked people and records and needs a clean run no older than 36 hours. Any c
 showing more than the source does blocks publishing; showing less only warns. Other sources
 publish after a complete sync.
 
+## In the web app
+
+With the feature on, the web app has a Data section for search and browsing, which shows each
+person only what they may read. Owners and admins add, pause, publish and retire sources under
+Integrations > Data sources, and manage scopes, grants, identity links, data admins and
+redaction sets under Admin > Data access. Declared sources show as bound and are read-only
+there. People link and connect their own accounts on their Profile.
+
 ## Declared config
 
 Set `DAIMON_DATA__DECLARED` to a YAML or JSON file to declare sources, scopes and grants
