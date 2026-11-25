@@ -7,6 +7,8 @@ from daimon.data.sync.connectors.bluedot import BluedotConnector
 from daimon.data.sync.connectors.discord import DiscordConnector
 from daimon.data.sync.connectors.gcal import GCalConnector
 from daimon.data.sync.connectors.gdrive import GDriveConnector
+from daimon.data.sync.connectors.github import GitHubConnector
+from daimon.data.sync.connectors.github_markdown import GitHubMarkdownConnector
 from daimon.data.sync.connectors.linkedin import LinkedInConnector
 from daimon.data.sync.connectors.notion import NotionConnector
 from daimon.data.sync.connectors.postgres import PostgresConnector
@@ -17,6 +19,8 @@ register(DiscordConnector())
 register(SlackConnector())
 register(GDriveConnector())
 register(GCalConnector())
+register(GitHubConnector())
+register(GitHubMarkdownConnector())
 register(NotionConnector())
 register(BluedotConnector())
 register(LinkedInConnector())
