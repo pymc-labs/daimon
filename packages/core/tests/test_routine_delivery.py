@@ -236,6 +236,7 @@ def test_every_destination_says_how_a_quiet_run_ends(
         direct_post=direct_post,
     )
     assert "must be one line: NO_POST: and a short reason" in text
+    assert "Whatever your instructions ask you to report" in text, "a report is never dropped"
     assert "say what stopped you" in text, "a failed check is never silent"
 
 
