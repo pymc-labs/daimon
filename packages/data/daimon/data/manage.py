@@ -134,6 +134,7 @@ class IdentityView:
     proof: str | None
     linked_at: datetime | None
     active: bool
+    redacted: bool
 
 
 @dataclass(frozen=True)
@@ -533,7 +534,7 @@ async def identities(
     unlinked ones."""
     cur = await conn.execute(
         f"select provider, workspace, subject, name, email, email_verified, account_id, proof,"
-        f" linked_at, active from {schemas.data}.identities where tenant_id = %(t)s"
+        f" linked_at, active, redacted from {schemas.data}.identities where tenant_id = %(t)s"
         " and (%(a)s::uuid is null or account_id = %(a)s)"
         " and (%(l)s::boolean is null or (account_id is not null) = %(l)s)"
         " order by provider, workspace, name, subject limit %(n)s".encode(),
