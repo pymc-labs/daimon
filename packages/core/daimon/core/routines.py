@@ -14,9 +14,9 @@ from daimon.core.workflows.spec import RoutineNode, Spec
 PANEL_CAP = 25
 #: A moved routine's line on every panel; the panel links the workflow and offers no changes.
 MOVED_TO_WORKFLOWS: Final = "Moved to Workflows. Change it there."
-#: A routine surface's badge: routines still run, workflows replace them.
 #: A routine run's failure, where its output is private to someone else.
 PRIVATE_FAILED: Final = "Private routine run failed."
+#: A routine surface's badge: routines still run, workflows replace them.
 LEGACY: Final = "Legacy"
 #: The same, where there is room to name the replacement.
 LEGACY_USE_WORKFLOWS: Final = "Legacy, use Workflows"
