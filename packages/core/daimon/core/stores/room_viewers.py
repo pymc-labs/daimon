@@ -2,6 +2,7 @@
 
 Written with the room facts, under their generation (`daimon.core.stores.audience_facts`),
 so a change that makes the facts unknown makes the viewers unknown too. Unknown is None.
+Viewers are reader subjects (`daimon.core.data_audience.user_subject`).
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from collections.abc import Mapping
 from datetime import datetime
 
 from daimon.core._models import DiscordAudienceState, DiscordRoomViewers
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,3 +72,29 @@ async def read_viewers(
     )
     users = found.scalar_one_or_none()
     return None if users is None else frozenset(users)
+
+
+async def forget_viewer(session: AsyncSession, *, tenant_id: uuid.UUID, viewer: str) -> int:
+    """Erasure: drop every room that names `viewer`. Those rooms read as unknown (no data)
+    until the next publish, which only names people still in the server."""
+    found = await session.execute(
+        delete(DiscordRoomViewers)
+        .where(
+            DiscordRoomViewers.tenant_id == tenant_id,
+            DiscordRoomViewers.user_ids.contains([viewer]),
+        )
+        .returning(DiscordRoomViewers.channel_id)
+    )
+    return len(found.all())
+
+
+async def count_viewer(session: AsyncSession, *, tenant_id: uuid.UUID, viewer: str) -> int:
+    found = await session.execute(
+        select(func.count())
+        .select_from(DiscordRoomViewers)
+        .where(
+            DiscordRoomViewers.tenant_id == tenant_id,
+            DiscordRoomViewers.user_ids.contains([viewer]),
+        )
+    )
+    return found.scalar_one()

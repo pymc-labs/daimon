@@ -24,6 +24,8 @@ DEFINERS = {
     "lapsed_record_ids",
     "visible_fraction",
 }
+CALLER_SQL = "caller_sql"
+"""The one definer that takes arguments: the text of a caller's query (tested in test_sync)."""
 
 
 def now() -> datetime:
@@ -194,9 +196,11 @@ async def test_another_tenants_source_is_never_visible_in_rows_or_through_any_de
         " from pg_proc p where p.pronamespace = %s::regnamespace and p.prosecdef",
         (store.d,),
     )
-    assert {r["name"] for r in definers} == DEFINERS, "a new definer needs a case here"
+    assert {r["name"] for r in definers} == DEFINERS | {CALLER_SQL}, (
+        "a new definer needs a case here"
+    )
     async with scoped(store.conn, store.schemas, ctx) as c:
-        for fn in definers:
+        for fn in (f for f in definers if f["name"] != CALLER_SQL):
             assert fn["args"] == 0, f"{fn['name']} takes arguments: call it here with hostile ones"
             got = [
                 v
@@ -237,7 +241,9 @@ async def test_the_reader_runs_only_its_definers_and_never_reads_lists_or_creden
         " from pg_proc p where p.pronamespace = %s::regnamespace",
         (store.d,),
     )
-    assert {r["name"] for r in fns if r["ok"]} == DEFINERS, "the reader runs an owner's function"
+    assert {r["name"] for r in fns if r["ok"]} == DEFINERS | {CALLER_SQL}, (
+        "the reader runs an owner's function"
+    )
     async with scoped(store.conn, store.schemas, store.who(someone())) as c:
         for q in (
             "select publish(1, 1)",

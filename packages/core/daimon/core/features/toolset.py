@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.config import Settings
 from daimon.core.data_tools import DATA_READS
@@ -44,9 +46,12 @@ async def place_session(
         agent_builtins=builtins_of(agent),
         server_setup=server_setup,
     )
-    if features.on(DATA_READS):
-        # A data-reading agent keeps no long-term memory in any session (`daimon.core.data_seal`).
-        from daimon.core.relay_scope import without_long_term_memory
+    if not features.on(DATA_READS):
+        return agent_toolset(features, agent), SessionIdentity.of(features)
+    # A data-reading agent keeps no long-term memory in any session (`daimon.core.data_seal`),
+    # and what could carry data out asks first (`tool_safety.after_data_read`).
+    from daimon.core.relay_scope import without_long_term_memory
 
-        features = without_long_term_memory(features)
-    return agent_toolset(features, agent), SessionIdentity.of(features)
+    features = without_long_term_memory(features)
+    toolset = replace(agent_toolset(features, agent), data_reads=True)
+    return toolset, SessionIdentity.of(features)

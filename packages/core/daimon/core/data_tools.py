@@ -12,8 +12,10 @@ from typing import Final
 from pydantic import JsonValue
 
 DATA_READS: Final = "data_reads"
-DATA_TOOLS: Final[frozenset[str]] = frozenset()
-"""The data tools registered behind `data_reads`; empty until the store's read functions land."""
+DATA_TOOLS: Final[frozenset[str]] = frozenset(
+    {"data_sources", "data_search", "data_get", "data_file", "data_sql"}
+)
+"""The data tools registered behind `data_reads` (`daimon.adapters.mcp.tools.data`)."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
 

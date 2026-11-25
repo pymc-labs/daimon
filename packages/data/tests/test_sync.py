@@ -1,22 +1,32 @@
-"""Sync: the external Postgres connector end to end, the network guard, the scheduler."""
+"""Sync: the external Postgres connector end to end, the network guard, the scheduler, and the
+search and reads over what it synced."""
 
 from __future__ import annotations
 
 import io
+import json
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
+import httpx
+import psycopg
 import pytest
 from cryptography.fernet import Fernet
+from daimon.core.config import DataSettings
+from daimon.data import embed, reads
 from daimon.data.access import ReadContext, scoped, subject
+from daimon.data.caller_sql import SqlRefused, data_sql
 from daimon.data.dsn import libpq_dsn
+from daimon.data.metering import Payer
 from daimon.data.schema import Schemas
+from daimon.data.search import Filters, search
 from daimon.data.sync import connectors  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from daimon.data.sync.attachments import text_of
 from daimon.data.sync.credentials import seal
+from daimon.data.sync.embedding import embed_pending
 from daimon.data.sync.engine import Env, run_source
 from daimon.data.sync.netguard import NotPublic, resolve
 from daimon.data.sync.rate import RateBudget
@@ -237,3 +247,218 @@ async def test_one_scheduler_leads_and_a_cut_run_is_recovered(
         src,
     )
     assert left[0]["n"] == 0, "no run is left running"
+
+
+MODEL = "text-embedding-3-small"
+WORDS = ("heron", "colony", "soup", "cafeteria", "fish", "lake", "nests", "frogs")
+
+
+def fake_embeddings(request: httpx.Request) -> httpx.Response:
+    """An embeddings API of word counts over eight dimensions: texts sharing words are near."""
+    texts: list[str] = json.loads(request.content)["input"]
+    data = [
+        {"index": i, "embedding": [float(t.lower().count(w)) + 0.01 for w in WORDS]}
+        for i, t in enumerate(texts)
+    ]
+    return httpx.Response(200, json={"data": data, "usage": {"prompt_tokens": 7 * len(texts)}})
+
+
+@dataclass
+class Ledger:
+    """A meter that keeps what it is asked to bill."""
+
+    open: bool = True
+    spent: list[tuple[str, uuid.UUID, str | None, int]] = field(
+        default_factory=list[tuple[str, uuid.UUID, str | None, int]]
+    )
+
+    async def allowed(self, tenant_id: uuid.UUID) -> bool:
+        return self.open
+
+    def priced(self, model: str) -> bool:
+        return model == MODEL
+
+    async def record(
+        self,
+        purpose: str,
+        *,
+        tenant_id: uuid.UUID,
+        platform_user_id: str | None,
+        model: str,
+        units: int,
+    ) -> None:
+        self.spent.append((purpose, tenant_id, platform_user_id, units))
+
+
+EMBED = DataSettings(embed_url="https://embed.example.com/v1", embed_model=MODEL, embed_dim=8)
+
+
+@pytest.fixture
+def embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(embed, "transport", httpx.MockTransport(fake_embeddings))
+
+
+async def put_docs(world: World, src: uuid.UUID) -> None:
+    for i, title in enumerate(("heron colony nests", "cafeteria soup", "lake fish frogs"), 1):
+        await world.put(i, title)
+    await run_source(world.conn, replace(world.env, embed=False), src)  # synced, not yet embedded
+
+
+async def test_search_ranks_by_text_and_vector_and_bills_ingest_and_the_asker(
+    world: World, embedder: None
+) -> None:
+    ledger = Ledger()
+    src = await world.source()
+    for i, title in enumerate(("heron colony nests", "cafeteria soup", "lake fish frogs"), 1):
+        await world.put(i, title)
+    env = replace(world.env, embed=True, data=EMBED, meter=ledger)
+    await run_source(world.conn, env, src)
+    counts = await world.sql(
+        f"select count(v.chunk_id) as vectors, count(*) as chunks from {world.d}.chunks c"
+        f" left join {world.d}.chunk_vectors v on v.chunk_id = c.id where c.source_id = %s",
+        src,
+    )
+    assert counts[0]["vectors"] == counts[0]["chunks"] > 0, "every chunk got a vector"
+    assert [(p, t) for p, t, _, _ in ledger.spent] == [("data_embedding", world.tenant)], (
+        "ingest is billed once, to the source's tenant"
+    )
+
+    asker = Payer(uuid.uuid4(), "u1")
+    ctx = ReadContext(tenant_ids=(world.tenant,), scopes=("internal",))
+    found = await search(
+        world.conn, world.schemas, ctx, "where does the heron colony nest",
+        settings=EMBED, meter=ledger, payer=asker, limit=3,
+    )  # fmt: skip
+    assert found.hits[0].title == "heron colony nests", "the matching record ranks first"
+    assert set(found.hits[0].arms) == {"fts", "vec"}, "both arms found it"
+    assert ledger.spent[-1][:3] == ("data_embedding", asker.tenant_id, "u1"), (
+        "the query is billed to the asker, not the source's tenant"
+    )
+    dated = await search(
+        world.conn, world.schemas, ctx, "heron colony today", settings=EMBED, limit=3
+    )
+    assert "time" in dated.hits[0].arms, "a date phrase adds the time arm"
+    none = await search(
+        world.conn, world.schemas, ctx, "heron", settings=EMBED, filters=Filters(kinds=("other",))
+    )
+    assert none.hits == [], "a filter on another kind finds nothing"
+
+
+async def test_an_empty_balance_falls_back_to_full_text_and_waits_to_embed(
+    world: World, embedder: None
+) -> None:
+    ledger = Ledger(open=False)
+    src = await world.source()
+    await put_docs(world, src)
+    ctx = ReadContext(tenant_ids=(world.tenant,), scopes=("internal",))
+
+    found = await search(
+        world.conn, world.schemas, ctx, "heron colony",
+        settings=EMBED, meter=ledger, payer=Payer(uuid.uuid4()),
+    )  # fmt: skip
+    assert [set(h.arms) for h in found.hits] == [{"fts"}], "full text answers alone"
+    assert "balance" in found.notes, "the answer says why"
+    assert ledger.spent == [], "nothing was billed"
+
+    assert await embed_pending(world.conn, world.schemas, src, settings=EMBED, meter=ledger) == 0, (
+        "a tenant out of balance keeps its gaps"
+    )
+    ledger.open = True
+    waiting = await world.sql(
+        f"select count(*) as n from {world.d}.chunks where source_id = %s", src
+    )
+    assert (
+        await embed_pending(world.conn, world.schemas, src, settings=EMBED, meter=ledger)
+        == waiting[0]["n"]
+    ), "they fill once it tops up"
+
+
+async def test_search_without_an_embeddings_endpoint_is_full_text_only(world: World) -> None:
+    src = await world.source()
+    await put_docs(world, src)
+    ctx = ReadContext(tenant_ids=(world.tenant,), scopes=("internal",))
+    found = await search(world.conn, world.schemas, ctx, "cafeteria", settings=DataSettings())
+    assert [(h.title, set(h.arms)) for h in found.hits] == [("cafeteria soup", {"fts"})], (
+        "full text answers with no notes and no embedder"
+    )
+    assert found.notes == [], "nothing failed: vectors were never asked for"
+
+
+async def test_browse_and_get_page_a_source_and_hide_it_from_another_tenant(world: World) -> None:
+    src = await world.source()
+    await put_docs(world, src)
+    mine = ReadContext(tenant_ids=(world.tenant,), scopes=("internal",))
+    other = ReadContext(tenant_ids=(uuid.uuid4(),), scopes=("internal",))
+
+    first = await reads.browse(world.conn, world.schemas, mine, src, limit=2)
+    rest = await reads.browse(world.conn, world.schemas, mine, src, limit=2, after=first.next)
+    assert (len(first.items), len(rest.items), rest.next) == (2, 1, None), "pages of two, then one"
+    record = await reads.get(world.conn, world.schemas, mine, first.items[0].id)
+    assert record is not None and record.body.startswith("body of"), "get returns the text"
+    assert (
+        await reads.read_file(world.conn, world.schemas, mine, world.env, first.items[0].id, 0)
+        is None
+    ), "a record with no file has none to read"
+    assert await reads.get(world.conn, world.schemas, other, first.items[0].id) is None, (
+        "another tenant cannot tell the record exists"
+    )
+    assert await reads.sources(world.conn, world.schemas, other) == [], "nor the source"
+
+
+async def test_caller_sql_reads_views_only_and_cannot_change_role(world: World) -> None:
+    src = await world.source()
+    await put_docs(world, src)
+    await world.sql(
+        f"insert into {world.d}.datasets (source_id, name, title, scope) values (%s, 'docs', 'Docs', 'internal')",
+        src,
+    )
+    await world.sql(
+        f"insert into {world.d}.metrics (source_id, dataset, name, expr) values (%s, 'docs', 'n', 'count(*)')",
+        src,
+    )
+    mine = ReadContext(tenant_ids=(world.tenant,), scopes=("internal",))
+    other = ReadContext(tenant_ids=(uuid.uuid4(),), scopes=("internal",))
+
+    async def ask(ctx: ReadContext, sql: str) -> list[dict[str, object]]:
+        return (await data_sql(world.conn, world.schemas, ctx, sql)).rows
+
+    titles = await ask(mine, "select title from records order by title")
+    assert [r["title"] for r in titles] == [
+        "cafeteria soup",
+        "heron colony nests",
+        "lake fish frogs",
+    ], "the views answer under the reader's row policies"
+    assert await ask(other, "select title from records") == [], (
+        "another tenant's rows are not there"
+    )
+    assert [r["name"] for r in await ask(mine, "select name from datasets")] == ["docs"], (
+        "datasets are views too"
+    )
+    listed = await reads.datasets(world.conn, world.schemas, mine)
+    assert [(d.name, [m["name"] for m in d.metrics]) for d in listed] == [("docs", ["n"])], (
+        "the catalog lists a dataset with its metrics"
+    )
+
+    for text in (
+        f"select * from {world.d}.records",
+        "select acl from records",
+        "select 1; reset role",
+        "select set_config('role', 'daimon_data_reader', false)",
+        "select set_config('session_authorization', 'postgres', false)",
+    ):
+        with pytest.raises(SqlRefused):
+            await ask(mine, text)
+    who = await ask(mine, "select current_user as u")
+    assert who == [{"u": "daimon_data_sql"}], (
+        "after every attempt the text still runs as the sql role"
+    )
+    assert (await world.sql("select current_user as u, session_user as s"))[0]["u"] == (
+        (await world.sql("select session_user as s"))[0]["s"]
+    ), "and the connection's own role never moved"
+
+    with pytest.raises(psycopg.Error):  # past the Python guard: the function itself refuses
+        async with scoped(world.conn, world.schemas, mine):
+            await world.conn.execute(
+                f"select {world.d}.caller_sql(%s, 5)".encode(),
+                ("select 1) t; reset role; select * from (select 1",),
+            )

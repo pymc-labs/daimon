@@ -6,9 +6,11 @@ from datetime import UTC, datetime, timedelta
 
 from daimon.core.audience_facts import AudienceChannel, AudienceMember, compute_room_viewers
 from daimon.core.channel_visibility import DISCORD_VIEW_CHANNEL, DiscordOverwrite
+from daimon.core.data_audience import user_subject
+from daimon.core.erasure import ERASABLE, Subject
 from daimon.core.stores import audience_facts as facts_store
 from daimon.core.stores import room_viewers as store
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 GUILD, TEAM = "100", "200"
@@ -77,3 +79,28 @@ async def test_viewers_are_read_only_under_the_current_complete_generation(
     assert await read(db_session, tenant_id=tenant.id, channel_id="10", now=NOW) is None, (
         "a change that makes the facts unknown makes the viewers unknown"
     )
+
+
+async def test_erasing_a_person_drops_the_rooms_that_name_them(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="3102")
+    pp = await make_platform_principal(
+        db_session, platform="discord", external_id="1", tenant=tenant
+    )
+    generation = await facts_store.publish_facts(
+        db_session, tenant_id=tenant.id, rooms={}, now=NOW, fresh_until=NOW + timedelta(minutes=3)
+    )
+    named, other = user_subject("discord", "3102", "1"), user_subject("discord", "3102", "2")
+    viewers = {"10": frozenset({named, other}), "11": frozenset({other})}
+    await store.publish_viewers(
+        db_session, tenant_id=tenant.id, generation=generation, viewers=viewers, now=NOW
+    )
+    (erase,) = [e for e in ERASABLE if e.key == "room_viewers"]
+    assert erase.count is not None and erase.principal is not None
+    subject = Subject(account_id=pp.account_id, platform=(pp,))
+    assert await erase.count(db_session, subject) == 1
+    assert await erase.principal(db_session, pp) == 1
+    read = store.read_viewers
+    assert await read(db_session, tenant_id=tenant.id, channel_id="10", now=NOW) is None, (
+        "a room that named them reads as unknown until the next publish"
+    )
+    assert await read(db_session, tenant_id=tenant.id, channel_id="11", now=NOW) == {other}

@@ -19,14 +19,16 @@ import pytest
 from daimon.adapters.mcp import data_access, server
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import agent_chat, sessions, task_continuity
+from daimon.adapters.mcp.tools import agent_chat, data, sessions, task_continuity
 from daimon.core.capability_tools import CAPABILITY_TOOLS
+from daimon.core.data_audience import user_subject
 from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
 from daimon.core.features import toolset
 from daimon.core.features.registry import FEATURES
 from daimon.core.stores.domain import Role
 from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
+from daimon.data.identity import IdentityKey
 from pydantic import BaseModel
 
 
@@ -68,6 +70,43 @@ def test_every_entry_point_calls_its_guard(
     assert guard in _calls(function), f"{path}: {function.__qualname__} no longer calls {guard}"
 
 
+def _tool_defs() -> dict[str, ast.AsyncFunctionDef]:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(data.register_data_tools)))
+    return {n.name: n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)}
+
+
+def _names(node: ast.AST) -> set[str]:
+    return {
+        c.func.id if isinstance(c.func, ast.Name) else c.func.attr
+        for c in ast.walk(node)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name | ast.Attribute)
+    }
+
+
+def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
+    defs = _tool_defs()
+    assert set(defs) >= DATA_TOOLS, "every data tool registers in register_data_tools"
+    for name in DATA_TOOLS:
+        assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
+    assert {"data_audience_for", "read_context"} <= _names(defs["reading"])
+
+
+def test_every_model_spend_bills_the_asker() -> None:
+    """Search embeds and reranks; with no meter or payer it would bill nobody."""
+    calls = [
+        c
+        for c in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(data.register_data_tools))))
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "search"
+    ]
+    assert calls
+    for call in calls:
+        given = {k.arg: k.value for k in call.keywords}
+        for key in ("meter", "payer"):
+            assert key in given and not (
+                isinstance(given[key], ast.Constant) and given[key].value is None
+            ), f"search without a {key}"
+
+
 def test_relay_rule_and_tool_safety_cover_the_rest() -> None:
     """Paths sealed by the relay rule, not by a guard of their own: the button handoff and
     carry-over (a relay turn hands nothing and carries nothing), Daimon's own posts (held to
@@ -83,7 +122,7 @@ def _auth(**fields: Any) -> AuthIdentity:
 
 
 _NO_RUNTIME = cast(McpRuntime, None)
-_PRIVATE = {"platform": "discord", "platform_user_id": "7"}
+_PRIVATE = {"platform": "discord", "platform_user_id": "7", "external_id": "1"}
 _ORIGINS: list[tuple[str, dict[str, Any], str, bool]] = [
     ("outsider's held turn", {**_PRIVATE, "hold": TurnHold("discord", "1", client=True)}, "private", True),
     ("another organisation's person", {**_PRIVATE, "foreign_home_id": "org"}, "private", True),
@@ -101,7 +140,9 @@ async def test_callers_without_a_turn_resolve_from_their_credential(
     got = await data_access.data_origin(_NO_RUNTIME, _auth(**fields), now=datetime.now(UTC))
     assert (got.kind, got.contained) == (kind, contained), row
     if not contained and kind == "private":
-        assert got.asker is not None and got.asker.subject == "discord:7", "the key's maker asks"
+        assert got.asker is not None and got.asker.subject == user_subject("discord", "1", "7"), (
+            "the key's maker asks"
+        )
 
 
 def test_a_transcript_read_elsewhere_hides_data_results() -> None:
@@ -113,3 +154,8 @@ def test_a_transcript_read_elsewhere_hides_data_results() -> None:
     event = _Event(id="e", type="tool_result", content=[{"text": mark_data_result("rows")}])
     out = sessions.SessionEventOut.from_event(event)
     assert out.content == [{"text": REDACTED_DATA_RESULT}]
+
+
+def test_readers_take_the_form_of_mirrored_platform_identities() -> None:
+    mirrored = IdentityKey("discord", "1", "7").ref()
+    assert user_subject("discord", "1", "7") == mirrored == "discord/1:user:7"

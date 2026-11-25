@@ -3600,6 +3600,153 @@
         'type': 'object',
       }),
     }),
+    'data_file': dict({
+      'description': '''
+        Read a file attached to a record (`index` from `data_get`'s files), fetched now from
+        its source with the source's permissions and never stored. Text files return their
+        text; other files only their type and size.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'index': dict({
+            'type': 'integer',
+          }),
+          'record_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'record_id',
+          'index',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'data_get': dict({
+      'description': '''
+        Open one record by its `record_id`: its text (12,000 characters from `start`; a
+        `next_start` says where the rest continues) and its attached files for `data_file`.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'record_id': dict({
+            'type': 'string',
+          }),
+          'start': dict({
+            'default': 0,
+            'type': 'integer',
+          }),
+        }),
+        'required': list([
+          'record_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'data_search': dict({
+      'description': '''
+        Search the data sources for `query`; only what everyone who will see the answer may
+        read. Filter by source ids (`data_sources`), record kind and date range. Each hit has a
+        `record_id` to open with `data_get`. No hit is not proof that nothing exists.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'kind': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit': dict({
+            'default': 10,
+            'type': 'integer',
+          }),
+          'query': dict({
+            'type': 'string',
+          }),
+          'since': dict({
+            'anyOf': list([
+              dict({
+                'format': 'date-time',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'source_ids': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'until': dict({
+            'anyOf': list([
+              dict({
+                'format': 'date-time',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'query',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'data_sources': dict({
+      'description': '''
+        The data sources you can read here, with their ids and how many records each holds,
+        and the datasets `data_sql` can query.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'data_sql': dict({
+      'description': '''
+        Read-only SQL over the data views and datasets (`data_sources` lists them), by plain
+        names. One statement, at most 500 rows, five seconds.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'query': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'query',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'delete_allowance': dict({
       'description': 'Remove an allowance or cap.',
       'parameters': dict({
@@ -5681,6 +5828,16 @@
         ``last`` (YYYY-MM-DD). Admin-only.
       ''',
       'parameters': dict({
+        '$defs': dict({
+          'AuditSource': dict({
+            'enum': list([
+              'web',
+              'security',
+              'data',
+            ]),
+            'type': 'string',
+          }),
+        }),
         'additionalProperties': False,
         'properties': dict({
           'first': dict({
@@ -5734,11 +5891,7 @@
           'source': dict({
             'anyOf': list([
               dict({
-                'enum': list([
-                  'web',
-                  'security',
-                ]),
-                'type': 'string',
+                '$ref': '#/$defs/AuditSource',
               }),
               dict({
                 'type': 'null',

@@ -51,6 +51,7 @@ from daimon.core.tool_safety import (
     ToolCall,
     ToolSafetyPolicy,
     ToolVerdict,
+    after_data_read,
     classify_tool,
     decide_tool_call,
     gate_protected_tool,
@@ -458,6 +459,11 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
             f"Refused: this agent's tool rule requires approval for {call.key}, "
             "and nobody is here to approve. Do not retry it."
         )
+    if verdict.reason == "data_read":
+        return (
+            f"Refused: {call.tool_name} could carry what the data sources returned out of this "
+            "conversation, and nobody is here to approve it. Do not retry it in this run."
+        )
     if verdict.reason == "unattended_publish":
         return (
             f"Refused: {call.tool_name} publishes, which this agent does only after the "
@@ -533,9 +539,10 @@ def unattended_decider(
     rules_for: RuleLookup | None = None,
     daimon_rules: bool = False,
     annotations_for: AnnotationLookup | None = None,
+    data_read: bool = False,
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
-    unless the operator allowed them there."""
+    unless the operator allowed them there; never after a data read (`after_data_read`)."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
@@ -558,6 +565,8 @@ def unattended_decider(
         )
         if read_error:
             verdict = read_error_verdict(verdict, attended=False)
+        if data_read:
+            verdict = after_data_read(verdict, call, attended=False)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -613,8 +622,10 @@ def interactive_decider(
     approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
     server_urls: Mapping[str, str] | None = None,
     skill_update_for: SkillUpdateLookup | None = None,
+    data_read: bool = False,
 ) -> ToolCallDecider:
-    """Decider for chat: reads run, writes wait for `confirm`.
+    """Decider for chat: reads run, writes wait for `confirm`. With `data_read` (a session
+    that reads data sources) nothing that could carry data out runs unasked (`after_data_read`).
 
     `confirm` is the adapter's card hook; the default refuses, which is what a
     surface without cards gets. A hook that raises is logged and the write is
@@ -645,9 +656,12 @@ def interactive_decider(
         )
         if read_error:
             verdict = read_error_verdict(verdict, attended=True)
+        if data_read:
+            verdict = after_data_read(verdict, call, attended=True)
         protected_name = gate_protected_tool(call.tool_name)
         if (
             policy.enabled
+            and not data_read
             and not protected_name
             and approval_gate_for is not None
             and call.server_name in (server_urls or {})
@@ -795,6 +809,7 @@ def chat_tool_confirmation(
     approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
     server_urls: Mapping[str, str] | None = None,
     skill_update_for: SkillUpdateLookup | None = None,
+    data_read: bool = False,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -824,6 +839,7 @@ def chat_tool_confirmation(
             approval_gate_for=approval_gate_for,
             server_urls=server_urls,
             skill_update_for=skill_update_for,
+            data_read=data_read,
         )
         if attended
         else unattended_decider(
@@ -833,6 +849,7 @@ def chat_tool_confirmation(
             rules_for=rules_for,
             annotations_for=annotations_for,
             daimon_rules=daimon_rules,
+            data_read=data_read,
         )
     )
     if not policy.enabled and not provider_permissions:

@@ -209,6 +209,7 @@ class PurgeReport(BaseModel):
     mux_release_requests: int = 0
     mux_operations: int = 0
     host_call_cards: int = 0
+    room_viewers: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport.model_validate(

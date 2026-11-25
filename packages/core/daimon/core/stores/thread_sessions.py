@@ -736,6 +736,19 @@ async def invalidate_session_tools(session: AsyncSession, *, ma_session_id: str)
     await session.flush()
 
 
+async def mark_data_read(session: AsyncSession, *, id: _uuid.UUID) -> None:
+    """Record that this session read data sources (`SessionSnapshot.data_read`); it is never
+    cleared. Legacy NULL snapshots stay unknown."""
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.id == id,
+            func.jsonb_typeof(ThreadSession.effective_config) == "object",
+        )
+        .values(effective_config=ThreadSession.effective_config.op("||")({"data_read": True}))
+    )
+
+
 async def record_snapshot(
     session: AsyncSession,
     *,

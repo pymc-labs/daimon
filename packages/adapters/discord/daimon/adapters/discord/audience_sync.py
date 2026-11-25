@@ -62,7 +62,7 @@ from daimon.adapters.discord.member_sync import tenant_of
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.audience_facts import AudienceChannel, AudienceMember, compute_room_viewers
 from daimon.core.config import Settings
-from daimon.core.data_audience import CAP
+from daimon.core.data_audience import CAP, user_subject
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores import audience_facts as facts_store
@@ -641,8 +641,12 @@ class AudienceSync:
             channels=snapshot.channels,
             cap=CAP,
         )
+        subjects = {
+            room: frozenset(user_subject("discord", snapshot.guild_id, u) for u in users)
+            for room, users in viewers.items()
+        }
         await room_viewers.publish_viewers(
-            session, tenant_id=tenant_id, generation=generation, viewers=viewers, now=now
+            session, tenant_id=tenant_id, generation=generation, viewers=subjects, now=now
         )
 
     async def _publish(

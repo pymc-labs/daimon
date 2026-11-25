@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Final
 
+from daimon.core.ports.data_subject import subject as subject
 from daimon.data.schema import Schemas
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -26,11 +27,6 @@ POLICY: Final = 1
 """Part of every audience key: bump it to refill every audience."""
 ACL_SCOPE: Final = "restricted:acl"
 """The scope of rows read through their access list only; no context ever holds it."""
-
-
-def subject(provider: str, workspace: str, kind: str, id_: str) -> str:
-    """A source principal: `<provider>/<workspace>:<kind>:<id>` (kind: user, group, role...)."""
-    return f"{provider}/{workspace}:{kind}:{id_}"
 
 
 def person(account_id: uuid.UUID) -> str:
@@ -88,7 +84,8 @@ async def scoped(
     conn: AsyncConnection[DictRow], schemas: Schemas, ctx: ReadContext
 ) -> AsyncIterator[AsyncConnection[DictRow]]:
     """A read transaction on `conn` (autocommit, owned by the store's owner) that sees only
-    what `ctx` allows. The caller must not run SQL it did not write inside it."""
+    what `ctx` allows. The caller must not run SQL it did not write inside it. The context's
+    row is deleted once the transaction ends."""
     await fill(conn, schemas, ctx)
     async with conn.transaction():
         await conn.execute(
@@ -107,6 +104,10 @@ async def scoped(
         await conn.execute(f"select {schemas.data}.fill_audience()".encode())
         await conn.execute(b"set local role daimon_data_reader")
         yield conn
+    # Its readers outlive the transaction only until here (a rolled-back one left no row).
+    await conn.execute(
+        f"delete from {schemas.data}.read_contexts where pid = pg_backend_pid()".encode()
+    )
 
 
 async def effective_scopes(

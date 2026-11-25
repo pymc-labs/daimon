@@ -12,7 +12,7 @@ scope its source's rules or default name.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar, Final
@@ -188,6 +188,20 @@ class Replaced:
 Record = ItemRecord | Checkpoint | SyncState | Replaced
 
 
+@dataclass(frozen=True)
+class LiveHit:
+    """One result of a live source's search, read now and never stored. `ref` is its id in
+    the source."""
+
+    ref: str
+    title: str
+    text: str = ""
+    kind: str = "item"
+    url: str | None = None
+    author: str | None = None
+    occurred_at: datetime | None = None
+
+
 class Connector:
     """Base of every connector. Override what the kind needs; the defaults do nothing."""
 
@@ -236,6 +250,27 @@ class Connector:
 
     async def test(self, source: Source) -> tuple[bool, str]:
         return True, "ok"
+
+    live: ClassVar[bool] = False
+    """A source of this kind is read upstream at read time (`mode` federated), never stored."""
+    recheck_reads: ClassVar[bool] = False
+    """Each stored record is checked with `can_open` before it is shown."""
+
+    async def live_search(self, source: Source, query: str, limit: int) -> list[LiveHit]:
+        """Live kinds: what the source finds for `query` now. Read-only; nothing is kept."""
+        raise NotImplementedError
+
+    async def can_open(
+        self, source: Source, external_id: str, subjects: Sequence[str]
+    ) -> bool | None:
+        """Whether the person holding these source subjects (bare ids in the source's own
+        namespace) may open the record in the source itself, asked now. None: cannot say.
+        Serves the read-time re-check and the parity oracle; the default offers neither."""
+        raise NotImplementedError
+
+    @classmethod
+    def has_can_open(cls) -> bool:
+        return cls.can_open is not Connector.can_open
 
     def scan_key(self, source: Source) -> str | None:
         """A sync that reads an external database returns that database's key (`dsn_key`): runs

@@ -194,8 +194,11 @@ TAIL = (
     "0230_data_store",
     "0231_data_store_tables",
     "0232_data_sync",
+    "0233_data_search",
     "0240_discord_room_viewers",
     "0241_data_identity",
+    "0242_data_ops",
+    "0243_data_redaction",
 )
 HEAD = TAIL[-1]
 

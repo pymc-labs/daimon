@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Data sources can go stale, be read live, be declared in a file and be checked before
+  they publish.** A source past its freshness ceiling is hidden until it syncs; a new source
+  publishes only after a clean comparison with its own permissions. `DAIMON_DATA__DECLARED`
+  names a file of sources, scopes and grants that Daimon applies every 10 minutes without
+  deleting, and `daimon data access-check` explains who can read a record
+  ([Data sources](docs/data-sources.md)).
+
 - **The groundwork for a data store ships, switched off.** A release migration creates the
   `data` and `data_views` Postgres schemas, the store's tables and four `daimon_data_*` roles; the
   `data_sources` feature (`DAIMON_FEATURES__DATA_SOURCES`) stays off and nothing reads them
@@ -20,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel with no memory, refuses helper, agent chat and hand-off requests into it, and offers
   it no data tool where people outside the team can read. Other sessions' transcripts hide its
   data results ([Features](docs/features.md#data-source-reads)).
+
+- **Agents that read data sources get tools to search and read them.** `data_sources`,
+  `data_search`, `data_get`, `data_file` and `data_sql` answer only with what everyone who
+  will see the answer may read, and bill the person who asked. After such a read, a write that
+  would not ask first shows a card in chat and is refused in a routine
+  ([Permissions](docs/permissions.md#data-reads)).
 
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,

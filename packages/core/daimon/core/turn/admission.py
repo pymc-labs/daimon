@@ -75,6 +75,7 @@ from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import env_admits
 from daimon.core.data_seal import AGENT_REQUEST_REFUSAL, reads_data
+from daimon.core.data_tools import DATA_READS
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.errors import TurnError, UserFacingError
@@ -535,8 +536,10 @@ class Admission:
 
     @property
     def toolset(self) -> SessionToolset:
-        """What this place's features change in the agent's session tools."""
-        return agent_toolset(self.features, self.agent)
+        """What this place's features change in the agent's session tools; a session that
+        read data keeps `data_reads` (`data_reading`)."""
+        toolset = agent_toolset(self.features, self.agent)
+        return replace(toolset, data_reads=True) if self.data_reading else toolset
 
     @property
     def identity(self) -> SessionIdentity:
@@ -1619,14 +1622,20 @@ async def _admit_gates(
     # tool where outsiders may read (a hold before the relay's own), nor in a Teams room,
     # whose readers are unknown; and a helper ask into it from an agent that does not read
     # data here is refused, or its answers would land in that agent's memory.
-    data_reading = await reads_data(
-        deps.sessionmaker,
-        deps.settings,
-        FeaturePlace.of(tenant_id, platform, channel_id, thread_id, agent_id=agent.id),
-    )
+    # A failed read is unknown, which reads no data: the turn runs with no data tool.
+    data_unknown = False
+    try:
+        data_reading = await reads_data(
+            deps.sessionmaker,
+            deps.settings,
+            FeaturePlace.of(tenant_id, platform, channel_id, thread_id, agent_id=agent.id),
+        )
+    except Exception:
+        _log.warning("turn.data_reads_lookup_failed", tenant_id=str(tenant_id), exc_info=True)
+        data_reading, data_unknown = False, True
     if helper is not None and data_reading and not helper.data_reading:
         raise UserFacingError(AGENT_REQUEST_REFUSAL)
-    data_blocked = hold is not None or (platform == "teams" and not is_dm)
+    data_blocked = data_unknown or hold is not None or (platform == "teams" and not is_dm)
     relay_agent = (
         (helper is not None and helper.relay_scoped)
         or data_reading
@@ -3094,13 +3103,15 @@ async def _capture_backend_source(
             ids = (context.tenant_id, read_on, context.channel_id, context.thread_id)
             here = FeaturePlace.of(*ids, agent_id=actual.id)
             features = await place_features(deps, here, actual, HIDING_KEYS)
-            relay = agent_has_identity_relay(
+            # A data-reading agent is sealed as a relay agent is, as its turn will be.
+            data_reading = features.on(DATA_READS)
+            relay = data_reading or agent_has_identity_relay(
                 (server.url for server in actual.mcp_servers),
                 public_url=deps.public_url,
                 unscoped=deps.relay_unscoped,
             )
             features = without_long_term_memory(features) if relay else features
-            admission = replace(admission, features=features)
+            admission = replace(admission, features=features, data_reading=data_reading)
             mark("admission")
             request = ProviderPreparationRequest(
                 deps,

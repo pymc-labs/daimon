@@ -1,4 +1,4 @@
-"""Who each source identity is: proofs, links, candidates and data admins (`0003_identity.sql`).
+"""Who each source identity is: proofs, links, candidates and data admins (`0004_identity.sql`).
 
 A link makes a person read as that identity, so one is written only
 - for the person a provider or platform verified (`link`): the tenant's own platform
@@ -243,8 +243,9 @@ async def mirror_platform(
     people: Mapping[str, uuid.UUID],
 ) -> None:
     """The tenant's own platform principals (platform user id -> account) as identities of its
-    workspace. Core admits a principal, so it is who that user is here and wins over any other
-    link of the same user."""
+    `workspace`, the tenant's external id, each read as `user_subject(platform, workspace, id)`.
+    Core admits a principal, so it is who that user is here and wins over any other link of
+    the same user."""
     async with conn.transaction():
         await fence_account(conn, schemas, *people.values())
         for user_id, account_id in sorted(people.items()):
@@ -608,11 +609,25 @@ async def list_holders(
 ) -> list[str]:
     """Who a person holds grants as: their account and every identity linked to it here. With
     their platform roles, the holders `access.effective_scopes` takes."""
+    return (await holders_of(conn, schemas, tenant_id, [account_id]))[account_id]
+
+
+async def holders_of(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    tenant_id: uuid.UUID,
+    account_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, list[str]]:
+    """`list_holders` for each of `account_ids`, in one query."""
     cur = await conn.execute(
-        f"select s from {schemas.data}.linked_subjects(%s, %s) s order by s".encode(),
-        (account_id, [tenant_id]),
+        f"select a, s from unnest(%s::uuid[]) a, {schemas.data}.linked_subjects(a, %s) s"
+        " order by a, s".encode(),
+        (list(account_ids), [tenant_id]),
     )
-    return [person(account_id), *(str(r["s"]) for r in await cur.fetchall())]
+    out = {a: [person(a)] for a in account_ids}
+    for r in await cur.fetchall():
+        out[r["a"]].append(str(r["s"]))
+    return out
 
 
 @dataclass(frozen=True)

@@ -194,6 +194,52 @@ never counts, since a directory user can set it.
 Google sign-in for data sources needs a Google OAuth client in
 [`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).
 
+## Freshness
+
+A source has a freshness floor and ceiling in minutes. Its lifetime is three sync intervals,
+at least the floor and at most the ceiling. Once its last complete sync is older than that,
+its records are hidden from every read until the next complete sync. Without a ceiling a
+source is never hidden.
+
+A connector can also check a record with the source at read time, and a source that
+cannot is read as stored. A live source is asked at search time instead: it stores nothing,
+only callers holding its scope reach it, and one that fails or is slow is skipped.
+
+## Publishing
+
+A new source starts in shadow, where no one reads it. Publishing it needs evidence. If the
+connector can ask the source whether a person may open a record, Daimon compares a sample
+of linked people and records and needs a clean run no older than 36 hours. Any case of Daimon
+showing more than the source does blocks publishing; showing less only warns. Other sources
+publish after a complete sync.
+
+## Declared config
+
+Set `DAIMON_DATA__DECLARED` to a YAML or JSON file to declare sources, scopes and grants
+for each workspace. Daimon applies it at start and every 10 minutes.
+
+```yaml
+revision: 4
+tenants:
+  - workspace: discord:<server id>
+    scopes: [{id: shared:eng, kind: shared, name: Engineering}]
+    sources:
+      - {id: wiki, kind: postgres, name: Wiki, credentials: {dsn: "env:WIKI_DSN"}, publish: true}
+```
+
+A `workspace` is Daimon's workspace id, or `<platform>:<id>` with the platform's own id for
+it, so one file serves every deployment; one not found is skipped. Declared rows are
+read-only in the app. Daimon never deletes one: a removed entry stays, and
+`retire: true` retires a source for good. A source is created in shadow and published only
+with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
+below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
+
+## Who can read a record
+
+`daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.
+Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account
+can read it now, and why not.
+
 ## Vector search
 
 Embedding search needs the `vector` extension. The default Postgres image lacks it, and
@@ -206,6 +252,55 @@ docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build po
 
 It keeps the data volume, so an existing database carries over. Run
 `daimon data init` afterwards to create the extension.
+
+Set `DAIMON_DATA__EMBED_URL` and `DAIMON_DATA__EMBED_MODEL` (and `_KEY`) to an
+OpenAI-compatible embeddings API, and the sync worker embeds new chunks after each run and
+once a day for gaps. `DAIMON_DATA__EMBED_DIM` is the vector length kept, and the HNSW index
+is built over it. `DAIMON_DATA__EMBED_PROVIDER` names the providers an OpenRouter-style
+router may use, comma-separated, or `openai` for OpenAI's own API; unset or `openai` sends
+a plain request. Usage rows name `openai`, or `selfhosted` for any other.
+`DAIMON_DATA__EMBED_QUERY_PREFIX` goes before a question when it is embedded.
+
+Embedding and reranking are billed like any model call: the usage rows are
+`data_embedding` and `data_rerank`, priced from the model's entry in the rate table
+(`text-embedding-3-small`, `text-embedding-3-large`, `qwen/qwen3-embedding-8b`,
+`perplexity/pplx-embed-v1-0.6b`, `semantic-ranker-fast-005`, one query per 100 records
+reranked), and a model without an entry is never called. Ingest is billed
+to the source's workspace, a question to whoever asked. A workspace out of balance gets
+full-text answers only, and its new chunks wait to be embedded until it tops up.
+
+## Search and reading
+
+Search combines full text, BM25 (where `pg_textsearch` is installed), vectors and, when the
+question names a date ("last week", "in March"), a time window, fused by reciprocal rank.
+`DAIMON_DATA__RERANK=vertex` and `DAIMON_DATA__RERANK_PROJECT` add the Vertex AI Ranking
+API on the best candidates, using the host's cloud identity. `DAIMON_DATA__SEARCH_SECONDS`
+bounds a search; it returns what the arms have found when time runs out, and notes what was
+cut.
+
+Callers browse a source's records, read one with its text and files, and run read-only SQL
+over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views and nothing
+else, so it never sees an access list, a credential or another workspace's rows. Like any
+role, it can read the system catalogs, so it can see roughly how many rows each of the
+store's tables holds across every workspace, though not what they say.
+
+## Evals and probes
+
+`daimon data eval GOLD...` runs a gold set (JSON or YAML) through search. Each question names
+its caller (`tenant_id`, and an `account_id` or explicit `scopes` and `readers`) and the
+records that answer it (`source` name or id, `external_id`, a `grade` of 1 to 3). The search
+runs as that caller, and recall and nDCG at 5 and 10 are scored for the fused list and for
+each arm (`fts`, `vec`, `time`, read from the hits' ranks before any rerank) on the expected
+records the caller can read; a record they cannot read is not a miss, and a question with
+none readable is left out and counted. The estimated spend prints first and the run refuses
+above `--max-usd`; it stops once the metered spend reaches that cap. Query spend bills the
+caller's tenant. `--out` writes the JSON report; the text summary prints either way.
+
+`daimon data probe NAME --tenant ID` runs one read-only check and prints JSON: `grants` (each
+scope's holders), `scopes` (records by source and scope, and those in a scope nobody defined),
+`person` (`--account`: what that person holds and reads), `health` (each source's state, last
+sync and embedding coverage) and `drift` (chunks off their record, records without chunks,
+sources not synced in 48 hours or failing). Probes never write the store.
 
 ## After a restore
 
