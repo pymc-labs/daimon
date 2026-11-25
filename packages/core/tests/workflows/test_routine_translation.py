@@ -158,12 +158,17 @@ def test_dm_text_stays_private_and_source_links_are_kept() -> None:
         ({"next_slot": None}, "invalid_schedule"),
         ({"owner_account_id": None}, "owner_unlinked"),
         ({"delivery_status": "claimed"}, "busy"),
-        ({"last_finished_at": None}, "busy"),
+        ({"last_fired_at": NOW - timedelta(minutes=49), "last_finished_at": None}, "busy"),
     ],
     ids=["handback", "schedule", "unlinked", "posting", "running"],
 )
 def test_routines_that_cannot_translate_are_refused(fields: dict[str, Any], reason: str) -> None:
     assert translate(replace(BASE, **fields), now=NOW) == Refusal(reason)  # pyright: ignore[reportArgumentType]
+
+
+def test_a_routine_stuck_past_the_dispatch_timeout_counts_as_finished() -> None:
+    stuck = replace(BASE, last_fired_at=NOW - timedelta(minutes=50), last_finished_at=None)
+    assert isinstance(translate(stuck, now=NOW), Move), "a crashed fire no longer blocks the move"
 
 
 def test_a_translation_is_deterministic() -> None:

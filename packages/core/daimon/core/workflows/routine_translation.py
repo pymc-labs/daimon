@@ -12,7 +12,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final, Literal
 
 import sqlalchemy as sa
@@ -24,6 +24,9 @@ DONE: Final = "done"
 TRIGGER: Final = "schedule"
 NOTE: Final = "Moved from a routine"
 MAX_TITLE: Final = 120
+#: The scheduler's default dispatch timeout: a fire claimed longer ago is dead, so it counts as
+#: finished and the fence drops a late result.
+STUCK_AFTER: Final = timedelta(minutes=50)
 _FEATURE_NOTES: Final = {"routine_sandbox_tools": "sandbox pin", "routine_result_header": "header"}
 
 Reason = Literal[
@@ -224,8 +227,9 @@ def translate(snap: RoutineSnapshot, *, now: datetime) -> Move | Refusal:
         return Refusal("invalid_schedule")
     if snap.created_by_user_id is not None and snap.owner_account_id is None:
         return Refusal("owner_unlinked")
+    fired = snap.last_fired_at
     if snap.delivery_status == "claimed" or (
-        snap.last_fired_at is not None and snap.last_finished_at is None
+        fired is not None and snap.last_finished_at is None and now - fired < STUCK_AFTER
     ):
         return Refusal("busy")
     made = ids(snap.id)

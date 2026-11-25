@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 from daimon.adapters.scheduler.settings import DISPATCH_TIMEOUT_MARGIN_S, SchedulerSettings
 from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
+from daimon.core.workflows.routine_translation import STUCK_AFTER
 from pydantic import ValidationError
 
 
@@ -40,6 +41,11 @@ def test_scheduler_settings_new_concurrency_defaults() -> None:
     assert s.dispatch_timeout_s == (LONGEST_TURN_CEILING_S + DISPATCH_TIMEOUT_MARGIN_S), (
         "default per-fire timeout should be LONGEST_TURN_CEILING_S + DISPATCH_TIMEOUT_MARGIN_S"
     )
+
+
+def test_a_move_counts_a_fire_stuck_as_the_scheduler_does() -> None:
+    timeout = SchedulerSettings().dispatch_timeout_s
+    assert STUCK_AFTER.total_seconds() == timeout, "a move's stuck fire is the dispatch timeout"
 
 
 def test_dispatch_timeout_default_sits_above_the_core_turn_ceiling() -> None:
