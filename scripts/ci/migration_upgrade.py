@@ -32,6 +32,7 @@ from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).resolve().parents[2]
 ROLE = "daimon_migrator"
+STORE_FILES = ["0001_store.sql", "0002_sync.sql", "0003_store.sql"]
 SEED = (
     "INSERT INTO tenants (id, platform, external_id) VALUES ('{t}', 'discord', 'guild-1')",
     "INSERT INTO tenant_config (tenant_id) VALUES ('{t}')",
@@ -137,7 +138,8 @@ async def check(admin: str, base: str, workdir: Path, db: str, password: str) ->
         count = await conn.fetchval(f"SELECT count(*) FROM {table}")
         assert count == 1, f"{table} has {count} rows after the upgrade from {base}, want 1"
     # The migrator holds the store's roles, so the data store's revisions set the store up.
-    assert await conn.fetchval("SELECT to_regnamespace('data') IS NOT NULL"), "no data schema"
+    files = [r[0] for r in await conn.fetch("SELECT file FROM data.schema_version ORDER BY file")]
+    assert files == STORE_FILES, f"store files applied: {files}"
     await conn.close()
     print(f"ok: {base} ({', '.join(old_heads)}) -> {heads[0]}")
 
