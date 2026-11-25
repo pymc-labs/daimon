@@ -1,0 +1,33 @@
+"""The `data_*` tools `data_reads` offers, and how their results stay out of other readers' hands.
+
+Every data tool result starts with `DATA_RESULT_MARK` (`mark_data_result`), so a transcript
+read outside the sealed session (a hub admin's, another session's) shows it redacted
+(`redact_data_results`) whichever page holds the call. Pure.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+from pydantic import JsonValue
+
+DATA_READS: Final = "data_reads"
+DATA_TOOLS: Final[frozenset[str]] = frozenset()
+"""The data tools registered behind `data_reads`; empty until the store's read functions land."""
+DATA_RESULT_MARK: Final = "[data source result]"
+REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
+
+
+def mark_data_result(text: str) -> str:
+    return f"{DATA_RESULT_MARK}\n{text}"
+
+
+def redact_data_results(value: JsonValue) -> JsonValue:
+    """`value` (a dumped event) with every string that carries a data result replaced."""
+    if isinstance(value, str):
+        return REDACTED_DATA_RESULT if DATA_RESULT_MARK in value else value
+    if isinstance(value, list):
+        return [redact_data_results(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_data_results(item) for key, item in value.items()}
+    return value

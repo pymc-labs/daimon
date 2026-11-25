@@ -128,6 +128,7 @@ _NARROWED: dict[str, str] = {
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
     "data_sources": "an operator turns the store on; a workspace may turn it off",
+    "data_reads": "an admin's choice for the team, an agent or a room; a thread shares its room's readers",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 

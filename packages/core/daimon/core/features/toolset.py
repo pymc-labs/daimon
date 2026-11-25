@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.config import Settings
+from daimon.core.data_tools import DATA_READS
 from daimon.core.features.model_input import (
     TOOLSET_KEYS,
     SessionToolset,
@@ -43,4 +44,9 @@ async def place_session(
         agent_builtins=builtins_of(agent),
         server_setup=server_setup,
     )
+    if features.on(DATA_READS):
+        # A data-reading agent keeps no long-term memory in any session (`daimon.core.data_seal`).
+        from daimon.core.relay_scope import without_long_term_memory
+
+        features = without_long_term_memory(features)
     return agent_toolset(features, agent), SessionIdentity.of(features)

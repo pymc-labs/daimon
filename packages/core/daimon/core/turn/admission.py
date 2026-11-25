@@ -74,9 +74,10 @@ from daimon.core.channel_backend import log_backend_unsupported as _log_backend_
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import env_admits
+from daimon.core.data_seal import AGENT_REQUEST_REFUSAL, reads_data
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
-from daimon.core.errors import TurnError
+from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.features.model_input import (
     CHAT_KEYS,
     HIDING_KEYS,
@@ -125,6 +126,7 @@ from daimon.core.relay_scope import (
     agent_has_identity_relay,
     identity_relay_server_names,
     relay_seal_ids,
+    without_data_reads,
     without_identity_relays,
     without_long_term_memory,
 )
@@ -386,6 +388,8 @@ class HelperCall:
     # The asking turn is a relay agent's: its helper inherits the held, sealed,
     # memory-free turn whatever servers the helper itself has (`daimon.core.relay_scope`).
     relay_scoped: bool = False
+    # The asking turn's agent reads data sources here (`daimon.core.data_seal`).
+    data_reading: bool = False
 
 
 @dataclass(frozen=True)
@@ -415,6 +419,7 @@ class AdmitRequest:
     public_thread: bool = False
     # The turn was admitted as a relay agent's (`daimon.core.relay_scope`); its helpers inherit it.
     relay_scoped: bool = False
+    data_reading: bool = False
 
 
 @dataclass(frozen=True)
@@ -458,6 +463,8 @@ class Admission:
     private_dm_id: str | None = None
     # A relay agent's turn (`daimon.core.relay_scope`): held, sealed, no memory, a fresh session.
     relay_scoped: bool = False
+    # The turn's agent reads data sources here (`daimon.core.data_seal`); it is also relay_scoped.
+    data_reading: bool = False
     # The channel and thread the turn runs in, and every sealed id that seals
     # them (the channel and a thread sealed on its own): stamped on the session
     # so the transcript tools can apply the seal to it
@@ -842,6 +849,7 @@ async def admit(
         principal_platform=principal_platform,
         public_thread=public_thread,
         relay_scoped=result.relay_scoped,
+        data_reading=result.data_reading,
     )
     return replace(result, observation=observation, request=request)
 
@@ -879,7 +887,9 @@ async def admit_helper(
         surface=request.surface,
         principal_platform=request.principal_platform,
         public_thread=request.public_thread,
-        helper=replace(helper, relay_scoped=request.relay_scoped),
+        helper=replace(
+            helper, relay_scoped=request.relay_scoped, data_reading=request.data_reading
+        ),
     )
 
 
@@ -1605,10 +1615,26 @@ async def _admit_gates(
             channel_id=channel_id,
             agent_name=config.agent_name,
         )
-    relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
-        (server.url for server in agent.mcp_servers),
-        public_url=deps.public_url,
-        unscoped=deps.relay_unscoped,
+    # An agent that reads data sources is sealed as a relay agent is. It is offered no data
+    # tool where outsiders may read (a hold before the relay's own), nor in a Teams room,
+    # whose readers are unknown; and a helper ask into it from an agent that does not read
+    # data here is refused, or its answers would land in that agent's memory.
+    data_reading = await reads_data(
+        deps.sessionmaker,
+        deps.settings,
+        FeaturePlace.of(tenant_id, platform, channel_id, thread_id, agent_id=agent.id),
+    )
+    if helper is not None and data_reading and not helper.data_reading:
+        raise UserFacingError(AGENT_REQUEST_REFUSAL)
+    data_blocked = hold is not None or (platform == "teams" and not is_dm)
+    relay_agent = (
+        (helper is not None and helper.relay_scoped)
+        or data_reading
+        or agent_has_identity_relay(
+            (server.url for server in agent.mcp_servers),
+            public_url=deps.public_url,
+            unscoped=deps.relay_unscoped,
+        )
     )
     if relay_agent and not is_dm:
         hold = (
@@ -1711,6 +1737,7 @@ async def _admit_gates(
             tenant_id, platform, channel_id, thread_id, agent_id=key[0], backend=key[1]
         )
         features = await place_features(deps, place, admission.agent)
+        features = without_data_reads(features) if data_blocked else features
         resolved[key] = without_long_term_memory(features) if relay_agent else features
         return resolved[key]
 
@@ -2118,6 +2145,7 @@ async def _admit_gates(
         hold=hold,
         shared_channel=shared,
         relay_scoped=relay_agent,
+        data_reading=data_reading,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
         origin_seal_ids=seal_ids,

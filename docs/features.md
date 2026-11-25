@@ -96,6 +96,8 @@ Where each feature can be set, and its default.
 | Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Data sources | `data_sources` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
+| Data source reads | `data_reads` | Capability | Off |  | ✓ | ✓ | ✓ |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |
@@ -1081,6 +1083,30 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Off above is a ceiling |
+
+## Data sources
+
+The data store: connected sources, their synced content and the tools that search it. Whoever runs Daimon turns it on for the deployment and sets the store up with `daimon data init`; a workspace can then turn it off for itself.
+
+| | |
+| --- | --- |
+| Key | `data_sources` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Data source reads
+
+The agent can search the workspace's data sources, showing only what everyone who will see the answer may read. It then starts fresh for each message in a channel, keeps no memory, and other agents cannot ask it. Not in rooms people outside the team can read.
+
+| | |
+| --- | --- |
+| Key | `data_reads` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace, Agent, Channel |
 | Combines | Off above is a ceiling |
 
 ## Long job dollar cap
