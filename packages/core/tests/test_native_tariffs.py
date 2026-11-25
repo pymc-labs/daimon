@@ -257,10 +257,12 @@ def test_neon_has_one_flat_tariff(monkeypatch: pytest.MonkeyPatch) -> None:
         assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) == Decimal(
             ".0005715"
         )
-    _clock(monkeypatch, date(2026, 11, 17))
+        assert pricing.provider_price_on("gemini-4-neon", day) is price, "settlement picks it too"
+    _clock(monkeypatch, date(2026, 11, 23))
     assert ("gemini", "gemini-4-neon") not in pricing.provider_prices("gemini.inline_reuse"), (
-        "no price before the model existed"
+        "no price before its checked date"
     )
+    assert pricing.provider_price_on("gemini-4-neon", date(2026, 11, 23)) is None
 
 
 @pytest.mark.parametrize(
