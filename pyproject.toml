@@ -241,6 +241,7 @@ source_modules = [
     "daimon.core.erasure",
     "daimon.core.direct_messages",
     "daimon.core.discord_destination",
+    "daimon.core.dispatch_timeout",
     "daimon.core.dm_access",
     "daimon.core.dm_carry_over",
     "daimon.core.dm_debounce",
