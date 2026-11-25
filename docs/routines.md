@@ -199,7 +199,7 @@ Delivery is at most once and checks first:
 - **Never tag me.** Someone who opted out shows as a plain name and gets no
   Teams notice.
 
-An expired claim or a raising poster is not retried, as it may have posted. A run with no final text or files posts nothing. With [agent identity](agent-identity.md) on, Slack and Discord post as
+An expired claim or a raising poster is not retried, as it may have posted. A run with no final text, or a `NO_POST:` line, posts no text. With [agent identity](agent-identity.md) on, Slack and Discord post as
 the agent. On Discord a reply to any delivered message starts a turn.
 
 ### Generated files

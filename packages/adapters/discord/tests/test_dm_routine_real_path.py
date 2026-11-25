@@ -797,11 +797,19 @@ async def _reclassify(db: AsyncSession, row: RoutineRow, change: str, **back: An
         )
 
 
-@pytest.mark.parametrize("text", ["private answer", ""], ids=["answer", "quiet"])
+@pytest.mark.parametrize(
+    ("text", "sends", "tail"),
+    [
+        ("private answer", True, "private answer"),
+        ("", False, ""),
+        ("NO_POST: no new mail", False, "no new mail"),
+    ],
+    ids=["answer", "empty", "marker"],
+)
 async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(
-    harness: Harness, text: str
+    harness: Harness, text: str, sends: bool, tail: str
 ):
-    """A quiet run, one that ends with no text, is billed and sends its owner nothing."""
+    """A quiet run, with no final text or a NO_POST one, is billed and sends nothing."""
     harness.upstream.scripts = [answer(text)]
     row = await _routine_row(harness)
     await harness.fire(row)
@@ -819,7 +827,7 @@ async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(
 
     await harness.deliver(fetch_channel=no_channel, open_dm=open_dm, files=False)
 
-    if text:
+    if sends:
         assert [(guild, user) for guild, user, _ in sent] == [(GUILD, int(OWNER_A))]
         assert text in sent[0][2]
     else:
@@ -827,7 +835,8 @@ async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(
     async with harness.factory() as session:
         saved = await get_routine(session, row.id, tenant_id=row.tenant_id)
         assert saved is not None and saved.last_error is None
-        assert saved.delivery_note == (None if text else "no_result")
+        assert saved.delivery_note == (None if sends else "no_result")
+        assert saved.last_result_tail == tail
         spent = await get_channel_spend(
             session, tenant_id=harness.tenant.id, channel_id=BUDGET, since=None, until=None
         )

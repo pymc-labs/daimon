@@ -19,6 +19,7 @@ from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
     DirectPost,
+    RunText,
     agent_posted_to,
     clear_creator,
     delivery_refusal,
@@ -30,6 +31,7 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     render_routine_controls,
     resolve_routine_identity,
+    split_run_text,
     teams_thread_id,
 )
 from daimon.core.stores.access_policy import set_access_policy
@@ -226,14 +228,34 @@ def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:
 def test_every_destination_says_how_a_quiet_run_ends(
     platform: str, kind: str, destination_id: str, direct_post: DirectPost
 ) -> None:
-    """`test_an_empty_tail_is_not_posted` proves that no text delivers nothing."""
+    """`test_split_run_text` proves the marker, `test_an_empty_tail_is_not_posted` no text."""
     text = render_routine_controls(
         _row(destination_kind=kind, destination_id=destination_id),
         platform=platform,
         direct_post=direct_post,
     )
-    assert "end the run without any final text: daimon then posts no reply" in text
+    assert "must be one line: NO_POST: and a short reason" in text
     assert "say what stopped you" in text, "a failed check is never silent"
+
+
+@pytest.mark.parametrize(
+    ("text", "post", "record"),
+    [
+        ("Report.\nAll green.", "Report.\nAll green.", "Report.\nAll green."),
+        ("NO_POST: no new leads", "", "no new leads"),
+        ("  **NO_POST:** no new leads", "", "no new leads"),
+        ("`NO_POST: no new leads`", "", "no new leads"),
+        ("NO_POST", "", "Nothing to post."),
+        ("I read the inbox.\n\nNO_POST: no new leads\n", "", "no new leads"),
+        ("NO_POST: no new leads\nI checked twice.", "", "no new leads"),
+        ("", "", ""),
+        ("The NO_POST: rule changed.", *("The NO_POST: rule changed.",) * 2),
+        ("NO_POST handling changed.", *("NO_POST handling changed.",) * 2),
+        ("NO_POSTERS: none", *("NO_POSTERS: none",) * 2),
+    ],
+)
+def test_split_run_text(text: str, post: str, record: str) -> None:
+    assert split_run_text(text) == RunText(post=post, record=record)
 
 
 def test_protected_controls_do_not_invite_a_post() -> None:

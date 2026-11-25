@@ -130,6 +130,7 @@ from daimon.core.routine_delivery import (
     render_routine_controls,
     routine_agent_name,
     routine_links,
+    split_run_text,
 )
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import delivery_hold_value, routine_hold
@@ -593,12 +594,15 @@ async def _build_fire(
                     expected_private=row,
                 )
             return
-        payload = await collect_routine_files(client, session_id=reply.session_id, text=reply.text)
+        run_text = split_run_text(reply.text)
+        payload = await collect_routine_files(
+            client, session_id=reply.session_id, text=run_text.post
+        )
         async with sm() as s, s.begin():
             await record_result(
                 s,
                 row.id,
-                tail=reply.text,
+                tail=run_text.record,
                 delivery_payload=payload,
                 error=None,
                 delivery="pending",
@@ -1131,11 +1135,12 @@ async def _build_fire(
         # Fallback post: only when the agent did not deliver to the
         # destination itself. The chat adapter for `platform` posts it.
         posted = bool(final_state) and agent_posted_to(final_state[0], row)
-        payload = result
+        run_text = split_run_text(result)
+        payload = run_text.post
         needs_delivery = not posted
         if output_sessions:
             payload = await collect_routine_files(
-                client, session_id=output_sessions[-1], text="" if posted else result
+                client, session_id=output_sessions[-1], text="" if posted else run_text.post
             )
             # A messaging tool can have posted the text while leaving generated
             # outputs behind. Deliver those without repeating the final reply.
@@ -1144,7 +1149,7 @@ async def _build_fire(
             await record_result(
                 s,
                 row.id,
-                tail=result,
+                tail=run_text.record,
                 delivery_payload=payload,
                 # The hold this fire ran under travels with its result to delivery.
                 delivery_hold=delivery_hold_value(fire_hold),
