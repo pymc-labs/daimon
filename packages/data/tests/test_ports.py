@@ -9,7 +9,7 @@ import pytest
 from daimon.core import ports
 from daimon.core.ports import erasure as erasure_port
 from daimon.core.ports.audit import AuditFilter
-from daimon.data import audit
+from daimon.data import acl, audit
 from daimon.data.audit import AUDIT_SOURCE, record_audit
 from daimon.data.ports import erasure
 from daimon.testing.data_db import DataDb
@@ -23,13 +23,26 @@ async def _count(conn: AsyncConnection[DictRow], sql: str, params: Sequence[obje
     return int(row["n"]) if row else -1
 
 
+async def _holding(conn: AsyncConnection[DictRow], d: str, needle: str) -> list[str]:
+    """The store's tables with a row whose text holds `needle`."""
+    cur = await conn.execute(b"select tablename from pg_tables where schemaname = %s", (d,))
+    tables = [str(r["tablename"]) for r in await cur.fetchall()]
+    return [
+        t
+        for t in tables
+        if await _count(conn, f"{d}.{t} x where x::text like %s", (f"%{needle}%",))
+    ]
+
+
 async def test_erasure_removes_a_persons_data_and_a_tenant_purge_removes_the_tenants(
     data_db: DataDb, db_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ports.load()
     monkeypatch.setattr(erasure_port, "_REGISTERED", {s.key: s for s in erasure(data_db.schemas)})
     d, tenant, me, you = data_db.schemas.data, uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    member = f"a/w:user:{uuid.uuid4().hex}"
     async with data_db.aconnect() as conn:
+        shared = uuid.uuid4()
         for owner in (me, None):
             row = await (
                 await conn.execute(
@@ -39,6 +52,7 @@ async def test_erasure_removes_a_persons_data_and_a_tenant_purge_removes_the_ten
                 )
             ).fetchone()
             assert row, "a source insert returns its id"
+            shared = row["id"]
             await conn.execute(
                 f"insert into {d}.records (source_id, external_id, kind, occurred_at, scope)"
                 " values (%s, 'doc:1', 'doc', now(), 'internal')".encode(),
@@ -53,6 +67,17 @@ async def test_erasure_removes_a_persons_data_and_a_tenant_purge_removes_the_ten
             " (%s, 'internal', %s, %s), (%s, 'internal', %s, %s)".encode(),
             (tenant, f"account:{me}", you, tenant, f"account:{you}", me),
         )
+        async with conn.transaction():  # the person as a direct ref and a group member
+            u = await acl.unit(conn, data_db.schemas, shared, "pass", "groups")
+            await acl.intern(
+                conn,
+                data_db.schemas,
+                shared,
+                [acl.ref(f"account:{me}"), acl.ref("a/w:group:g", group=True)],
+            )
+            await acl.publish(
+                conn, data_db.schemas, u, 1, {"a/w:group:g": [f"account:{me}", member]}
+            )
         for actor in (me, you):
             await record_audit(
                 conn,
@@ -89,10 +114,12 @@ async def test_erasure_removes_a_persons_data_and_a_tenant_purge_removes_the_ten
         assert await _count(conn, f"{d}.audit where account_id = %s", (you,)) == 1, (
             "another's trail goes"
         )
+        assert await _holding(conn, d, str(me)) == [], "a row still names the person"
         async with AsyncSession(db_engine) as session, session.begin():
             await erasure_port.erase_tenant(session, tenant_id=tenant)
         for table in ("sources", "scopes", "grants", "audit"):
             assert await _count(conn, f"{d}.{table} where tenant_id = %s", (tenant,)) == 0, table
+        assert await _holding(conn, d, member) == [], "a row still names the source's subject"
 
 
 async def test_the_audit_source_reads_the_tenants_trail_newest_first_and_filters(

@@ -134,13 +134,15 @@ Set `DAIMON_DATA__EMBED_URL` and `DAIMON_DATA__EMBED_MODEL` (and `_KEY`) to an
 OpenAI-compatible embeddings API, and the sync worker embeds new chunks after each run and
 once a day for gaps. `DAIMON_DATA__EMBED_DIM` is the vector length kept, and the HNSW index
 is built over it. `DAIMON_DATA__EMBED_PROVIDER` names the providers an OpenRouter-style
-router may use, comma-separated; the default `openai` sends a plain request.
+router may use, comma-separated, or `openai` for OpenAI's own API; unset or `openai` sends
+a plain request. Usage rows name `openai`, or `selfhosted` for any other.
 `DAIMON_DATA__EMBED_QUERY_PREFIX` goes before a question when it is embedded.
 
 Embedding and reranking are billed like any model call: the usage rows are
 `data_embedding` and `data_rerank`, priced from the model's entry in the rate table
 (`text-embedding-3-small`, `text-embedding-3-large`, `qwen/qwen3-embedding-8b`,
-`semantic-ranker-fast-005`), and a model without an entry is never called. Ingest is billed
+`perplexity/pplx-embed-v1-0.6b`, `semantic-ranker-fast-005`, one query per 100 records
+reranked), and a model without an entry is never called. Ingest is billed
 to the source's workspace, a question to whoever asked. A workspace out of balance gets
 full-text answers only, and its new chunks wait to be embedded until it tops up.
 
@@ -155,7 +157,9 @@ cut.
 
 Callers browse a source's records, read one with its text and files, and run read-only SQL
 over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views and nothing
-else, so it never sees an access list, a credential or another workspace's rows.
+else, so it never sees an access list, a credential or another workspace's rows. Like any
+role, it can read the system catalogs, so it can see roughly how many rows each of the
+store's tables holds across every workspace, though not what they say.
 
 ## Evals and probes
 

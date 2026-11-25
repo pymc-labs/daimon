@@ -84,7 +84,8 @@ async def scoped(
     conn: AsyncConnection[DictRow], schemas: Schemas, ctx: ReadContext
 ) -> AsyncIterator[AsyncConnection[DictRow]]:
     """A read transaction on `conn` (autocommit, owned by the store's owner) that sees only
-    what `ctx` allows. The caller must not run SQL it did not write inside it."""
+    what `ctx` allows. The caller must not run SQL it did not write inside it. The context's
+    row is deleted once the transaction ends."""
     await fill(conn, schemas, ctx)
     async with conn.transaction():
         await conn.execute(
@@ -103,6 +104,10 @@ async def scoped(
         await conn.execute(f"select {schemas.data}.fill_audience()".encode())
         await conn.execute(b"set local role daimon_data_reader")
         yield conn
+    # Its readers outlive the transaction only until here (a rolled-back one left no row).
+    await conn.execute(
+        f"delete from {schemas.data}.read_contexts where pid = pg_backend_pid()".encode()
+    )
 
 
 async def effective_scopes(

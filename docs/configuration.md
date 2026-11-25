@@ -1376,9 +1376,11 @@ API key for the embeddings API.
 
 ### `DAIMON_DATA__EMBED_PROVIDER`
 
-`str` · optional · default `openai`
+`str` · optional · default unset
 
-Embeddings API dialect: `openai` or a named provider.
+Who serves the embeddings: `openai` for OpenAI's API, or the providers an OpenRouter-
+style router may use, comma-separated. Usage rows name it, or `selfhosted` for anything
+else.
 
 ### `DAIMON_DATA__EMBED_QUERY_PREFIX`
 

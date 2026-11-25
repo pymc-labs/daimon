@@ -23,6 +23,7 @@ Where each feature can be set, and its default.
 
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Routine | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Data sources | `data_sources` | Model input | Off | ✓ | ✓ |  |  |  |  |  |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
 | Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -69,7 +70,6 @@ Where each feature can be set, and its default.
 | /new in threads | `thread_new` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
-| Data sources | `data_sources` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
@@ -191,7 +191,7 @@ Each message starts with the notes in the agent's repository memory, and the age
 
 ## Data sources
 
-The data store, with its connected sources and search. Turned on for the deployment first; a workspace can turn it off for itself.
+The data store, with its connected sources and search. The operator turns it on first; a team can then turn it off for itself.
 
 | | |
 | --- | --- |
