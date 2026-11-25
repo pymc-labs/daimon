@@ -166,7 +166,8 @@ async def test_a_timer_waits_while_its_owner_has_a_dm_turn_running(
 async def test_only_the_owner_dm_routine_fire_is_given_own_dm_reach(
     db_session_factory: async_sessionmaker, monkeypatch, entry: str, reach: bool
 ):
-    """Watches and timers share the routine's DM path but never reach a limited room."""
+    """Watches and timers share the routine's DM path but never reach a limited room, and
+    only a routine's run may end with no text (its outbox then posts nothing)."""
     tenant, account, row = await seed(
         db_session_factory, reason="watch_report" if entry == "watch" else "timer"
     )
@@ -206,3 +207,4 @@ async def test_only_the_owner_dm_routine_fire_is_given_own_dm_reach(
         )
 
     assert unattended.await_args.kwargs["own_dm_reach"] is reach
+    assert unattended.await_args.kwargs["may_end_empty"] is reach

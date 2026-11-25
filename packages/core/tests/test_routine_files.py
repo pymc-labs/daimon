@@ -39,9 +39,11 @@ async def no_sleep(_: float) -> None:
     pass
 
 
-async def test_collection_bounds_and_references():
+@pytest.mark.parametrize("text", ["Result", ""], ids=["result", "quiet"])
+async def test_collection_bounds_and_references(text: str):
+    """A run with no final text still sends its files and the notices about them."""
     client = file_client([MAX_BYTES_CEILING + 1, *([4] * 11)])
-    payload = await collect_routine_files(client, session_id="ses_1", text="Result", sleep=no_sleep)
+    payload = await collect_routine_files(client, session_id="ses_1", text=text, sleep=no_sleep)
     decoded = decode_payload(payload)
     assert len(decoded.files) == 10
     assert "upload limit" in decoded.text
