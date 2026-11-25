@@ -3,9 +3,11 @@
 A service account with domain-wide delegation signs a short assertion naming the person to
 act as and trades it for an access token. The account either holds a key (the credential's
 `service_account_key`) or, keyless, asks Google's IAM Credentials API to sign as the runtime's
-own identity (the account named in `config.service_account`; the runtime needs Token Creator
-on it). Every scope is read-only. Tokens are kept in memory per person and scope set, and every
-call goes through the guarded transport and the source's request budget.
+own identity, but only as an account the deployment allows for the source's domain
+(`DAIMON_DATA__GOOGLE_KEYLESS_ACCOUNTS`; the runtime needs Token Creator on it), never as
+whatever `config.service_account` names. Every scope is read-only. Tokens are kept in memory
+per person and scope set (and shared by one request's calls), and every call goes through the
+guarded transport and the source's request budget.
 
 The directory (people and groups) is read through the same calls by `read_directory`.
 """
@@ -28,6 +30,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from daimon.data.sync.connector import Json, Source
 from daimon.data.sync.connectors.chat import obj, rows
 from daimon.data.sync.http import GuardedTransport, Upstream, send
+from daimon.data.sync.request_cache import once
 
 TOKEN_URL: Final = "https://oauth2.googleapis.com/token"
 SIGN_URL: Final = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{}:signJwt"
@@ -130,6 +133,11 @@ class Google:
         )
         if not self._account:
             raise ValueError("config.service_account or a service account key is required")
+        if self._key is None and self._account.lower() not in source.keyless_accounts:
+            raise ValueError(
+                "this deployment does not allow keyless signing as that service account"
+                " for this domain; give the credential a service account key"
+            )
         self._tokens: dict[tuple[str, str], tuple[float, str]] = {}
         self._clients = {
             api: httpx.AsyncClient(
@@ -150,6 +158,12 @@ class Google:
         hit = self._tokens.get((who.lower(), api))
         if hit and hit[0] > time.monotonic():
             return hit[1]
+        key = ("google-token", self.source.id, who.lower(), api)
+        token = await once(key, lambda: self._mint(who, api))
+        self._tokens[(who.lower(), api)] = (time.monotonic() + LIFETIME, token)
+        return token
+
+    async def _mint(self, who: str, api: str) -> str:
         now = int(time.time())
         claims = {
             "iss": self._account,
@@ -167,9 +181,7 @@ class Google:
             except ValueError:
                 code = str(r.status_code)
             raise DelegationRefused(f"Google refused to act as {who}: {code}")
-        token = str(r.json()["access_token"])
-        self._tokens[(who.lower(), api)] = (time.monotonic() + LIFETIME, token)
-        return token
+        return str(r.json()["access_token"])
 
     def _sign(self, claims: Json) -> str:
         assert self._key is not None

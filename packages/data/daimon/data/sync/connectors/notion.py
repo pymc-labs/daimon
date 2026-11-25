@@ -3,14 +3,20 @@ signed in to Notion through Daimon.
 
 The integration token only discovers: it lists what Notion shares with the integration (search),
 reads each changed page's text, and grants nobody anything. Every object has one access list, the
-group of people with a live Notion sign-in (the people signed in at this source, each proving
-themselves with their own token: Notion must accept it on every run, and a token that stops
-working ends that person's access with their unit, within `UNIT_MINUTES`). A person who has not
-signed in reads no Notion. `exclude` lists page or database ids whose whole tree is stored but
-read by nobody. An object that disappears from a complete listing is removed; a page whose
-text Notion refuses to give keeps what it had.
+group of people with a live Notion sign-in: signed in at this source, listed among the
+integration's users, and proving themselves with their own token (Notion must accept it on every
+run; a token that stops working ends that person's access with their unit, within
+`UNIT_MINUTES`). A person who has not signed in, or whose Notion account is not one of the
+integration's users, reads no Notion. Each stored page is also opened live through the reader's
+own Notion session before it is shown, so a reader who cannot open it in Notion does not see it.
+`exclude` lists page or database ids whose whole tree is stored but read by nobody. An object
+that disappears from a complete listing is removed; a page whose text Notion refuses to give
+keeps what it had.
 
-Create an internal integration with read content access and share the pages to read with it.
+Create an internal integration with read content access and the user information capability
+(with email addresses), and share the pages to read with it. Without that capability Notion
+refuses the user list, and then nobody is published.
+
 Credential `{"token": "secret_..."}`; configuration (`sources.config`):
 
 - `workspace`: a name for the Notion workspace (its identities are keyed by it).
@@ -23,8 +29,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import re
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Final
@@ -292,30 +300,83 @@ def is_trashed(o: Json) -> bool:
     return bool(o.get("in_trash") or o.get("archived"))
 
 
+def _headers(token: str, session: str | None = None) -> dict[str, str]:
+    h = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
+    return {**h, "Mcp-Session-Id": session} if session else h
+
+
+async def _session(h: httpx.AsyncClient, token: str) -> str | None:
+    """A new MCP session for this person's token, or None when Notion refuses it."""
+    r = await h.post(
+        MCP,
+        headers=_headers(token),
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "Daimon", "version": "1"},
+            },
+        },
+    )
+    return r.headers.get("mcp-session-id") if r.status_code == 200 else None
+
+
 async def accepted(transport: httpx.AsyncBaseTransport, token: str) -> bool:
     """Whether Notion accepts this person's token now: its MCP server opens a session for it."""
     try:
         async with httpx.AsyncClient(timeout=8, transport=transport) as h:
+            return bool(await _session(h, token))
+    except httpx.HTTPError:
+        return False
+
+
+def _result_text(r: httpx.Response) -> str | None:
+    """The text of a successful tool call, else None: a denial is HTTP 200 with `isError`, and
+    an error object, an empty answer or a trashed page also count as not opened."""
+    text = r.text
+    if r.headers.get("content-type", "").startswith("text/event-stream"):
+        text = next((x[5:] for x in text.splitlines() if x.startswith("data:")), "")
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return None
+    result = obj(obj(body).get("result"))
+    if r.status_code != 200 or not result or result.get("isError"):
+        return None
+    texts = [str(x.get("text", "")) for x in rows(result.get("content")) if x.get("type") == "text"]
+    out = texts[0] if texts else ""
+    if not out.strip() or re.search(r'"(code|in_trash|archived)":\s*("[a-z_]+"|true)', out):
+        return None
+    return out
+
+
+async def opens(transport: httpx.AsyncBaseTransport, token: str, object_id: str) -> bool:
+    """Whether this person's own Notion session fetches the page or database now."""
+    try:
+        async with httpx.AsyncClient(timeout=8, transport=transport) as h:
+            if not (sid := await _session(h, token)):
+                return False
+            await h.post(
+                MCP,
+                headers=_headers(token, sid),
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            )
             r = await h.post(
                 MCP,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json, text/event-stream",
-                },
+                headers=_headers(token, sid),
                 json={
                     "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-06-18",
-                        "capabilities": {},
-                        "clientInfo": {"name": "Daimon", "version": "1"},
-                    },
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "notion-fetch", "arguments": {"id": object_id}},
                 },
             )
     except httpx.HTTPError:
         return False
-    return r.status_code == 200 and bool(r.headers.get("mcp-session-id"))
+    return _result_text(r) is not None
 
 
 # ---- the connector ---------------------------------------------------------------------------
@@ -361,15 +422,31 @@ class NotionConnector(Connector):
 
     # ---- who reads ----
 
+    async def _users(self, source: Source) -> list[Json] | None:
+        """The integration's people. None: Notion refuses the user list (the integration lacks
+        the user information capability), so there is no roster."""
+        out: list[Json] = []
+        try:
+            async with self._client(source) as client:
+                async for u in Api(client, source, self.pace).paged("GET", "/users?page_size=100"):
+                    if u.get("type") == "person":
+                        out.append(u)
+        except NotFound:
+            return None
+        return out
+
     async def permissions(self, source: Source) -> AsyncGenerator[PermissionUnit]:
-        """One unit per person signed in, each publishing them into the connected group, but
-        only after Notion accepts their token now. A sign-in that stopped proving itself
+        """One unit per person signed in. A person is published into the connected group only
+        when they are one of the integration's users and Notion accepts their token now; a
+        sign-in that stopped proving itself, or is not on the roster (or there is no roster),
         publishes an empty unit with no lifetime: their access ends at once."""
         cfg = Config.of(source.config)
         group = connected_group(cfg.workspace)
+        users = await self._users(source)
+        roster = {str(u["id"]) for u in users or ()}
         for p in source.people:
             ref = f"person:{p.account_id}"
-            if p.token is None:
+            if p.token is None or p.subject not in roster:
                 yield PermissionUnit("connection", ref, 0, {group: ()}, time.time_ns() // 1000)
             elif await accepted(self._guard(source), p.token):
                 yield PermissionUnit(
@@ -382,20 +459,33 @@ class NotionConnector(Connector):
 
     async def accounts(self, source: Source) -> Roster | None:
         cfg = Config.of(source.config)
-        out: list[SourceAccount] = []
-        async with self._client(source) as client:
-            async for u in Api(client, source, self.pace).paged("GET", "/users?page_size=100"):
-                person = obj(u.get("person"))
-                if u.get("type") == "person" and person.get("email"):
-                    out.append(
-                        SourceAccount(
-                            str(u["id"]),
-                            str(u.get("name") or ""),
-                            str(person["email"]),
-                            bool(person.get("email_verified")),
-                        )
-                    )
+        users = await self._users(source)
+        if users is None:
+            return None
+        out = [
+            SourceAccount(
+                str(u["id"]),
+                str(u.get("name") or ""),
+                str(obj(u.get("person"))["email"]),
+                bool(obj(u.get("person")).get("email_verified")),
+            )
+            for u in users
+            if obj(u.get("person")).get("email")
+        ]
         return Roster(PROVIDER, cfg.workspace, tuple(out))
+
+    recheck_reads: ClassVar[bool] = True
+
+    async def can_open(
+        self, source: Source, external_id: str, subjects: Sequence[str]
+    ) -> bool | None:
+        """Whether Notion opens the page for this person through their own session now.
+        None: none of these subjects has a sign-in with a working token here."""
+        tokens = [p.token for p in source.people if p.subject in subjects and p.token]
+        if not tokens:
+            return None
+        oid = external_id.partition(":")[2]
+        return any([await opens(self._guard(source), t, oid) for t in tokens])
 
     # ---- content ----
 

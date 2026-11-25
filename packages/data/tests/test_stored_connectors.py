@@ -15,12 +15,13 @@ from cryptography.fernet import Fernet
 from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.schema import Schemas
 from daimon.data.sync import connectors  # noqa: F401  # pyright: ignore[reportUnusedImport]
-from daimon.data.sync.connector import CONNECTORS, Json
+from daimon.data.sync.connector import CONNECTORS, Json, Person, Source
 from daimon.data.sync.connectors.bluedot import BluedotConnector
 from daimon.data.sync.connectors.linkedin import LinkedInConnector
 from daimon.data.sync.connectors.notion import NotionConnector
 from daimon.data.sync.credentials import seal
 from daimon.data.sync.engine import Env, RunResult, run_source
+from daimon.data.sync.rate import RateBudget
 from daimon.testing.data_db import DataDb
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -123,6 +124,10 @@ class FakeNotion:
         self.pages: dict[str, Json] = {}
         self.text: dict[str, str] = {}
         self.valid = {"tok-u-alice", "tok-u-bob"}
+        self.opens: dict[str, set[str]] = {}
+        """Token -> the pages that person's own session fetches."""
+        self.people = ["u-alice"]
+        self.users_refused = False
         self.refuse: set[str] = set()
         """Pages whose blocks answer not-found."""
         self.broken = False
@@ -132,19 +137,33 @@ class FakeNotion:
         if request.url.host == "mcp.notion.com":
             token = request.headers.get("authorization", "").removeprefix("Bearer ")
             ok = token in self.valid
+            msg = json.loads(request.content)
+            if msg.get("method") == "tools/call":
+                page_id = msg["params"]["arguments"]["id"]
+                if page_id not in self.opens.get(token, set()):
+                    text, error = json.dumps({"code": "object_not_found"}), True
+                else:
+                    text, error = f"<page>{page_id}</page>", False
+                result = {"isError": error, "content": [{"type": "text", "text": text}]}
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": 2, "result": result})
             return httpx.Response(200 if ok else 401, headers={"mcp-session-id": "s"}, json={})
         if self.broken and path.endswith("/search"):
             return httpx.Response(500)
         if path.endswith("/users/me"):
             return httpx.Response(200, json={"id": "bot"})
         if path.endswith("/users"):
-            user: Json = {
-                "id": "u-alice",
-                "type": "person",
-                "name": "Alice",
-                "person": {"email": "alice@example.com"},
-            }
-            return httpx.Response(200, json={"results": [user], "has_more": False})
+            if self.users_refused:
+                return httpx.Response(403, json={"code": "restricted_resource"})
+            found: list[Json] = [
+                {
+                    "id": u,
+                    "type": "person",
+                    "name": u,
+                    "person": {"email": f"{u}@example.com"},
+                }
+                for u in self.people
+            ]
+            return httpx.Response(200, json={"results": found, "has_more": False})
         if path.endswith("/search"):
             return httpx.Response(
                 200, json={"results": list(self.pages.values()), "has_more": False}
@@ -204,6 +223,44 @@ async def test_a_notion_page_is_read_by_signed_in_people_and_an_excluded_tree_by
     assert await store.sees("notion", "ws", "u-alice") == set(), (
         "a sign-in that stopped proving itself ends the person's access at once"
     )
+
+
+async def test_a_notion_sign_in_outside_the_integrations_users_reads_nothing(
+    store: Store, notion: FakeNotion
+) -> None:
+    src = await store.add("notion", {"token": "secret"}, workspace="ws")
+    await store.connect(src, "u-alice")
+    await store.connect(src, "u-mallory")
+    notion.valid.add("tok-u-mallory")
+    await store.ok(src)
+    assert await store.sees("notion", "ws", "u-alice") == {f"page:{i}" for i in (A, B, X, Y)}
+    assert await store.sees("notion", "ws", "u-mallory") == set(), (
+        "a Notion account the integration does not list is not the workspace's"
+    )
+
+    notion.users_refused = True
+    await store.ok(src)  # a refused user list is no roster, not a failed run
+    assert await store.sees("notion", "ws", "u-alice") == set(), "with no roster nobody reads"
+
+
+async def test_a_notion_page_opens_only_through_the_readers_own_session(
+    notion: FakeNotion,
+) -> None:
+    connector = CONNECTORS["notion"]
+    assert connector.recheck_reads and connector.has_can_open()
+    people = tuple(Person(uuid.uuid4(), u, f"tok-{u}") for u in ("u-alice", "u-bob"))
+    source = Source(
+        uuid.uuid4(), uuid.uuid4(), "notion", "n", "notion", {"workspace": "ws"}, {}, "internal",
+        {}, None, RateBudget(0), people=people,
+    )  # fmt: skip
+    notion.valid.add("tok-u-bob")
+    notion.opens = {"tok-u-alice": {A}}
+
+    assert await connector.can_open(source, f"page:{A}", ["u-alice"]) is True
+    assert await connector.can_open(source, f"page:{A}", ["u-bob"]) is False, (
+        "bob's own fetch fails"
+    )
+    assert await connector.can_open(source, f"page:{A}", ["u-nobody"]) is None, "not signed in"
 
 
 async def test_a_notion_page_that_vanishes_from_a_complete_listing_is_removed_and_a_refusal_keeps_it(

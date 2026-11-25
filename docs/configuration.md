@@ -1426,6 +1426,14 @@ Seconds a search may run before it returns what it has.
 Private hosts or ranges, comma-separated, that database connections to external Postgres
 servers may reach. Public hosts need no entry.
 
+### `DAIMON_DATA__GOOGLE_KEYLESS_ACCOUNTS`
+
+`tuple[str, ...]` · optional · default unset
+
+Service accounts a Google Workspace data source may sign as without a key file, comma-
+separated `domain=account` entries (Daimon's own identity needs Token Creator on each
+account). A source with no key and no entry for its domain is refused.
+
 ### `DAIMON_DATA__DECLARED`
 
 `str | None` · optional · default unset

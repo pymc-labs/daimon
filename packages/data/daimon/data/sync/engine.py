@@ -73,6 +73,8 @@ class Env:
     schemas: Schemas
     crypto_keys: tuple[str, ...] = ()
     private_hosts: tuple[str, ...] = ()
+    keyless_accounts: tuple[str, ...] = ()
+    """`domain=account` entries: the service accounts a Google source may sign as without a key."""
     embed: bool = False
     clients: Mapping[str, connect.Client] = field(default_factory=dict[str, connect.Client])
     """Daimon's own sign-in clients, for refreshing a connected person's token."""
@@ -87,6 +89,7 @@ class Env:
             Schemas.of(settings.data),
             tuple(k.get_secret_value() for k in settings.crypto.keys),
             settings.data.private_hosts,
+            settings.data.google_keyless_accounts,
             settings.data.embed_url is not None,
             connect.configured_clients(settings.data),
             settings.data,
@@ -512,9 +515,16 @@ class EmptySnapshot(RuntimeError):
     """A connector said nothing exists upstream while records are stored."""
 
 
+DEFAULT_RATE: Final = 60.0
+"""Upstream calls per minute a source may make unless `rate_per_minute` says otherwise
+(0 is unlimited)."""
+
+
 def build_source(row: DictRow, env: Env, deadline: float | None) -> Source:
     config: Json = row["config"] or {}
-    return Source(
+    set_rate = config.get("rate_per_minute")
+    rate = DEFAULT_RATE if set_rate in (None, "") else float(set_rate)
+    source = Source(
         id=row["id"],
         tenant_id=row["tenant_id"],
         kind=row["kind"],
@@ -525,10 +535,39 @@ def build_source(row: DictRow, env: Env, deadline: float | None) -> Source:
         default_scope=row["default_scope"],
         state=row["state"] or {},
         last_sync_at=row["last_sync_at"],
-        budget=RateBudget(float(config.get("rate_per_minute") or 0)),
+        budget=RateBudget(rate, burst=rate),
         private_hosts=env.private_hosts,
         deadline=deadline,
     )
+    connector = CONNECTORS.get(source.kind)
+    if connector is None or not env.keyless_accounts:
+        return source
+    try:
+        ws = connector.workspace_of(source).lower()
+    except ValueError:
+        return source
+    allowed = tuple(
+        a.strip().lower()
+        for w, _, a in (e.partition("=") for e in env.keyless_accounts)
+        if w.strip().lower() == ws
+    )
+    return replace(source, keyless_accounts=allowed)
+
+
+async def with_people(conn: AsyncConnection[DictRow], env: Env, source: Source) -> Source:
+    """The source with the people signed in at it, when its connector reads as each person."""
+    connector = CONNECTORS.get(source.kind)
+    if connector is None or not connector.person_sign_in:
+        return source
+    people = await connect.connected_people(
+        conn,
+        env.schemas,
+        env.crypto_keys,
+        env.clients,
+        GuardedTransport(env.private_hosts),
+        source.id,
+    )
+    return replace(source, people=people)
 
 
 _LOAD: Final = (
@@ -610,16 +649,7 @@ async def _locked(
     source: Source | None = None
     try:
         source = build_source(row, env, deadline)
-        if connector.person_sign_in:
-            people = await connect.connected_people(
-                conn,
-                env.schemas,
-                env.crypto_keys,
-                env.clients,
-                GuardedTransport(env.private_hosts),
-                source_id,
-            )
-            source = replace(source, people=people)
+        source = await with_people(conn, env, source)
         key = connector.scan_key(source)
         if key:
             scan = advisory_key(d, f"scan:{key}")

@@ -417,9 +417,16 @@ class Run:
                 raise d
         return list(done)  # pyright: ignore[reportReturnType]
 
-    async def apply(self, key: Key, fid: str, m: Json | None) -> Record:
-        """One changed file: its record, or the removal of the one it had."""
-        if m and key.holds(m) and indexable(m) and await self.allowed(key, m):
+    async def apply(self, key: Key, fid: str, m: Json | None) -> Record | None:
+        """One changed file: its record, or the removal of the one it had. A key never touches
+        a file it does not hold (another key holds it), and a person's feed cannot say a file
+        is gone for everyone: only a shared drive's feed removes on `removed`, and the next
+        full listing prunes the rest."""
+        if m is None:
+            return Replaced(f"file:{fid}", "", END) if key.drive else None
+        if not key.holds(m):
+            return None
+        if indexable(m) and await self.allowed(key, m):
             rec = await self.record(key, m)
             if rec is not None:
                 return rec
@@ -628,7 +635,8 @@ class GDriveConnector(Connector):
                     for c in rows(page.get("changes"))
                 }
                 for fid, m in changed.items():
-                    yield await run.apply(key, fid, m)
+                    if (rec := await run.apply(key, fid, m)) is not None:
+                        yield rec
                 feeds[key.id] = str(page.get("nextPageToken") or page["newStartPageToken"])
                 yield Checkpoint({**old, "feeds": dict(feeds)})
                 if not page.get("nextPageToken"):

@@ -8,7 +8,7 @@ import base64
 import json
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import parse_qs, unquote
 
@@ -397,6 +397,21 @@ async def test_changes_follow_the_feed_and_a_lost_cursor_lists_everything_again(
     assert google.lists == 2
 
 
+async def test_a_persons_feed_never_removes_or_replaces_a_file_another_key_holds(
+    store: Store, google: FakeGoogle
+) -> None:
+    google.add("a", [to("alice")])
+    src = await add_source(store, my_drives="yes")
+    await store.run(src)
+
+    google.feed += [(f"alice@{DOMAIN}", "a", True), (f"alice@{DOMAIN}", "a", False)]
+    await store.run(src)
+
+    assert set(await store.bodies(src)) == {"file:a"}, (
+        "alice's feed reports a shared drive's file gone and then changed; its key holds neither"
+    )
+
+
 async def test_google_formats_are_exported_and_files_are_read_to_their_cap(
     store: Store, google: FakeGoogle
 ) -> None:
@@ -437,9 +452,14 @@ async def test_delegation_without_a_key_signs_through_iam_and_a_person_can_be_ch
         {},
         None,
         RateBudget(0),
+        keyless_accounts=(SERVICE,),
     )
     connector = CONNECTORS["gdrive"]
     assert isinstance(connector, GDriveConnector)
+
+    refused, why = await connector.test(replace(source, keyless_accounts=()))
+    assert not refused and "does not allow keyless signing" in why, why
+    assert google.signed == 0, "an account the deployment does not allow is never signed as"
 
     ok, message = await connector.test(source)
     assert (ok, message) == (True, "4 people, 1 shared drives to read"), message

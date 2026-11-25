@@ -70,6 +70,8 @@ class Source:
     last_sync_at: datetime | None
     budget: RateBudget
     private_hosts: tuple[str, ...] = ()
+    keyless_accounts: tuple[str, ...] = ()
+    """The service accounts the deployment lets this source sign as without a key."""
     deadline: float | None = None
     """Monotonic time after which the run stops at its next checkpoint."""
     people: tuple[Person, ...] = ()
