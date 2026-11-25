@@ -21,6 +21,7 @@ from daimon.core.ports.data_metering import SessionMeter
 from daimon.data import acl, declared, parity, pool
 from daimon.data.dsn import libpq_dsn
 from daimon.data.locks import advisory_key
+from daimon.data.migrate import STORE_FILES
 from daimon.data.schema import Schemas
 from daimon.data.sync.embedding import embed_pending
 from daimon.data.sync.engine import STALE_RUN, Env, run_source, try_lock, unlock
@@ -30,6 +31,8 @@ from psycopg.rows import DictRow, dict_row
 log = structlog.get_logger()
 
 TICK: Final = 15.0
+UNREADY_WAIT: Final = 60.0
+"""Seconds between checks of a store that `daimon data init` has not finished."""
 """Seconds between looks at what is due."""
 RUN_BUDGET: Final = 600.0
 """Seconds one run works before it yields as `partial` and the next run continues."""
@@ -270,6 +273,19 @@ async def lead(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def ready(settings: Settings, schemas: Schemas) -> bool:
+    """Whether the store has every schema file this release reads."""
+    async with pool.connection(settings) as conn:
+        cur = await conn.execute(
+            f"select to_regclass('{schemas.data}.schema_version') is not null as ok".encode()
+        )
+        row = await cur.fetchone()
+        if not (row and row["ok"]):
+            return False
+        cur = await conn.execute(f"select file from {schemas.data}.schema_version".encode())
+        return set(STORE_FILES) <= {r["file"] for r in await cur.fetchall()}
+
+
 async def serve(settings: Settings, stop: asyncio.Event) -> None:
     """Take the lead whenever it is free and schedule until `stop` is set."""
     env = Env.of(settings)
@@ -277,6 +293,10 @@ async def serve(settings: Settings, stop: asyncio.Event) -> None:
     env = replace(env, meter=meter)
     try:
         while not stop.is_set():
+            if not await ready(settings, env.schemas):
+                log.warning("sync.store_not_ready", fix="daimon data init")
+                await _wait(stop, UNREADY_WAIT)
+                continue
             leader = await take_lead(str(settings.database.url), env.schemas)
             if leader is None:
                 await _wait(stop, TICK)
