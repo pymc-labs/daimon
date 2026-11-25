@@ -82,6 +82,10 @@ _INLINE_POLLS = (0.3, 0.7, 1.0)
 _INLINE_EXTRA_TASKS = 4
 # Seconds between the caller's last look at an inline command and the scheduler's first.
 _INLINE_HANDOVER = 5
+#: How often a status read that waits looks at its command again.
+_STATUS_POLL_SECONDS = 2.0
+#: What a status read says when it could not read the command at all.
+STATUS_REFUSED = "Could not check the command right now. Try again soon."
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may always make.
@@ -838,28 +842,79 @@ class ComputeSessions:
         await self._owned(db, caller, task.session_id, read=True)
         return task
 
-    async def task_status(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
-        """Read a task, probing the machine once if it is still active.
+    async def task_status(
+        self,
+        caller: ComputeCaller,
+        task_id: uuid.UUID,
+        *,
+        wait_seconds: float = 0,
+        deadline: float | None = None,
+    ) -> ComputeTask:
+        """Read a task and, while it is active, probe the machine until it ends or
+        `wait_seconds` pass. A task that already ended returns at once.
 
-        Like a poll, a probe that finds the command running keeps the lease alive.
+        Each probe follows today's rules for a status read (`_poll_task`). An owner who
+        is present sees an ending here, so no separate wake is queued for it; a wake's
+        turn has no owner watching, so the wake stays. While an inline caller still owns
+        the task, a probe only reads it. Like a poll, a probe that finds the command
+        running keeps the lease alive.
+
+        One deadline on the event loop's clock, taken when the call starts unless the
+        caller passes the one its own call started (`deadline`), bounds every step before
+        a write: the one authorization read, and each poll's reads, lock wait
+        and probe. A step cut short settles nothing: the last state read is returned, or
+        the plain refusal when nothing was read yet. With no wait there is one probe and
+        no deadline, as before. A database error before the first probe succeeded is the
+        plain refusal; after one, the state read then is returned. A probe that settles
+        the command returns it at once, with no read after it. A write, its commit and
+        the kill of an overdue command are never cut short, so the call can run a little
+        longer than `wait_seconds` when the machine or the database is slow.
         """
-        async with self.sm.begin() as db:
-            task = await self._owned_task(db, caller, task_id)
-        if task.state in ACTIVE_TASK_STATES:
-            # An owner who is present sees an ending here, so no separate wake is
-            # queued for it. A wake's turn has no owner watching: the wake stays.
-            # While an inline caller still waits for the task, this only reads it.
+        wait_seconds = max(0.0, wait_seconds)
+        loop = asyncio.get_running_loop()
+        if deadline is None and wait_seconds:
+            deadline = loop.time() + wait_seconds
+        give_up = self.clock() + timedelta(seconds=wait_seconds)
+        try:
+            async with self.sm.begin() as db:
+                async with asyncio.timeout_at(deadline):
+                    task = await self._owned_task(db, caller, task_id)
+        except (TimeoutError, SQLAlchemyError):
+            log.warning("compute.task_status_retry", task_id=str(task_id))
+            raise StoreError(STATUS_REFUSED) from None
+        if task.state not in ACTIVE_TASK_STATES:
+            return task
+        wake = not owner_present(caller.origin)
+        probed = False
+        while True:
             try:
-                await self._poll_task(
-                    task.tenant_id, task.id, wake=not owner_present(caller.origin)
+                polled = await self._poll_task(
+                    task.tenant_id, task.id, wake=wake, deadline=deadline
                 )
+            except TimeoutError:
+                # Rolled back before any write: this call settled nothing.
+                return task
             except SQLAlchemyError:
                 # Never relay database errors; the scheduler keeps polling.
                 log.warning("compute.task_status_retry", task_id=str(task.id))
-                raise StoreError("Could not check the command right now. Try again soon.") from None
-            async with self.sm.begin() as db:
-                task = await self._owned_task(db, caller, task_id)
-        return task
+                if not probed:
+                    raise StoreError(STATUS_REFUSED) from None
+                return task
+            if polled.task is None:
+                return task
+            task = polled.task
+            if polled.settled:
+                # This call saved the end: its caller gets it now, with no read after it.
+                return task
+            probed = True
+            left = (give_up - self.clock()).total_seconds()
+            if (
+                task.state not in ACTIVE_TASK_STATES
+                or left <= 0
+                or (deadline is not None and loop.time() >= deadline)
+            ):
+                return task
+            await self.sleep(min(_STATUS_POLL_SECONDS, left))
 
     async def task_result(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
         async with self.sm.begin() as db:
@@ -904,25 +959,27 @@ class ComputeSessions:
         `wait_until` is empty or past. Outside its own window a call does nothing, so the
         caller and the conversation's message never both report one end.
 
-        `deadline`, on the event loop's clock, bounds the wait for the session lock and
-        for the probe. Both come before any write, so a `TimeoutError` settles nothing.
+        `deadline`, on the event loop's clock, bounds the reads, the wait for the session
+        lock and the probe. All come before any write, so a `TimeoutError` settles
+        nothing. The writes, their commit and the kill of an overdue command are never
+        cut short.
         """
         async with self.sm.begin() as db:
-            task = await task_store.get(db, tenant_id, task_id)
-            if task is None or task.state not in ACTIVE_TASK_STATES:
-                return Polled(task)
-            # The session lock serializes with stop and deletion. The poller skips
-            # a session busy with an inline call and returns next pass.
             async with asyncio.timeout_at(deadline):
+                task = await task_store.get(db, tenant_id, task_id)
+                if task is None or task.state not in ACTIVE_TASK_STATES:
+                    return Polled(task)
+                # The session lock serializes with stop and deletion. The poller skips
+                # a session busy with an inline call and returns next pass.
                 session = await store.get(
                     db, tenant_id, task.session_id, lock=True, skip_locked=wake
                 )
-            if session is None:
-                return Polled(task)
-            # Re-read under the lock: another poll may have settled it meanwhile.
-            task = await task_store.get(db, tenant_id, task_id)
-            if task is None or task.state not in ACTIVE_TASK_STATES:
-                return Polled(task)
+                if session is None:
+                    return Polled(task)
+                # Re-read under the lock: another poll may have settled it meanwhile.
+                task = await task_store.get(db, tenant_id, task_id)
+                if task is None or task.state not in ACTIVE_TASK_STATES:
+                    return Polled(task)
             now = self.clock()
             held = task.wait_until
             if inline:

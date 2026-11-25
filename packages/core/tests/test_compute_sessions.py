@@ -24,6 +24,7 @@ from daimon.core.compute_sessions import (
     ELSEWHERE,
     ComputeCaller,
     ComputeSessions,
+    Polled,
 )
 from daimon.core.compute_tasks import WAKE_OUTPUT_CHARS, wake_key
 from daimon.core.config import ComputeProfile, ComputeSettings
@@ -38,6 +39,7 @@ from daimon.core.stores.turn_origins import bind_origin_session, create_origin, 
 from daimon.testing.compute import FakeComputeProvider
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import SecretStr
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .shared_fakes import pending_wakes
@@ -1059,6 +1061,14 @@ async def test_status_turns_a_failed_database_write_into_a_plain_refusal(monkeyp
     with pytest.raises(StoreError) as error:
         await service.task_status(type("C", (), {"origin": present}), uuid.uuid4())
     assert "secret" not in str(error.value) and "INSERT" not in str(error.value)
+    # A read that waits and already looked once returns what it saw instead.
+    looks = [Polled(running), DataError("INSERT ... secret", {}, Exception("NUL"))]
+    monkeypatch.setattr(service, "_poll_task", AsyncMock(side_effect=looks))
+    monkeypatch.setattr(service, "sleep", AsyncMock())
+    seen = await service.task_status(
+        type("C", (), {"origin": present}), uuid.uuid4(), wait_seconds=10
+    )
+    assert seen is running
 
 
 # --- A session is `running` only after its machine has started -----------------
@@ -1479,6 +1489,231 @@ async def test_a_probe_that_never_answers_cannot_hold_the_caller_past_its_wait(d
     await service.poll_tasks()
     assert (await service.task_result(owner, ran.task.id)).state == "succeeded"
     assert len(await wakes_for(sm, owner)) == 1
+
+
+# --- A status read waits for the end, so an agent does not check in a loop -------
+
+
+async def _background(service, owner, session, key="bg"):
+    return await service.start_task(
+        owner, session.id, command="python fit.py", timeout_minutes=60, request_key=key
+    )
+
+
+async def test_a_status_read_returns_as_soon_as_the_command_ends_and_queues_no_wake(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+
+    async def ends_on_the_third_look():
+        if len(clock["slept"]) == 3:
+            await _ended(fake)()
+
+    service, clock = _waiting(sm, fake, on_sleep=ends_on_the_third_look)
+    session = await launch(service, owner)
+    task = await _background(service, owner, session)
+    seen = await service.task_status(owner, task.id, wait_seconds=40)
+    assert seen.state == "succeeded" and clock["slept"] == [2.0, 2.0, 2.0], "no wait after it"
+    await service.poll_tasks()
+    assert await wakes_for(sm, owner) == [], "the owner saw it here: no second report"
+
+
+async def test_a_status_read_of_a_command_still_running_returns_after_exactly_the_wait(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await _background(service, owner, session)
+    assert (await service.task_status(owner, task.id, wait_seconds=7)).state == "running"
+    assert clock["slept"] == [2.0, 2.0, 2.0, 1.0], "never past the wait"
+    assert len(_scripts(fake, "probe")) == 5
+    clock["slept"].clear()
+    assert (await service.task_status(owner, task.id)).state == "running"
+    assert clock["slept"] == [] and len(_scripts(fake, "probe")) == 6, "no wait: one look"
+
+
+async def test_a_status_read_whose_probe_never_answers_returns_at_the_end_of_its_wait(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    answers = asyncio.Event()
+
+    class SilentMachine(FakeComputeProvider):
+        async def call(self, session, token, tool, arguments):
+            if str(arguments.get("command", "")).startswith("# daimon-task probe"):
+                await answers.wait()
+            return await super().call(session, token, tool, arguments)
+
+    fake = SilentMachine()
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await _background(service, owner, session)
+    # A short wait keeps the test fast: the bound runs on the event loop's own clock.
+    seen = await asyncio.wait_for(service.task_status(owner, task.id, wait_seconds=0.05), 5)
+    assert seen.state == "running", "the last state read, and nothing settled"
+    answers.set()
+
+
+async def test_a_wake_turns_status_read_that_waits_keeps_the_conversations_message(
+    db_engine, db_clean
+):
+    """Nobody watches a wake's turn: a command it sees end still gets its own message."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, account = await caller(sm)
+    fake = FakeComputeProvider()
+    service, clock = _waiting(sm, fake, on_sleep=_ended(fake))
+    session = await launch(service, owner)
+    first = await _finished_task(service, fake, owner, session)
+    later = await _background(service, owner, session, key="later")
+    woken, _ = await _wake_turn(sm, tenant, account, wake_key(first.id))
+    seen = await service.task_status(woken, later.id, wait_seconds=40)
+    assert seen.state == "succeeded" and clock["slept"] == [2.0]
+    [told] = await wakes_for(sm, owner)
+    assert told.idempotency_key == wake_key(later.id)
+
+
+async def test_a_status_read_that_waits_never_settles_a_command_its_inline_caller_owns(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await service.start_task(
+        owner, session.id, command="make", timeout_minutes=60, request_key="k", wait_seconds=30
+    )
+    await _ended(fake)()
+    seen = await service.task_status(owner, task.id, wait_seconds=10)
+    assert seen.state == "running", "the state as read: its caller reports the end"
+    assert sum(clock["slept"]) == 10 and _scripts(fake, "probe") == []
+    assert await wakes_for(sm, owner) == []
+
+
+async def test_a_status_read_that_settles_the_end_returns_it_with_no_read_after_it(
+    db_engine, db_clean, monkeypatch
+):
+    """Saved with no wake, so the caller must get the end: no later read may hide it."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, _ = _waiting(sm, fake, on_sleep=_ended(fake))
+    session = await launch(service, owner)
+    task = await _background(service, owner, session)
+    poll = service._poll_task
+
+    class Down:
+        def begin(self):
+            raise OperationalError("SELECT", {}, Exception("database down"))
+
+    async def poll_then_fail(*args, **kwargs):
+        polled = await poll(*args, **kwargs)
+        if polled.settled:
+            monkeypatch.setattr(service, "sm", Down())
+        return polled
+
+    monkeypatch.setattr(service, "_poll_task", poll_then_fail)
+    seen = await service.task_status(owner, task.id, wait_seconds=40)
+    assert seen.state == "succeeded" and seen.output_tail == "fit done\n"
+    monkeypatch.setattr(service, "sm", sm)
+    assert await wakes_for(sm, owner) == [], "the owner saw it here, once"
+
+
+async def test_a_status_read_never_waits_on_a_held_session_lock_past_its_wait(
+    db_committing_engine, db_clean
+):
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await _background(service, owner, session)
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_the_lock():
+        async with sm.begin() as db:
+            await session_store.get(db, owner.tenant_id, session.id, lock=True)
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold_the_lock())
+    await held.wait()
+    try:
+        # The authorization read takes the lock too: with nothing read, the plain refusal.
+        with pytest.raises(StoreError, match="Could not check the command right now"):
+            await asyncio.wait_for(service.task_status(owner, task.id, wait_seconds=0.05), 5)
+    finally:
+        release.set()
+        await holder
+    assert (await service.task_result(owner, task.id)).state == "running", "nothing settled"
+
+
+async def test_a_status_read_does_not_cut_short_the_kill_of_an_overdue_command(db_engine, db_clean):
+    """The kill is never cancelled, so the read can run a little longer than its wait."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    entered, release, killed = asyncio.Event(), asyncio.Event(), []
+
+    class SlowKill(FakeComputeProvider):
+        async def call(self, session, token, tool, arguments):
+            if str(arguments.get("command", "")).startswith("# daimon-task kill"):
+                entered.set()
+                await release.wait()
+                killed.append(True)
+            return await super().call(session, token, tool, arguments)
+
+    fake = SlowKill()
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    task = await service.start_task(
+        owner, session.id, command="sleep 600", timeout_minutes=1, request_key="k"
+    )
+    clock["now"] = task.deadline_at + timedelta(minutes=6)
+    read = asyncio.create_task(service.task_status(owner, task.id, wait_seconds=0.05))
+    await entered.wait()
+    await asyncio.sleep(0.1)  # past the wait: the kill still runs
+    assert not read.done()
+    release.set()
+    seen = await asyncio.wait_for(read, 5)
+    assert killed == [True] and seen.state == "timed_out"
+
+
+async def test_a_status_read_that_crosses_the_inline_wait_leaves_its_caller_no_report(
+    db_engine, db_clean
+):
+    """The owner checks while the inline caller is stalled, with a wait that crosses its
+    `wait_until`: the status read settles the end, with no wake. The caller then did not
+    report it, so its tool result says the command has ended (`tools.compute._ENDED`)."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    seen = []
+
+    async def owner_checks_meanwhile():
+        if seen:
+            return
+        seen.append(None)
+        [task_hex] = fake.tasks
+        held = (await service.task_result(owner, uuid.UUID(task_hex))).wait_until
+        clock["now"] = held - timedelta(seconds=2)
+        await _ended(fake)()
+        seen[0] = await service.task_status(owner, uuid.UUID(task_hex), wait_seconds=10)
+
+    service, clock = _waiting(sm, fake, on_sleep=owner_checks_meanwhile)
+    session = await launch(service, owner)
+    ran = await _inline(service, owner, session, wait_seconds=10)
+    assert seen[0].state == "succeeded", "the owner's read crossed the wait and settled it"
+    assert ran.task.state == "succeeded" and not ran.ended_here, "the caller did not report it"
+    await service.poll_tasks()
+    assert await wakes_for(sm, owner) == [], "no message: nothing is reported twice"
+    result = await service.task_result(owner, ran.task.id)
+    assert result.output_tail == "fit done\n", "the result is there to read"
 
 
 async def test_the_scheduler_leaves_a_waited_for_command_alone_until_its_wait_is_over(

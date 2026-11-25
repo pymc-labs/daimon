@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Checking a background command now waits up to 40 seconds for it to end, so an agent does
+  not call the check in a loop.** `compute_task_status` returns as soon as the command ends,
+  and a command still running says to end the reply: the conversation gets a message when it
+  ends ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **Cloud computers are now off until a server admin turns them on.** Before, every workspace
   and agent got the computer tools once the operator set compute up. Turn on the `compute`
   feature for a workspace or one agent, or set `DAIMON_FEATURES__COMPUTE=on` on every Daimon

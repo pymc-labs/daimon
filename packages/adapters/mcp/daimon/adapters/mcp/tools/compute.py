@@ -9,6 +9,7 @@ allows it, run commands, write files and stop it (`turn_may_act`).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from math import ceil
 
@@ -31,6 +32,7 @@ from daimon.core.compute_models import (
 from daimon.core.compute_provider import ComputeProviderError, compute_provider_for
 from daimon.core.compute_sessions import (
     READ_OPERATIONS,
+    STATUS_REFUSED,
     ComputeCaller,
     ComputeSessions,
     InlineRun,
@@ -210,15 +212,21 @@ def _task_view(task: ComputeTask, *, output: bool) -> dict[str, JsonValue]:
     return view
 
 
-#: What compute_run_bash adds to a command that ends after its caller stops waiting.
-_STILL_RUNNING = (
-    "Still running. This conversation gets a message when it ends. "
-    "Check it with compute_task_status."
-)
+#: What compute_run_bash and compute_task_status add to a command still running when
+#: they stop waiting. Its end is always reported in the conversation, whoever asked
+#: (`stores.compute_tasks.finish`), so the agent need not look again.
+_STILL_RUNNING = "Still running. End your reply; this conversation gets a message when it ends."
 
 
-#: What it adds to a command whose end another poll saw: the conversation gets the message.
-_ENDED_ELSEWHERE = "It has ended. This conversation gets a message with the result."
+#: What they add to a command that ended, when this call did not report the end itself.
+#: True whether the conversation gets a message or not: a status read the owner saw
+#: queues none (`ComputeSessions.task_status`).
+_ENDED = "It has ended. Read it with compute_task_result."
+
+
+def _note(task: ComputeTask) -> str:
+    """The one note for a command whose end this call did not report itself."""
+    return _STILL_RUNNING if task.state in ACTIVE_TASK_STATES else _ENDED
 
 
 def _command_view(run: InlineRun) -> dict[str, JsonValue]:
@@ -231,7 +239,7 @@ def _command_view(run: InlineRun) -> dict[str, JsonValue]:
         view["timed_out"] = task.state == "timed_out"
         view["truncated"] = task.output_bytes > len(task.output_tail.encode())
     else:
-        view["note"] = _STILL_RUNNING if task.state in ACTIVE_TASK_STATES else _ENDED_ELSEWHERE
+        view["note"] = _note(task)
     return view
 
 
@@ -541,22 +549,34 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def compute_task_status(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, task_id: uuid.UUID, origin_context_id: str
+        ctx: Context, task_id: uuid.UUID, origin_context_id: str, wait_seconds: int = 40
     ) -> dict[str, JsonValue]:
         """Check one of your background commands: state, exit code and output size.
 
-        Running commands are checked on the machine once. A running command keeps
-        its session alive up to the maximum lifetime.
+        A running command is waited for up to wait_seconds (at most 40), and the result
+        comes as soon as it ends. A finished command returns at once. Do not call this
+        in a loop: end your reply, and this conversation gets a message when the command
+        ends. A running command keeps its session alive up to the maximum lifetime. The
+        call can take a little longer than wait_seconds when the machine or the database
+        is slow.
         """
+        # One deadline for the whole call, so the reads before the wait count against it;
+        # with no wait there is one check, unbounded as before.
+        wait = min(max(wait_seconds, 0), 40)
+        deadline = asyncio.get_running_loop().time() + wait if wait else None
         auth, caller = await _caller(runtime, ctx, origin_context_id, wake_ok=True)
         try:
-            task = await service.task_result(caller, task_id)
-            await _readable(
-                runtime, auth, origin_context_id, await service.get(caller, task.session_id)
-            )
-            return _task_view(await service.task_status(caller, task_id), output=False)
+            try:
+                async with asyncio.timeout_at(deadline):
+                    task = await service.task_result(caller, task_id)
+                    session = await service.get(caller, task.session_id)
+                    await _readable(runtime, auth, origin_context_id, session)
+            except TimeoutError:
+                raise ToolError(STATUS_REFUSED) from None
+            seen = await service.task_status(caller, task_id, wait_seconds=wait, deadline=deadline)
         except (StoreError, ComputeProviderError) as exc:
             raise ToolError(str(exc)) from None
+        return {**_task_view(seen, output=False), "note": _note(seen)}
 
     @mcp.tool
     async def compute_task_result(  # pyright: ignore[reportUnusedFunction]
