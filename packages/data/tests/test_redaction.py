@@ -108,6 +108,15 @@ RULES = {
 SOURCE = {"id": "feed", "kind": "feed", "name": "Feed", "redaction_set": "house"}
 
 
+@pytest.mark.parametrize(
+    "pattern", [r"(\w+\s?)*", r"(a|aa)+", r"((a+))+", r"(.*a){20}", r"(?:ab)?", r"(a)\1"]
+)
+def test_a_pattern_that_can_run_forever_is_refused(pattern: str) -> None:
+    with pytest.raises(ValueError, match="can repeat|refer back"):
+        redaction.parse(json.dumps({"regex": [{"pattern": pattern}]}))
+    assert redaction.parse(json.dumps({"regex": [{"pattern": r"\d{3}-\w+\s?"}]})).regex
+
+
 async def test_removed_text_is_never_stored_and_excluded_records_are_dropped(
     store: Store, feed: None
 ) -> None:

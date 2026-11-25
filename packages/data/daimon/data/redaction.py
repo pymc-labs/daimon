@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib
 import re
 import uuid
 from collections.abc import Callable, Collection, Iterable
@@ -71,8 +72,26 @@ class NotApproved(Exception):
 Term = Field(min_length=2, max_length=200)
 
 
-# A quantified group that holds a quantifier, like `(a+)+`: it backtracks exponentially.
-_NESTED = re.compile(r"\([^)]*[+*}]\)[+*{]")
+# The stdlib's own reading of a pattern; private, so untyped.
+sre: Any = importlib.import_module("re._parser")
+_ATOMS = {sre.LITERAL, sre.NOT_LITERAL, sre.IN, sre.ANY}
+_REPEATS = {sre.MAX_REPEAT, sre.MIN_REPEAT, sre.POSSESSIVE_REPEAT}
+
+
+def _unsafe(value: object) -> str | None:
+    """Why a parsed pattern may backtrack without end: a repeat of more than one character or
+    class, like `(a|aa)+`, or a back reference. None when it is safe."""
+    if isinstance(value, sre.SubPattern):
+        for op, av in cast("Iterable[tuple[object, Any]]", value):
+            if op in (sre.GROUPREF, sre.GROUPREF_EXISTS):
+                return "a pattern can't refer back to a group"
+            if op in _REPEATS and (len(body := av[2]) != 1 or body[0][0] not in _ATOMS):
+                return "only a single character or class can repeat, never a group"
+            if why := _unsafe(av):
+                return why
+    elif isinstance(value, tuple | list):
+        return next(filter(None, map(_unsafe, cast("Iterable[object]", value))), None)
+    return None
 
 
 class Pattern(BaseModel):
@@ -87,8 +106,8 @@ class Pattern(BaseModel):
             re.compile(value)
         except re.error as e:
             raise ValueError(f"not a regular expression: {e.msg}") from None
-        if _NESTED.search(value):
-            raise ValueError("a repeated group can't hold a repeat; it can run forever")
+        if why := _unsafe(sre.parse(value)):
+            raise ValueError(why)
         return value
 
 
@@ -512,6 +531,10 @@ async def approve(
         row = await cur.fetchone()
         if row is None:
             raise identity.Conflict("That is not the file waiting for approval.")
+        try:  # a file loaded before a check tightened
+            Rules.model_validate(row["rules"])
+        except ValidationError as e:
+            raise identity.Conflict(f"That file can't be approved: {_where(e)}") from None
         await restart_sources(conn, schemas, tenant_id, name)
         await audit.record_audit(
             conn, schemas, tenant_id=tenant_id, kind="redaction.approve", account_id=by,
