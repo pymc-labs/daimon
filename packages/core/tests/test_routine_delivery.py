@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from unittest.mock import MagicMock
@@ -44,7 +43,7 @@ from daimon.core.stores.routines import (
     settle_routine_delivery,
     update_routine,
 )
-from daimon.core.turn.state import ToolUseBlock, TurnState, reported_routine_problem
+from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.web_links import panel_links
 from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
@@ -258,25 +257,6 @@ def test_every_destination_says_how_a_quiet_run_ends(
 )
 def test_split_run_text(text: str, post: str, record: str) -> None:
     assert split_run_text(text) == RunText(post=post, record=record)
-
-
-def test_a_run_that_reported_a_problem_is_never_quiet() -> None:
-    blocked = split_run_text("NO_POST: the channel was not found", reported_problem=True)
-    assert blocked == RunText(*("the channel was not found",) * 2)
-    mixed = split_run_text("Two checks failed.\nNO_POST: done", reported_problem=True)
-    assert mixed.post == "Two checks failed.\ndone", "what it wrote is kept, not the marker"
-
-    for empty in ("NO_POST", "NO_POST:", ""):
-        assert split_run_text(empty, reported_problem=True).post == "", "admins see the report"
-
-    call = replace(
-        _post_block("1"),
-        name="report_routine_problem",
-        input={"category": "source_unavailable", "note": "x"},
-    )
-    assert reported_routine_problem([call])
-    assert not reported_routine_problem([replace(call, is_error=True)])
-    assert not reported_routine_problem([_post_block("1")])
 
 
 def test_protected_controls_do_not_invite_a_post() -> None:

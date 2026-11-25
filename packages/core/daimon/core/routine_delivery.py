@@ -247,21 +247,17 @@ class RunText:
     record: str
 
 
-def split_run_text(text: str, *, reported_problem: bool = False) -> RunText:
+def split_run_text(text: str) -> RunText:
     """`text` as it may be posted: none of it when its first or last line is a `NO_POST`.
 
     The record keeps the reason without the marker, which only the agent is told about.
-    A run that reported a problem keeps what it wrote, marker removed. One that wrote
-    nothing but the marker posts nothing, and admins see the report on Issues.
     """
     lines = [line for line in text.splitlines() if line.strip()]
-    for line in lines[:1] + lines[-1:]:
+    for line in (lines[:1] + lines[-1:]) if lines else ():
         if match := _NO_POST_LINE.match(line):
-            reason = (match["reason"] or "").strip(" *`_")
-            if reported_problem:
-                text = text.replace(line, reason, 1).strip()
-                break
-            return RunText(post="", record=reason or "Nothing to post.")
+            return RunText(
+                post="", record=(match["reason"] or "").strip(" *`_") or "Nothing to post."
+            )
     return RunText(post=text, record=text)
 
 

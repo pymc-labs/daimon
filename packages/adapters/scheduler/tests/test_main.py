@@ -3241,37 +3241,26 @@ async def test_fire_with_destination_queues_the_tail_when_the_agent_did_not_post
     assert after.delivery_status == "pending"
 
 
-@pytest.mark.parametrize(
-    ("final", "reports_problem", "record"),
-    [
-        ("NO_POST: nothing new", False, "nothing new"),
-        ("NO_POST: nothing new", True, "nothing new"),
-    ],
-    ids=["quiet", "blocked"],
-)
+@pytest.mark.parametrize("reports_problem", [False, True], ids=["quiet", "reported_a_problem"])
 async def test_fire_with_destination_queues_no_text_for_a_quiet_run(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    final: str,
     reports_problem: bool,
-    record: str,
 ) -> None:
+    """Admins see a reported problem on Issues; the destination stays quiet."""
     after, _seen = await _fire_with_fake_turn(
         db_session,
         db_session_factory,
         monkeypatch,
         destination=("channel", "111222333"),
         agent_posts_to=None,
-        final=final,
+        final="I checked.\n\nNO_POST: nothing new",
         reports_problem=reports_problem,
     )
 
-    if reports_problem:
-        assert after.delivery_payload == record, "what a blocked run wrote is posted"
-    else:
-        assert not after.delivery_payload, "the outbox settles it as no_result"
-    assert after.last_result_tail == record, "the record keeps the reason"
+    assert not after.delivery_payload, "the outbox settles it as no_result"
+    assert after.last_result_tail == "nothing new", "the record keeps the reason"
 
 
 async def test_fire_with_destination_skips_the_fallback_when_the_agent_posted(
