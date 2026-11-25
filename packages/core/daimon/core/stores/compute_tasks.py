@@ -15,6 +15,7 @@ from daimon.core.compute_models import (
 )
 from daimon.core.compute_tasks import wake_key, wake_text
 from daimon.core.errors import StoreError
+from daimon.core.features.snapshot import FeaturePlace, feature_in_or_none
 from daimon.core.stores.compute_sessions import scope
 from daimon.core.stores.domain import TurnOriginRow
 from sqlalchemy import func, or_, select, update
@@ -106,6 +107,7 @@ async def finish(
     state: ComputeTaskState,
     now: datetime,
     wake: bool,
+    run_limit: int,
     exit_code: int | None = None,
     output_bytes: int | None = None,
     output_tail: str | None = None,
@@ -114,7 +116,9 @@ async def finish(
 
     The wake goes to the session's own conversation, which is the only one a
     task can be started from. ``wake`` is false when the owner observed the end
-    themselves in that conversation, so they are not told twice.
+    themselves in that conversation, so they are not told twice. Its text offers the
+    next command only when the wake turn may run one: fewer than ``run_limit`` wake
+    turns ran commands since the owner's last (`turn_may_act`).
     """
     if state in ACTIVE_TASK_STATES:
         raise ValueError("Finish requires a terminal state")
@@ -133,6 +137,12 @@ async def finish(
         return done
     from daimon.core.stores.task_continuations import record_continuation
 
+    reads = wake_reads_in(session)
+    runs = (
+        reads
+        and await wake_runs_on(db, session)
+        and len(await wake_runs_since_owner(db, session)) < run_limit
+    )
     await record_continuation(
         db,
         tenant_id=session.tenant_id,
@@ -147,7 +157,7 @@ async def finish(
         idempotency_key=wake_key(task.id),
         available_at=now,
         attended=False,
-        requested_work=wake_text(done, reads=wake_reads_in(session)),
+        requested_work=wake_text(done, reads=reads, runs=runs),
     )
     return done
 
@@ -206,3 +216,45 @@ async def wake_turn_of(
         )
     )
     return wake.idempotency_key in {wake_key(task_id) for task_id in finished}
+
+
+async def wake_runs_on(db: AsyncSession, session: ComputeSession) -> bool:
+    """Whether `compute_wake_runs` is on at the session's place; off when it cannot be read.
+
+    `feature_in_or_none` does not check `depends_on`, and this needs `compute` on too.
+    It is: the session exists, and `ComputeSessions._allowed` checked it at launch.
+    """
+    place = FeaturePlace.of(
+        session.tenant_id,
+        session.platform,
+        session.parent_channel_id,
+        session.thread_id,
+        agent_id=session.agent_id,
+    )
+    found = await feature_in_or_none(db, None, place, "compute_wake_runs")
+    return found is not None and found.on
+
+
+async def wake_runs_since_owner(db: AsyncSession, session: ComputeSession) -> set[uuid.UUID]:
+    """The wake turns that started commands on this session since the owner's last one.
+
+    All of them when the owner started none (`ComputeTask.started_by_wake`).
+    """
+    await scope(db, session.tenant_id)
+    own = (
+        ComputeTaskRecord.tenant_id == session.tenant_id,
+        ComputeTaskRecord.session_id == session.id,
+    )
+    since = await db.scalar(
+        select(func.max(ComputeTaskRecord.created_at)).where(
+            *own, ComputeTaskRecord.started_by_wake.is_(None)
+        )
+    )
+    query = (
+        select(ComputeTaskRecord.started_by_wake)
+        .distinct()
+        .where(*own, ComputeTaskRecord.started_by_wake.is_not(None))
+    )
+    if since is not None:
+        query = query.where(ComputeTaskRecord.created_at > since)
+    return {wake for wake in await db.scalars(query) if wake is not None}

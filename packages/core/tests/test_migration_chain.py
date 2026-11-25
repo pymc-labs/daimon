@@ -190,6 +190,7 @@ TAIL = (
     "0226_compute_tool_names",
     "0227_turn_origin_own_dm_reach",
     "0228_compute_task_wait_until",
+    "0229_compute_started_by_wake",
 )
 HEAD = TAIL[-1]
 
@@ -248,6 +249,7 @@ AFTER_MERGE_COLUMNS = {
     ("routines", "delivery_hold"),
     ("routines", "owner_notice"),
     ("compute_tasks", "wait_until"),
+    ("compute_tasks", "started_by_wake"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 

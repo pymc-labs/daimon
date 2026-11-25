@@ -106,3 +106,5 @@ class ComputeTask(BaseModel):
     version: int = 0
     # While the caller of an inline command still waits for it, the scheduler leaves it.
     wait_until: datetime | None = None
+    # The wake turn that started this command; empty when the owner did.
+    started_by_wake: uuid.UUID | None = None

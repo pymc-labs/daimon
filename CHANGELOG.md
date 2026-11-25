@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A server admin can let the agent continue on a cloud computer after a background command
+  ends.** With `compute_wake_runs` on, for the team or one agent, the message about a finished
+  command in a thread may run the next command, write files and stop that machine. It never
+  starts or extends a machine, and after `DAIMON_COMPUTE__WAKE_RUN_LIMIT` such messages in a
+  row (20 by default) it waits for the owner. It is off by default
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **A command on a cloud computer that needs more than 40 seconds now continues, and the
   conversation gets a message when it ends.** Before, the machine stopped it at 40 seconds.
   A command that ends in time still returns its result in the reply

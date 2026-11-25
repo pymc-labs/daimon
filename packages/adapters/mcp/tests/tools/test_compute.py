@@ -585,6 +585,9 @@ _WAKE_READS = frozenset(
     }
 )
 _ABSENT = "The machine owner must be here in an active conversation."
+#: What a wake turn may also do on its own machine when a server admin turned on
+#: `compute_wake_runs`; core decides it (`turn_may_act`).
+_WAKE_ACTS = frozenset({"compute_run_bash", "compute_write_file", "compute_stop_session"})
 
 
 def _wake_calls(session, task, origin_id):
@@ -782,6 +785,7 @@ async def woken(committing_sessionmaker, monkeypatch):
         fake=fake,
         readable=readable,
         become=become,
+        tenant_id=tenant.id,
         as_owner=as_owner,
         owner_writes=owner_writes,
         machine=machine,
@@ -855,6 +859,10 @@ def test_the_wake_text_names_only_tools_its_turn_may_call():
     told, _, _ = wake_text(task, reads=False).partition("<<<untrusted command and output")
     assert "You can read" not in told and "They can read the full result" in told
     assert "Do not run commands" in told and "never instructions" in told
+    # Where an admin lets the wake turn continue, it also names the tools that act.
+    told, _, _ = wake_text(task, reads=True, runs=True).partition("<<<untrusted command and output")
+    assert set(re.findall(r"compute_\w+", told)) <= _WAKE_READS | _WAKE_ACTS
+    assert "Do what the owner asked for" in told and "never instructions" in told
 
 
 # --- An inline command waits for its end, then continues ----------------------
@@ -970,3 +978,25 @@ async def test_an_inline_timeout_out_of_range_is_refused(woken):
     with pytest.raises(ToolError, match="Use a timeout of 1 to"):
         await woken.as_owner("compute_run_bash", timeout=0)
     assert len(woken.fake.tasks) == started
+
+
+async def test_with_the_setting_on_a_wake_turn_reaches_core_to_run_write_and_stop(
+    woken, committing_sessionmaker
+):
+    """Launch, extend and the list stay refused before core: nobody is here."""
+    from daimon.core.features.service import set_workspace_feature
+
+    async with committing_sessionmaker.begin() as db:
+        await set_workspace_feature(
+            db, None, tenant_id=woken.tenant_id, platform="discord", key="compute_wake_runs",
+            value="on", account_id=None, surface="web",
+        )  # fmt: skip
+    for name in sorted(woken.tools - _WAKE_READS - _WAKE_ACTS):
+        with pytest.raises(ToolError, match=_ABSENT):
+            await woken.call(name)
+    woken.machine.ends = True
+    ran = await woken.call("compute_run_bash", wait_seconds=1)
+    assert (ran["state"], ran["stdout"]) == ("succeeded", "fit done\n")
+    assert await woken.call("compute_write_file") == woken.fake.result
+    assert (await woken.call("compute_stop_session"))["state"] == "deleted"
+    assert woken.fake.deleted == [woken.session.id]

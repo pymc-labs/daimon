@@ -89,10 +89,17 @@ server admin can emergency-stop a session without seeing its files.
 
 Daimon waits up to 40 seconds for a command's result. A command that needs
 longer keeps running, and the scheduler posts one message in the conversation
-when it ends. In a
-thread, Daimon can read the command's output and the machine's files for that
-message. Outside a thread it reports only the end of the output. It cannot run
-commands or change the machine until the owner writes again.
+when it ends. In a thread, Daimon can read the command's output and the
+machine's files for that message. Outside a thread it reports only the end of
+the output.
+
+For that message Daimon cannot run commands or change the machine until the
+owner writes again. A server admin can turn on [Cloud computers continue after
+a job](features.md#cloud-computers-continue-after-a-job). Then, in a thread, it
+may run the next command, write files and stop that machine. It never starts
+or extends a machine, and it waits for the owner after
+[`DAIMON_COMPUTE__WAKE_RUN_LIMIT`](configuration.md#daimon_compute__wake_run_limit)
+such messages in a row.
 
 Google can restart a machine at any time. A restart clears its files and ends
 running commands. Each is reported as stopped, with the last output Daimon
