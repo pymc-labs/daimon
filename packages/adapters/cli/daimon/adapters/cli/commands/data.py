@@ -17,7 +17,10 @@ def init_command(
     admin_url: str | None = typer.Option(
         None,
         "--admin-url",
-        help="Connect as this database user, when the app's own user cannot create roles.",
+        help=(
+            "An administrator's database URL, to make the roles and extensions the app's "
+            "own user cannot; the store stays the app user's."
+        ),
     ),
 ) -> None:
     """Create the store's schemas, roles and tables; safe to run again."""
@@ -27,7 +30,9 @@ def init_command(
         return
     from daimon.data.init import init_data
 
-    outcome = init_data(settings, repair=repair, admin_url=admin_url)
+    outcome = init_data(
+        str(settings.database.url), settings.data, repair=repair, admin_url=admin_url
+    )
     if outcome.missing:
         typer.echo(f"The data store needs {'; '.join(outcome.missing)}.", err=True)
         raise typer.Exit(1)
