@@ -1217,8 +1217,13 @@ async def test_an_inline_command_that_ends_in_time_is_returned_and_never_reporte
     fake = FakeComputeProvider()
     service, clock = _waiting(sm, fake, on_sleep=_ended(fake))
     session = await launch(service, owner)
-    task = await _inline(service, owner, session)
-    assert (task.state, task.exit_code, task.output_tail) == ("succeeded", 0, "fit done\n")
+    ran = await _inline(service, owner, session)
+    assert ran.ended_here, "this call settled it, so its caller reports the end"
+    assert (ran.task.state, ran.task.exit_code, ran.task.output_tail) == (
+        "succeeded",
+        0,
+        "fit done\n",
+    )
     assert clock["slept"] == [0.3], "it ended by the first look"
     await service.poll_tasks()
     assert await wakes_for(sm, owner) == []
@@ -1232,8 +1237,10 @@ async def test_an_inline_command_that_needs_longer_continues_and_wakes_its_conve
     fake = FakeComputeProvider()
     service, clock = _waiting(sm, fake)
     session = await launch(service, owner)
-    task = await _inline(service, owner, session, wait_seconds=10)
-    assert task.state == "running" and task.wait_until is None, "handed to the scheduler"
+    ran = await _inline(service, owner, session, wait_seconds=10)
+    task = ran.task
+    assert not ran.ended_here and task.state == "running"
+    assert task.wait_until is None, "handed to the scheduler"
     assert clock["slept"] == [0.3, 0.7, 1.0, 2.0, 2.0, 2.0, 2.0]
     assert len(_scripts(fake, "probe")) == 7
     assert len(_scripts(fake, "start")) == 1, "looking at a command never starts it again"
@@ -1245,10 +1252,31 @@ async def test_an_inline_command_that_needs_longer_continues_and_wakes_its_conve
     assert wake.idempotency_key == wake_key(task.id)
 
 
-async def test_the_scheduler_leaves_a_waited_for_command_alone_until_its_wait_is_over(
+async def test_a_caller_that_sleeps_past_its_wait_leaves_the_end_to_the_scheduler(
     db_engine, db_clean
 ):
-    """A caller that stopped while it waited saw nothing: after `wait_until` it is told."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+
+    async def paused():
+        # The caller's process stalls a minute; the command ends and the scheduler runs.
+        clock["now"] += timedelta(minutes=1)
+        await _ended(fake)()
+        await service.poll_tasks()
+
+    service, clock = _waiting(sm, fake, on_sleep=paused)
+    session = await launch(service, owner)
+    ran = await _inline(service, owner, session, wait_seconds=10)
+    assert ran.task.state == "succeeded" and not ran.ended_here, "the caller does not report it"
+    assert len(await wakes_for(sm, owner)) == 1, "the conversation's message does"
+
+
+async def test_the_scheduler_leaves_a_waited_for_command_alone_until_its_wait_is_over(
+    db_engine, db_clean, monkeypatch
+):
+    """Decided under the session lock, so a stale listing changes nothing. A caller
+    that stopped while it waited saw nothing: after `wait_until` the scheduler tells."""
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     owner, _, _ = await caller(sm)
     fake = FakeComputeProvider()
@@ -1259,10 +1287,18 @@ async def test_the_scheduler_leaves_a_waited_for_command_alone_until_its_wait_is
     )
     # The wait, the start call's limit and the hand-over gap.
     assert task.wait_until == NOW + timedelta(seconds=10 + 30 + 5)
+    listed = task_store.list_active
+
+    async def every_active(db, tenant_id, *, now):
+        return await listed(db, tenant_id, now=task.wait_until)
+
+    monkeypatch.setattr(task_store, "list_active", every_active)
     await _ended(fake)()
     calls = len(fake.calls)
     clock["now"] = task.wait_until - timedelta(seconds=1)
     await service.poll_tasks()
+    # The owner's own status read does not settle it either while the caller waits.
+    assert (await service.task_status(owner, task.id)).state == "running"
     assert len(fake.calls) == calls and await wakes_for(sm, owner) == []
     clock["now"] = task.wait_until
     await service.poll_tasks()
@@ -1292,8 +1328,8 @@ async def test_a_slow_start_never_lets_the_caller_and_the_scheduler_both_report_
 
     service, clock = _waiting(sm, fake, on_sleep=meanwhile)
     session = await launch(service, owner)
-    task = await _inline(service, owner, session, wait_seconds=10)
-    assert task.state == "succeeded", "the caller saw the end"
+    ran = await _inline(service, owner, session, wait_seconds=10)
+    assert ran.ended_here and ran.task.state == "succeeded", "the caller saw the end"
     await service.poll_tasks()
     assert await wakes_for(sm, owner) == [], "so the conversation is not told again"
 
@@ -1313,9 +1349,8 @@ async def test_an_inline_command_starts_while_background_commands_fill_the_machi
     with pytest.raises(StoreError, match="Too many"):
         await _inline(service, owner, session, "background-2", wait_seconds=0)
     for n in range(_INLINE_EXTRA_TASKS):
-        assert (await _inline(service, owner, session, f"inline:{n}", wait_seconds=1)).state == (
-            "running"
-        )
+        ran = await _inline(service, owner, session, f"inline:{n}", wait_seconds=1)
+        assert ran.task.state == "running"
     with pytest.raises(StoreError, match="Too many"):
         await _inline(service, owner, session, "inline:last", wait_seconds=1)
 
@@ -1326,7 +1361,7 @@ async def test_a_timeout_in_seconds_ends_the_command_at_that_time(db_engine, db_
     fake = FakeComputeProvider()
     service, _ = _waiting(sm, fake)
     session = await launch(service, owner)
-    task = await _inline(service, owner, session, wait_seconds=0, timeout_seconds=5)
+    task = (await _inline(service, owner, session, wait_seconds=0, timeout_seconds=5)).task
     assert (task.deadline_at, task.timeout_minutes) == (NOW + timedelta(seconds=5), 1)
     [start] = _scripts(fake, "start")
     assert "timeout -k 10 5 bash" in start

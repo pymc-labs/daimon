@@ -610,7 +610,7 @@ def test_the_wake_text_names_only_tools_its_turn_may_call():
 
 # --- An inline command waits for its end, then continues ----------------------
 
-_RESULT_KEYS = {
+_VIEW_KEYS = {
     "task_id",
     "session_id",
     "state",
@@ -620,17 +620,14 @@ _RESULT_KEYS = {
     "output_path",
     "created_at",
     "finished_at",
-    "stdout",
-    "timed_out",
-    "truncated",
 }
 
 
-async def test_an_inline_command_that_ends_in_time_returns_its_output(woken):
+async def test_an_inline_command_that_ends_in_time_returns_its_output_once(woken):
     """Older calls pass a longer wait and a description: neither is refused."""
     woken.machine.ends = True
     result = await woken.as_owner("compute_run_bash", wait_seconds=45, description="Fit it")
-    assert set(result) == _RESULT_KEYS
+    assert set(result) == _VIEW_KEYS | {"stdout", "timed_out", "truncated"}
     assert (result["state"], result["exit_code"], result["stdout"]) == (
         "succeeded",
         0,
@@ -641,22 +638,44 @@ async def test_an_inline_command_that_ends_in_time_returns_its_output(woken):
 
 
 async def test_an_inline_command_that_needs_longer_continues_with_a_note(woken):
-    result = await woken.as_owner("compute_run_bash", wait_seconds=1, timeout=1500)
-    assert set(result) == _RESULT_KEYS | {"note"}
+    result = await woken.as_owner("compute_run_bash", wait_seconds=1)
+    assert set(result) == _VIEW_KEYS | {"note"}, "no output: the message carries it"
     assert result["state"] == "running" and result["note"] == compute._STILL_RUNNING
-    assert (result["exit_code"], result["stdout"], result["timed_out"]) == (None, "", False)
-    # The timeout ends the command: 1.5 seconds rounds up to 2.
-    started = datetime.fromisoformat(result["created_at"])
-    assert datetime.fromisoformat(result["deadline_at"]) - started == timedelta(seconds=2)
     woken.replay.assert_not_awaited()
 
 
-async def test_a_background_start_is_its_tool_use_and_a_retry_never_starts_it_again(woken):
+def test_an_end_another_poll_saw_is_left_to_the_conversation_message():
+    from daimon.core.compute_models import ComputeTask
+    from daimon.core.compute_sessions import InlineRun
+
+    now = datetime.now(UTC)
+    task = ComputeTask(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        owner_account_id=uuid.uuid4(),
+        request_key="inline:1",
+        command_preview="python fit.py",
+        state="succeeded",
+        exit_code=0,
+        timeout_minutes=60,
+        deadline_at=now,
+        output_tail="fit done\n",
+        output_path="/tmp/daimon-tasks/x.out",
+        created_at=now,
+    )
+    view = compute._command_view(InlineRun(task, ended_here=False))
+    assert set(view) == _VIEW_KEYS | {"note"} and view["note"] == compute._ENDED_ELSEWHERE
+
+
+def _background_use(woken, origin_id, **arguments):
+    """The agent's background compute_run_bash tool use, as the conversation records it."""
     use = {
         "session_id": str(woken.session.id),
         "command": "python fit.py",
-        "origin_context_id": str((await woken.owner_writes()).id),
+        "origin_context_id": str(origin_id),
         "run_in_background": True,
+        **arguments,
     }
     woken.replay.return_value = [
         SimpleNamespace(
@@ -667,22 +686,38 @@ async def test_a_background_start_is_its_tool_use_and_a_retry_never_starts_it_ag
             id="background-use",
         )
     ]
+
+
+async def test_a_background_start_is_its_tool_use_and_a_retry_never_starts_it_again(woken):
+    _background_use(woken, (await woken.owner_writes()).id)
     first = await woken.as_owner("compute_run_bash", run_in_background=True)
     again = await woken.as_owner("compute_run_bash", run_in_background=True)
-    assert set(first) == _RESULT_KEYS | {"note"} and first["state"] == "running"
+    assert set(first) == _VIEW_KEYS | {"note"} and first["state"] == "running"
     assert again["task_id"] == first["task_id"]
     assert woken.fake.tasks[uuid.UUID(first["task_id"]).hex].starts == 1
 
 
 @pytest.mark.parametrize(
-    ("limits", "refusal"),
+    ("limits", "runs_for"),
     [
-        ({"timeout": 1000, "timeout_minutes": 5}, "Give timeout or timeout_minutes, not both."),
-        ({"timeout": 0}, "Use a timeout of 1 to"),
+        (
+            {"run_in_background": True, "timeout": 40000, "timeout_minutes": 45},
+            timedelta(minutes=45),
+        ),
+        ({"run_in_background": True, "timeout": 40000}, timedelta(hours=8)),
+        ({"timeout": 1500, "timeout_minutes": 5, "wait_seconds": 1}, timedelta(seconds=2)),
     ],
 )
-async def test_a_command_takes_one_time_limit_in_range(woken, limits, refusal):
+async def test_each_time_limit_keeps_the_meaning_it_had(woken, limits, runs_for):
+    """A background command ignores timeout. Inline, timeout ends it and wins."""
+    _background_use(woken, (await woken.owner_writes()).id, **limits)
+    result = await woken.as_owner("compute_run_bash", **limits)
+    started = datetime.fromisoformat(result["created_at"])
+    assert datetime.fromisoformat(result["deadline_at"]) - started == runs_for
+
+
+async def test_an_inline_timeout_out_of_range_is_refused(woken):
     started = len(woken.fake.tasks)
-    with pytest.raises(ToolError, match=refusal):
-        await woken.as_owner("compute_run_bash", **limits)
+    with pytest.raises(ToolError, match="Use a timeout of 1 to"):
+        await woken.as_owner("compute_run_bash", timeout=0)
     assert len(woken.fake.tasks) == started

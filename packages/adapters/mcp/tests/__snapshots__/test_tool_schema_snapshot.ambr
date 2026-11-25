@@ -1574,9 +1574,9 @@
         ends. Check it with compute_task_status and compute_task_result.
         run_in_background returns at once, in the same way.
         <blank line>
-        timeout, in milliseconds, ends the command at that time. Without it, the
-        command can run for timeout_minutes (default 8 hours, capped by the operator
-        TTL). Give one of the two, not both. description is accepted and not used.
+        timeout, in milliseconds, ends an inline command at that time; a background
+        command ignores it. Otherwise the command can run for timeout_minutes (default
+        8 hours, capped by the operator TTL). description is accepted and not used.
         <blank line>
         Do not retry an uncertain response automatically: check compute_task_status or
         files first. Commands, file writes and running commands renew the idle lease.
