@@ -21,6 +21,9 @@ returns a published source to shadow. Credentials are references, `env:NAME` or
 `auto_link_domain` joins its config. A `workspace` is a tenant id, or `<platform>:<workspace
 id>` resolved to the tenant here, so one file serves every deployment; an unknown one is skipped.
 
+`redaction_sets` entries are rule sets, inline or a repo file pinned by sha
+(`daimon.data.redaction`); a source names one in `redaction_set`.
+
 Sections are handlers registered by name (`register_section`), so other features add theirs;
 a section nobody handles is logged and kept in `declared_state.unknown`.
 """
@@ -28,7 +31,6 @@ a section nobody handles is logged and kept in `declared_state.unknown`.
 from __future__ import annotations
 
 import hashlib
-import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -38,17 +40,17 @@ from typing import Annotated, Final, Literal
 import structlog
 import yaml
 from daimon.core.config import Settings
-from daimon.data import audit, parity, pool
+from daimon.data import audit, parity, pool, redaction
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS
-from daimon.data.sync.credentials import seal
+from daimon.data.sync.credentials import resolve_ref, seal
 from daimon.data.sync.engine import Env
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 log = structlog.get_logger()
 
@@ -76,6 +78,8 @@ class SourceEntry(BaseModel):
     fresh_ceiling_minutes: int | None = Field(default=None, gt=0)
     auto_link_domain: str | None = None
     replaces: list[str] = []
+    redaction_set: str | None = Field(default=None, pattern=KEY)
+    """The rule set its records are redacted by as they are ingested (`redaction_sets`)."""
     publish: bool = False
     retire: bool = False
 
@@ -95,6 +99,31 @@ class GrantEntry(BaseModel):
     scope: str = Field(min_length=1)
     holder: str = Field(min_length=1)
     release: bool = False
+
+
+class RedactionSetEntry(BaseModel):
+    """A rule set: inline `rules`, or a repo file (`repo`, `path`, `ref`) pinned by blob sha.
+    `sha` approves that sha, each time it changes; later shas wait for a data admin."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(pattern=KEY)
+    rules: redaction.Rules | None = None
+    repo: str | None = Field(default=None, pattern=r"^[\w.-]+/[\w.-]+$")
+    path: str | None = Field(default=None, min_length=1)
+    ref: str | None = None
+    sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    token: str | None = Field(default=None, pattern=r"^(env|file):.+$")
+    """A reference to the repo host's token, never the token."""
+
+    @model_validator(mode="after")
+    def _one_kind(self) -> RedactionSetEntry:
+        if (self.rules is None) == (self.repo is None) or (self.repo is None) != (
+            self.path is None
+        ):
+            raise ValueError("a set has either rules, or a repo and a path")
+        if self.rules is not None and (self.ref or self.sha or self.token):
+            raise ValueError("ref, sha and token belong to a repo file")
+        return self
 
 
 class TenantDecl(BaseModel):
@@ -222,15 +251,10 @@ async def _grant(ctx: Ctx, e: GrantEntry) -> Result:
 
 def _resolve(ref: str) -> str | None:
     """A credential reference: `env:NAME` or `file:/path`. None: cannot be read."""
-    kind, _, name = ref.partition(":")
-    if kind == "env":
-        return os.environ.get(name) or None
-    if kind == "file":
-        try:
-            return Path(name).read_text("utf-8").strip() or None
-        except OSError:
-            return None
-    raise DeclaredError("a credential must be an env: or file: reference")
+    try:
+        return resolve_ref(ref)
+    except ValueError as e:
+        raise DeclaredError(str(e)) from None
 
 
 def _prints(values: dict[str, str]) -> dict[str, str]:
@@ -293,8 +317,9 @@ async def _source(ctx: Ctx, e: SourceEntry) -> Result:
     if connector.live != (e.mode == "federated"):
         raise DeclaredError("the kind and the mode disagree about live reads")
     cur = await ctx.conn.execute(
-        f"select s.id, s.kind, s.status, s.publication, s.bound, b.credentials as bound_prints"
-        f" from {d}.sources s left join {d}.declared_bindings b on b.source_id = s.id"
+        f"select s.id, s.kind, s.status, s.publication, s.bound, s.redaction_set,"
+        f" b.credentials as bound_prints from {d}.sources s"
+        f" left join {d}.declared_bindings b on b.source_id = s.id"
         " where s.tenant_id = %s and s.declared_key = %s".encode(),
         (ctx.tenant_id, e.id),
     )
@@ -331,13 +356,15 @@ async def _source(ctx: Ctx, e: SourceEntry) -> Result:
         e.mode,
         e.fresh_floor_minutes,
         e.fresh_ceiling_minutes,
+        e.redaction_set,
     )
     if row is None:
         cur = await ctx.conn.execute(
             f"insert into {d}.sources (tenant_id, kind, name, provider, config, default_scope,"
             " mode,"
-            " fresh_floor_minutes, fresh_ceiling_minutes, credential, status, bound, declared_key)"
-            " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s) returning id".encode(),
+            " fresh_floor_minutes, fresh_ceiling_minutes, redaction_set, credential, status, bound,"
+            " declared_key) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)"
+            " returning id".encode(),
             (ctx.tenant_id, e.kind, *fields, sealed, "paused" if unreadable else "active", e.id),
         )
         created = await cur.fetchone()
@@ -361,14 +388,22 @@ async def _source(ctx: Ctx, e: SourceEntry) -> Result:
         cur = await ctx.conn.execute(
             f"update {d}.sources set name = %s::text, provider = %s::text, config = %s::jsonb,"
             " default_scope = %s::text, mode = %s::text, fresh_floor_minutes = %s::int,"
-            " fresh_ceiling_minutes = %s::int, credential = coalesce(%s::text, credential),"
+            " fresh_ceiling_minutes = %s::int, redaction_set = %s::text,"
+            " credential = coalesce(%s::text, credential),"
             " status = %s::text where id = %s and ((name, provider, config, default_scope, mode,"
-            " fresh_floor_minutes, fresh_ceiling_minutes, status) is distinct from"
-            " (%s::text, %s::text, %s::jsonb, %s::text, %s::text, %s::int, %s::int, %s::text)"
+            " fresh_floor_minutes, fresh_ceiling_minutes, redaction_set, status) is distinct from"
+            " (%s::text, %s::text, %s::jsonb, %s::text, %s::text, %s::int, %s::int, %s::text,"
+            " %s::text)"
             " or %s::text is not null) returning id".encode(),
             (*fields, sealed, status, source_id, *fields, status, sealed),
         )
         action = "update" if await cur.fetchone() else "unchanged"
+        if action == "update" and row["redaction_set"] != e.redaction_set:
+            await ctx.conn.execute(
+                f"update {d}.source_cursors set state = '{{}}', requested_at = now()"
+                " where source_id = %s".encode(),
+                (source_id,),
+            )
     await ctx.conn.execute(
         f"insert into {d}.declared_bindings (source_id, revision, publish, replaces, credentials)"
         " values (%s, %s, %s, %s, %s) on conflict (source_id) do update set"
@@ -396,9 +431,62 @@ async def _grants(ctx: Ctx, raw: object) -> list[Result]:
     return await _each(ctx, "grants", raw, GrantEntry, _grant)
 
 
+# ---- redaction sets ------------------------------------------------------------------------
+
+
+async def _redaction_set(ctx: Ctx, e: RedactionSetEntry) -> Result:
+    d = ctx.schemas.data
+    key = (ctx.tenant_id, e.id)
+    cur = await ctx.conn.execute(
+        f"select * from {d}.redaction_sets where tenant_id = %s and name = %s".encode(), key
+    )
+    row = await cur.fetchone()
+    rules = Jsonb(e.rules.model_dump(mode="json")) if e.rules else None
+    if row is None:
+        await ctx.conn.execute(
+            f"insert into {d}.redaction_sets (tenant_id, name, rules, repo, path, ref, token_ref,"
+            " approved_sha, declared_sha) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)".encode(),
+            (*key, rules, e.repo, e.path, e.ref, e.token, e.sha, e.sha),
+        )
+        return {"action": "create"}
+    if e.rules is not None:
+        same = row["rules"] == (e.rules.model_dump(mode="json")) and row["repo"] is None
+        await ctx.conn.execute(
+            f"update {d}.redaction_sets set rules = %s, repo = null, path = null, ref = null,"
+            " token_ref = null, pin_sha = null, approved_sha = null, declared_sha = null,"
+            " pending = null, error = null where tenant_id = %s and name = %s".encode(),
+            (rules, *key),
+        )
+        if not same:
+            await redaction.restart_sources(ctx.conn, ctx.schemas, *key)
+        return {"action": "unchanged" if same else "update"}
+    # A pinned file: the declared sha approves itself when it changes; else admins approve.
+    fresh = row["repo"] is None
+    new_sha = e.sha is not None and (fresh or e.sha != row["declared_sha"])
+    approved = e.sha if new_sha else row["approved_sha"]
+    use_pending = new_sha and row["pin_sha"] == e.sha and row["pending"] is not None
+    await ctx.conn.execute(
+        f"update {d}.redaction_sets set repo = %s, path = %s, ref = %s, token_ref = %s,"
+        " approved_sha = %s, declared_sha = %s, rules = case when %s then pending"
+        " when %s then null else rules end, pending = case when %s then null else pending end,"
+        " pin_sha = case when %s then null else pin_sha end"
+        " where tenant_id = %s and name = %s".encode(),
+        (e.repo, e.path, e.ref, e.token, approved, e.sha or row["declared_sha"], use_pending,
+         fresh, use_pending, fresh, *key),
+    )  # fmt: skip
+    if use_pending:
+        await redaction.restart_sources(ctx.conn, ctx.schemas, *key)
+    return {"action": "update" if new_sha or fresh else "unchanged"}
+
+
+async def _redaction_sets(ctx: Ctx, raw: object) -> list[Result]:
+    return await _each(ctx, "redaction_sets", raw, RedactionSetEntry, _redaction_set)
+
+
 register_section("scopes", _scopes)
 register_section("grants", _grants)
 register_section("sources", _sources)
+register_section("redaction_sets", _redaction_sets)
 
 
 # ---- apply ---------------------------------------------------------------------------------

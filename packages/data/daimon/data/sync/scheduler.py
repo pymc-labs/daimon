@@ -18,7 +18,7 @@ import psycopg
 import structlog
 from daimon.core.config import Settings
 from daimon.core.ports.data_metering import SessionMeter
-from daimon.data import acl, declared, parity, pool
+from daimon.data import acl, declared, parity, pool, redaction
 from daimon.data.dsn import libpq_dsn
 from daimon.data.locks import advisory_key
 from daimon.data.migrate import STORE_FILES
@@ -169,8 +169,8 @@ class Maintenance:
 
 
 class Ops:
-    """Every `declared.EVERY` seconds: apply the declared file, then run the parity
-    comparisons that are due. The first run follows the start."""
+    """Every `declared.EVERY` seconds: apply the declared file, fetch pinned redaction files, then
+    run the parity comparisons that are due. The first run follows the start."""
 
     def __init__(self, start: datetime) -> None:
         self.last = start - timedelta(seconds=declared.EVERY)
@@ -181,6 +181,7 @@ class Ops:
     async def run(self, settings: Settings, env: Env, now: datetime) -> None:
         self.last = now
         await declared.apply_from_settings(settings, env)
+        await redaction.refresh_pins(settings)
         async with pool.connection(settings) as conn:
             await parity.run_due(conn, env.schemas, env, declared.EVERY)
 

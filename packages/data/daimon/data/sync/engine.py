@@ -26,7 +26,7 @@ from uuid import UUID
 import psycopg
 import structlog
 from daimon.core.config import DataSettings, Settings
-from daimon.data import acl, audit
+from daimon.data import acl, audit, redaction
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
 from daimon.data.metering import Meter
@@ -157,6 +157,7 @@ class _Run:
         source: Source,
         connector: Connector,
         read_at: datetime,
+        redactor: redaction.Redactor | None = None,
     ) -> None:
         self.conn, self.env, self.src, self.connector, self.read_at = (
             conn,
@@ -165,6 +166,9 @@ class _Run:
             connector,
             read_at,
         )
+        self.redactor = redactor
+        self.scopes: dict[str, str] = {}
+        self.dropped: set[str] = set()
         self.d = env.schemas.data
         self.acl_model = connector.descriptor_for(source) is not None
         self.c = _Counts()
@@ -200,6 +204,12 @@ class _Run:
         async with aclosing(self.connector.fetch(self.src)) as records:
             async for rec in records:
                 rec = clean(rec)
+                if isinstance(rec, ItemRecord) and self.redactor:
+                    if self.redactor.excludes(rec.external_id):
+                        self.dropped.add(rec.external_id)
+                        continue
+                    self.scopes[rec.external_id] = self._scope(rec)  # from what the source said
+                    rec = self.redactor.record(rec)
                 if isinstance(rec, ItemRecord):
                     self.pending[rec.external_id] = rec
                     if len(self.pending) >= BATCH:
@@ -237,6 +247,13 @@ class _Run:
         """Write the pending records in one transaction (a deadlock or serialization failure
         runs it again), with the cursor when there is one. Attachment text is read before it."""
         batch, self.pending = list(self.pending.values()), {}
+        if self.dropped:
+            await self.conn.execute(
+                f"delete from {self.d}.records where source_id = %s"
+                " and external_id = any(%s)".encode(),
+                (self.src.id, sorted(self.dropped)),
+            )
+            self.dropped = set()
         if not batch and state is None:
             return
         known = await self._known([r.external_id for r in batch])
@@ -267,7 +284,10 @@ class _Run:
         return {r["external_id"]: r["hash"] for r in await cur.fetchall()}
 
     async def _texts(self, r: ItemRecord) -> list[str | None]:
-        return [await text_of(f.name, f.content_type, f.data) if f.data else None for f in r.files]
+        texts = [await text_of(f.name, f.content_type, f.data) if f.data else None for f in r.files]
+        if self.redactor:
+            texts = [t and self.redactor.text(t) for t in texts]
+        return texts
 
     async def _batch(
         self, batch: list[ItemRecord], texts: dict[str, list[str | None]], state: Json | None
@@ -355,6 +375,8 @@ class _Run:
 
     def _scope(self, r: ItemRecord) -> str:
         """The restricted scope for a record on the access list model, else the source's rules."""
+        if r.external_id in self.scopes:
+            return self.scopes[r.external_id]
         if self.acl_model:
             return ACL_SCOPE
         facets = {"container": r.container, "client": r.client, **r.facets}
@@ -493,8 +515,9 @@ def build_source(row: DictRow, env: Env, deadline: float | None) -> Source:
 
 _LOAD: Final = (
     "select s.id, s.tenant_id, s.kind, s.name, s.provider, s.config, s.credential,"
-    " s.default_scope, s.status, s.publication, c.state, c.last_sync_at, c.last_status,"
-    " c.errors from {d}.sources s left join {d}.source_cursors c on c.source_id = s.id"
+    " s.default_scope, s.status, s.publication, s.redaction_set, c.state, c.last_sync_at,"
+    " c.last_status, c.errors from {d}.sources s"
+    " left join {d}.source_cursors c on c.source_id = s.id"
     " where s.id = %s"
 )
 
@@ -543,6 +566,15 @@ async def _locked(
                 (source_id,),
             )
         return RunResult(None, "skipped", error=skip)
+    redactor = None
+    if row["redaction_set"]:
+        try:
+            redactor = await redaction.ingest_redactor(
+                conn, env.schemas, row["tenant_id"], row["redaction_set"]
+            )
+        except redaction.NotApproved as e:
+            await redaction.hold(conn, env.schemas, source_id, str(e))
+            return RunResult(None, "skipped", error=str(e))
     started = await _one(
         conn,
         f"insert into {d}.sync_runs (source_id, trigger) values (%s, %s) returning id, started_at",
@@ -566,7 +598,7 @@ async def _locked(
             if not await try_lock(conn, scan):
                 scan = None
                 raise _Busy
-        run = _Run(conn, env, source, connector, started["started_at"])
+        run = _Run(conn, env, source, connector, started["started_at"], redactor)
         await run.permissions()
         await run.content()
         if run.c.partial:

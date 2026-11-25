@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from daimon.data import access, recheck
+from daimon.data import access, recheck, redaction
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS
@@ -200,7 +200,7 @@ async def read_file(
     d = schemas.data
     cur = await conn.execute(
         f"select s.id, s.tenant_id, s.kind, s.name, s.provider, s.config, s.credential,"
-        f" s.default_scope, c.state, c.last_sync_at from {d}.sources s"
+        f" s.default_scope, s.redaction_set, c.state, c.last_sync_at from {d}.sources s"
         f" left join {d}.source_cursors c on c.source_id = s.id where s.id = %s".encode(),
         (record.item.source_id,),
     )
@@ -212,11 +212,22 @@ async def read_file(
         f"select payload from {d}.records where id = %s".encode(), (record_id,)
     )
     payload = (await cur.fetchone() or {"payload": {}})["payload"]
+    try:
+        redactor = (
+            await redaction.ingest_redactor(conn, schemas, row["tenant_id"], row["redaction_set"])
+            if row["redaction_set"]
+            else None
+        )
+    except redaction.NotApproved:
+        return None
     source = build_source(row, env, None)
     try:
-        return await connector.fetch_file(
+        got = await connector.fetch_file(
             source, payload, record.item.external_id, file.name, file.ord
         )
+        if got is None or redactor is None or not got[1].startswith("text/"):
+            return got
+        return redactor.text(got[0].decode("utf-8", "replace")).encode(), got[1]
     finally:
         await connector.release(source)
 

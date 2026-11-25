@@ -8,7 +8,9 @@ a reader role is never granted the column.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
+from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
@@ -40,3 +42,17 @@ def unseal(keys: Sequence[str], sealed: str | None) -> dict[str, str]:
     if not isinstance(value, dict):
         raise CredentialError("a source credential is not an object")
     return {str(k): str(v) for k, v in value.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+
+
+def resolve_ref(ref: str) -> str | None:
+    """A secret named by a reference, `env:NAME` or `file:/path`; None when it cannot be read.
+    Any other form is a `ValueError`: values never sit in a file the deployment keeps."""
+    kind, _, name = ref.partition(":")
+    if kind == "env":
+        return os.environ.get(name) or None
+    if kind == "file":
+        try:
+            return Path(name).read_text("utf-8").strip() or None
+        except OSError:
+            return None
+    raise ValueError("a secret must be an env: or file: reference")
