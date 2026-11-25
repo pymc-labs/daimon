@@ -31,9 +31,10 @@ A profile names an image, regions, CPUs and memory:
          "regions": ["us-central1"], "cpus": 2, "memory_mb": 4096}}
 ```
 
-A profile needs at least one Google Cloud region, and 1, 2, 4, 6 or 8 CPUs.
-Memory is 512 to 32768 MB, within the range Cloud Run allows for that CPU
-count. Keep images in Artifact Registry or on Docker Hub.
+A profile needs at least one Google Cloud region, and 1, 2, 4, 6 or 8 CPUs. A
+launch that names no region uses the first one. Memory is 512 to 32768 MB,
+within the range Cloud Run allows for that CPU count. Keep images in Artifact
+Registry or on Docker Hub.
 
 Use immutable digests and images with no baked-in credentials. Build the image
 from `apps/compute-session` in the Daimon repository. An image built another
@@ -67,11 +68,15 @@ service agent Artifact Registry Reader on the repository.
 
 ## How sessions work
 
-The owner launches, extends and uses a session in the conversation it started
-in. Launching and extending need an approval card. A session is usable once
-its machine has started; until then a command gets a short notice to try
-again. A machine that fails to start, or has not started after 10 minutes, is
-removed, and its owner is told to ask an admin.
+The owner extends and uses a session only in the conversation it started in, and
+can list and stop it from any of their conversations. Launching and extending
+need an approval card, unless a server admin turned off the [card for cloud
+computers](features.md#approval-for-cloud-computers); then only the default
+lifetime runs. On OpenAI and Gemini agents the card still shows.
+
+A session is usable once its machine has started; until then a command gets a
+short notice to try again. A machine that fails to start, or has not started
+after 10 minutes, is removed, and its owner is told to ask an admin.
 
 Each machine gets only its own token, and Google credentials stay in the
 control plane. The Cloud Run service refuses callers that Google IAM does not

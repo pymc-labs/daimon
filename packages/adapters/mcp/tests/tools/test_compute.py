@@ -176,6 +176,137 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
             )
 
 
+@pytest.fixture
+async def skipped(monkeypatch):
+    """Launch and extend as registered, with `compute_approval` skip and no card on record.
+
+    The service is a fake, so what reaches it is what the tool let through."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def db():
+        yield None
+
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", chat_session_id="chat"
+    )
+    origin = SimpleNamespace(
+        platform="discord",
+        thread_id="thread",
+        responder_ma_agent_id="agent",
+        parent_channel_id="parent",
+    )
+    caller = SimpleNamespace(origin=origin)
+    monkeypatch.setattr(compute, "_caller", AsyncMock(return_value=(auth, caller)))
+    monkeypatch.setattr(compute, "compute_card_skipped", AsyncMock(return_value=True))
+    gap = AsyncMock(return_value="session_not_gated")
+    monkeypatch.setattr(compute._session_gate, "session_card_gap", gap)
+    monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        compute,
+        "get_live_thread_session",
+        AsyncMock(return_value=SimpleNamespace(ma_session_id="parent-session")),
+    )
+    monkeypatch.setattr(
+        compute,
+        "retrieve_session",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="parent-session", agent=SimpleNamespace(id="agent"), metadata={}
+            )
+        ),
+    )
+    session_id = uuid.uuid4()
+    uses = {
+        "compute_launch_session": {
+            "template": "mmm",
+            "origin_context_id": "origin",
+            "region": "us-central1",
+        },
+        "compute_extend_session": {
+            "session_id": str(session_id),
+            "hours": 24,
+            "origin_context_id": "origin",
+        },
+    }
+    # The model's tool uses, and no `user.tool_confirmation`: nobody saw a card.
+    events = [
+        SimpleNamespace(
+            type="agent.mcp_tool_use",
+            name=name,
+            mcp_server_name=compute.DAIMON_SERVER_NAME,
+            input=arguments,
+            id=name,
+        )
+        for name, arguments in uses.items()
+    ]
+    monkeypatch.setattr(
+        compute, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+    )
+    service = SimpleNamespace(
+        launch=AsyncMock(return_value="launched"),
+        extend=AsyncMock(return_value="extended"),
+        get=AsyncMock(return_value=SimpleNamespace(source_metadata={})),
+    )
+    monkeypatch.setattr(compute, "ComputeSessions", lambda *a, **k: service)
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=db,
+        client=None,
+        settings=SimpleNamespace(compute=ComputeSettings()),
+        compute_provider=object(),
+    )
+    compute.register_compute_tools(mcp, runtime)
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    async def call(name, **changes):
+        return await tools[name].fn(ctx=None, **{**uses[name], **changes})
+
+    return SimpleNamespace(call=call, uses=uses, service=service, gap=gap)
+
+
+async def test_compute_skip_runs_launch_and_extend_with_no_card_for_the_default_time(skipped):
+    assert await skipped.call("compute_launch_session") == "launched"
+    assert skipped.service.launch.await_args.kwargs["approval_key"] == (
+        "parent-session:compute_launch_session"
+    ), "the key is still the exact tool use in the owner's conversation"
+    assert await skipped.call("compute_extend_session") == "extended"
+    assert skipped.service.extend.await_args.kwargs["approval_key"] == (
+        "parent-session:compute_extend_session"
+    )
+    skipped.gap.assert_not_awaited()
+
+
+async def test_a_launch_may_leave_the_region_out(skipped):
+    """The tool use without a region is the same call as one with the default of None."""
+    del skipped.uses["compute_launch_session"]["region"]
+    assert await skipped.call("compute_launch_session") == "launched"
+    assert skipped.service.launch.await_args.kwargs["region"] is None
+
+
+@pytest.mark.parametrize(
+    ("name", "changes"),
+    [
+        ("compute_launch_session", {"ttl_hours": 48}),
+        # The default time is 24 hours (`ComputeSettings.default_idle_ttl_hours`).
+        ("compute_extend_session", {"hours": 25}),
+    ],
+)
+async def test_compute_skip_refuses_more_than_the_default_time(skipped, name, changes):
+    skipped.uses[name].update(changes)  # the model asked for this exact call
+    with pytest.raises(ToolError, match="A longer time needs the approval card"):
+        await skipped.call(name)
+    assert skipped.service.launch.await_count == skipped.service.extend.await_count == 0
+
+
+@pytest.mark.parametrize("name", ["compute_launch_session", "compute_extend_session"])
+async def test_compute_skip_still_needs_the_exact_tool_use_in_the_conversation(skipped, name):
+    other = {"template": "other"} if name == "compute_launch_session" else {"hours": 2}
+    with pytest.raises(ToolError, match="from the owner's conversation"):
+        await skipped.call(name, **other)
+    assert skipped.service.launch.await_count == skipped.service.extend.await_count == 0
+
+
 @pytest.mark.parametrize(
     "mode", ["same", "proxied", "proxied_other_tool", "changed", "foreign_tool", "none"]
 )
@@ -319,6 +450,124 @@ async def test_read_limit_is_the_largest_chunk_the_session_answer_can_carry():
     compute.register_compute_tools(mcp, runtime)
     description = (await mcp.get_tool("compute_read_file")).description
     assert f"at most {MAX_READ_BYTES // 1024} KiB" in description
+
+
+async def test_the_owner_lists_and_stops_a_machine_from_another_conversation(
+    committing_sessionmaker, monkeypatch
+):
+    """A machine started in thread A shows in thread B, not usable there but stoppable."""
+    import re
+
+    from daimon.core.compute_sessions import ELSEWHERE, ComputeCaller, ComputeSessions
+    from daimon.core.config import ComputeProfile
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.turn_origins import bind_origin_session, create_origin
+    from daimon.testing.compute import FakeComputeProvider
+    from daimon.testing.factories import make_account, make_tenant
+    from pydantic import SecretStr
+
+    sm = committing_sessionmaker
+    settings = ComputeSettings(
+        enabled=True,
+        deployment_id="test-deployment",
+        cloud_run_project="test-project",
+        cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
+        session_auth_key=SecretStr("session-secret-test-only"),
+        profiles={
+            "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+        },
+    )
+    fake = FakeComputeProvider()
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+        owner = await make_account(db, tenant=tenant)
+        stranger = await make_account(db, tenant=tenant)
+
+    async def turn(account, thread, *, attended=True):
+        now = datetime.now(UTC)
+        async with sm.begin() as db:
+            origin = await create_origin(
+                db,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                parent_channel_id="parent",
+                thread_id=thread,
+                responder_ma_agent_id="agent",
+                responder_name="Daimon",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=Role.USER,
+                expires_at=now + timedelta(minutes=5),
+                now=now,
+                sender_foreign=False,
+                shared_channel=False,
+                attended=attended,
+            )
+            # Each turn holds its own signed grant: binding one takes it from any other.
+            await bind_origin_session(
+                db, origin_id=origin.id, chat_session_id=str(origin.id), human_invocation=attended
+            )
+        return origin.model_copy(
+            update={"chat_session_id": str(origin.id), "human_invocation": attended}
+        )
+
+    here = await turn(owner, "thread-a")
+    session = await ComputeSessions(sm, settings, fake).launch(
+        ComputeCaller(tenant.id, owner.id, here, str(here.id), "owner"),
+        profile="mmm",
+        region="us-central1",
+        ttl_hours=24,
+        approval_key="approved",
+        source_metadata={},
+    )
+    auth = AsyncMock()
+    monkeypatch.setattr(compute, "_auth", auth)
+    monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=sm, settings=SimpleNamespace(compute=settings), compute_provider=fake
+    )
+    compute.register_compute_tools(mcp, runtime)
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    async def call(name, origin, **arguments):
+        """Call `name` as the person of `origin`, in that turn."""
+        auth.return_value = auth_identity(
+            origin.account_id,
+            tenant.id,
+            role=Role.USER,
+            chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent"),
+            chat_session_id=origin.chat_session_id,
+            platform_user_id="owner",
+            platform="discord",
+        )
+        return await tools[name].fn(ctx=None, origin_context_id=str(origin.id), **arguments)
+
+    there = await turn(owner, "thread-b")
+    [listed] = await call("compute_list_sessions", there)
+    assert listed["id"] == str(session.id) and listed["here"] is False
+    assert [row["here"] for row in await call("compute_list_sessions", here)] == [True]
+    with pytest.raises(ToolError, match=re.escape(ELSEWHERE)):
+        await call("compute_run_bash", there, session_id=session.id, command="id")
+
+    theirs = await turn(stranger, "thread-b")
+    assert await call("compute_list_sessions", theirs) == []
+    with pytest.raises(ToolError, match="^Session not found$"):
+        await call("compute_stop_session", theirs, session_id=session.id)
+
+    absent = await turn(owner, "thread-b", attended=False)
+    for name, arguments in (
+        ("compute_list_sessions", {}),
+        ("compute_stop_session", {"session_id": session.id}),
+    ):
+        with pytest.raises(ToolError, match="must be here"):
+            await call(name, absent, **arguments)
+    assert fake.calls == [] and fake.deleted == []
+
+    stopped = await call("compute_stop_session", there, session_id=session.id)
+    assert stopped == {"session_id": str(session.id), "state": "deleted"}
+    assert fake.deleted == [session.id]
 
 
 # --- What a finished command's wake turn may call, and what a routine may ------

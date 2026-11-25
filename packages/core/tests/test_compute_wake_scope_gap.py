@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core import direct_messages
-from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
+from daimon.core.compute_sessions import ELSEWHERE, ComputeCaller, ComputeSessions
 from daimon.core.compute_tasks import wake_key
 from daimon.core.continuity.scope_timers import dispatch_scope_timer
 from daimon.core.direct_messages import run_channel_timer, run_dm_timer
@@ -177,4 +177,4 @@ async def test_a_wake_in_a_dm_or_plain_channel_reads_nothing_today(
     assert seen["bound"] is True
     assert seen["place"] != (channel, scope)
     # ...so the session's conversation check refuses the read. Closing the gap fails here.
-    assert seen["read"] == "Session not found in this owner's conversation"
+    assert seen["read"] == ELSEWHERE

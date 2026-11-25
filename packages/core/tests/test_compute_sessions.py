@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -18,7 +19,7 @@ from daimon.core.compute_models import (
     machine_readiness,
 )
 from daimon.core.compute_provider import ComputeProviderError, app_name
-from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
+from daimon.core.compute_sessions import ELSEWHERE, ComputeCaller, ComputeSessions
 from daimon.core.compute_tasks import WAKE_OUTPUT_CHARS, wake_key
 from daimon.core.config import ComputeProfile, ComputeSettings
 from daimon.core.continuity.wakes import WAKE_RUN_LEASE, claim_wake, settle_wake, start_wake
@@ -62,6 +63,7 @@ async def caller(
     agent="agent",
     origin_id=None,
     chat_session=None,
+    thread="thread",
 ):
     async with sm.begin() as db:
         tenant = tenant or await make_tenant(db)
@@ -72,7 +74,7 @@ async def caller(
             account_id=account.id,
             platform="discord",
             parent_channel_id="parent",
-            thread_id="thread",
+            thread_id=thread,
             responder_ma_agent_id=agent,
             responder_name="Daimon",
             configuration_target_ma_agent_id=None,
@@ -153,6 +155,68 @@ async def test_owner_tenant_origin_and_machine_token_isolation(db_engine, db_cle
     assert fake.deleted == [session.id]
     # The provider is told where the session ran: Cloud Run addresses a service by region.
     assert fake.deleted_regions == ["us-central1"]
+
+
+async def test_the_owner_lists_and_stops_a_machine_from_another_conversation(db_engine, db_clean):
+    """Only the conversation a machine started in uses it; its owner lists and stops it anywhere."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, account = await caller(sm)
+    elsewhere, _, _ = await caller(sm, tenant=tenant, account=account, thread="thread-b")
+    stranger, _, _ = await caller(sm, tenant=tenant, thread="thread-b")
+    absent = await _unattended(sm, tenant, account, thread="thread-b")
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+
+    assert [s.id for s in await service.list(elsewhere)] == [session.id]
+    for operation in (
+        service.get(elsewhere, session.id),
+        service.call(elsewhere, session.id, tool="write_file", arguments={"path": "/x"}),
+        service.start_task(elsewhere, session.id, command="id", timeout_minutes=1, request_key="b"),
+        service.extend(elsewhere, session.id, hours=1, approval_key="b"),
+    ):
+        with pytest.raises(StoreError, match=re.escape(ELSEWHERE)):
+            await operation
+    # Another person's machine reads as missing, so nobody learns that it exists.
+    assert await service.list(stranger) == []
+    for operation in (service.get(stranger, session.id), service.stop(stranger, session.id)):
+        with pytest.raises(StoreError, match="^Session not found$"):
+            await operation
+    # A turn nobody sent can neither list nor stop, from any conversation.
+    await _all_refused((service.list(absent), service.stop(absent, session.id)))
+    assert fake.calls == [] and fake.deleted == []
+
+    assert (await service.stop(elsewhere, session.id)).state == "deleted"
+    assert fake.deleted == [session.id]
+    assert await service.list(owner) == []
+
+
+async def test_a_launch_with_no_region_uses_the_profiles_first(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    two = ComputeProfile(
+        image="registry.example/mmm@sha256:abc", regions=["europe-west4", "us-central1"]
+    )
+    service = ComputeSessions(
+        sm, settings().model_copy(update={"profiles": {"mmm": two}}), fake, clock=lambda: NOW
+    )
+
+    async def start(region, key):
+        return await service.launch(
+            owner,
+            profile="mmm",
+            region=region,
+            ttl_hours=None,
+            approval_key=key,
+            source_metadata={},
+        )
+
+    with pytest.raises(StoreError, match="profile and region"):
+        await start("asia-east1", "wrong")
+    assert fake.resources == {}, "a region the profile does not list starts nothing"
+    assert (await start(None, "first")).region == "europe-west4"
+    assert (await start("us-central1", "named")).region == "us-central1"
 
 
 @pytest.mark.parametrize("attended,human", [(False, True), (True, False), (True, None)])

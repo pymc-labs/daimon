@@ -1,8 +1,9 @@
 """Owner-only compute sessions bound to verified, attended conversation origins.
 
-One exception, decided in core (`daimon.core.compute_sessions.turn_may_read`): the
-turn that a finished background command wakes may use the read tools on that
-command's session.
+A session is used only in the conversation it started in; its owner lists and
+stops it from any of their conversations. One exception, decided in core
+(`daimon.core.compute_sessions.turn_may_read`): the turn that a finished background
+command wakes may use the read tools on that command's session.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import uuid
 
 from anthropic.types.beta.sessions import BetaManagedAgentsAgentMCPToolUseEvent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
@@ -24,14 +26,16 @@ from daimon.core.compute_sessions import (
     READ_OPERATIONS,
     ComputeCaller,
     ComputeSessions,
+    made_here,
     owner_present,
 )
 from daimon.core.compute_thin_mcp import MAX_READ_BYTES
+from daimon.core.confirmation import compute_card_skipped
 from daimon.core.errors import StoreError
 from daimon.core.session_seal import child_seal_ids, origin_stamp
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, PROXY_TOOL_NAME
+from daimon.core.tool_safety import COMPUTE_APPROVAL_TOOLS, DAIMON_SERVER_NAME, PROXY_TOOL_NAME
 from daimon.core.turn.io import turn_io
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -79,6 +83,16 @@ def _tool_input(event: BetaManagedAgentsAgentMCPToolUseEvent, tool: str) -> obje
     return None
 
 
+def _require_skip_defaults(auth: AuthIdentity, *, default_time: bool) -> None:
+    """With the card off nobody sees the time a launch or extend asks for, so it may
+    ask only for the default time. A person who approved Daimon's own card saw it."""
+    if not default_time and not card_satisfied(auth):
+        raise ToolError(
+            "A longer time needs the approval card. Ask a server admin to set approval "
+            "for cloud computers to Ask."
+        )
+
+
 async def _approved(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -88,10 +102,26 @@ async def _approved(
     defaults: dict[str, JsonValue],
     *,
     approval: bool = True,
+    default_time: bool = True,
 ) -> tuple[str, dict[str, str]]:
-    """Key the exact provider tool use; ``approval`` also requires its allowed card."""
-    if (
+    """Key the exact provider tool use; ``approval`` also requires its allowed card.
+
+    A server admin can turn that card off for launch and extend (`compute_approval`).
+    The tool use must still be in the conversation, and only ``default_time`` runs.
+    The setting is read once, so the card and the limit always agree.
+    """
+    skipped = (
         approval
+        and tool in COMPUTE_APPROVAL_TOOLS
+        and await compute_card_skipped(
+            runtime.session_factory, auth.tenant_id, origin.responder_ma_agent_id, origin.platform
+        )
+    )
+    if skipped:
+        _require_skip_defaults(auth, default_time=default_time)
+    asked = approval and not skipped
+    if (
+        asked
         and await _session_gate.session_card_gap(runtime, auth, origin, tool_name=tool) is not None
     ):
         raise ToolError("Approve this action in the owner's conversation first.")
@@ -119,9 +149,11 @@ async def _approved(
         and e.mcp_server_name == DAIMON_SERVER_NAME
         and isinstance(used := _tool_input(e, tool), dict)
         and {**defaults, **used} == arguments
-        and (e.id in approvals or not approval)
+        and (e.id in approvals or not asked)
     ]
     if not matches:
+        if skipped:
+            raise ToolError("Start or extend the machine from the owner's conversation.")
         if not approval:
             raise ToolError("Run the command from the owner's conversation.")
         raise ToolError("Approval of this exact action and its limits is required.")
@@ -187,13 +219,15 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         template: str,
         origin_context_id: str,
-        region: str,
+        region: str | None = None,
         ttl_hours: int | None = None,
     ) -> ComputeSession:
         """Launch your own temporary machine from an operator image profile.
 
-        Requires approval in an attended conversation. List profiles first: each names
-        its fixed CPU/RAM, image and the regions you may pass. No shared credentials are
+        Needs the owner in the conversation; a card asks first unless an admin turned the
+        card off. Without the card, leave ttl_hours out: only the default time runs. List
+        profiles first: each names its fixed CPU/RAM, image and the regions you may pass.
+        Leave `region` out to use the profile's first region. No shared credentials are
         mounted. Sessions are deleted after their idle lease; export files before
         stopping or expiry.
 
@@ -213,7 +247,8 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 "region": region,
                 "ttl_hours": ttl_hours,
             },
-            {"ttl_hours": None},
+            {"ttl_hours": None, "region": None},
+            default_time=ttl_hours is None,
         )
         if not await source_metadata_readable(
             runtime, auth, metadata, origin_context_id=origin_context_id
@@ -235,10 +270,12 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def compute_extend_session(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, session_id: uuid.UUID, hours: int, origin_context_id: str
     ) -> ComputeSession:
-        """Set your session's expiry to this many hours from now, after owner approval.
+        """Set your session's expiry to this many hours from now.
 
-        Use the original attended conversation. Hours cannot exceed the operator TTL.
-        This does not change the idle window used by subsequent command/file writes.
+        Needs the owner in the conversation; a card asks first unless an admin turned the
+        card off. Without the card, hours cannot exceed the default time. Use the
+        original attended conversation. Hours cannot exceed the operator TTL. This does
+        not change the idle window used by subsequent command/file writes.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         try:
@@ -254,6 +291,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                     "origin_context_id": origin_context_id,
                 },
                 {},
+                default_time=hours <= runtime.settings.compute.default_idle_ttl_hours,
             )
             return await service.extend(caller, session_id, hours=hours, approval_key=key)
         except (StoreError, ComputeProviderError) as exc:
@@ -265,7 +303,7 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> dict[str, str]:
         """Permanently delete a session and its files. Export needed files first.
 
-        The owner may stop it in the original conversation. A current tenant admin
+        The owner may stop it from any of their conversations. A current tenant admin
         may emergency-stop it without access to commands, files or other contents.
         Failed provider deletion remains pending for automatic cleanup.
         """
@@ -403,13 +441,17 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def compute_list_sessions(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, origin_context_id: str
-    ) -> list[ComputeSession]:
-        """List your live sessions in this conversation. Other people's sessions are private."""
+    ) -> list[dict[str, JsonValue]]:
+        """List your live machines from every conversation.
+
+        `here` is true for the ones this conversation can use. Other people's machines
+        are private.
+        """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         try:
             rows = await service.list(caller)
             return [
-                row
+                {**row.model_dump(mode="json"), "here": made_here(row, caller.origin)}
                 for row in rows
                 if await source_metadata_readable(
                     runtime, auth, row.source_metadata, origin_context_id=origin_context_id
