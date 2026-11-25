@@ -179,18 +179,23 @@ store's tables holds across every workspace, though not what they say.
 `daimon data eval GOLD...` runs a gold set (JSON or YAML) through search. Each question names
 its caller (`tenant_id`, and an `account_id` or explicit `scopes` and `readers`) and the
 records that answer it (`source` name or id, `external_id`, a `grade` of 1 to 3). The search
-runs as that caller, and recall and nDCG at 5 and 10 are scored for the fused list and for
-each arm (`fts`, `vec`, `time`, read from the hits' ranks before any rerank) on the expected
-records the caller can read; a record they cannot read is not a miss, and a question with
-none readable is left out and counted. The estimated spend prints first and the run refuses
-above `--max-usd`; it stops once the metered spend reaches that cap. Query spend bills the
-caller's tenant. `--out` writes the JSON report; the text summary prints either way.
+runs as that caller.
 
-`daimon data probe NAME --tenant ID` runs one read-only check and prints JSON: `grants` (each
-scope's holders), `scopes` (records by source and scope, and those in a scope nobody defined),
-`person` (`--account`: what that person holds and reads), `health` (each source's state, last
-sync and embedding coverage) and `drift` (chunks off their record, records without chunks,
-sources not synced in 48 hours or failing). Probes never write the store.
+Recall and nDCG at 5 and 10 are scored for the fused list and for each arm (`fts`, `vec`,
+`time`, read from the hits' ranks before any rerank). Only records the caller can read count.
+An unreadable record is not a miss, and a question with none readable is left out and counted.
+The estimated spend prints first and the run refuses above `--max-usd`. It stops once the
+metered spend reaches that cap. Query spend bills the caller's tenant. `--out` writes the
+JSON report; the text summary prints either way.
+
+`daimon data probe NAME --tenant ID` runs one read-only check and prints JSON. It never
+writes the store. The checks:
+
+- `grants`: each scope's holders.
+- `scopes`: records by source and scope, and those in a scope nobody defined.
+- `person` (`--account`): what that person holds and reads.
+- `health`: each source's state, last sync and embedding coverage.
+- `drift`: chunks off their record, records without chunks, sources not synced in 48 hours or failing.
 
 ## After a restore
 
