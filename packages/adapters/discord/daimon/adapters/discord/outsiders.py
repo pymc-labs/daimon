@@ -50,6 +50,15 @@ def audience_channel(channel: discord.abc.GuildChannel | discord.Thread) -> Audi
     )
 
 
+def is_public_thread(channel: object) -> bool:
+    """Whether Discord says this channel is a public thread (a forum post and an announcement
+    thread included). Anything else, a private thread or a type not known, is False."""
+    return isinstance(channel, discord.Thread) and channel.type in (
+        discord.ChannelType.public_thread,
+        discord.ChannelType.news_thread,
+    )
+
+
 def audience_member(guild: discord.Guild, member: discord.Member) -> AudienceMember:
     return AudienceMember(
         user_id=str(member.id),

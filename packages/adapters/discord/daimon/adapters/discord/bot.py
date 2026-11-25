@@ -67,6 +67,7 @@ from daimon.adapters.discord.names import (
 )
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import Conversation, deliver_session_outputs
+from daimon.adapters.discord.outsiders import is_public_thread
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
     DiscordPostTransport,
@@ -4777,6 +4778,7 @@ class DaimonBot(commands.Bot):
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
+            public_thread=is_public_thread(thread),
         )
         if (
             row.reason in ("watch_fired", "watch_report", "job_finished")
@@ -5695,6 +5697,7 @@ class DaimonBot(commands.Bot):
                 now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                public_thread=is_public_thread(thread),
             )
         except MissingTurnConfigError as err:
             log.info(

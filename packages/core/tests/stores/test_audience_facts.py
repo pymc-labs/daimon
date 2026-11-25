@@ -39,9 +39,15 @@ async def _read(
     channel: str,
     at: datetime = LATER,
     parent_id: str | None = None,
+    public_thread: bool = False,
 ) -> RoomFacts:
     return await store.read_channel_facts(
-        session, tenant_id=tenant_id, channel_id=channel, now=at, parent_id=parent_id
+        session,
+        tenant_id=tenant_id,
+        channel_id=channel,
+        now=at,
+        parent_id=parent_id,
+        public_thread=public_thread,
     )
 
 
@@ -148,6 +154,24 @@ async def test_an_uncached_thread_takes_contained_from_its_parent_and_is_narrow(
     assert await _read(db_session, tenant.id, "70", parent_id="2") == RoomFacts(True, True)
     assert await _read(db_session, tenant.id, "70", parent_id="1") == RoomFacts(False, True)
     assert await _read(db_session, tenant.id, "70", parent_id="404") == UNKNOWN_FACTS
+
+
+async def test_a_public_thread_with_no_row_takes_both_facts_from_its_parent(
+    db_session: AsyncSession,
+) -> None:
+    """What the next reconcile writes (`compute_room_facts`); a private or unknown kind stays narrow."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="3009")
+    await _publish(db_session, tenant.id)
+
+    async def public(parent: str) -> RoomFacts:
+        return await _read(db_session, tenant.id, "70", parent_id=parent, public_thread=True)
+
+    assert await public("1") == RoomFacts(False, False)
+    assert await public("2") == RoomFacts(True, False)
+    assert await public("3") == RoomFacts(False, True)
+    assert await public("404") == UNKNOWN_FACTS, "a parent with no row stays unknown"
+    # Private (public_thread False): contained from the parent, always narrow.
+    assert await _read(db_session, tenant.id, "70", parent_id="1") == RoomFacts(False, True)
 
 
 async def test_retiring_writes_nothing_for_a_server_without_facts(
