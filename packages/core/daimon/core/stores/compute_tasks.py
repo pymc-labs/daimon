@@ -47,6 +47,31 @@ async def list_active(
     return [ComputeTask.model_validate(row) for row in rows]
 
 
+async def list_for_session(
+    db: AsyncSession, tenant_id: uuid.UUID, session_id: uuid.UUID
+) -> list[ComputeTask]:
+    """Every task of one session, active or finished."""
+    await scope(db, tenant_id)
+    rows = await db.scalars(
+        select(ComputeTaskRecord).where(
+            ComputeTaskRecord.tenant_id == tenant_id, ComputeTaskRecord.session_id == session_id
+        )
+    )
+    return [ComputeTask.model_validate(row) for row in rows]
+
+
+async def withdraw_wake(db: AsyncSession, task: ComputeTask) -> bool:
+    """Withdraw a finished task's completion wake that no dispatcher has claimed yet, because
+    its conversation already has the end; False when there is none or it is claimed."""
+    from daimon.core.stores.task_continuations import cancel_wake_row
+
+    if task.state in ACTIVE_TASK_STATES:
+        raise ValueError("Only a finished task's wake can be withdrawn")
+    return await cancel_wake_row(
+        db, tenant_id=task.tenant_id, idempotency_key=wake_key(task.id), skip_reason="seen"
+    )
+
+
 async def register(db: AsyncSession, task: ComputeTask, *, cap: int) -> tuple[ComputeTask, bool]:
     """Return the existing row for a retried request, else admit under the session cap.
 

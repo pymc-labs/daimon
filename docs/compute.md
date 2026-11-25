@@ -100,9 +100,9 @@ server admin can emergency-stop a session without seeing its files.
 
 Daimon waits up to 40 seconds for a command's result. A command that needs
 longer keeps running, and the scheduler posts one message in the conversation
-when it ends. In a thread, Daimon can read the command's output and the
-machine's files for that message. Outside a thread it reports only the end of
-the output.
+when it ends, unless the conversation already read the result or stopped the
+machine. In a thread, Daimon can read the command's output and the machine's
+files for that message. Outside a thread it reports only the end of the output.
 
 For that message Daimon cannot run commands or change the machine until the
 owner writes again. A server admin can turn on [Cloud computers continue after

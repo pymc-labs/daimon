@@ -593,9 +593,11 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             await _readable(
                 runtime, auth, origin_context_id, await service.get(caller, task.session_id)
             )
-            return _task_view(task, output=True)
         except (StoreError, ComputeProviderError) as exc:
             raise ToolError(str(exc)) from None
+        # Every check passed and the result is in hand: only now is the end seen here.
+        await service.mark_seen(caller, task)
+        return _task_view(task, output=True)
 
     @mcp.tool
     async def compute_list_templates(  # pyright: ignore[reportUnusedFunction]

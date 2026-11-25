@@ -439,7 +439,9 @@ async def test_errors_never_carry_remote_bodies(capsys, failure):
         assert error.value.__cause__ is None
         assert error.value.__context__ is None or error.value.__suppress_context__
     logged = capsys.readouterr()
-    assert ("status=403" in logged.out) == (failure == "refused")
+    # Console or JSON lines, whichever renderer an earlier test in this worker set up.
+    refused_logged = "status=403" in logged.out or '"status": 403' in logged.out
+    assert refused_logged == (failure == "refused")
     assert "secret-detail" not in logged.out + logged.err
     assert "google-access-token" not in logged.out + logged.err
 

@@ -86,6 +86,8 @@ _INLINE_HANDOVER = 5
 _STATUS_POLL_SECONDS = 2.0
 #: What a status read says when it could not read the command at all.
 STATUS_REFUSED = "Could not check the command right now. Try again soon."
+#: The longest a seen end's message withdrawal may hold an answer: past it, the message stays.
+_WITHDRAW_SECONDS = 2.0
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may always make.
@@ -461,12 +463,36 @@ class ComputeSessions:
             if session.state != "deleted":
                 session = session.model_copy(update={"state": "stopping"})
                 await store.save(db, session)
+            if session.owner_account_id == caller.account_id and made_here(session, caller.origin):
+                await self._stopped_by_owner(db, session)
         # Stopping intent survives failed provider calls and process restarts.
         await self._delete(session)
         async with self.sm.begin() as db:
             result = await store.get(db, caller.tenant_id, session_id)
             assert result is not None
             return result
+
+    async def _stopped_by_owner(self, db: AsyncSession, session: ComputeSession) -> None:
+        """The owner present in the session's own conversation, or its wake turn, stopped
+        the machine, so that conversation knows: each command still running ends as
+        cancelled with no message, and a message nobody claimed yet for one that ended is
+        withdrawn (`_seen`). Under the session lock the stop took. A stop from another
+        of the owner's conversations, an admin's emergency stop and expiry keep one
+        message per command: the session's conversation did not see it."""
+        now = self.clock()
+        for task in await task_store.list_for_session(db, session.tenant_id, session.id):
+            if task.state in ACTIVE_TASK_STATES:
+                await task_store.finish(
+                    db,
+                    task,
+                    session,
+                    state="cancelled",
+                    now=now,
+                    wake=False,
+                    run_limit=self.settings.wake_run_limit,
+                )
+            else:
+                await self._seen(db, task)
 
     async def _delete(self, session: ComputeSession) -> None:
         async with self.sm.begin() as db:
@@ -738,13 +764,40 @@ class ComputeSessions:
         timeout_minutes: int | None,
         request_key: str,
     ) -> InlineRun:
+        """`_run`, then, as its last step, an end another poll settled is marked seen: the
+        caller is told the command ended (`tools.compute._ENDED`)."""
+        ran = await self._run(
+            caller,
+            session_id,
+            command=command,
+            wait_seconds=wait_seconds,
+            timeout_seconds=timeout_seconds,
+            timeout_minutes=timeout_minutes,
+            request_key=request_key,
+        )
+        if not ran.ended_here:
+            await self.mark_seen(caller, ran.task)
+        return ran
+
+    async def _run(
+        self,
+        caller: ComputeCaller,
+        session_id: uuid.UUID,
+        *,
+        command: str,
+        wait_seconds: float,
+        timeout_seconds: int | None,
+        timeout_minutes: int | None,
+        request_key: str,
+    ) -> InlineRun:
         """Start a command and wait up to `wait_seconds` for it to end.
 
         A command whose end this call settles is returned with `ended_here`, and queues
-        no wake: the caller sees it. In every other case the conversation gets the end
-        as a message: the command needs longer, or another poll settled it. Who settles
-        is decided under the session lock (`_poll_task`). `start_task` never settles a
-        task; a retried background key can return one that ended elsewhere.
+        no wake: the caller sees it. A command that needs longer gets its end as a
+        message in the conversation. One another poll settled is returned ended, and
+        `run` withdraws its message: the caller is told it ended. Who settles is decided
+        under the session lock (`_poll_task`). `start_task` never settles a task; a
+        retried background key can return one that ended elsewhere.
 
         Locks: `start_task` takes the session lock; its time counts against the wait, but
         it is never cut short. Each poll takes the lock within the deadline; once a poll
@@ -850,14 +903,33 @@ class ComputeSessions:
         wait_seconds: float = 0,
         deadline: float | None = None,
     ) -> ComputeTask:
-        """Read a task and, while it is active, probe the machine until it ends or
-        `wait_seconds` pass. A task that already ended returns at once.
+        """`_task_status`, then, as its last step, an end another poll settled is marked
+        seen. One this call settled itself queued no message, so it returns at once, with
+        no transaction after the settling poll."""
+        task, settled_here = await self._task_status(
+            caller, task_id, wait_seconds=wait_seconds, deadline=deadline
+        )
+        if not settled_here:
+            await self.mark_seen(caller, task)
+        return task
 
-        Each probe follows today's rules for a status read (`_poll_task`). An owner who
-        is present sees an ending here, so no separate wake is queued for it; a wake's
-        turn has no owner watching, so the wake stays. While an inline caller still owns
-        the task, a probe only reads it. Like a poll, a probe that finds the command
-        running keeps the lease alive.
+    async def _task_status(
+        self,
+        caller: ComputeCaller,
+        task_id: uuid.UUID,
+        *,
+        wait_seconds: float = 0,
+        deadline: float | None = None,
+    ) -> tuple[ComputeTask, bool]:
+        """Read a task and, while it is active, probe the machine until it ends or
+        `wait_seconds` pass, with whether this call settled it. A task that already ended
+        returns at once.
+
+        Only a turn of the session's own conversation gets here (the owner present, or
+        the session's own wake turn), so an end it reads is the conversation's: no wake
+        is queued for it, and `task_status` withdraws an unclaimed one. While an inline
+        caller still owns the task, a probe only reads it. Like a poll, a probe that
+        finds the command running keeps the lease alive.
 
         One deadline on the event loop's clock, taken when the call starts unless the
         caller passes the one its own call started (`deadline`), bounds every step before
@@ -883,29 +955,28 @@ class ComputeSessions:
             log.warning("compute.task_status_retry", task_id=str(task_id))
             raise StoreError(STATUS_REFUSED) from None
         if task.state not in ACTIVE_TASK_STATES:
-            return task
-        wake = not owner_present(caller.origin)
+            return task, False
         probed = False
         while True:
             try:
                 polled = await self._poll_task(
-                    task.tenant_id, task.id, wake=wake, deadline=deadline
+                    task.tenant_id, task.id, wake=False, deadline=deadline
                 )
             except TimeoutError:
                 # Rolled back before any write: this call settled nothing.
-                return task
+                return task, False
             except SQLAlchemyError:
                 # Never relay database errors; the scheduler keeps polling.
                 log.warning("compute.task_status_retry", task_id=str(task.id))
                 if not probed:
                     raise StoreError(STATUS_REFUSED) from None
-                return task
+                return task, False
             if polled.task is None:
-                return task
+                return task, False
             task = polled.task
             if polled.settled:
                 # This call saved the end: its caller gets it now, with no read after it.
-                return task
+                return task, True
             probed = True
             left = (give_up - self.clock()).total_seconds()
             if (
@@ -913,12 +984,40 @@ class ComputeSessions:
                 or left <= 0
                 or (deadline is not None and loop.time() >= deadline)
             ):
-                return task
+                return task, False
             await self.sleep(min(_STATUS_POLL_SECONDS, left))
 
     async def task_result(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
+        """A task, read by a turn of its session's own conversation (`_owned_task`). It
+        withdraws nothing: a caller that answers with it calls `mark_seen` last."""
         async with self.sm.begin() as db:
             return await self._owned_task(db, caller, task_id)
+
+    async def mark_seen(self, caller: ComputeCaller, task: ComputeTask) -> None:
+        """The last step before a turn of the session's own conversation is answered with
+        this finished task: withdraw the message that would tell the conversation again.
+
+        Only once every check passed and the result is in hand, in a transaction of its
+        own. A failure is logged and never fails the answer: a late extra message is
+        better than a lost one. `caller` must have read the task (`task_result`)."""
+        if task.state in ACTIVE_TASK_STATES or task.owner_account_id != caller.account_id:
+            return
+        try:
+            # Bounded, so a slow database never holds an answer already in hand. Not
+            # shielded: a request cancelled here cannot answer anyway, and the withdrawal
+            # rolls back with it, so the message stays.
+            async with asyncio.timeout(_WITHDRAW_SECONDS), self.sm.begin() as db:
+                await self._seen(db, task)
+        except Exception:
+            log.warning("compute.wake_withdraw_retry", task_id=str(task.id))
+
+    async def _seen(self, db: AsyncSession, task: ComputeTask) -> None:
+        """Withdraw a finished task's message nobody claimed yet: the one rule for a
+        conversation that already has the end (`mark_seen`, and the owner's stop). A
+        claimed message (its turn is starting or running) is left alone, and a withdrawn
+        one never runs, so it is no wake turn."""
+        if task.state not in ACTIVE_TASK_STATES:
+            await task_store.withdraw_wake(db, task)
 
     async def poll_tasks(self) -> None:
         """One scheduler pass over active tasks; each task's failure is isolated."""

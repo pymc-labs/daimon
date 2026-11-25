@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A finished command no longer sends a second message when the conversation already has its
+  result, or when its machine was stopped from the conversation.** Reading the result there,
+  or stopping the machine from the conversation it started in, withdraws a message nobody has
+  picked up yet. A stop from another conversation, an admin's emergency stop and an expiry
+  still send one message for each command ([Compute sessions](docs/compute.md#how-sessions-work)).
+
 - **Checking a background command now waits up to 40 seconds for it to end, so an agent does
   not call the check in a loop.** `compute_task_status` returns as soon as the command ends,
   and a command still running says to end the reply: the conversation gets a message when it
