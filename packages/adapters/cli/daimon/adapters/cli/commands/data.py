@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+from typing import Annotated
+
 import typer
 from daimon.core.config import load_settings
 from daimon.core.ports.gate import data_sources_on
@@ -32,3 +36,39 @@ def init_command(
         typer.echo(f"The data store needs {'; '.join(outcome.missing)}.", err=True)
         raise typer.Exit(1)
     typer.echo(f"Data store ready; applied {len(outcome.applied)} new file(s).")
+
+
+@data_app.command("access-check")
+def access_check_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant", help="The workspace's id.")],
+    source: Annotated[uuid.UUID, typer.Option("--source", help="The source's id.")],
+    record: Annotated[
+        str | None, typer.Option("--record", help="A record's id in that source.")
+    ] = None,
+    account: Annotated[
+        uuid.UUID | None,
+        typer.Option("--account", help="Also say whether this account can read the record now."),
+    ] = None,
+) -> None:
+    """Show who can read a source or a record, and why."""
+    settings = load_settings()
+    if not data_sources_on(settings):
+        typer.echo("Data sources are off (DAIMON_FEATURES__DATA_SOURCES). Nothing to do.")
+        return
+
+    async def run() -> list[str]:
+        from daimon.data import access_check, pool
+        from daimon.data.schema import Schemas
+
+        async with pool.connection(settings) as conn:
+            return await access_check.check(
+                conn,
+                Schemas.of(settings.data),
+                tenant,
+                source,
+                record=record,
+                account=account,
+            )
+
+    for line in asyncio.run(run()):
+        typer.echo(line)
