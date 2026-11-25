@@ -11,7 +11,7 @@ from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
-from daimon.core.routines import hides_workflow_output
+from daimon.core.routines import hides_moved_output
 from daimon.core.stores import platform_names, web_people, workflow_triggers
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_reads as reads
@@ -487,14 +487,13 @@ async def workflow_view(
         else None,
         migration=None
         if origin is None
-        else _migration(base.source_routine, origin[1], hidden=_hides(workflow, live, who)),
+        else _migration(
+            base.source_routine,
+            origin[1],
+            hidden=hides_moved_output(workflow, origin[1], reader=who.account_id),
+        ),
         run_budget_usd=limits.get("budget_usd"),
     )
-
-
-def _hides(workflow: WorkflowRow, live: WorkflowVersionRow | None, who: Who) -> bool:
-    spec = parse_spec(live.spec) if live is not None else None
-    return spec is not None and hides_workflow_output(workflow, spec, reader=who.account_id)
 
 
 def _migration(

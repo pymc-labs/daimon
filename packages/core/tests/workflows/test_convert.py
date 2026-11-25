@@ -14,6 +14,7 @@ from daimon.core._models import (
     Workflow,
     WorkflowTrigger,
     WorkflowTriggerEvent,
+    WorkflowVersion,
 )
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
@@ -372,6 +373,17 @@ async def test_a_moved_personal_routines_last_result_is_its_owners_alone(
     owner = await db_session.scalar(select(Workflow.owner_account_id).where(Workflow.id == flow))
     assert owner is not None and owner != env.who.account_id, "the admin is not the owner"
     as_owner = Env(env.sm, env.settings, Who(env.who.tenant_id, owner), NOW, env.agents)
-    for reader, shown in ((as_owner, "Notes"), (env, "" if hidden else "Notes")):
-        migration = (await service.get(reader, flow)).migration
-        assert migration is not None and migration["last"]["text"] == shown, f"{reader.who}"
+    plain = {
+        "schema": "daimon.workflow/v1",
+        "name": "T",
+        "start": "f",
+        "nodes": {"f": {"kind": "finish"}},
+    }
+    for edited in (False, True):
+        if edited:  # an editor republishes it as an ordinary workflow: the text stays as hidden
+            await db_session.execute(update(WorkflowVersion).values(spec=plain))
+            await db_session.commit()
+        for reader, shown in ((as_owner, "Notes"), (env, "" if hidden else "Notes")):
+            migration = (await service.get(reader, flow)).migration
+            assert migration is not None, f"{reader.who}"
+            assert migration["last"]["text"] == shown, f"{reader.who}, edited {edited}"

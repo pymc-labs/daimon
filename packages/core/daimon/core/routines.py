@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import Final, Literal
+from collections.abc import Mapping
+from typing import Any, Final, Literal
 
 from daimon.core.fire.subject import RoutineFacts
 from daimon.core.stores.domain import RoutineRow
@@ -80,9 +81,16 @@ def _reaches_nobody(kind: str | None, destination_id: str | None, channel_id: st
     return kind is None and destination_id is None and channel_id is None
 
 
+def private_destination(
+    kind: str | None, destination_id: str | None, channel_id: str | None
+) -> bool:
+    """DM results and destination-free runs, which mount personal memory."""
+    return kind == "dm" or _reaches_nobody(kind, destination_id, channel_id)
+
+
 def has_private_output(row: RoutineFacts) -> bool:
     """DM results and destination-free runs, which mount personal memory."""
-    return row.destination_kind == "dm" or mounts_personal_memory(row)
+    return private_destination(row.destination_kind, row.destination_id, row.channel_id)
 
 
 def private_routine_steps(spec: Spec, home_channel_id: str | None) -> frozenset[str]:
@@ -92,7 +100,7 @@ def private_routine_steps(spec: Spec, home_channel_id: str | None) -> frozenset[
     for node_id, node in spec.nodes.items():
         if isinstance(node, RoutineNode):
             kind, target = (node.to.kind, node.to.id) if node.to else (None, None)
-            if kind == "dm" or _reaches_nobody(kind, target, home_channel_id):
+            if private_destination(kind, target, home_channel_id):
                 found.add(node_id)
     return frozenset(found)
 
@@ -102,6 +110,17 @@ def hides_workflow_output(workflow: WorkflowRow, spec: Spec, *, reader: uuid.UUI
     if reader is not None and reader == workflow.owner_account_id:
         return False
     return bool(private_routine_steps(spec, workflow.home_channel_id))
+
+
+def hides_moved_output(
+    workflow: WorkflowRow, moved: Mapping[str, Any], *, reader: uuid.UUID | None
+) -> bool:
+    """A moved routine's stored text (`converted_from`), private as the routine was when it moved,
+    whatever the workflow's spec says now."""
+    if reader is not None and reader == workflow.owner_account_id:
+        return False
+    to: Mapping[str, Any] = moved.get("to") or {}
+    return private_destination(to.get("kind"), to.get("id"), moved.get("channel_id"))
 
 
 def can_read_routine_output(row: RoutineRow, *, user_id: str | None) -> bool:

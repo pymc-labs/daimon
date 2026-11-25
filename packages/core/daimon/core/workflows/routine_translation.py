@@ -253,6 +253,7 @@ def translate(snap: RoutineSnapshot, *, now: datetime) -> Move | Refusal:
         "owner": snap.created_by_user_id,
         "owner_account_id": None if owner is None else str(owner),
         "to": _to(snap.destination_kind, snap.destination_id),
+        "channel_id": snap.channel_id,
         "fired_at": _iso(snap.last_fired_at),
         "finished_at": _iso(snap.last_finished_at),
         "error": snap.last_error,
