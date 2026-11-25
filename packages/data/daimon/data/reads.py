@@ -119,6 +119,19 @@ async def sources(
         ]
 
 
+async def freshness(
+    conn: AsyncConnection[DictRow], schemas: Schemas, ctx: ReadContext
+) -> dict[UUID, datetime]:
+    """When the newest record this reader may see of each source happened."""
+    d = schemas.data
+    async with access.scoped(conn, schemas, ctx):
+        cur = await conn.execute(
+            f"select source_id, max(occurred_at) as latest from {d}.records"
+            " group by source_id".encode()
+        )
+        return {r["source_id"]: r["latest"] for r in await cur.fetchall()}
+
+
 async def browse(
     conn: AsyncConnection[DictRow],
     schemas: Schemas,

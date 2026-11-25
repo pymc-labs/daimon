@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Collection, Mapping
-from typing import Protocol
+from collections.abc import Callable, Collection, Mapping
+from typing import Final, Protocol
 
 import structlog
+from daimon.core import ports
 from daimon.core.agent_admin import require_admin
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_target import ChangeRecorder
+from daimon.core.config import Settings
 from daimon.core.server_skills.gate import manifest_digest
 from daimon.core.skills.ingest import SkillBundle, retained_archive_files
 from daimon.core.stores import workspace_skills as store
@@ -31,7 +33,9 @@ __all__ = [
     "list_visible_skills",
     "record_bundle",
     "record_published",
+    "register_skill_scopes",
     "set_skill_scope",
+    "skill_scopes",
 ]
 
 log = structlog.get_logger(__name__)
@@ -54,6 +58,20 @@ class NoScopes:
         self, *, tenant_id: uuid.UUID, account_id: uuid.UUID | None, scopes: Collection[str]
     ) -> frozenset[str]:
         return frozenset()
+
+
+_FACTORY: Final[list[Callable[[Settings], SkillScopes]]] = []
+
+
+def register_skill_scopes(factory: Callable[[Settings], SkillScopes]) -> None:
+    """Fill the scope seam: the installed data package says which scopes a caller holds."""
+    _FACTORY[:] = [factory]
+
+
+def skill_scopes(settings: Settings) -> SkillScopes:
+    """The registered scope checker, or `NoScopes` where no package fills the seam."""
+    ports.load()
+    return _FACTORY[0](settings) if _FACTORY else NoScopes()
 
 
 def files_digest(files: Mapping[str, bytes]) -> str:
