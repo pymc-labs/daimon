@@ -271,7 +271,7 @@ def go_case(tmp_path, monkeypatch):
     pin.write_text("{}")
     expiry = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     identity = "independently-authorized-attempt"
-    credential = "/home/clsandoval/.config/daimon-nc/openai.env"
+    credential = gate.CREDENTIAL_FILE
     approval = {
         "attempt_identity": identity,
         "expires_at": expiry,

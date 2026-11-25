@@ -584,8 +584,7 @@ def _is_dead_session(state: TurnState) -> bool:
     single terminal error bricked the thread PERMANENTLY: MA terminated the
     session, the mapping row still pointed at it, and every later message in
     that thread 400'd here forever with zero tokens billed and no path back.
-    Observed on staging thread 1535185295245582356 / session
-    sesn_01TBcsjhyD4KMEc6wasC3vyg (2026-08-07), where an oversized image ended
+    Observed on a staging thread (2026-08-07), where an oversized image ended
     the session and the next "hello" — and every message after it — failed.
 
     Note this deliberately does NOT fire on the terminating turn itself (whose
