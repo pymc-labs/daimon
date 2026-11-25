@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from daimon.core.config import DataSettings
+from daimon.core.ports.data_metering import Purpose
 from daimon.data import access, embed, identity
 from daimon.data.access import ReadContext, person
 from daimon.data.evals.gold import Caller, GoldSet, Question
@@ -71,7 +72,7 @@ class SpendMeter:
 
     async def record(
         self,
-        purpose: str,
+        purpose: Purpose,
         *,
         tenant_id: uuid.UUID,
         platform_user_id: str | None,

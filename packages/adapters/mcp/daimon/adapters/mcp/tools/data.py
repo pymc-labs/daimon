@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Final, cast
+from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.data_access import data_audience_for
@@ -26,7 +26,7 @@ from daimon.core.ports.data_metering import SessionMeter
 from daimon.data import access, caller_sql, identity, pool, reads
 from daimon.data.access import ReadContext, person
 from daimon.data.caller_sql import SqlRefused
-from daimon.data.metering import Meter, Payer
+from daimon.data.metering import Payer
 from daimon.data.schema import Schemas
 from daimon.data.search.arms import Filters
 from daimon.data.search.pipeline import search
@@ -123,8 +123,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 rc,
                 query,
                 settings=settings.data,
-                # The store's `Meter.record` takes any purpose; core's names the two it bills.
-                meter=cast(Meter, SessionMeter(runtime.session_factory, settings.billing.markup)),
+                meter=SessionMeter(runtime.session_factory, settings.billing.markup),
                 payer=Payer(auth.tenant_id, auth.platform_user_id),
                 limit=min(max(limit, 1), 25),
                 filters=filters,

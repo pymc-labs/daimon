@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated
 from uuid import UUID
 
 import typer
@@ -44,7 +44,6 @@ def eval_command(
     from daimon.data import pool
     from daimon.data.evals import gold as golds
     from daimon.data.evals.run import Budget, estimate, evaluate
-    from daimon.data.metering import Meter
     from daimon.data.schema import Schemas
 
     questions = [q for path in gold for q in golds.load(path).questions][:limit]
@@ -63,7 +62,7 @@ def eval_command(
                     Schemas.of(settings.data),
                     settings.data,
                     golds.GoldSet(questions=questions),
-                    meter=cast(Meter, meter),
+                    meter=meter,
                     budget=Budget(max_usd, _price),
                     estimated=cost,
                 )
