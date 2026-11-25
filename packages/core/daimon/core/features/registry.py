@@ -974,6 +974,29 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         combine_override="most_specific",
     ),
     FeatureSpec(
+        key="compute_wake_runs",
+        name="Cloud computers continue after a job",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "When a background command ends and nobody is in the conversation, the agent "
+            "may run the next command on that cloud computer. After a set number in a row it "
+            "waits until the owner runs a command or writes a file there; a message alone "
+            "does not count. Off: it only reads the result and reports. Only a server admin "
+            "can change it."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("compute",),
+        authority=_SERVER_ADMIN,
+        # Off is the default and the strict value, so a stricter-wins rule could never
+        # turn it on. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
         key="require_routine_destination",
         name="Routines must say where they post",
         category="guardrails",

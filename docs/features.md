@@ -119,6 +119,7 @@ Where each feature can be set, and its default.
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
 | Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Approval for cloud computers | `compute_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
+| Cloud computers continue after a job | `compute_wake_runs` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
@@ -1315,6 +1316,18 @@ Ask shows a card before a cloud computer is started or its time is extended. Ski
 | Key | `compute_approval` |
 | Values | `skip` (Skip the card), `ask` (Ask) |
 | Default | `ask` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Cloud computers continue after a job
+
+When a background command ends and nobody is in the conversation, the agent may run the next command on that cloud computer. After a set number in a row it waits until the owner runs a command or writes a file there; a message alone does not count. Off: it only reads the result and reports. Only a server admin can change it.
+
+| | |
+| --- | --- |
+| Key | `compute_wake_runs` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
 | Levels | Workspace, Agent |
 | Combines | Most specific wins |
 

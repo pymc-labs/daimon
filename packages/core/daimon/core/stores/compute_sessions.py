@@ -105,6 +105,7 @@ async def save(db: AsyncSession, session: ComputeSession) -> None:
             expires_at=session.expires_at,
             warned_for=session.warned_for,
             extension_keys=session.extension_keys,
+            wake_turns=session.wake_turns,
         )
     )
 
