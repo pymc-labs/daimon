@@ -210,11 +210,10 @@ def _task_view(task: ComputeTask, *, output: bool) -> dict[str, JsonValue]:
     return view
 
 
-#: What compute_run_bash adds to a command that ends after its caller stops waiting.
-_STILL_RUNNING = (
-    "Still running. This conversation gets a message when it ends. "
-    "Check it with compute_task_status."
-)
+#: What compute_run_bash and compute_task_status add to a command still running when
+#: they stop waiting. Its end is always reported in the conversation, whoever asked
+#: (`stores.compute_tasks.finish`), so the agent need not look again.
+_STILL_RUNNING = "Still running. End your reply; this conversation gets a message when it ends."
 
 
 #: What it adds to a command whose end another poll saw: the conversation gets the message.
@@ -541,12 +540,14 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def compute_task_status(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, task_id: uuid.UUID, origin_context_id: str
+        ctx: Context, task_id: uuid.UUID, origin_context_id: str, wait_seconds: int = 40
     ) -> dict[str, JsonValue]:
         """Check one of your background commands: state, exit code and output size.
 
-        Running commands are checked on the machine once. A running command keeps
-        its session alive up to the maximum lifetime.
+        A running command is waited for up to wait_seconds (at most 40), and the result
+        comes as soon as it ends. A finished command returns at once. Do not call this
+        in a loop: end your reply, and this conversation gets a message when the command
+        ends. A running command keeps its session alive up to the maximum lifetime.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id, wake_ok=True)
         try:
@@ -554,9 +555,15 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             await _readable(
                 runtime, auth, origin_context_id, await service.get(caller, task.session_id)
             )
-            return _task_view(await service.task_status(caller, task_id), output=False)
+            seen = await service.task_status(
+                caller, task_id, wait_seconds=min(max(wait_seconds, 0), 40)
+            )
         except (StoreError, ComputeProviderError) as exc:
             raise ToolError(str(exc)) from None
+        view = _task_view(seen, output=False)
+        if seen.state in ACTIVE_TASK_STATES:
+            view["note"] = _STILL_RUNNING
+        return view
 
     @mcp.tool
     async def compute_task_result(  # pyright: ignore[reportUnusedFunction]

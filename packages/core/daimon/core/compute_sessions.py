@@ -82,6 +82,8 @@ _INLINE_POLLS = (0.3, 0.7, 1.0)
 _INLINE_EXTRA_TASKS = 4
 # Seconds between the caller's last look at an inline command and the scheduler's first.
 _INLINE_HANDOVER = 5
+#: How often a status read that waits looks at its command again.
+_STATUS_POLL_SECONDS = 2.0
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may always make.
@@ -838,28 +840,56 @@ class ComputeSessions:
         await self._owned(db, caller, task.session_id, read=True)
         return task
 
-    async def task_status(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
-        """Read a task, probing the machine once if it is still active.
+    async def task_status(
+        self, caller: ComputeCaller, task_id: uuid.UUID, *, wait_seconds: float = 0
+    ) -> ComputeTask:
+        """Read a task and, while it is active, probe the machine until it ends or
+        `wait_seconds` pass. A task that already ended returns at once.
 
-        Like a poll, a probe that finds the command running keeps the lease alive.
+        Each probe follows today's rules for a status read (`_poll_task`). An owner who
+        is present sees an ending here, so no separate wake is queued for it; a wake's
+        turn has no owner watching, so the wake stays. While an inline caller still owns
+        the task, a probe only reads it. Like a poll, a probe that finds the command
+        running keeps the lease alive.
+
+        The wait is bounded on the event loop's clock, as `run` is: a lock wait or a
+        probe cut short settles nothing, and the last state read is returned. With no
+        wait there is one probe, unbounded as before. A database error before any probe
+        succeeded is the plain refusal; after one, the state read then is returned.
         """
         async with self.sm.begin() as db:
             task = await self._owned_task(db, caller, task_id)
-        if task.state in ACTIVE_TASK_STATES:
-            # An owner who is present sees an ending here, so no separate wake is
-            # queued for it. A wake's turn has no owner watching: the wake stays.
-            # While an inline caller still waits for the task, this only reads it.
+        if task.state not in ACTIVE_TASK_STATES:
+            return task
+        wait_seconds = max(0.0, wait_seconds)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        give_up = self.clock() + timedelta(seconds=wait_seconds)
+        wake = not owner_present(caller.origin)
+        probed = False
+        while True:
             try:
                 await self._poll_task(
-                    task.tenant_id, task.id, wake=not owner_present(caller.origin)
+                    task.tenant_id, task.id, wake=wake, deadline=deadline if wait_seconds else None
                 )
+                async with self.sm.begin() as db:
+                    task = await self._owned_task(db, caller, task_id)
+            except TimeoutError:
+                # Rolled back before any write: this call settled nothing.
+                return task
             except SQLAlchemyError:
                 # Never relay database errors; the scheduler keeps polling.
                 log.warning("compute.task_status_retry", task_id=str(task.id))
-                raise StoreError("Could not check the command right now. Try again soon.") from None
-            async with self.sm.begin() as db:
-                task = await self._owned_task(db, caller, task_id)
-        return task
+                if not probed:
+                    raise StoreError(
+                        "Could not check the command right now. Try again soon."
+                    ) from None
+                return task
+            probed = True
+            left = (give_up - self.clock()).total_seconds()
+            if task.state not in ACTIVE_TASK_STATES or left <= 0 or loop.time() >= deadline:
+                return task
+            await self.sleep(min(_STATUS_POLL_SECONDS, left))
 
     async def task_result(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
         async with self.sm.begin() as db:

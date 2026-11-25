@@ -994,6 +994,56 @@ async def test_an_inline_command_that_needs_longer_continues_with_a_note(woken):
     woken.replay.assert_not_awaited()
 
 
+@pytest.mark.parametrize(("asked", "waited"), [(45, 40), (40, 40), (5, 5), (0, 0), (-3, 0)])
+@pytest.mark.parametrize("state", ["running", "succeeded"])
+async def test_a_status_check_waits_at_most_40_seconds_and_says_to_end_the_reply(
+    monkeypatch, asked, waited, state
+):
+    """Older calls pass 45: it is not refused. A command still running after the wait
+    tells the agent to end its reply, so it does not check again in a loop."""
+    from daimon.core.compute_models import ComputeTask
+
+    now = datetime.now(UTC)
+    task = ComputeTask(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        owner_account_id=uuid.uuid4(),
+        request_key="parent:use",
+        command_preview="python fit.py",
+        timeout_minutes=60,
+        deadline_at=now,
+        output_path="/tmp/daimon-tasks/x.out",
+        created_at=now,
+        state=state,
+    )
+    service = SimpleNamespace(
+        task_result=AsyncMock(return_value=task),
+        get=AsyncMock(return_value=SimpleNamespace(source_metadata={})),
+        task_status=AsyncMock(return_value=task),
+    )
+    monkeypatch.setattr(compute, "ComputeSessions", lambda *a, **k: service)
+    monkeypatch.setattr(compute, "_caller", AsyncMock(return_value=(None, "caller")))
+    monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=None,
+        settings=SimpleNamespace(compute=ComputeSettings()),
+        compute_provider=object(),
+    )
+    compute.register_compute_tools(mcp, runtime)
+    tool = await mcp.get_tool("compute_task_status")
+    view = await tool.fn(ctx=None, task_id=task.id, origin_context_id="o", wait_seconds=asked)
+    assert service.task_status.await_args.kwargs == {"wait_seconds": waited}
+    if state == "running":
+        assert view["note"] == compute._STILL_RUNNING
+        assert view["note"] == (
+            "Still running. End your reply; this conversation gets a message when it ends."
+        )
+    else:
+        assert "note" not in view, "an ended command says nothing more"
+
+
 def test_an_end_another_poll_saw_is_left_to_the_conversation_message():
     from daimon.core.compute_models import ComputeTask
     from daimon.core.compute_sessions import InlineRun
