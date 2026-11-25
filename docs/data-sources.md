@@ -73,6 +73,50 @@ never counts, since a directory user can set it.
 Google sign-in for data sources needs a Google OAuth client in
 [`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).
 
+## Freshness
+
+A source has a freshness floor and ceiling in minutes. Its lifetime is three sync intervals,
+at least the floor and at most the ceiling. Once its last complete sync is older than that,
+its records are hidden from every read until the next complete sync. Without a ceiling a
+source is never hidden.
+
+A connector can also check a record with the source at read time, and a source that
+cannot is read as stored. A live source is asked at search time instead: it stores nothing,
+only callers holding its scope reach it, and one that fails or is slow is skipped.
+
+## Publishing
+
+A new source starts in shadow, where no one reads it. Publishing it needs evidence. If the
+connector can ask the source whether a person may open a record, Daimon compares a sample
+of linked people and records and needs a clean run no older than 36 hours. Any case of Daimon
+showing more than the source does blocks publishing; showing less only warns. Other sources
+publish after a complete sync.
+
+## Declared config
+
+Set `DAIMON_DATA__DECLARED` to a YAML or JSON file to declare sources, scopes and grants
+for each workspace. Daimon applies it at start and every 10 minutes.
+
+```yaml
+revision: 4
+tenants:
+  - workspace: <workspace id>
+    scopes: [{id: shared:eng, kind: shared, name: Engineering}]
+    sources:
+      - {id: wiki, kind: postgres, name: Wiki, credentials: {dsn: "env:WIKI_DSN"}, publish: true}
+```
+
+Declared rows are read-only in the app. Daimon never deletes one: a removed entry stays, and
+`retire: true` retires a source for good. A source is created in shadow and published only
+with `publish: true` and a clean run. `replaces` retires the sources it names. A `revision`
+below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
+
+## Who can read a record
+
+`daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.
+Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account
+can read it now, and why not.
+
 ## Vector search
 
 Embedding search needs the `vector` extension. The default Postgres image lacks it, and
