@@ -54,6 +54,7 @@ from daimon.core.stores.task_continuations import (
     start_wake_row,
 )
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_origin import wake_turn
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -295,6 +296,7 @@ async def keep_wake(
 ) -> AsyncIterator[None]:
     """Renew a started wake's lease while its turn runs, and stop when it ends.
 
+    The turn's origin is bound to the claim (`daimon.core.turn_origin.wake_turn`).
     `tenant_id` and `kind` only label the log line when the lease is lost."""
 
     async def renew() -> None:
@@ -328,7 +330,8 @@ async def keep_wake(
 
     renewer = asyncio.create_task(renew())
     try:
-        yield
+        with wake_turn(claim.owner):
+            yield
     finally:
         renewer.cancel()
         await asyncio.wait([renewer])

@@ -6,7 +6,8 @@ configured caps; the owner, a tenant admin or the fenced reconciler may stop it.
 
 Only the session owner, through an authorized attended conversation, can start a
 background command; its status and result go only to that owner; its completion
-wake goes only to the originating conversation, once.
+wake goes only to the originating conversation, once. The turn that wake starts
+may read the command's session and nothing more (`turn_may_read`).
 """
 
 from __future__ import annotations
@@ -63,6 +64,25 @@ START_FAILED = (
 _START_GRACE = timedelta(minutes=2)
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
+#: The machine operations that only read: the ones a completion wake's turn may make.
+READ_OPERATIONS = frozenset({"read_file", "list_files"})
+
+
+def owner_present(origin: TurnOriginRow) -> bool:
+    """The owner sent this turn's message and waits for its reply."""
+    return origin.attended and origin.human_invocation is True
+
+
+async def turn_may_read(
+    db: AsyncSession, origin: TurnOriginRow, session: ComputeSession, *, now: datetime
+) -> bool:
+    """Whether this turn may read this session: the one rule for every compute read.
+
+    The owner is present, or the turn is the completion wake of one of the session's
+    own background commands (`stores.compute_tasks.wake_turn_of`). Such a wake reads
+    and reports; it never launches, extends, runs, writes or stops.
+    """
+    return owner_present(origin) or await task_store.wake_turn_of(db, origin, session, now=now)
 
 
 @dataclass(frozen=True)
@@ -99,7 +119,10 @@ class ComputeSessions:
             raise StoreError(f"Lifetime must be between 1 and {self.settings.max_ttl_hours} hours")
         return value
 
-    async def _origin(self, db: AsyncSession, caller: ComputeCaller) -> None:
+    async def _origin(
+        self, db: AsyncSession, caller: ComputeCaller, *, read: bool = False
+    ) -> TurnOriginRow:
+        """The caller's live origin; ``read`` leaves an absent owner to `turn_may_read`."""
         origin = await get_active_origin(
             db,
             tenant_id=caller.tenant_id,
@@ -110,18 +133,24 @@ class ComputeSessions:
         )
         if (
             origin is None
-            or not origin.attended
-            or origin.human_invocation is not True
             or not caller.chat_session_id
             or origin.chat_session_id != caller.chat_session_id
             or origin != caller.origin
+            or not (read or owner_present(origin))
         ):
             raise StoreError("Use an active attended conversation with the session owner.")
+        return origin
 
     async def _owned(
-        self, db: AsyncSession, caller: ComputeCaller, session_id: uuid.UUID, *, stop: bool = False
+        self,
+        db: AsyncSession,
+        caller: ComputeCaller,
+        session_id: uuid.UUID,
+        *,
+        stop: bool = False,
+        read: bool = False,
     ) -> ComputeSession:
-        await self._origin(db, caller)
+        origin = await self._origin(db, caller, read=read)
         session = await store.get(db, caller.tenant_id, session_id, lock=True)
         if session is None or session.deployment_id != self.settings.deployment_id:
             raise StoreError("Session not found")
@@ -133,6 +162,8 @@ class ComputeSessions:
             session.parent_channel_id,
         ) != (caller.origin.platform, caller.origin.thread_id, caller.origin.parent_channel_id):
             raise StoreError("Session not found in this owner's conversation")
+        if read and not await turn_may_read(db, origin, session, now=self.clock()):
+            raise StoreError("The machine owner must be here in an active conversation.")
         return session
 
     async def launch(
@@ -254,7 +285,12 @@ class ComputeSessions:
             log.warning("compute.failed_start_delete_retry", session_id=str(session.id))
 
     async def _started(
-        self, caller: ComputeCaller, session_id: uuid.UUID, *, refuse_starting: bool = True
+        self,
+        caller: ComputeCaller,
+        session_id: uuid.UUID,
+        *,
+        refuse_starting: bool = True,
+        read: bool = False,
     ) -> None:
         """Let a call through only to a machine that has started.
 
@@ -264,7 +300,7 @@ class ComputeSessions:
         `refuse_starting` is off for a status read, which reports the wait instead.
         """
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id)
+            session = await self._owned(db, caller, session_id, read=read)
             if session.state != "launching" or session.expires_at <= self.clock():
                 return
             session = await self._settle(db, session, tell_owner=False)
@@ -329,7 +365,7 @@ class ComputeSessions:
 
     async def get(self, caller: ComputeCaller, session_id: uuid.UUID) -> ComputeSession:
         async with self.sm.begin() as db:
-            return await self._owned(db, caller, session_id)
+            return await self._owned(db, caller, session_id, read=True)
 
     async def status(self, caller: ComputeCaller, session_id: uuid.UUID) -> ComputeStatus:
         """The session and its machine as they are now.
@@ -337,9 +373,9 @@ class ComputeSessions:
         A session still `launching` is moved on first, so a status never shows
         `running` for a machine that has not started, and shows it as soon as it has.
         """
-        await self._started(caller, session_id, refuse_starting=False)
+        await self._started(caller, session_id, refuse_starting=False, read=True)
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id)
+            session = await self._owned(db, caller, session_id, read=True)
             resource = await self.provider.inspect(session)
             return ComputeStatus(**session.model_dump(), machine_state=resource.machine_state)
 
@@ -365,17 +401,18 @@ class ComputeSessions:
         tool: str,
         arguments: dict[str, JsonValue],
     ) -> JsonValue:
-        if tool not in {"run_bash", "write_file", "read_file", "list_files"}:
+        if tool not in {"run_bash", "write_file"} | READ_OPERATIONS:
             raise StoreError("Unsupported session operation")
-        await self._started(caller, session_id)
+        read = tool in READ_OPERATIONS
+        await self._started(caller, session_id, read=read)
         async with self.sm.begin() as db:
-            session = await self._owned(db, caller, session_id)
+            session = await self._owned(db, caller, session_id, read=read)
             if session.state != "running" or session.expires_at <= self.clock():
                 raise StoreError("The session is expired or stopping. Launch a new session.")
             result = await self.provider.call(
                 session, session_token(self.settings, session.id), tool, arguments
             )
-            if tool in {"run_bash", "write_file"}:
+            if not read:
                 await store.save(
                     db,
                     session.model_copy(
@@ -561,7 +598,7 @@ class ComputeSessions:
         if task is None or task.owner_account_id != caller.account_id:
             raise StoreError("Command not found")
         # The session check also proves the same owner and the same conversation.
-        await self._owned(db, caller, task.session_id)
+        await self._owned(db, caller, task.session_id, read=True)
         return task
 
     async def task_status(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
@@ -572,9 +609,12 @@ class ComputeSessions:
         async with self.sm.begin() as db:
             task = await self._owned_task(db, caller, task_id)
         if task.state in ACTIVE_TASK_STATES:
-            # The owner sees an ending here, so no separate wake is queued for it.
+            # An owner who is present sees an ending here, so no separate wake is
+            # queued for it. A wake's turn has no owner watching: the wake stays.
             try:
-                await self._poll_task(task.tenant_id, task.id, wake=False)
+                await self._poll_task(
+                    task.tenant_id, task.id, wake=not owner_present(caller.origin)
+                )
             except SQLAlchemyError:
                 # Never relay database errors; the scheduler keeps polling.
                 log.warning("compute.task_status_retry", task_id=str(task.id))

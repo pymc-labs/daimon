@@ -37,6 +37,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
     TurnNotStarted,
 )
+from daimon.core.turn_origin import wake_turn
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -76,7 +77,8 @@ async def dispatch_scope_timer(
         error_class: str | None = None
         try:
             # An imported timer carries no set time; the seed leaves it out.
-            await run_timer(row, render_timer_seed(row.requested_work or ""))
+            with wake_turn(claim.owner):
+                await run_timer(row, render_timer_seed(row.requested_work or ""))
         except AnthropicDisabled:
             log.warning("scope_timer.provider_guard_denied", row_id=str(row.id))
             report_wake_failed(
