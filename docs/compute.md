@@ -83,9 +83,10 @@ confirms. Keep the scheduler running while any session remains. A Discord
 server admin can emergency-stop a session without seeing its files.
 
 Inline bash stops after 40 seconds. Longer commands run in the background, and
-the scheduler posts one message in the conversation when each ends. For that
-message Daimon can read the command's output and the machine's files. It
-cannot run commands or change the machine until the owner writes again.
+the scheduler posts one message in the conversation when each ends. In a
+thread, Daimon can read the command's output and the machine's files for that
+message. Outside a thread it reports only the end of the output. It cannot run
+commands or change the machine until the owner writes again.
 
 Google can restart a machine at any time. A restart clears its files and ends
 running commands. Each is reported as stopped, with the last output Daimon

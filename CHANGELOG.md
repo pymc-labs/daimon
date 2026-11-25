@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Daimon reads a finished background command before it reports.** When a long command on a
-  cloud machine ends, the message Daimon posts can use the whole saved result and the machine's
-  files, not only the last 1,500 characters. For that message it can only read that one
-  machine: it cannot run commands, write files, or launch, extend or stop a machine
+- **In a thread, Daimon reads a finished background command before it reports.** When a long
+  command on a cloud machine ends, the message Daimon posts in the thread can use the whole
+  saved result and the machine's files, not only the last 1,500 characters. For that message
+  it can only read that one machine: it cannot run commands, write files, or launch, extend
+  or stop a machine. Outside a thread it still reports the last 1,500 characters
   ([Compute sessions](docs/compute.md#how-sessions-work)).
 
 - **A quiet routine run posts nothing.** Each run with a destination is told to end with one

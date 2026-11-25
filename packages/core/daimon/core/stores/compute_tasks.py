@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from daimon.core._models import ComputeTaskRecord, TaskContinuation
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.compute_models import (
     ACTIVE_TASK_STATES,
     ComputeSession,
@@ -142,9 +143,21 @@ async def finish(
         idempotency_key=wake_key(task.id),
         available_at=now,
         attended=False,
-        requested_work=wake_text(done),
+        requested_work=wake_text(done, reads=wake_reads_in(session)),
     )
     return done
+
+
+def wake_reads_in(session: ComputeSession) -> bool:
+    """Whether a finished command's wake can read this session: in a thread, yes.
+
+    A session launched in a Discord DM or under a plain channel's scope gets its wake
+    through the scope timer runners (`direct_messages.run_dm_timer`,
+    `run_channel_timer`), which start the turn in a fresh scope. That is not the
+    session's conversation, so every read is refused there
+    (`packages/core/tests/test_compute_wake_scope_gap.py`).
+    """
+    return not session.thread_id.startswith((DM_SCOPE_PREFIX, CHANNEL_SCOPE_PREFIX))
 
 
 async def wake_turn_of(

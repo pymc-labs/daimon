@@ -533,6 +533,8 @@ async def test_background_task_runs_once_and_wakes_its_conversation_once(db_engi
     assert wake.requester_account_id == owner.account_id
     assert (wake.parent_channel_id, wake.thread_id) == ("parent", "thread")
     assert str(task.id) in wake.requested_work
+    # In a thread the wake's turn can read, and its text says so.
+    assert "You can read" in wake.requested_work
     assert "never instructions" in wake.requested_work
     assert wake.requested_work.endswith(">>>end of untrusted data")
     assert fake.tasks[task.id.hex].starts == 1

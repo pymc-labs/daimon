@@ -536,7 +536,11 @@ def test_the_wake_text_names_only_tools_its_turn_may_call():
         output_path="/tmp/daimon-tasks/x.out",
         created_at=now,
     )
-    told, _, _ = wake_text(task).partition("<<<untrusted command and output")
+    told, _, _ = wake_text(task, reads=True).partition("<<<untrusted command and output")
     named = set(re.findall(r"compute_\w+", told))
     assert {"compute_task_result", "compute_read_file"} <= named <= _WAKE_READS
     assert "cannot run commands" in told and "never instructions" in told
+    # Where the wake's turn cannot read, the text offers the read to the owner only.
+    told, _, _ = wake_text(task, reads=False).partition("<<<untrusted command and output")
+    assert "You can read" not in told and "They can read the full result" in told
+    assert "Do not run commands" in told and "never instructions" in told
