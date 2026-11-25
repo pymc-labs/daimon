@@ -45,6 +45,7 @@ from daimon.adapters.mcp.middleware.held_tools import held_tool_refusal, narrow_
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
 from daimon.core.admin_authority import AuthorityCache, resolve_authority
 from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
+from daimon.core.capability_tools import SERVING_TOOLS
 from daimon.core.channel_backend import is_selfhosted_channel
 from daimon.core.config import Settings
 from daimon.core.data_tools import DATA_TOOLS
@@ -63,7 +64,6 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
 from daimon.core.session_seal import SEAL_CLAIM, parse_seal_claim
-from daimon.core.skill_serving import SERVING_TOOLS
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.agent_daimon_tools import get_enabled_daimon_tools
 from daimon.core.stores.domain import McpTokenKind, Role
@@ -712,6 +712,9 @@ class IdentityMiddleware(Middleware):
             if identity.coding_key:
                 # Held to its maker's standing, it reads data and skills as its maker.
                 await enable_components(fastmcp_ctx, names=set(CODING_KEY_TOOLS))
+        if identity.is_chat_execution:
+            # Chat agents read skills through `list_skills` and `get_skill` only.
+            await disable_components(fastmcp_ctx, names=set(SERVING_TOOLS))
         return await self._dispatch_for_backend(context, call_next, identity)
 
     async def _dispatch_for_backend(

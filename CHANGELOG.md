@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Coding keys, the hub and outside clients can read the skill library.** The workspace
+  feature `library_skills` (off by default) adds `list_library_skills` and
+  `read_library_skill`; a scoped skill shows only to callers whose data reads include its
+  scope. Declared `skill_repos` add a repository's skills ([Data sources](docs/data-sources.md)).
+
 - **Data sources can go stale, be read live, be declared in a file and be checked before
   they publish.** A source past its freshness ceiling is hidden until it syncs; a new source
   publishes only after a clean comparison with its own permissions. `DAIMON_DATA__DECLARED`

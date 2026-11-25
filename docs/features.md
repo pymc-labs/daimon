@@ -98,6 +98,7 @@ Where each feature can be set, and its default.
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Data source reads | `data_reads` | Capability | Off |  | ✓ | ✓ | ✓ |  |  |  |
+| Library skills | `library_skills` | Capability | Off |  | ✓ |  |  |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |
@@ -1107,6 +1108,18 @@ The agent can search the workspace's data sources, showing only what everyone wh
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Library skills
+
+Coding keys, the hub and outside clients can read the skill library, by scope. Chat agents keep their own skill tools.
+
+| | |
+| --- | --- |
+| Key | `library_skills` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace |
 | Combines | Off above is a ceiling |
 
 ## Long job dollar cap

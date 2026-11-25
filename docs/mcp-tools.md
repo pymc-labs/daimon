@@ -635,7 +635,8 @@ version and restore an older one.
 
 ## `skill_serving`
 
-Serve the workspace library's skills to MCP clients: list them and read their files.
+Serve the workspace library's skills to coding keys, the hub and outside clients, behind
+`library_skills`: list them and read their files.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -859,7 +860,8 @@ reaches several workspaces here.
 
 ## Hub login mounts: `skill_serving`
 
-Serve the workspace library's skills to MCP clients: list them and read their files.
+Serve the workspace library's skills to coding keys, the hub and outside clients, behind
+`library_skills`: list them and read their files.
 
 A second surface, separate from the tools above: one app per platform, mounted at
 `/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present only

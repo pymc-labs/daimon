@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import time
 import uuid
+from collections.abc import Callable
 
 import anthropic
 import httpx
@@ -247,6 +248,7 @@ async def _sync_impl(
                 branch=branch,
                 path=path,
                 tenant_id=auth.tenant_id,
+                records=runtime.session_factory,
                 seeded_skill_names=seeded_skill_names,
                 # `_require_admin` above.
                 is_admin=True,
@@ -350,17 +352,25 @@ async def _skill_view(
     )
 
 
+async def skill_hider(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None = None
+) -> Callable[[str, str], bool]:
+    """Whether a tenant skill (its id and display-title body) belongs, or may belong, to an
+    agent across an isolated channel's line: every skill reader applies it."""
+    caller = await _skill_view(runtime, auth, origin_context_id)
+    owners = await load_skill_owners(runtime, caller, auth.tenant_id)
+    return lambda skill_id, body: caller.hides_skill(owners, skill_id=skill_id, body=body)
+
+
 async def _hidden(
     runtime: McpRuntime,
     auth: AuthIdentity,
     skill: SkillListResponse,
     origin_context_id: str | None = None,
 ) -> bool:
-    """Whether `skill` belongs, or may belong, to an agent across an isolated channel's line."""
-    caller = await _skill_view(runtime, auth, origin_context_id)
-    owners = await load_skill_owners(runtime, caller, auth.tenant_id)
+    hides = await skill_hider(runtime, auth, origin_context_id)
     body = strip_tenant_prefix(tenant_id=auth.tenant_id, display_title=skill.display_title or "")
-    return caller.hides_skill(owners, skill_id=skill.id, body=body or "")
+    return hides(skill.id, body or "")
 
 
 async def _list_impl(
@@ -369,8 +379,7 @@ async def _list_impl(
     origin_context_id: str | None = None,
 ) -> list[SkillInfo]:
     rows, _truncated = await list_skills_lenient(runtime.client)
-    caller = await _skill_view(runtime, auth, origin_context_id)
-    owners = await load_skill_owners(runtime, caller, auth.tenant_id)
+    hides = await skill_hider(runtime, auth, origin_context_id)
     result: list[SkillInfo] = []
     for row in rows:
         if row.source == "anthropic":
@@ -381,7 +390,7 @@ async def _list_impl(
             bare = strip_tenant_prefix(
                 tenant_id=auth.tenant_id, display_title=row.display_title or ""
             )
-            if bare is not None and not caller.hides_skill(owners, skill_id=row.id, body=bare):
+            if bare is not None and not hides(row.id, bare):
                 # Own-namespace skill: display the bare name.
                 result.append(SkillInfo.from_ma(row, display_name=bare))
             # Foreign-tenant skills are excluded from the result.

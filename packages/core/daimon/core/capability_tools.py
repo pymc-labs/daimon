@@ -6,6 +6,10 @@ from typing import Final
 
 from daimon.core.data_tools import DATA_READS, DATA_TOOLS
 
+LIBRARY_SKILLS: Final = "library_skills"
+SERVING_TOOLS: Final = frozenset({"list_library_skills", "read_library_skill"})
+"""The library's skills (`daimon.adapters.mcp.tools.skill_serving`); never offered to chat."""
+
 CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
     "watches": frozenset(
         {
@@ -92,6 +96,7 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     DATA_READS: DATA_TOOLS,
+    LIBRARY_SKILLS: SERVING_TOOLS,
 }
 """Feature key to the tools it switches. Every one binds to the session, so a tier's Off takes
 the tools from the next message on; a test keeps these names equal to what the server registers."""

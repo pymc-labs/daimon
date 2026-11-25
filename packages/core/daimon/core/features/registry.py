@@ -1331,6 +1331,22 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         depends_on=("data_sources", "tool_safety"),
         authority=_ADMIN_NOT_OWNER,
     ),
+    FeatureSpec(
+        key="library_skills",
+        name="Library skills",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace",),
+        binds="turn",
+        doc=(
+            "Coding keys, the hub and outside clients can read the skill library, by scope. "
+            "Chat agents keep their own skill tools."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+    ),
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",
