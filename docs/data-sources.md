@@ -58,6 +58,21 @@ failure instead.
 Connections to private addresses are refused. To reach a database on your own network,
 list its host name or address range in `DAIMON_DATA__PRIVATE_HOSTS`.
 
+## People and their accounts
+
+A record a source shares with some of its users reads for a Daimon account only through a
+link to one of those users. Daimon links an account only on a proof the source or chat
+platform verified: the person's own chat account, a GitHub link, Sign in with Slack or
+Microsoft, or the person signing in to the source.
+
+A data admin can link someone else's account, never their own. The person gets a notice
+and the audit trail records it. An email the source and the person both verified makes a
+suggested link, and a source can link those itself for one email domain. A Microsoft email
+never counts, since a directory user can set it.
+
+Google sign-in for data sources needs a Google OAuth client in
+[`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).
+
 ## Vector search
 
 Embedding search needs the `vector` extension. The default Postgres image lacks it, and

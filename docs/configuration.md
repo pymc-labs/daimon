@@ -1423,6 +1423,19 @@ Seconds a search may run before it returns what it has.
 Private hosts or ranges, comma-separated, that database connections to external Postgres
 servers may reach. Public hosts need no entry.
 
+### `DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`
+
+`str | None` · optional · default unset
+
+Google OAuth client id that people sign in with to prove their Google account to a data
+source. Unset: no Google sign-in for data sources.
+
+### `DAIMON_DATA__GOOGLE_OAUTH_CLIENT_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Secret of the Google OAuth client for data sources.
+
 ## Microsoft Accounts
 
 Read from `daimon.core.config.MicrosoftAccountsSettings`. Prefix

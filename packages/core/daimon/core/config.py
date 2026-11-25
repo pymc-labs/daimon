@@ -3170,6 +3170,16 @@ class DataSettings(BaseModel):
             "Postgres servers may reach. Public hosts need no entry."
         ),
     )
+    google_oauth_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Google OAuth client id that people sign in with to prove their Google account to a "
+            "data source. Unset: no Google sign-in for data sources."
+        ),
+    )
+    google_oauth_client_secret: SecretStr | None = Field(
+        default=None, description="Secret of the Google OAuth client for data sources."
+    )
 
     _split_lists = field_validator("private_hosts", mode="before")(_split_csv)
 
