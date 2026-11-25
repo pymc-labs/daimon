@@ -6148,16 +6148,6 @@
         ``last`` (YYYY-MM-DD). Admin-only.
       ''',
       'parameters': dict({
-        '$defs': dict({
-          'AuditSource': dict({
-            'enum': list([
-              'web',
-              'security',
-              'data',
-            ]),
-            'type': 'string',
-          }),
-        }),
         'additionalProperties': False,
         'properties': dict({
           'first': dict({
@@ -6211,7 +6201,11 @@
           'source': dict({
             'anyOf': list([
               dict({
-                '$ref': '#/$defs/AuditSource',
+                'enum': list([
+                  'web',
+                  'security',
+                ]),
+                'type': 'string',
               }),
               dict({
                 'type': 'null',
