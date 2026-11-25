@@ -165,6 +165,14 @@ def label(prompt: str, routine_id: uuid.UUID) -> str:
     return prompt.strip()[:60] or f"routine {routine_id.hex[:8]}"
 
 
+def routine_name(name: str, converted_from: Mapping[str, Any] | None, prompt: str) -> str | None:
+    """A converted workflow's name as its routine's: None while it keeps an unnamed one's label."""
+    cf = converted_from or {}
+    routine_id = cf.get("routine_id")
+    blank = routine_id is not None and cf.get("name") is None
+    return None if blank and name == label(prompt, uuid.UUID(routine_id)) else name
+
+
 def _iso(at: datetime | None) -> str | None:
     return None if at is None else at.isoformat()
 
@@ -417,7 +425,6 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
     enabled = snap.status == "active"
     to = node.get("to")
     made_in = snap.made_in or {}
-    blank = cf.get("name") is None and snap.name == label(node["prompt"], routine_id)
     source = cf.get("source_routine_id")
     values: dict[str, Any] = {
         "id": routine_id,
@@ -425,7 +432,7 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
         "created_by_user_id": cf.get("owner"),
         "agent_id": cf["agent_id"],
         "agent_name": node["agent"],
-        "name": None if blank else snap.name,
+        "name": routine_name(snap.name, cf, node["prompt"]),
         "cron_expr": trigger["cron"],
         "timezone": trigger.get("timezone") or "UTC",
         "trigger_message": node["prompt"],

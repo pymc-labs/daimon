@@ -8,6 +8,7 @@ from typing import Protocol
 
 from daimon.core.stores.domain import RoutineDestinationKind, RoutineRow
 from daimon.core.stores.workflows import WorkflowRow
+from daimon.core.workflows.routine_translation import routine_name
 from daimon.core.workflows.spec import RoutineNode, ScheduleTrigger, Spec
 
 
@@ -106,7 +107,8 @@ def workflow_subject(
         cron_expr=(schedule.cron if schedule else None) or "",
         timezone=(schedule.timezone if schedule else None) or spec.timezone or "UTC",
         trigger_message=node.prompt,
-        name=workflow.name,
+        # A moved unnamed routine posts as one, not under the label its workflow is named.
+        name=routine_name(workflow.name, workflow.converted_from, node.prompt),
         destination_kind=to.kind if to else None,
         destination_id=(owner if to.kind == "dm" else to.id) if to else None,
         channel_id=workflow.home_channel_id,
