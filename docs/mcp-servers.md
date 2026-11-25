@@ -26,6 +26,21 @@ must be reachable from a browser, and
 connection fails, the agent still answers and names the server it could not use.
 Ask it to disconnect the server or connect again.
 
+## Share a server with the workspace
+
+A server admin can share one MCP server with the whole workspace, so agents and
+outside MCP clients use it without a sign-in of their own. Turn on the
+[`shared_connections`](features.md) feature, then open Integrations, MCP
+connections, and add the server's name, URL and token. The token is stored
+encrypted.
+
+Daimon lists the server's tools and shows each one's description and arguments.
+Read them, then turn on the tools you want. A tool whose text changes upstream
+stays off until you approve it again. Each tool appears as `<name>_<tool>` on
+Daimon's MCP server. Mark a tool that changes data: chat users approve each call
+on a card, and outside MCP clients can only use read tools. Agent tool rules
+apply, and every call is audited.
+
 ## Register a client for servers without dynamic registration
 
 Some authorization servers, including Microsoft Entra ID, do not let Daimon
