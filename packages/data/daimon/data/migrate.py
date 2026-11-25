@@ -3,7 +3,7 @@
 The files are plain SQL scripts run as one multi-statement script each, so they can use
 `DO` blocks and `{{data}}`/`{{views}}` placeholders. Each applied file is recorded in
 `<data>.schema_version`, so a file runs once per store. The setup in `preamble.sql` and the
-grants listed in `GRANT_FILES` are idempotent and run every time.
+files in `GRANT_FILES` are idempotent and run every time.
 """
 
 from __future__ import annotations
@@ -25,12 +25,13 @@ ROLES: Final = (
     "daimon_data_parity",
 )
 
-STORE_FILES: Final[tuple[str, ...]] = ()
-"""Schema files `daimon data init` applies, in order; M2 appends `0001_store.sql`. An Alembic
-revision pins its own copy of the names it applied, so this list may grow without them."""
+STORE_FILES: Final[tuple[str, ...]] = ("0001_store.sql",)
+"""Schema files `daimon data init` applies, in order. An Alembic revision pins its own copy of
+the names it applied, so this list may grow without them."""
 
-GRANT_FILES: Final[tuple[str, ...]] = ()
-"""Idempotent grant files, re-run by every apply and by `--repair` after the store files."""
+GRANT_FILES: Final[dict[str, str]] = {"0001_store.sql": "0001_grants.sql"}
+"""A store file's idempotent follow-up (grants, and parts that wait for an optional extension),
+re-run by every apply and by `--repair` once that store file is in."""
 
 _ROLE_LIST: Final = ", ".join(f"'{r}'" for r in ROLES)
 _PROBE: Final = f"""
@@ -98,6 +99,7 @@ def apply(sql: Sql, schemas: Schemas, files: Sequence[str], *, repair: bool = Fa
         applied.append(name)
     if repair:
         sql.script(render(read_sql("repair.sql"), schemas))
-    for name in GRANT_FILES:
-        sql.script(render(read_sql(name), schemas))
+    for store_file, name in GRANT_FILES.items():
+        if store_file in done or store_file in applied:
+            sql.script(render(read_sql(name), schemas))
     return Outcome(applied=tuple(applied))
