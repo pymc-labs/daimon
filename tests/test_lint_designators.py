@@ -113,6 +113,10 @@ def test_a_required_denylist_fails_when_missing(tmp_path: Path) -> None:
     result = _lint(repo, DAIMON_LINT_DENYLIST_REQUIRED="1")
     assert result.returncode == 1, result.stdout
     assert "no denylist was supplied" in result.stdout
+    only_comments = _lint(
+        repo, DAIMON_LINT_DENYLIST="# none yet\n", DAIMON_LINT_DENYLIST_REQUIRED="1"
+    )
+    assert only_comments.returncode == 1, "a list with no patterns does not satisfy the requirement"
 
 
 def test_the_repository_itself_is_clean() -> None:

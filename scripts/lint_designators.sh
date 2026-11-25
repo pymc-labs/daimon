@@ -61,7 +61,8 @@ fail() {
 # One extended regex per line, matched case-insensitively between
 # non-alphanumeric boundaries (so "name_client" and "name-client" match, while
 # "namesake" does not); surrounding spaces are trimmed, and blank lines and lines
-# starting with # are ignored. Supplied from outside the repo, first match wins:
+# starting with # are ignored. Entries must not use back-references (each is
+# wrapped in groups). Supplied from outside the repo, first match wins:
 #   1. DAIMON_LINT_DENYLIST         the list itself (CI: the repo secret of that name)
 #   2. DAIMON_LINT_DENYLIST_FILE    a path to the list
 #   3. ~/.config/daimon/lint-denylist
@@ -122,6 +123,10 @@ redact() {
             path="${location%%:*}"
             if grep -qiEf "$patterns" <<<"$path"; then
                 location="(path withheld)${location#"$path"}"
+            fi
+            # A path with a colon in it can still carry the name: withhold it all.
+            if grep -qiEf "$patterns" <<<"$location"; then
+                location="(path withheld)"
             fi
             printf '%s\n' "$location"
         else
@@ -186,11 +191,11 @@ if [[ -n "$patterns" ]]; then
         "a name on the private denylist ($denylist_source) appears at these lines; replace it with a neutral example such as \"Acme\" or \"example-client\"" \
         "$deny_hits"
     denylist_status="checked"
+elif [[ "${DAIMON_LINT_DENYLIST_REQUIRED:-}" == "1" ]]; then
+    echo "FAIL [private-denylist] DAIMON_LINT_DENYLIST_REQUIRED=1 but no denylist was supplied, or it has no patterns"
+    failed=1
 elif [[ -n "$denylist_source" ]]; then
     denylist_status="empty"
-elif [[ "${DAIMON_LINT_DENYLIST_REQUIRED:-}" == "1" ]]; then
-    echo "FAIL [private-denylist] DAIMON_LINT_DENYLIST_REQUIRED=1 but no denylist was supplied"
-    failed=1
 else
     echo "lint_designators: no private denylist supplied (DAIMON_LINT_DENYLIST); customer-name rule skipped"
 fi

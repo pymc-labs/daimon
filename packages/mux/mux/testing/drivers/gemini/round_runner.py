@@ -70,7 +70,7 @@ type Case = Literal["C06", "C04"]
 COUNTS: dict[Case, int] = {"C06": 1, "C04": 3}
 ROUND_LEDGER = (
     Path.home() / "cs/daimon-neutral-core-20261009/lanes/N9-qa/spend-gemini-certg-round-20261012.md"
-)
+).resolve()
 REPO = Path(__file__).resolve().parents[5]
 
 
