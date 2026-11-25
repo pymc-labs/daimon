@@ -441,7 +441,8 @@ async def delete_scope(
     by: uuid.UUID,
     id: str,
 ) -> None:
-    """Remove a scope and its grants; refused while it is the default of a source."""
+    """Remove a scope and its grants; refused while it or one of its grants is declared, or it
+    is the default of a source."""
     d = schemas.data
     async with conn.transaction():
         await _admin(conn, schemas, tenant_id, by)
@@ -451,7 +452,11 @@ async def delete_scope(
             (tenant_id, id),
             "That scope isn't here.",
         )
-        if row["bound"]:
+        cur = await conn.execute(
+            f"select 1 from {d}.grants where tenant_id = %s and scope = %s and bound".encode(),
+            (tenant_id, id),
+        )
+        if row["bound"] or await cur.fetchone():
             raise Conflict(MANAGED)
         cur = await conn.execute(
             f"select 1 from {d}.sources where tenant_id = %s"

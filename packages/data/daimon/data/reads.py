@@ -149,7 +149,7 @@ async def browse(
     after_page = _cursor(items[-1]) if len(rows) > limit else None
     if env is not None and items:
         refs = [(i.source_id, i.external_id) for i in items]
-        ok = await recheck.allowed(conn, schemas, env, ctx.readers, refs, limit=len(refs))
+        ok = await recheck.allowed(conn, schemas, env, ctx.readers, refs)
         items = [i for i in items if (i.source_id, i.external_id) in ok]
     return Page(items, after_page)
 

@@ -1,14 +1,14 @@
 """Who each source identity is: proofs, links, candidates and data admins (`0004_identity.sql`).
 
 A link makes a person read as that identity, so one is written only
-- for the person a provider or platform verified (`link`): the tenant's own platform
-  principals (`mirror_platform`), a GitHub link, a person's own OAuth connect
-  (`daimon.data.connect`), Sign in with Slack, Microsoft `tid`+`oid`, or an import of
-  links already proved elsewhere;
+- for the person a provider or platform verified (`link`), at a web sign-in (Discord by
+  `mirror_platform`, Slack and Microsoft `tid`+`oid` by `sign_in_proof`), a GitHub link
+  or a person's own OAuth connect (`daimon.data.connect`);
 - on an exact match of emails both providers verified, in an auto-link domain the source
-  names (`record_accounts`), never for a subject or account an admin decided on there;
+  names (`record_accounts`, for a connector that lists accounts; none in this package
+  does), never for a subject or account an admin decided on there;
 - by a data admin for someone else (`admin_link`): never for themselves, with an audit
-  row and a notice to the person.
+  row and a notice row (`take_notices`) for the person.
 An email Microsoft reports proves nothing (any directory user may set it), so it is never
 kept as verified.
 

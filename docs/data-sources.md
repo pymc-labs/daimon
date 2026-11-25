@@ -49,14 +49,12 @@ apps](data-connectors-apps.md).
 
 A record a source shares with some of its users reads for a Daimon account only through a
 link to one of those users. Daimon links an account only on a proof the source or chat
-platform verified: the person's own chat account, a GitHub link, Sign in with Slack or
-Microsoft, or the person signing in to the source (Bluedot and Notion).
+platform verified. That is a web app sign-in with Discord, Slack or Microsoft, a GitHub
+link, or the person signing in to the source (Bluedot and Notion). A person who only chats
+has no link until they sign in to the web app.
 
-A data admin can link someone else's account, never their own. The person gets a notice
-and the audit trail records it. A link a data admin ends or rejects stays ended when the
-person signs in again. An email the source and the person both verified makes a
-suggested link, and a source can link those itself for one email domain. A Microsoft email
-never counts, since a directory user can set it.
+A data admin can link someone else's account, never their own, and the audit trail records
+it. A link a data admin ends or rejects stays ended when the person signs in again.
 
 Google sign-in for data sources needs a Google OAuth client in
 [`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).

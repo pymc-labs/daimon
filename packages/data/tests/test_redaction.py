@@ -90,6 +90,8 @@ class Store:
 async def store(data_db: DataDb, db_schema: str) -> AsyncIterator[Store]:
     async with data_db.aconnect() as conn:
         tenant = uuid.uuid4()
+        # The declared revision is one per store: each test starts with none applied.
+        await conn.execute(f"delete from {data_db.schemas.data}.declared_state".encode())
         await conn.execute(f"set search_path = {db_schema}".encode())
         await conn.execute(
             b"insert into tenants (id, platform, external_id) values (%s, 'discord', %s)",
@@ -106,6 +108,15 @@ RULES = {
     "entities": [{"name": "Globex", "scope": "client:globex", "label": "[client]"}],
 }
 SOURCE = {"id": "feed", "kind": "feed", "name": "Feed", "redaction_set": "house"}
+
+
+@pytest.mark.parametrize(
+    "pattern", [r"(\w+\s?)*", r"(a|aa)+", r"((a+))+", r"(.*a){20}", r"(?:ab)?", r"(a)\1"]
+)
+def test_a_pattern_that_can_run_forever_is_refused(pattern: str) -> None:
+    with pytest.raises(ValueError, match="can repeat|refer back"):
+        redaction.parse(json.dumps({"regex": [{"pattern": pattern}]}))
+    assert redaction.parse(json.dumps({"regex": [{"pattern": r"\d{3}-\w+\s?"}]})).regex
 
 
 async def test_removed_text_is_never_stored_and_excluded_records_are_dropped(
