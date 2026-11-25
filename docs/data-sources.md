@@ -58,6 +58,51 @@ failure instead.
 Connections to private addresses are refused. To reach a database on your own network,
 list its host name or address range in `DAIMON_DATA__PRIVATE_HOSTS`.
 
+### Discord
+
+A source of kind `discord` reads one server with a bot of its own, never Daimon's chat bot. Create
+an application, add a bot, and turn on the Server Members intent. Invite the bot with View
+Channel and Read Message History, and add Manage Threads to read private threads. The
+credential is `{"token": "<bot token>"}`. The source's config:
+
+```json
+{"workspace": "123456789012345678", "exclude": ["staff-only", "123456789012345679"],
+ "rewalk_days": 7}
+```
+
+`workspace` is the server id. `exclude` lists channel or thread ids or names to leave out.
+A day's messages in a channel or thread become one record, split past 20,000 characters.
+Messages from the last `rewalk_days` days (7 by default) are read again once per sync cycle,
+so edits and deletes show up.
+
+A record is readable by the members whom the server lets read its channel, worked out from
+roles and permission overwrites. A private thread is readable by its members who can read
+the channel, and by those who manage threads. The bot lists every human member as an account,
+without email addresses. Attachments are listed on the record and fetched on demand.
+
+### Slack
+
+A source of kind `slack` reads one workspace with its own bot token, never Daimon's chat
+bot. Create an app with the scopes `channels:read`, `channels:history`, `users:read` and
+`files:read`, add `groups:read` and `groups:history` for private channels, and install it.
+Invite the bot to each channel to read. The optional `users:read.email` scope lists people
+with their confirmed email addresses. The credential is `{"token": "xoxb-..."}`. The
+source's config:
+
+```json
+{"workspace": "T0123456789", "private": "yes", "exclude": ["random"], "rewalk_days": 30}
+```
+
+`workspace` is the team id, and the token must belong to it. `private` adds the private
+channels the bot is in. `exclude` lists channel ids or names to leave out. A channel's
+messages become one record per day, and a thread becomes records of its own, rebuilt when it
+changes. Messages from the last `rewalk_days` days (30 by default) are read again once per
+sync cycle.
+
+A public channel is readable by the workspace's active members and by the guests in it. A
+private channel is readable by its active members. Direct messages and group direct messages
+are never read. Deactivated people, bots and people from other workspaces read nothing.
+
 ## People and their accounts
 
 A record a source shares with some of its users reads for a Daimon account only through a
