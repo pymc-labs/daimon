@@ -34,7 +34,8 @@ A profile names an image, regions, CPUs and memory:
 A profile needs at least one Google Cloud region, and 1, 2, 4, 6 or 8 CPUs. A
 launch that names no region uses the first one. Memory is 512 to 32768 MB,
 within the range Cloud Run allows for that CPU count. Keep images in Artifact
-Registry or on Docker Hub.
+Registry or on Docker Hub. A profile can also carry a `description` of up to
+1,000 characters, which the agent reads: what the image holds and how to use it.
 
 Use immutable digests and images with no baked-in credentials. Build the image
 from `apps/compute-session` in the Daimon repository. An image built another

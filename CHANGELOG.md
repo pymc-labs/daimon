@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An operator can give each cloud computer profile a description that the agent sees when it
+  lists profiles and starts a session.** Set `description` on a profile in
+  `DAIMON_COMPUTE__PROFILES`, up to 1,000 characters: what the image holds and how to use it
+  ([Compute sessions](docs/compute.md#turn-it-on)).
+
 - **A command on a cloud computer that needs more than 40 seconds now continues, and the
   conversation gets a message when it ends.** Before, the machine stopped it at 40 seconds.
   A command that ends in time still returns its result in the reply

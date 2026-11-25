@@ -232,6 +232,27 @@ def test_cloud_run_accepts_the_profiles_it_can_run(profile):
     ComputeSettings(**_CLOUD_RUN, profiles={"mmm": ComputeProfile(image="i", **profile)})
 
 
+@pytest.mark.parametrize("length", [1000, 1001])
+def test_a_profile_description_over_1000_characters_stops_startup(monkeypatch, length):
+    """The agent reads it in every listing and launch, so a longer one is refused at start."""
+    import json
+
+    profile = {"image": "i", "regions": ["us-central1"], "description": "x" * length}
+    for name, value in {
+        "DATABASE__URL": "postgresql+asyncpg://u:p@h:5432/d",
+        "ANTHROPIC__API_KEY": "sk-test",
+        "COMPUTE__PROFILES": json.dumps({"mmm": profile}),
+    }.items():
+        monkeypatch.setenv("DAIMON_" + name, value)
+    if length == 1000:
+        assert load_settings(_env_file=None).compute.profiles["mmm"].description == "x" * 1000
+        return
+    with pytest.raises(
+        ValidationError, match=r"profiles\.mmm\.description\s+String should have at most 1000"
+    ):
+        load_settings(_env_file=None)
+
+
 def test_settings_of_the_removed_fly_provider_do_not_stop_startup(monkeypatch):
     """A deployment that still passes Fly settings starts, with compute not set up."""
     for name, value in {

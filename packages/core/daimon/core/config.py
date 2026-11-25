@@ -2891,6 +2891,14 @@ class ComputeProfile(BaseModel):
         le=131072,
         description="Fixed RAM in MB: 512 to 32768, within the range its CPU count permits.",
     )
+    description: str = Field(
+        default="",
+        max_length=1000,
+        description=(
+            "What this image holds and how to use it, for the agent. Shown when profiles are "
+            "listed and when a session starts. Plain text; no secrets."
+        ),
+    )
 
 
 _CLOUD_RUN_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")

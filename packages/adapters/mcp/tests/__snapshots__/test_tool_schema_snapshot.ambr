@@ -1439,6 +1439,7 @@
         The result's state is `running` once the machine has started. `launching` means
         it is still starting: read compute_get_session_status until it says `running`
         before you run a command, and do not tell the owner it is ready before then.
+        The result's profile_description says what the image holds and how to use it.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1528,7 +1529,7 @@
       }),
     }),
     'compute_list_templates': dict({
-      'description': 'List operator image profiles, fixed CPU/RAM and allowed regions.',
+      'description': 'List operator image profiles: what each holds, its fixed CPU/RAM and allowed regions.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
