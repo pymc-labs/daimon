@@ -41,6 +41,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SLOT = NOW + timedelta(hours=1)
+STUCK = timedelta(minutes=50)
 OWNER = uuid.UUID(int=3)
 BASE = RoutineSnapshot(
     id=uuid.UUID(int=1),
@@ -118,7 +119,7 @@ SHAPES: dict[str, tuple[dict[str, Any], str, tuple[str, ...]]] = {
 
 
 def _move(**fields: Any) -> Move:
-    move = translate(replace(BASE, **fields), now=NOW)
+    move = translate(replace(BASE, **fields), now=NOW, stuck_after=STUCK)
     assert isinstance(move, Move), move
     return move
 
@@ -164,12 +165,14 @@ def test_dm_text_is_kept_for_its_owner_and_source_links_are_kept() -> None:
     ids=["handback", "schedule", "unlinked", "posting", "running"],
 )
 def test_routines_that_cannot_translate_are_refused(fields: dict[str, Any], reason: str) -> None:
-    assert translate(replace(BASE, **fields), now=NOW) == Refusal(reason)  # pyright: ignore[reportArgumentType]
+    assert translate(replace(BASE, **fields), now=NOW, stuck_after=STUCK) == Refusal(reason)  # pyright: ignore[reportArgumentType]
 
 
 def test_a_routine_stuck_past_the_dispatch_timeout_counts_as_finished() -> None:
     stuck = replace(BASE, last_fired_at=NOW - timedelta(minutes=50), last_finished_at=None)
-    assert isinstance(translate(stuck, now=NOW), Move), "a crashed fire no longer blocks the move"
+    assert isinstance(translate(stuck, now=NOW, stuck_after=STUCK), Move), "a crashed fire is done"
+    longer = translate(stuck, now=NOW, stuck_after=2 * STUCK)
+    assert longer == Refusal("busy"), "a longer dispatch timeout keeps the fire running"
 
 
 def test_a_translation_is_deterministic() -> None:
@@ -253,7 +256,7 @@ def test_untranslate_refuses_what_a_routine_cannot_be() -> None:
 def test_moving_back_takes_the_failure_streak_from_the_workflows_runs(
     ran: dict[str, Any], error: str | None
 ) -> None:
-    move = translate(replace(BASE, last_error="boom"), now=NOW)
+    move = translate(replace(BASE, last_error="boom"), now=NOW, stuck_after=STUCK)
     assert isinstance(move, Move)
     back = untranslate(_back(move, last_error="late", **ran), now=NOW)
     assert isinstance(back, Move)

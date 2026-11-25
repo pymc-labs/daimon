@@ -12,9 +12,9 @@ Behavior:
 from __future__ import annotations
 
 import pytest
-from daimon.adapters.scheduler.settings import DISPATCH_TIMEOUT_MARGIN_S, SchedulerSettings
+from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.core.dispatch_timeout import DISPATCH_TIMEOUT_MARGIN_S, DispatchTimeoutSettings
 from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
-from daimon.core.workflows.routine_translation import STUCK_AFTER
 from pydantic import ValidationError
 
 
@@ -43,9 +43,12 @@ def test_scheduler_settings_new_concurrency_defaults() -> None:
     )
 
 
-def test_a_move_counts_a_fire_stuck_as_the_scheduler_does() -> None:
-    timeout = SchedulerSettings().dispatch_timeout_s
-    assert STUCK_AFTER.total_seconds() == timeout, "a move's stuck fire is the dispatch timeout"
+def test_a_move_counts_a_fire_stuck_as_the_scheduler_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A routine move reads the dispatch timeout the scheduler is configured with."""
+    assert DispatchTimeoutSettings().dispatch_timeout_s == SchedulerSettings().dispatch_timeout_s
+    monkeypatch.setenv("DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S", "4000")
+    assert DispatchTimeoutSettings().dispatch_timeout_s == 4000
+    assert SchedulerSettings().dispatch_timeout_s == 4000
 
 
 def test_dispatch_timeout_default_sits_above_the_core_turn_ceiling() -> None:

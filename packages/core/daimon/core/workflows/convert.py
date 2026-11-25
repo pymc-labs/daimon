@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final
 
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
+from daimon.core.dispatch_timeout import DispatchTimeoutSettings
 from daimon.core.stores import feature_values, lead_intake, tenants
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import workflow_deliveries as deliveries_store
@@ -116,7 +117,8 @@ async def plan_move(
         raise NotFound(GONE)
     row, notice = found
     snap = await routine_snapshot(session, row, notice, platform=tenant.platform, now=now)
-    return row, translate(snap, now=now)
+    stuck_after = timedelta(seconds=DispatchTimeoutSettings().dispatch_timeout_s)
+    return row, translate(snap, now=now, stuck_after=stuck_after)
 
 
 async def _plan(

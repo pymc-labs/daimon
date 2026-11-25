@@ -2307,6 +2307,20 @@ Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
 Freshness window for routines with catch_up_policy=skip. Older slots are recorded as
 skipped and advanced; run-once routines ignore this window.
 
+### `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S`
+
+`float` · optional · default `3000.0`
+
+An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core turn
+ceiling (daimon.core.turn.ceiling: 45 minutes, or less by the unattended run limit) is
+enforced inside headless_runner.run_turn and fires first, producing a
+TurnError(kind='ceiling'). This bound only catches a fire that hangs OUTSIDE the
+ceiling's two legs (routine row bookkeeping, agent/environment resolution, the usage-
+recorder factory, record_result), and must stay strictly above LONGEST_TURN_CEILING_S or
+the core ceiling becomes unreachable for routines. Each routine has its own timeout;
+continuous scheduler ticks do not await in-flight routines. Missed slots follow the
+routine's catch_up_policy.
+
 ### `DAIMON_SCHEDULER__TICK_INTERVAL_S`
 
 `float` · optional · default `30.0`
@@ -2330,20 +2344,6 @@ session is billed the next time a read sees its last turn ended.
 Global cap on simultaneously-dispatched routine fires across all ticks. Conservative
 against the shared Anthropic key's rate limit; per-tenant caps are enforced separately
 by the adapters.
-
-### `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S`
-
-`float` · optional · default `3000.0`
-
-An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core turn
-ceiling (daimon.core.turn.ceiling: 45 minutes, or less by the unattended run limit) is
-enforced inside headless_runner.run_turn and fires first, producing a
-TurnError(kind='ceiling'). This bound only catches a fire that hangs OUTSIDE the
-ceiling's two legs (routine row bookkeeping, agent/environment resolution, the usage-
-recorder factory, record_result), and must stay strictly above LONGEST_TURN_CEILING_S or
-the core ceiling becomes unreachable for routines. Each routine has its own timeout;
-continuous scheduler ticks do not await in-flight routines. Missed slots follow the
-routine's catch_up_policy.
 
 ### `DAIMON_SCHEDULER__ADVISORY_LOCK_KEY`
 

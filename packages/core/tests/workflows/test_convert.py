@@ -97,6 +97,20 @@ async def test_a_routine_moves_to_a_workflow_and_back_with_each_slot_once(
     assert await _claimed(env, nxt + timedelta(seconds=5)) == [routine_id], "the routine fires"
 
 
+async def test_a_fire_is_stuck_after_the_schedulers_configured_dispatch_timeout(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = await _env(db_session)
+    routine_id = await _routine(db_session, env)
+    await db_session.execute(update(Routine).values(last_fired_at=NOW - timedelta(minutes=55)))
+    await db_session.commit()
+    monkeypatch.setenv("DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S", "7200")
+    with pytest.raises(Refused):
+        await convert.from_routine(env, routine_id)
+    monkeypatch.delenv("DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S")
+    await convert.from_routine(env, routine_id)
+
+
 async def test_a_paused_routine_moves_to_a_paused_workflow(db_session: AsyncSession) -> None:
     env = await _env(db_session)
     flow = await convert.from_routine(env, await _routine(db_session, env, enabled=False))

@@ -24,9 +24,6 @@ DONE: Final = "done"
 TRIGGER: Final = "schedule"
 NOTE: Final = "Moved from a routine"
 MAX_TITLE: Final = 120
-#: The scheduler's default dispatch timeout: a fire claimed longer ago is dead, so it counts as
-#: finished and the fence drops a late result.
-STUCK_AFTER: Final = timedelta(minutes=50)
 _FEATURE_NOTES: Final = {"routine_sandbox_tools": "sandbox pin", "routine_result_header": "header"}
 
 Reason = Literal[
@@ -221,9 +218,11 @@ def _last(snap: RoutineSnapshot) -> dict[str, Any] | None:
     }
 
 
-def translate(snap: RoutineSnapshot, *, now: datetime) -> Move | Refusal:
+def translate(snap: RoutineSnapshot, *, now: datetime, stuck_after: timedelta) -> Move | Refusal:
     """The workflow a routine becomes, with its cursor, posts, features and intake binding;
-    the routine row goes. Active when it was enabled with an owner, else paused."""
+    the routine row goes. Active when it was enabled with an owner, else paused. A fire claimed
+    `stuck_after` ago (the scheduler's dispatch timeout) is dead: it counts as finished, and the
+    fence drops a late result."""
     if snap.handback_paused_at is not None:
         return Refusal("handback_paused")
     if snap.next_slot is None:
@@ -232,7 +231,7 @@ def translate(snap: RoutineSnapshot, *, now: datetime) -> Move | Refusal:
         return Refusal("owner_unlinked")
     fired = snap.last_fired_at
     if snap.delivery_status == "claimed" or (
-        fired is not None and snap.last_finished_at is None and now - fired < STUCK_AFTER
+        fired is not None and snap.last_finished_at is None and now - fired < stuck_after
     ):
         return Refusal("busy")
     made = ids(snap.id)
