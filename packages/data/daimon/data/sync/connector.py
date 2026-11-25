@@ -214,6 +214,11 @@ class Connector:
     person_sign_in: ClassVar[bool] = False
     """The engine gives a run the people signed in at the source (`Source.people`)."""
 
+    def workspace_of(self, source: Source) -> str:
+        """The namespace of this source's subjects (`config.workspace`, else the source);
+        a connector that keys its accounts by something else (a domain) overrides it."""
+        return str(source.config.get("workspace") or source.id)
+
     def descriptor_for(self, source: Source) -> Descriptor | None:
         """Whether this source's records are on the access list model; a connector whose
         sources differ (a readers column set or not) overrides it."""
@@ -258,6 +263,17 @@ class Connector:
 
     async def live_search(self, source: Source, query: str, limit: int) -> list[LiveHit]:
         """Live kinds: what the source finds for `query` now. Read-only; nothing is kept."""
+        raise NotImplementedError
+
+    live_as_reader: ClassVar[bool] = False
+    """A live source read as each reader, with their own access (`live_search_as`); it
+    answers only a caller who names readers, and a hit shows only if every reader's read has it."""
+
+    async def live_search_as(
+        self, source: Source, query: str, limit: int, subjects: Sequence[str]
+    ) -> list[LiveHit]:
+        """Live kinds read as one person, given their subjects (bare ids in the source's own
+        namespace): what that person's own access finds for `query` now."""
         raise NotImplementedError
 
     async def can_open(

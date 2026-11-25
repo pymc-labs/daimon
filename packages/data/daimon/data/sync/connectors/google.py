@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from daimon.data.sync.connector import Json, Source
 from daimon.data.sync.connectors.chat import obj, rows
-from daimon.data.sync.http import Upstream, send
+from daimon.data.sync.http import GuardedTransport, Upstream, send
 
 TOKEN_URL: Final = "https://oauth2.googleapis.com/token"
 SIGN_URL: Final = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{}:signJwt"
@@ -39,12 +39,17 @@ GRANT: Final = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 _SCOPE: Final = "https://www.googleapis.com/auth/"
 SCOPES: Final = {
     "drive": (_SCOPE + "drive.readonly",),
+    "calendar": (_SCOPE + "calendar.readonly",),
     "directory": (
         _SCOPE + "admin.directory.user.readonly",
         _SCOPE + "admin.directory.group.readonly",
     ),
 }
-HOSTS: Final = {"drive": "https://www.googleapis.com", "directory": "https://admin.googleapis.com"}
+HOSTS: Final = {
+    "drive": "https://www.googleapis.com",
+    "calendar": "https://www.googleapis.com",
+    "directory": "https://admin.googleapis.com",
+}
 LIFETIME: Final = 3000.0
 """Seconds a token is used (Google's last 3600)."""
 LIMITED: Final = {"userRateLimitExceeded", "rateLimitExceeded"}
@@ -313,3 +318,31 @@ async def read_directory(g: Google, domain: str, who: str) -> Directory:
             )
         )
     return Directory(domain, people, groups)
+
+
+def connect(source: Source, transport: httpx.AsyncBaseTransport | None = None) -> Google:
+    """Google calls for `source`, on its guarded transport (`transport` replaces it: tests)."""
+
+    def make(hosts: tuple[str, ...]) -> httpx.AsyncBaseTransport:
+        return transport or GuardedTransport((*source.private_hosts, *hosts))
+
+    return Google(source, make)
+
+
+async def person_email(g: Google, admin: str, user_id: str) -> str | None:
+    """The primary address of one active directory user, read as the admin; None when the
+    directory does not list them or they are suspended."""
+    try:
+        u = await g.get(
+            admin,
+            "directory",
+            f"/admin/directory/v1/users/{quote(user_id, safe='')}",
+            {"fields": "primaryEmail,suspended,archived,isGuestUser"},
+        )
+    except ApiError as e:
+        if e.status in (403, 404):
+            return None
+        raise
+    if u.get("suspended") or u.get("archived") or u.get("isGuestUser"):
+        return None
+    return str(u["primaryEmail"]).lower() if u.get("primaryEmail") else None

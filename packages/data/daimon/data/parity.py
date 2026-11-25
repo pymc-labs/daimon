@@ -99,7 +99,7 @@ async def _people(
         (
             source.tenant_id,
             source.provider,
-            str(source.config.get("workspace") or source.id),
+            CONNECTORS[source.kind].workspace_of(source),
             PEOPLE,
         ),
     )

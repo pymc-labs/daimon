@@ -38,7 +38,7 @@ async def reader_subjects(
 ) -> list[tuple[str, ...]]:
     """For each reader, their subjects in this source's namespace: a person's linked
     identities, or the subject itself. An empty tuple: the source cannot be asked about them."""
-    workspace = str(source.config.get("workspace") or source.id)
+    workspace = CONNECTORS[source.kind].workspace_of(source)
     prefix = f"{source.provider}/{workspace}:user:"
     accounts = [r.removeprefix("account:") for r in readers if r.startswith("account:")]
     linked: dict[str, list[str]] = {}

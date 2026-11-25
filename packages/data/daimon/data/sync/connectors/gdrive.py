@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Final
@@ -57,9 +57,11 @@ from daimon.data.sync.connectors.google import (
     DelegationRefused,
     Directory,
     Google,
+    connect,
+    person_email,
     read_directory,
 )
-from daimon.data.sync.http import GuardedTransport, Upstream
+from daimon.data.sync.http import Upstream
 from daimon.data.sync.office import DOCX, PPTX, TEXT_CAP, XLSX
 
 log = structlog.get_logger()
@@ -457,10 +459,7 @@ class GDriveConnector(Connector):
         self._runs: dict[object, Run] = {}
 
     def _google(self, source: Source) -> Google:
-        def make(hosts: tuple[str, ...]) -> httpx.AsyncBaseTransport:
-            return self.transport or GuardedTransport((*source.private_hosts, *hosts))
-
-        return Google(source, make)
+        return connect(source, self.transport)
 
     async def _open(self, source: Source, cfg: Config) -> Run:
         g = self._google(source)
@@ -494,10 +493,33 @@ class GDriveConnector(Connector):
         drives = sum(1 for k in keys if k.drive)
         return True, f"{len(run.directory.active)} people, {drives} shared drives to read"
 
-    async def can_open(self, source: Source, file_id: str, email: str) -> bool:
-        """Whether Drive lets this person open the file now (they are the one acting): for the
-        publish gate and the live re-check. A refusal, or a person who cannot be acted as, is no."""
+    recheck_reads: ClassVar[bool] = True
+
+    def workspace_of(self, source: Source) -> str:
+        return Config.of(source.config).domain
+
+    async def can_open(
+        self, source: Source, external_id: str, subjects: Sequence[str]
+    ) -> bool | None:
+        """Whether Drive lets this person (their directory user ids) open the file now: each
+        read at the source, the live re-check and the parity oracle ask here. None: no
+        subject names an active person to act as."""
+        cfg = Config.of(source.config)
         g = self._google(source)
+        try:
+            emails = [e for i in subjects if (e := await person_email(g, cfg.admin, i))]
+            if not emails:
+                return None
+            return any(
+                [await self.can_open_as(g, external_id.removeprefix("file:"), e) for e in emails]
+            )
+        finally:
+            await g.aclose()
+
+    @staticmethod
+    async def can_open_as(g: Google, file_id: str, email: str) -> bool:
+        """Whether Drive lets the person with this address open the file (they are the one
+        acting). A refusal, or a person who cannot be acted as, is no."""
         try:
             await g.get(
                 email.lower(),
@@ -512,8 +534,6 @@ class GDriveConnector(Connector):
             if e.status in GONE:
                 return False
             raise
-        finally:
-            await g.aclose()
 
     # ---- who reads what ----
 
