@@ -11,6 +11,7 @@ import { featuresHandlers } from "./features"
 import { chatHandlers } from "./chat"
 import { coreHandlers } from "./core"
 import { creditsHandlers } from "./credits"
+import { dataHandlers } from "./data"
 import { integrationsHandlers } from "./integrations"
 import { opsHandlers } from "./ops"
 import { profileHandlers } from "./profile"
@@ -19,5 +20,5 @@ import { supportHandlers } from "./support"
 
 // Module handlers first, so a module can override a core route it owns.
 export const worker = setupWorker(
-  ...chatHandlers, ...serverSkillsHandlers, ...agentLibraryHandlers, ...agentSetupHandlers, ...agentGithubHandlers, ...agentsHandlers, ...channelsHandlers, ...featuresHandlers, ...supportHandlers, ...routinesHandlers, ...creditsHandlers, ...integrationsHandlers, ...profileHandlers, ...opsHandlers, ...adminHandlers, ...coreHandlers,
+  ...chatHandlers, ...serverSkillsHandlers, ...agentLibraryHandlers, ...agentSetupHandlers, ...agentGithubHandlers, ...agentsHandlers, ...channelsHandlers, ...featuresHandlers, ...supportHandlers, ...routinesHandlers, ...creditsHandlers, ...dataHandlers, ...integrationsHandlers, ...profileHandlers, ...opsHandlers, ...adminHandlers, ...coreHandlers,
 )
