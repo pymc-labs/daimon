@@ -123,6 +123,7 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
 )
+from daimon.core.ports.gate import data_sources_on
 from daimon.core.relay_scope import (
     agent_has_identity_relay,
     identity_relay_server_names,
@@ -1622,7 +1623,8 @@ async def _admit_gates(
     # tool where outsiders may read (a hold before the relay's own), nor in a Teams room,
     # whose readers are unknown; and a helper ask into it from an agent that does not read
     # data here is refused, or its answers would land in that agent's memory.
-    # A failed read is unknown, which reads no data: the turn runs with no data tool.
+    # A failed read is unknown: the turn runs with no data tool, and sealed if the session
+    # read data or that cannot be told either.
     data_unknown = False
     try:
         data_reading = await reads_data(
@@ -1633,18 +1635,25 @@ async def _admit_gates(
     except Exception:
         _log.warning("turn.data_reads_lookup_failed", tenant_id=str(tenant_id), exc_info=True)
         data_reading, data_unknown = False, True
-    if not data_reading and not data_unknown:
+    if not data_reading and data_sources_on(deps.settings):
         # A session that read data keeps the whole data seal until `/new`, whatever
         # `data_reads` says now: its context holds what it read.
-        async with deps.sessionmaker() as session:
-            live = await get_live_thread_session(
-                session,
-                tenant_id=tenant_id,
-                platform=platform,
-                thread_id=slot_thread_id or channel_id,
-                account_id=principal.account_id,
-            )
-        data_reading = (
+        try:
+            async with deps.sessionmaker() as session:
+                live = await get_live_thread_session(
+                    session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=slot_thread_id or channel_id,
+                    account_id=principal.account_id,
+                )
+        except Exception:
+            if not data_unknown:
+                raise
+            _log.warning("turn.data_session_lookup_failed", tenant_id=str(tenant_id))
+            live = None
+            data_reading = True
+        data_reading = data_reading or (
             live is not None
             and live.effective_config is not None
             and live.effective_config.data_read
@@ -3120,9 +3129,8 @@ async def _capture_backend_source(
             ids = (context.tenant_id, read_on, context.channel_id, context.thread_id)
             here = FeaturePlace.of(*ids, agent_id=actual.id)
             features = await place_features(deps, here, actual, HIDING_KEYS)
-            # A data-reading agent, or a session that read data, is sealed as a relay agent
-            # is, as its turn will be.
-            data_reading = admission.data_reading or features.on(DATA_READS)
+            # A data-reading agent is sealed as a relay agent is, as its turn will be.
+            data_reading = features.on(DATA_READS)
             relay = data_reading or agent_has_identity_relay(
                 (server.url for server in actual.mcp_servers),
                 public_url=deps.public_url,

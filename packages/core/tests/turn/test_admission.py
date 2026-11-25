@@ -633,9 +633,11 @@ async def test_a_session_that_read_data_keeps_the_data_seal_until_a_fresh_start(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With `data_reads` Off now, a live session that read data stays sealed: relay scoped,
-    no long-term memory. Only a fresh start ends it."""
+    """With `data_reads` Off now, or its lookup failing, a live session that read data stays
+    sealed: relay scoped, no long-term memory. Only a fresh start ends it."""
+    monkeypatch.setenv("DAIMON_FEATURES__DATA_SOURCES", "on")
     tenant = await make_tenant(db_session)
     await _tenant_config(db_session, tenant=tenant)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -661,6 +663,10 @@ async def test_a_session_that_read_data_keeps_the_data_seal_until_a_fresh_start(
 
     sealed = await admit_chat(deps, tenant, now=_NOW)
     assert sealed.data_reading and sealed.relay_scoped, "the read keeps the seal"
+    with monkeypatch.context() as m:
+        m.setattr("daimon.core.turn.admission.reads_data", AsyncMock(side_effect=RuntimeError))
+        failed = await admit_chat(deps, tenant, now=_NOW)
+    assert failed.data_reading and failed.relay_scoped, "a failed lookup keeps the seal"
     async with db_session_factory.begin() as session:
         await request_fresh_start(session, id=row.id, at=_NOW)
     fresh = await admit_chat(deps, tenant, now=_NOW)
