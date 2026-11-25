@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from daimon.core.agent_chat_requester import counts_as_signed_in, driver_signed_in, record_driver
+from daimon.core.agent_chat_requester import (
+    UNREAD,
+    EarlierTurn,
+    counts_as_signed_in,
+    driver_signed_in,
+    record_driver,
+)
+from daimon.core.stores import session_settle_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SESSION = "sesn_driver"
@@ -34,15 +41,22 @@ def test_only_a_signed_in_person_on_a_new_or_finished_session_is_named(
     )
 
 
+async def _sends(factory: async_sessionmaker[AsyncSession], session_id: str) -> int | None:
+    async with factory() as db:
+        sends = await session_settle_state.count_agent_chat_sends(db, managed_session_id=session_id)
+    return sends.begun if sends is not None else None
+
+
 async def _record(
     factory: async_sessionmaker[AsyncSession], signed_in: bool, *, resuming: bool = False
 ) -> bool:
+    """A send or resume on the existing session that read no earlier turn open."""
     await record_driver(
         factory,
         managed_session_id=SESSION,
         signed_in_person=signed_in,
         session_status="idle",
-        earlier_turn_open=False,
+        earlier=EarlierTurn(open=False, sends=await _sends(factory, SESSION)),
         resuming=resuming,
     )
     return await driver_signed_in(factory, managed_session_id=SESSION)
@@ -54,7 +68,8 @@ async def test_each_send_replaces_the_driver_and_a_resume_can_only_clear_it(
     assert not await driver_signed_in(db_session_factory, managed_session_id=SESSION), (
         "a session with no record names nobody"
     )
-    assert await _record(db_session_factory, True), "a signed-in person's send names them"
+    assert await _start(db_session_factory, SESSION), "a signed-in person's start names them"
+    assert await _record(db_session_factory, True), "and so does their next send"
     assert not await _record(db_session_factory, False), "a key's send after it names nobody"
     assert not await _record(db_session_factory, True, resuming=True), (
         "a person resuming a turn a key sent does not gain it"
@@ -71,7 +86,7 @@ async def _start(factory: async_sessionmaker[AsyncSession], session_id: str) -> 
         managed_session_id=session_id,
         signed_in_person=True,
         session_status=None,
-        earlier_turn_open=False,
+        earlier=EarlierTurn(open=False),
         new_session=True,
     )
     return await driver_signed_in(factory, managed_session_id=session_id)
@@ -88,9 +103,34 @@ async def test_a_start_names_its_person_only_if_its_write_created_the_row(
         managed_session_id=SESSION,
         signed_in_person=False,
         session_status=None,
-        earlier_turn_open=True,
+        earlier=UNREAD,
     )
     assert not await _start(db_session_factory, SESSION), "another caller wrote first"
+
+
+async def test_a_send_names_its_person_only_if_no_send_began_since_its_read(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """On an existing session the write checks the count the decision read, in the
+    same statement, so a key's send landing between the read and the write still
+    names nobody."""
+    assert await _start(db_session_factory, SESSION)
+    read = EarlierTurn(open=False, sends=await _sends(db_session_factory, SESSION))
+    await record_driver(  # a key's send, between the person's read and write
+        db_session_factory,
+        managed_session_id=SESSION,
+        signed_in_person=False,
+        session_status="idle",
+        earlier=UNREAD,
+    )
+    await record_driver(
+        db_session_factory,
+        managed_session_id=SESSION,
+        signed_in_person=True,
+        session_status="idle",
+        earlier=read,
+    )
+    assert not await driver_signed_in(db_session_factory, managed_session_id=SESSION)
 
 
 async def test_each_send_is_numbered_and_a_resume_is_not(
@@ -102,7 +142,7 @@ async def test_each_send_is_numbered_and_a_resume_is_not(
             managed_session_id=SESSION,
             signed_in_person=person,
             session_status="idle",
-            earlier_turn_open=False,
+            earlier=UNREAD,
             resuming=resuming,
         )
 

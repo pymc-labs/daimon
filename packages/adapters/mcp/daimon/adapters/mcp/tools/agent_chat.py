@@ -108,7 +108,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
-from daimon.core.agent_chat_requester import record_driver
+from daimon.core.agent_chat_requester import UNREAD, record_driver
 from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
@@ -1059,7 +1059,7 @@ async def _start_turn_impl(
             managed_session_id=session.id,
             signed_in_person=auth.signed_in_person,
             session_status=None,
-            earlier_turn_open=await earlier_turn_open(runtime, auth, session.id, new_session=True),
+            earlier=await earlier_turn_open(runtime, auth, session.id, new_session=True),
             new_session=True,
         )
         turn_started_at = now()
@@ -1188,7 +1188,7 @@ async def _continue_turn_impl(
             managed_session_id=handle,
             signed_in_person=auth.signed_in_person,
             session_status=current.status,
-            earlier_turn_open=True,
+            earlier=UNREAD,
             resuming=True,
         )
         resumed = await resume_paused(runtime, auth, current)
@@ -1215,7 +1215,7 @@ async def _continue_turn_impl(
             managed_session_id=handle,
             signed_in_person=auth.signed_in_person,
             session_status=current.status,
-            earlier_turn_open=await earlier_turn_open(runtime, auth, handle, new_session=False),
+            earlier=await earlier_turn_open(runtime, auth, handle, new_session=False),
         )
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.

@@ -30,11 +30,27 @@ MCP verifier; nothing from the request or the tool arguments is used.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from daimon.core.stores import session_settle_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: The session status in which no other turn can be calling the relay.
 IDLE_STATUS = "idle"
+
+
+@dataclass(frozen=True)
+class EarlierTurn:
+    """What the sending path read before its send: whether an earlier turn may still be
+    running (`open`), and the count of sends begun it read (`sends`), which the write
+    checks is unchanged."""
+
+    open: bool
+    sends: int | None = None
+
+
+#: For a path that reads nothing: any earlier turn may still be running.
+UNREAD = EarlierTurn(open=True)
 
 
 def counts_as_signed_in(
@@ -51,17 +67,19 @@ async def record_driver(
     managed_session_id: str,
     signed_in_person: bool,
     session_status: str | None,
-    earlier_turn_open: bool,
+    earlier: EarlierTurn,
     resuming: bool = False,
     new_session: bool = False,
 ) -> int | None:
     """Record who drives the turn about to be sent or resumed on `managed_session_id`.
 
     Written under the session fence before the send, and never swallowed: a send whose
-    driver is not recorded could run under the previous driver's name.
-    `earlier_turn_open` says an earlier send's turn has not been seen to end. A send
-    returns its number, which `record_turn` writes once the send is accepted. On a
-    session the caller just created (`new_session`) a row already there names nobody.
+    driver is not recorded could run under the previous driver's name. `earlier` is
+    what the path read: whether an earlier send's turn has not been seen to end, and
+    the count of sends it read. A send returns its number, which `record_turn` writes
+    once the send is accepted. The write names the person only if nothing changed since
+    the read, in the same statement: on a session the caller just created, only if it
+    creates the row; on another, only if the count of sends is still the one read.
     A resume carries on a turn someone else may have started, so it can only take a
     name away: a signed-in person's resume keeps the record, anyone else's clears it.
     """
@@ -75,10 +93,11 @@ async def record_driver(
             and counts_as_signed_in(
                 signed_in_person=signed_in_person,
                 session_status=session_status,
-                earlier_turn_open=earlier_turn_open,
+                earlier_turn_open=earlier.open,
             ),
             send=not resuming,
             new_session=new_session,
+            sends_read=earlier.sends,
         )
 
 
@@ -87,6 +106,6 @@ async def driver_signed_in(
 ) -> bool:
     """Whether the latest recorded driver of the session is a signed-in person."""
     async with sessionmaker() as db:
-        return await session_settle_state.agent_chat_signed_in(
+        return await session_settle_state.is_agent_chat_signed_in(
             db, managed_session_id=managed_session_id
         )

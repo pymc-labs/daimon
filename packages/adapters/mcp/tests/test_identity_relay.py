@@ -26,7 +26,7 @@ from daimon.adapters.mcp.identity_relay import (
     build_relay_clients,
 )
 from daimon.adapters.mcp.tools import _session_gate
-from daimon.core.agent_chat_requester import record_driver
+from daimon.core.agent_chat_requester import EarlierTurn, record_driver
 from daimon.core.config import SignedIdentityServer
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.ma_identity import derive_agent_uuid
@@ -1211,7 +1211,8 @@ async def _agent_chat(
             managed_session_id=session_id,
             signed_in_person=signed_in,
             session_status=None,
-            earlier_turn_open=False,
+            earlier=EarlierTurn(open=False),
+            new_session=True,
         )
     return await _token(factory, person, RelayBinding("Agent A", agent_chat=session_id))
 

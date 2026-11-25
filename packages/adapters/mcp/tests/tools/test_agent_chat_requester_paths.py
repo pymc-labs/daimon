@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,7 +35,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
     _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.agent_chat_requester import driver_signed_in, record_driver
+from daimon.core.agent_chat_requester import driver_signed_in
 from daimon.core.config import SignedIdentityServer
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
@@ -114,7 +115,7 @@ def test_every_send_or_resume_of_an_agent_chat_turn_records_its_driver_first() -
             )
             if _called(send) == "_send_billed":
                 assert any(
-                    k.arg == "earlier_turn_open"
+                    k.arg == "earlier"
                     and isinstance(k.value, ast.Await)
                     and isinstance(k.value.value, ast.Call)
                     and _called(k.value.value) == "earlier_turn_open"
@@ -202,6 +203,7 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
         assert "delete" not in calls, f"{fn.name} deletes a settle-state row"
         named = {n.arg for n in ast.walk(fn) if isinstance(n, ast.keyword)}
         named |= {n.value for n in ast.walk(fn) if isinstance(n, ast.Constant)} - {None}
+        named |= {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
         if calls & {"insert", "update"} and named & _DRIVER_STATE:
             writers.add(fn.name)
     assert writers == {"record_agent_chat_driver", "record_unattended_turn"}
@@ -235,17 +237,30 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
     }
     assert sites == 5, "start: driver and turn; continue: resume, driver and turn"
 
-    versions = _REPO / "packages/core/alembic/versions"
-    touching = sorted(
-        path.name
-        for path in versions.glob("*.py")
-        if any(
-            column in path.read_text() for column in _DRIVER_STATE - {"unattended_turn_event_id"}
-        )
+
+#: Non-test files that may name the agent-chat columns, each with its reason.
+_NAMES_THE_COLUMNS = {
+    "packages/core/daimon/core/stores/session_settle_state.py": "the one store",
+    "packages/core/daimon/core/_models.py": "the mapping",
+    "packages/core/daimon/core/stores/agent_rekey.py": "exempts them as not agent ids",
+    "packages/core/alembic/versions/0230_agent_chat_signed_in.py": "adds a column",
+    "packages/core/alembic/versions/0231_agent_chat_send_count.py": "adds two columns",
+}
+
+
+def test_no_other_file_names_the_agent_chat_columns() -> None:
+    """Raw SQL, a migration or a second store would write these columns outside the
+    fence without calling the store, so no other non-test file may name them."""
+    columns = ("agent_chat_signed_in", "agent_chat_sends", "agent_chat_recorded_send")
+    naming = sorted(
+        str(path.relative_to(_REPO))
+        for top in ("packages", "apps", "scripts")
+        for path in (_REPO / top).rglob("*")
+        if path.suffix in {".py", ".sql"}
+        and not {"tests", ".venv", "node_modules", "__pycache__"} & set(path.parts)
+        and re.search(rf"\b({'|'.join(columns)})\b", path.read_text(encoding="utf-8"))
     )
-    assert touching == ["0230_agent_chat_signed_in.py", "0231_agent_chat_send_count.py"], (
-        "a migration that writes these columns decides who is named outside the fence"
-    )
+    assert naming == sorted(_NAMES_THE_COLUMNS)
 
 
 def test_each_turn_records_the_number_its_own_driver_record_gave() -> None:
@@ -285,10 +300,12 @@ class _World:
 
 
 _EARLIER = "sevt_earlier"
+_SENT_AT = "2026-09-06T00:00:00Z"
 _IDLE = {
     "id": "sevt_idle",
     "type": "session.status_idle",
     "stop_reason": {"type": "end_turn", "event_ids": []},
+    "processed_at": "2026-09-06T00:01:00Z",
 }
 _REPLY = {
     "id": "sevt_reply",
@@ -297,8 +314,13 @@ _REPLY = {
 }
 
 
-def _boundary(event_id: str) -> dict[str, Any]:
-    return {"id": event_id, "type": "user.message", "content": [{"type": "text", "text": "hi"}]}
+def _boundary(event_id: str, processed_at: str | None = _SENT_AT) -> dict[str, Any]:
+    return {
+        "id": event_id,
+        "type": "user.message",
+        "content": [{"type": "text", "text": "hi"}],
+        "processed_at": processed_at,
+    }
 
 
 async def _world(
@@ -411,13 +433,17 @@ async def _recorded_send(
 
 async def _mark(factory: async_sessionmaker[AsyncSession], session_id: str) -> None:
     """A signed-in person's earlier turn, which a later driver must replace."""
-    await record_driver(
-        factory,
-        managed_session_id=session_id,
-        signed_in_person=True,
-        session_status=None,
-        earlier_turn_open=False,
-    )
+    async with factory.begin() as db:
+        sends = await session_settle_state.count_agent_chat_sends(db, managed_session_id=session_id)
+        await session_settle_state.record_agent_chat_driver(
+            db,
+            managed_session_id=session_id,
+            signed_in=True,
+            send=False,
+            new_session=sends is None,
+            sends_read=sends.begun if sends is not None else None,
+        )
+    assert await _signed_in(factory, session_id)
 
 
 @pytest.mark.parametrize("tool", ["ask", "start_turn", "continue_turn", "ask_continue"])
@@ -545,7 +571,7 @@ async def test_a_key_send_accepted_but_not_recorded_before_the_start_names_nobod
     async def created_then_key_sends(*_a: object, **_kw: object) -> object:
         await _key_send_accepted_unrecorded(world, _NEW)
         async with pooled_sessionmaker() as db:
-            sends = await session_settle_state.agent_chat_sends(db, managed_session_id=_NEW)
+            sends = await session_settle_state.count_agent_chat_sends(db, managed_session_id=_NEW)
         assert sends == session_settle_state.AgentChatSends(
             begun=1, recorded=None, turn_event_id=None
         ), "sent, not recorded"
@@ -676,20 +702,87 @@ async def test_a_send_begun_is_open_until_its_turn_is_recorded(
     person = dataclasses.replace(world.auth, signed_in_person=True)
     session_id = _NEW if new_session else _EXISTING
     if new_session:
-        assert not await _agent_chat_safety.earlier_turn_open(
-            world.runtime, person, session_id, new_session=True
-        ), "nothing sent yet"
+        assert not (
+            await _agent_chat_safety.earlier_turn_open(
+                world.runtime, person, session_id, new_session=True
+            )
+        ).open, "nothing sent yet"
     else:
-        assert not await _agent_chat_safety.earlier_turn_open(
-            world.runtime, person, session_id, new_session=False
-        ), "the recorded send was seen to end"
+        assert not (
+            await _agent_chat_safety.earlier_turn_open(
+                world.runtime, person, session_id, new_session=False
+            )
+        ).open, "the recorded send was seen to end"
     async with db_session_factory.begin() as db:
         await session_settle_state.record_agent_chat_driver(
             db, managed_session_id=session_id, signed_in=False, send=True
         )
-    assert await _agent_chat_safety.earlier_turn_open(
-        world.runtime, person, session_id, new_session=new_session
+    assert (
+        await _agent_chat_safety.earlier_turn_open(
+            world.runtime, person, session_id, new_session=new_session
+        )
+    ).open
+
+
+@pytest.mark.parametrize(
+    ("queued_at", "idle_at"),
+    [
+        (None, _IDLE["processed_at"]),  # still queued
+        ("not a time", _IDLE["processed_at"]),  # unparseable
+        (_SENT_AT, "2026-09-05T23:59:00Z"),  # the idle was processed before it
+        (_SENT_AT, None),  # the idle has no time
+    ],
+)
+async def test_a_key_message_queued_behind_the_earlier_turn_names_nobody(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    queued_at: str | None,
+    idle_at: Any,
+) -> None:
+    """A key's message sent while the earlier turn ran is counted and recorded, but
+    queued: listed before that turn's idle, it must not read as its own turn ended.
+    Only the provider's processing times show the order, not the list."""
+    world = await _world(db_session, db_session_factory)
+    await _recorded_send(db_session_factory, _EXISTING, "sevt_key_send")
+    idle = {**_IDLE, "processed_at": idle_at}
+    world.events[:] = [idle, _REPLY, _boundary("sevt_key_send", queued_at), _boundary(_EARLIER)]
+    result = await _call_tool(
+        world.app.http_app(path="/mcp", stateless_http=True, json_response=True),
+        "/mcp",
+        _TOKEN,
+        name="continue_turn",
+        arguments={"daimon_id": world.daimon_id, "handle": _EXISTING, "message": "and?"},
     )
+    assert not result["result"].get("isError"), result
+    assert not await _signed_in(db_session_factory, _EXISTING), "the key's turn may run next"
+
+
+async def test_a_key_send_between_a_continues_read_and_write_names_nobody(
+    db_session: AsyncSession, pooled_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """If the fence were lost, a key's whole send could land between the person's read
+    and write; the write names the person only if the count it read is unchanged."""
+    world = await _world(db_session, pooled_sessionmaker)
+    real = _agent_chat_safety.earlier_turn_open
+
+    async def read_then_key_sends(
+        runtime: McpRuntime, auth: AuthIdentity, handle: str, *, new_session: bool
+    ) -> Any:
+        earlier = await real(runtime, auth, handle, new_session=new_session)
+        assert not earlier.open, "read as ended"
+        await _recorded_send(pooled_sessionmaker, handle, "sevt_key_send")
+        return earlier
+
+    with patch.object(agent_chat, "earlier_turn_open", new=read_then_key_sends):
+        result = await _call_tool(
+            world.app.http_app(path="/mcp", stateless_http=True, json_response=True),
+            "/mcp",
+            _TOKEN,
+            name="continue_turn",
+            arguments={"daimon_id": world.daimon_id, "handle": _EXISTING, "message": "and?"},
+        )
+    assert not result["result"].get("isError"), result
+    assert not await _signed_in(pooled_sessionmaker, _EXISTING), "the key's turn runs next"
 
 
 @pytest.mark.parametrize("tool", ["continue_turn", "start_turn"])
@@ -729,9 +822,11 @@ async def test_with_no_server_opted_in_no_earlier_send_is_read(
         patch.object(_agent_chat_safety, "_read_turn", new=unread),
         patch.object(_agent_chat_safety, "_agent_chat_sends", new=unread),
     ):
-        assert await _agent_chat_safety.earlier_turn_open(
-            world.runtime, person, _EXISTING, new_session=new_session
-        ), "counted as open, so the send names nobody"
+        assert (
+            await _agent_chat_safety.earlier_turn_open(
+                world.runtime, person, _EXISTING, new_session=new_session
+            )
+        ).open, "counted as open, so the send names nobody"
     unread.assert_not_awaited()
 
 

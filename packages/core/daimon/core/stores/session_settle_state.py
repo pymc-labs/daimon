@@ -1,6 +1,6 @@
 """Store for per-session settle state: pending settle requests, the billing cutoffs,
 which turn an agent-chat send started (`unattended_turn`) and whether its driver is
-a person signed in to the hub (`agent_chat_signed_in`).
+a person signed in to the hub (`is_agent_chat_signed_in`).
 
 Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from daimon.core._models import SessionSettleState
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -256,7 +256,7 @@ class AgentChatSends:
     turn_event_id: str | None
 
 
-async def agent_chat_sends(
+async def count_agent_chat_sends(
     session: AsyncSession, *, managed_session_id: str
 ) -> AgentChatSends | None:
     """The session's agent-chat sends; None when it has no row."""
@@ -281,24 +281,27 @@ async def record_agent_chat_driver(
     signed_in: bool,
     send: bool,
     new_session: bool = False,
+    sends_read: int | None = None,
 ) -> int | None:
     """Record, before a send or resume, whether that session's driver is signed in.
 
     A send (`send`) also counts itself and returns its number, for
-    `record_unattended_turn` once it is accepted. On a session its caller just created
-    (`new_session`) the driver is named only if this write creates the row: a row
-    already there was written for something done on the session before this send, so
-    it names nobody, decided in the same statement as the write.
+    `record_unattended_turn` once it is accepted. The driver is named only if nothing
+    changed since the caller decided, checked in the same statement as the write: on a
+    session its caller just created (`new_session`), only if this write creates the
+    row; on any other, only if `agent_chat_sends` is still `sends_read`, the count the
+    decision read, so another send begun in between names nobody.
     """
     stmt = insert(SessionSettleState).values(
         managed_session_id=managed_session_id,
-        agent_chat_signed_in=signed_in,
+        agent_chat_signed_in=signed_in and new_session,
         agent_chat_sends=1 if send else None,
     )
-    set_: dict[str, object] = {
-        "agent_chat_signed_in": False if new_session else signed_in,
-        "updated_at": func.now(),
-    }
+    named: object = False
+    if signed_in and not new_session and sends_read is not None:
+        # Read before this row is updated: the count as it stood when the send began.
+        named = case((SessionSettleState.agent_chat_sends == sends_read, True), else_=False)
+    set_: dict[str, object] = {"agent_chat_signed_in": named, "updated_at": func.now()}
     if send:
         set_["agent_chat_sends"] = func.coalesce(SessionSettleState.agent_chat_sends, 0) + 1
     number = await session.scalar(
@@ -309,7 +312,7 @@ async def record_agent_chat_driver(
     return number if send else None
 
 
-async def agent_chat_signed_in(session: AsyncSession, *, managed_session_id: str) -> bool:
+async def is_agent_chat_signed_in(session: AsyncSession, *, managed_session_id: str) -> bool:
     """Whether the latest recorded driver of the session is signed in; no record is no."""
     value = await session.scalar(
         select(SessionSettleState.agent_chat_signed_in).where(

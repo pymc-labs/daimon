@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 
 import structlog
@@ -31,6 +32,7 @@ from daimon.adapters.mcp.resource_ports import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _policy_gate  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._session_access import hub_access_mode
+from daimon.core.agent_chat_requester import UNREAD, EarlierTurn
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_AGENT_CHAT,
@@ -201,7 +203,7 @@ async def _agent_chat_sends(
     runtime: McpRuntime, handle: str
 ) -> session_settle_state.AgentChatSends | None:
     async with runtime.session_factory() as db:
-        return await session_settle_state.agent_chat_sends(db, managed_session_id=handle)
+        return await session_settle_state.count_agent_chat_sends(db, managed_session_id=handle)
 
 
 def _public_url(runtime: McpRuntime) -> str | None:
@@ -233,6 +235,10 @@ class _Turn:
     boundary_id: str | None = None
     state: TurnState = field(default_factory=TurnState)
     confirmed: set[str] = field(default_factory=set[str])
+    #: The provider's `processed_at` of the boundary and of the turn's latest idle, as
+    #: listed: None while a message is queued, so possibly not a datetime at all.
+    boundary_processed_at: object = None
+    idle_processed_at: object = None
 
 
 async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _Turn:
@@ -255,6 +261,7 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
         for event in result.data:
             if event.type == "user.message":
                 turn.boundary_id = event.id
+                turn.boundary_processed_at = event.processed_at
                 break
             events.append(event)
         if turn.boundary_id is not None or result.next_page is None:
@@ -264,6 +271,8 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
         raise RuntimeError("MCP turn history exceeds the confirmation page limit")
     for event in reversed(events):
         turn.state = apply(turn.state, event)
+        if event.type == "session.status_idle":
+            turn.idle_processed_at = event.processed_at
         if event.type == "user.tool_confirmation":
             turn.confirmed.add(event.tool_use_id)
     return turn
@@ -271,7 +280,7 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
 
 async def earlier_turn_open(
     runtime: McpRuntime, auth: AuthIdentity, handle: str, *, new_session: bool
-) -> bool:
+) -> EarlierTurn:
     """Whether a turn sent earlier on `handle` may still be running.
 
     Read from Daimon's own count of the sends (`record_driver`, `record_turn`), written
@@ -283,20 +292,21 @@ async def earlier_turn_open(
     - Otherwise the latest send begun must be the one whose turn was recorded; a send
       that may have been accepted unrecorded (a 5xx or a timeout) is open and logged.
       The recorded turn then counts as ended only once the transcript's newest
-      boundary is that turn and an idle that is not a pause follows it. Anything else,
-      or an unreadable transcript, is open.
+      boundary is that turn, processed, and an idle that is not a pause was processed
+      no earlier than it. Anything else, or an unreadable transcript, is open.
 
     Nothing is read for a caller who is not a signed-in person, or while no server
     names the agent-chat requester: the send then names nobody (counted as open), so
-    with the option off a send does what it did before it existed.
+    with the option off a send does what it did before it existed. The count of sends
+    read is returned with the answer, for the write to check it is unchanged.
     """
     if not (auth.signed_in_person and runtime.settings.mcp_identity.names_agent_chat_requester):
-        return True
+        return UNREAD
     sends = await _agent_chat_sends(runtime, handle)
     if new_session:
-        return sends is not None and sends.begun is not None
+        return EarlierTurn(open=sends is not None and sends.begun is not None)
     if sends is None or sends.turn_event_id is None:
-        return True
+        return UNREAD
     if sends.begun is None or sends.recorded != sends.begun:
         log.info(
             "agent_chat.requester_withheld",
@@ -305,17 +315,34 @@ async def earlier_turn_open(
             sends_begun=sends.begun,
             send_recorded=sends.recorded,
         )
-        return True
+        return UNREAD
     try:
         turn = await _read_turn(runtime, auth, handle)
     except RuntimeError:
-        return True
+        return UNREAD
     stop = turn.state.stop_reason
-    return not (
+    ended = (
         turn.boundary_id == sends.turn_event_id
         and stop is not None
         and stop.type != "requires_action"
+        and _processed_in_order(turn.boundary_processed_at, turn.idle_processed_at)
     )
+    return EarlierTurn(open=not ended, sends=sends.begun)
+
+
+def _processed_in_order(boundary: object, idle: object) -> bool:
+    """Whether the idle was processed no earlier than the boundary message.
+
+    The list order alone does not show it: a message queued behind a running turn is
+    listed with no `processed_at` and may sort before that turn's idle. A missing or
+    unparsed timestamp is not in order.
+    """
+    if not (isinstance(boundary, datetime) and isinstance(idle, datetime)):
+        return False
+    try:
+        return idle >= boundary
+    except TypeError:  # one naive, one aware
+        return False
 
 
 def watch_turn(
