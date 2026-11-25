@@ -965,8 +965,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "Ask shows a card before a cloud computer is started or its time is extended. "
-            "Skip starts it without the card, for the default time. Only a server admin "
-            "can change it."
+            "Skip starts it without the card, for the default time. On OpenAI and Gemini "
+            "agents the card still shows. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,

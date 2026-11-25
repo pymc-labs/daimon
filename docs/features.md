@@ -1308,7 +1308,7 @@ Ask shows a card with the destination and duration before a watch is made or res
 
 ## Approval for cloud computers
 
-Ask shows a card before a cloud computer is started or its time is extended. Skip starts it without the card, for the default time. Only a server admin can change it.
+Ask shows a card before a cloud computer is started or its time is extended. Skip starts it without the card, for the default time. On OpenAI and Gemini agents the card still shows. Only a server admin can change it.
 
 | | |
 | --- | --- |
