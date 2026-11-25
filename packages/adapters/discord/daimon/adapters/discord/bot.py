@@ -6525,8 +6525,8 @@ class DaimonBot(commands.Bot):
             the agent curls the URL, ``read``s it at full size, and MA
             terminates the session. Reseeding that same URL into the fresh
             session just repeats it, so the thread recovers, dies, recovers,
-            dies -- each cycle billing a full agentic run. Observed on staging
-            thread 1535185295245582356: two consecutive recoveries burned 243k
+            dies -- each cycle billing a full agentic run. Observed on a staging
+            thread: two consecutive recoveries burned 243k
             then 62k input tokens and both ended terminated. Withholding the
             URL (rather than only warning about it, which the model may ignore)
             is what actually breaks the loop.
