@@ -20,6 +20,11 @@ Set these in the MCP service **and the scheduler**:
 
 Keep the deployment id and auth key the same across restarts.
 
+Cloud computers stay off after this set-up. A server admin then turns on the
+[`compute` feature](features.md#cloud-computers) for a workspace or one agent,
+with `/settings` in chat, the web app or `daimon features`. To turn it on
+everywhere, set `DAIMON_FEATURES__COMPUTE=on` on every Daimon service.
+
 > **Warning:** Removing these settings before cleanup finishes can leave paid
 > machines running. To stop new launches, turn off `DAIMON_COMPUTE__ENABLED`
 > and leave the rest: cleanup keeps going.

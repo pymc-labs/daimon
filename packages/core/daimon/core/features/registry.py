@@ -1198,9 +1198,13 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "compute",
         "Cloud computers",
-        "The agent can start a short-lived cloud computer to run code and keep files. Off "
-        "removes the computer tools here.",
+        (
+            "The agent can start a short-lived cloud computer to run code and keep files. Off "
+            "until a server admin turns it on; off removes the computer tools here."
+        ),
         requires=("compute_setup",),
+        default="off",
+        authority=_SERVER_ADMIN,
     ),
     _capability(
         "notebooks",

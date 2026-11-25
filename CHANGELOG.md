@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Cloud computers are now off until a server admin turns them on.** Before, every workspace
+  and agent got the computer tools once the operator set compute up. Turn on the `compute`
+  feature for a workspace or one agent, or set `DAIMON_FEATURES__COMPUTE=on` on every Daimon
+  service to keep them on everywhere. Only a server admin can change it, and agent owners can
+  no longer turn it on or off ([Compute sessions](docs/compute.md#turn-it-on)).
+
 - **Routines start on time when many sessions are live.** The scheduler's check for due routines
   shared one loop with the GitHub token refresh, which takes about a second for each live
   session. With hundreds of sessions a check came more than 15 minutes after the one before, and

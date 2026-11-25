@@ -1,4 +1,5 @@
-"""Long jobs spend money in the background: only a server admin sets them, as on main."""
+"""Long jobs and cloud computers spend money in the background: only a server admin sets
+them."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.features.registry import FEATURES, Tier
 from daimon.core.features.service import FeatureActor, may_change
 
-_LONG_JOB_KEYS = ("long_jobs", "long_jobs_max_usd", "long_jobs_max_deadline")
+_LONG_JOB_KEYS = ("long_jobs", "long_jobs_max_usd", "long_jobs_max_deadline", "compute")
 _TIERS: tuple[Tier, ...] = ("workspace", "agent")
 
 
@@ -38,7 +39,7 @@ async def test_an_owner_and_a_delegated_admin_cannot_change_a_long_job_feature(
     owner = _actor(server_admin=False, owner=True)
     delegated = _actor(server_admin=False, delegated_admin=True)
     assert not await may_change(owner, spec, tier, locked=False, agent_id="ag"), (
-        "an agent's owner must not raise a long job cap or turn long jobs on"
+        "an agent's owner must not raise a long job cap or turn long jobs or computers on"
     )
     assert not await may_change(delegated, spec, tier, locked=False, agent_id="ag"), (
         "a delegated admin is not a server admin"
@@ -57,5 +58,5 @@ async def test_a_server_admin_changes_a_long_job_feature(key: str, tier: Tier) -
 async def test_an_agent_owner_still_sets_an_ordinary_agent_feature() -> None:
     owner = _actor(server_admin=False, owner=True)
     assert await may_change(owner, FEATURES["routines"], "agent", locked=False, agent_id="ag"), (
-        "only the long-job features drop the owner path"
+        "only the spending features drop the owner path"
     )

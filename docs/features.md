@@ -86,7 +86,7 @@ Where each feature can be set, and its default.
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Secret sharing | `secret_sharing` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
 | Wait for bot access | `bot_access_wait` | Capability | Off |  | ✓ |  |  |  |  | Only Discord |
-| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Cloud computers | `compute` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -952,13 +952,13 @@ Work for a channel Daimon cannot reach waits, without failing, and runs once it 
 
 ## Cloud computers
 
-The agent can start a short-lived cloud computer to run code and keep files. Off removes the computer tools here.
+The agent can start a short-lived cloud computer to run code and keep files. Off until a server admin turns it on; off removes the computer tools here.
 
 | | |
 | --- | --- |
 | Key | `compute` |
 | Values | `on` (On), `off` (Off) |
-| Default | `on` |
+| Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
 

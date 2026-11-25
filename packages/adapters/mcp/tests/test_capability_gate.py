@@ -268,6 +268,28 @@ async def test_the_tool_list_when_a_feature_is_off_drops_its_tools_for_an_extern
     assert "get_long_job" in after, "a stop tool stays listed though long jobs is Off"
 
 
+async def test_cloud_computers_stay_off_until_a_workspace_turns_them_on(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off by default even once the operator set compute up: nothing is offered or runs."""
+    mcp = await _app(sessionmaker)
+    tenant_id = await _tenant(sessionmaker)
+    _as(monkeypatch, tenant_id, platform="cli")
+    launch = {"template": "mmm", "origin_context_id": str(uuid.uuid4())}
+    # The ones listed by name; the rest are found through search.
+    compute = frozenset({"compute_launch_session", "compute_extend_session"})
+    async with Client(mcp) as client:
+        before = {t.name for t in await client.list_tools()}
+        refused = await _error(client, "compute_launch_session", launch)
+        await _set(sessionmaker, tenant_id, "compute", "on")
+        after = {t.name for t in await client.list_tools()}
+        allowed = await _error(client, "compute_launch_session", launch)
+    assert not before & compute, f"cloud computer tools listed while Off: {before & compute}"
+    assert "Cloud computers is turned off here" in refused and OFF in refused, refused
+    assert compute <= after, "a workspace On offers them"
+    assert OFF not in allowed, f"the gate let the call through: {allowed!r}"
+
+
 async def test_the_tool_list_for_a_chat_credential_is_left_whole(
     sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
