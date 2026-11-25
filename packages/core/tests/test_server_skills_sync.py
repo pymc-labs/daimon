@@ -206,6 +206,20 @@ async def test_a_published_update_is_kept_as_a_version(
     assert "guide.md" in {f.path for f in files}
 
 
+async def test_a_repository_read_without_the_app_holds_even_a_text_update(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+
+    async def anonymous() -> bool:
+        return True
+
+    deps = dataclasses.replace(world.deps, approve_every_change=anonymous)
+    world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
+    assert await check_mirror(deps, world.mirror.id) == "pending"
+    assert world.first.published == [] and world.second.published == []
+
+
 async def test_a_failing_provider_keeps_its_agents_and_retries(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

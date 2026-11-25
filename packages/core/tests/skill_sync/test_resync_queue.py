@@ -75,6 +75,7 @@ async def test_acknowledged_work_survives_worker_death_before_resync_starts(
         github_settings: GithubSettings,
         github_app: GithubAppSettings | None = None,
         http_client: object | None = None,
+        attempts: int = 1,
     ) -> ResyncReport:
         published.append(f"{repo_full_name}:{ref}")
         return ResyncReport(failed_bindings=0)
@@ -121,6 +122,7 @@ async def test_queue_retries_only_retryable_binding_failures(
         github_settings: GithubSettings,
         github_app: GithubAppSettings | None = None,
         http_client: object | None = None,
+        attempts: int = 1,
     ) -> ResyncReport:
         return ResyncReport(failed_bindings=1, retryable_bindings=retryable_bindings)
 
@@ -162,6 +164,7 @@ async def test_expired_lease_recovers_after_process_dies_mid_binding_batch(
         github_settings: GithubSettings,
         github_app: GithubAppSettings | None = None,
         http_client: object | None = None,
+        attempts: int = 1,
     ) -> ResyncReport:
         nonlocal calls
         calls += 1
@@ -232,6 +235,7 @@ async def test_later_push_converges_after_stalled_old_generation(
         github_settings: GithubSettings,
         github_app: GithubAppSettings | None = None,
         http_client: object | None = None,
+        attempts: int = 1,
     ) -> ResyncReport:
         nonlocal calls
         calls += 1

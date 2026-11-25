@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import tempfile
 import uuid
 from collections.abc import Callable, Sequence
@@ -51,7 +52,7 @@ from daimon.core.stores.github_installation_coverage import installation_covers_
 from pydantic import JsonValue, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["REPO_PREFIX", "RepoUpstream", "parse_repo_server", "repo_server"]
+__all__ = ["REPO_PREFIX", "RepoUpstream", "parse_repo_server", "repo_server", "valid_branch"]
 
 log = structlog.get_logger(__name__)
 
@@ -63,12 +64,25 @@ def repo_server(repo: str, branch: str) -> str:
     return f"{REPO_PREFIX}{repo}@{branch}"
 
 
+_BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+
+
+def valid_branch(branch: str) -> bool:
+    """A branch name git accepts, from a plain alphabet, so it is safe in an API path."""
+    parts = branch.split("/")
+    return (
+        _BRANCH.fullmatch(branch) is not None
+        and ".." not in branch
+        and all(p and not p.startswith(".") and not p.endswith((".", ".lock")) for p in parts)
+    )
+
+
 def parse_repo_server(server: str) -> tuple[str, str] | None:
     """`(owner/name, branch)` of a repo mirror's server name, else None."""
     if not server.startswith(REPO_PREFIX):
         return None
     repo, sep, branch = server.removeprefix(REPO_PREFIX).partition("@")
-    return (repo, branch) if sep and repo.count("/") == 1 and branch else None
+    return (repo, branch) if sep and repo.count("/") == 1 and valid_branch(branch) else None
 
 
 def _read_tree(found: Sequence[BundledSkill]) -> dict[str, dict[str, bytes]]:
@@ -85,9 +99,12 @@ def _read_tree(found: Sequence[BundledSkill]) -> dict[str, dict[str, bytes]]:
         if len(paths) > MAX_FILES or sum(p.stat().st_size for p in paths) > MAX_UNCOMPRESSED_BYTES:
             log.warning("repo_skill.too_large", folder=item.source_rel)
             continue
-        tree[item.source_rel] = {
-            p.relative_to(item.skill_dir).as_posix(): p.read_bytes() for p in paths
-        }
+        files = {p.relative_to(item.skill_dir).as_posix(): p.read_bytes() for p in paths}
+        # The bundler finds SKILL.md in any case; the mirror names it SKILL.md.
+        main = next((path for path in files if path.casefold() == "skill.md"), None)
+        if main is not None:
+            files["SKILL.md"] = files.pop(main)
+        tree[item.source_rel] = files
     return tree
 
 
@@ -132,9 +149,20 @@ class RepoUpstream:
     max_tarball_bytes: int = 50 * 1024 * 1024
     max_tarball_decompressed_bytes: int = DEFAULT_MAX_TARBALL_DECOMPRESSED_BYTES
     _tree: dict[str, dict[str, bytes]] | None = field(default=None, init=False, repr=False)
+    _token: list[str | None] = field(default_factory=list[str | None], init=False, repr=False)
+
+    async def anonymous(self) -> bool:
+        """Whether the repository is read without the workspace's GitHub App: whoever
+        controls it is nobody here, so every change it makes waits for approval."""
+        return await self._credential() is None
 
     async def _credential(self) -> str | None:
         """An App token when the workspace authorized this repository, else None (public)."""
+        if not self._token:
+            self._token.append(await self._mint())
+        return self._token[0]
+
+    async def _mint(self) -> str | None:
         if self.app_id is None or self.app_private_key is None:
             return None
         async with self.sessionmaker() as session:
@@ -181,9 +209,9 @@ class RepoUpstream:
                     max_tarball_decompressed_bytes=self.max_tarball_decompressed_bytes,
                 )
                 self._tree = await asyncio.to_thread(_read_tree, found)
-        except (GitHubAuthError, GitHubUnreachable) as err:
+        except (GitHubAuthError, GitHubUnreachable, TarballTooLarge) as err:
             raise UpstreamGone(type(err).__name__) from err
-        except (TarballTooLarge, GitHubRateLimitError, httpx.HTTPError) as err:
+        except (GitHubRateLimitError, httpx.HTTPError) as err:
             raise UpstreamUnreachable(type(err).__name__) from err
         return self._tree
 

@@ -87,13 +87,17 @@ def runtime(
     def node(*_a: object) -> SkillsNode:
         return _NODE
 
+    def no_source(*_a: object, **_k: object) -> None:
+        return None  # a node's mirror: no in-process source keeps it
+
     monkeypatch.setattr(tools, "_edit_deps", deps)
     monkeypatch.setattr(tools, "_sync_deps", deps)
+    monkeypatch.setattr(tools, "mirror_sync_deps", no_source)
     monkeypatch.setattr(tools, "skills_node_of", node)
     monkeypatch.setattr(tools, "tenant_links", no_links)
     rt = SimpleNamespace(
         session_factory=db_session_factory,
-        settings=object(),
+        settings=SimpleNamespace(github=None, github_app=None),
         fernet=None,
         identity_key=None,
         node_held={},
@@ -449,6 +453,8 @@ NODE_FREE_TOOLS = {
     "fork_server_skill": "copies a library skill",
     "apply_server_skill_update": "applies a held update from the library",
     "set_server_skill_follow": "records a choice; fetches only when the node is served",
+    "check_server_skill": "a repository's mirror syncs without the node; a node's still needs it",
+    "approve_server_skill_update": "as check_server_skill",
 }
 
 

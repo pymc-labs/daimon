@@ -8,7 +8,7 @@ An update held by an earlier release stays until the agent moves; then it is rel
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,7 +31,7 @@ from daimon.core.server_skills.gate import (
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_files
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow, ServerSkillStatus
-from daimon.core.workspace_skills import record_bundle
+from daimon.core.workspace_skills import record_zip
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -108,6 +108,8 @@ class SyncDeps:
     now: Callable[[], datetime]
     asked_as_adder: bool = True
     """Whether the server is asked as the person who added the mirror, which then needs them."""
+    approve_every_change: Callable[[], Awaitable[bool]] | None = None
+    """True when every change waits for approval, text too: a source nobody here controls."""
 
 
 async def _row(deps: SyncDeps, mirror_id: uuid.UUID) -> ServerSkillRow | None:
@@ -184,13 +186,13 @@ async def _deploy(deps: SyncDeps, mirror: ServerSkillRow, bundle: SkillBundle | 
                 if bundle is None:
                     bundle, _ = await _bundle(deps, mirror, mirror.digest)
                 version = await target.publish(mirror, bundle)
-                await record_bundle(
+                await record_zip(
                     deps.sessionmaker,
                     tenant_id=mirror.tenant_id,
                     skill_id=mirror.skill_id,
                     name=mirror.name,
                     version=version,
-                    bundle=bundle,
+                    zip_bytes=bundle.zip_bytes,
                 )
                 async with deps.sessionmaker.begin() as session:
                     await store.put_deployment(
@@ -333,7 +335,7 @@ async def _check_locked(
         fetched.files,
         old_tools=mirror.allowed_tools,
         new_tools=allowed_tools_of(entry.frontmatter),
-    )
+    ) or (deps.approve_every_change is not None and await deps.approve_every_change())
     if gated and approve != digest:
         async with deps.sessionmaker.begin() as session:
             await store.hold_for_approval(

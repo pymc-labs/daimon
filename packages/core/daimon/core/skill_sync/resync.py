@@ -144,6 +144,10 @@ async def _resync_agent_repos(
     return ResyncReport(failed_bindings=failed, retryable_bindings=retryable)
 
 
+MIRROR_ATTEMPTS = 5
+"""Push resyncs that retry a repository's mirrors; the check loop covers them after that."""
+
+
 async def resync_bound_repo(
     *,
     repo_full_name: str,
@@ -154,8 +158,10 @@ async def resync_bound_repo(
     http_client: httpx.AsyncClient | None = None,
     github_settings: GithubSettings | None = None,
     github_app: GithubAppSettings | None = None,
+    attempts: int = 1,
 ) -> ResyncReport:
-    """Resync a pushed repository: agents' imported skills, then the library's repo mirrors."""
+    """Resync a pushed repository: agents' imported skills, then the library's repo mirrors.
+    `attempts` counts this job's runs; past `MIRROR_ATTEMPTS` a mirror failure is not retried."""
     agents = await _resync_agent_repos(
         repo_full_name=repo_full_name,
         ref=ref,
@@ -171,13 +177,12 @@ async def resync_bound_repo(
         return await resync_repo_mirrors(
             repo_full_name=repo_full_name,
             ref=ref,
-            sessionmaker=sessionmaker,
+            github=github_settings or GithubSettings(),
+            github_app=github_app,
             edit=AgentEditDeps(
                 client=anthropic_client, session_factory=sessionmaker, public_url=None
             ),
             http=client,
-            app_id=None if github_app is None else github_app.app_id,
-            app_private_key=None if github_app is None else github_app.private_key,
             now=lambda: datetime.now(UTC),
         )
 
@@ -188,6 +193,7 @@ async def resync_bound_repo(
         failed, retryable = await mirrors(http_client)
     return ResyncReport(
         failed_bindings=agents.failed_bindings + failed,
-        retryable_bindings=agents.retryable_bindings + retryable,
+        retryable_bindings=agents.retryable_bindings
+        + (retryable if attempts < MIRROR_ATTEMPTS else 0),
         retry_after=agents.retry_after,
     )

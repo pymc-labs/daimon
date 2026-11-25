@@ -9,7 +9,7 @@ store the data package supplies (`LocalSources`, filled at startup, empty by def
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +23,6 @@ from daimon.core.server_skills.sync import SyncDeps, Upstream
 from daimon.core.skill_library_files import skill_lock
 from daimon.core.stores.domain import ServerSkillRow
 from mux.contracts.ids import Scope
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "LocalSources",
@@ -60,14 +59,14 @@ def source_deps(
     *,
     server: str,
     upstream: Upstream,
-    sessionmaker: async_sessionmaker[AsyncSession],
     edit: AgentEditDeps,
     now: Callable[[], datetime],
+    approve_every_change: Callable[[], Awaitable[bool]] | None = None,
 ) -> SyncDeps:
     """Sync dependencies for mirrors of one in-process source, deployed to Managed Agents.
 
     No person is asked for the files: the source decides what the workspace may read, so a
-    mirror needs no adder.
+    mirror needs no adder. `approve_every_change` says when even a text change waits.
     """
 
     def lock(mirror: ServerSkillRow) -> AbstractAsyncContextManager[None]:
@@ -75,10 +74,11 @@ def source_deps(
 
     return SyncDeps(
         server=server,
-        sessionmaker=sessionmaker,
+        sessionmaker=edit.session_factory,
         upstream=lambda _mirror: upstream,
         targets=(ManagedAgentsTarget(edit.client),),
         lock=lock,
         now=now,
         asked_as_adder=False,
+        approve_every_change=approve_every_change,
     )
