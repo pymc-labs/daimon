@@ -37,7 +37,7 @@ export type ConnectionTool = {
   name: string
   description: string
   seen_description: string
-  seen_arguments: string[]
+  seen_schema: Record<string, unknown>
   seen: string
   changed: boolean
   enabled: boolean

@@ -53,10 +53,10 @@ function Body({ d }: { d: Data }) {
 
 function Item({ c, can }: { c: Connection; can: boolean }) {
   const confirm = useConfirm()
-  const editable = can && !c.declared
   const url = `${BASE}/${c.id}`
+  const active = c.status === "active"
   const refresh = useChange(() => api.post(`${url}/refresh`), "Tools refreshed")
-  const pause = useChange(() => api.patch(url, { status: c.status === "paused" ? "active" : "paused" }))
+  const pause = useChange(() => api.patch(url, { status: active ? "paused" : "active" }))
   const remove = useChange(() => api.del(url), "Connection removed")
   return (
     <section className="rounded-lg border">
@@ -71,18 +71,18 @@ function Item({ c, can }: { c: Connection; can: boolean }) {
           <div className="truncate font-mono text-[12px] text-muted-foreground">{c.url}</div>
           {c.error && <div className="mt-1 text-xs text-destructive">{c.error}</div>}
         </div>
-        {editable && (
+        {can && (
           <div className="flex gap-1">
             <Button variant="ghost" size="sm" disabled={refresh.isPending} onClick={() => refresh.mutate(undefined)}>Refresh</Button>
-            <Button variant="ghost" size="sm" disabled={pause.isPending} onClick={() => pause.mutate(undefined)}>{c.status === "paused" ? "Resume" : "Pause"}</Button>
-            <Button variant="ghost" size="sm" disabled={remove.isPending} onClick={async () => {
+            <Button variant="ghost" size="sm" disabled={pause.isPending} onClick={() => pause.mutate(undefined)}>{active ? "Pause" : "Resume"}</Button>
+            {!c.declared && <Button variant="ghost" size="sm" disabled={remove.isPending} onClick={async () => {
               if (await confirm({ title: `Remove ${c.name}?`, body: "Its tools stop being offered to agents and clients.", action: "Remove", destructive: true })) remove.mutate(undefined)
-            }}>Remove</Button>
+            }}>Remove</Button>}
           </div>
         )}
       </header>
       {!c.tools.length ? <div className="px-4 py-6 text-sm text-muted-foreground">No tools found yet</div> : (
-        <ul className="divide-y">{c.tools.map((t) => <Tool key={t.name} c={c} t={t} can={editable} />)}</ul>
+        <ul className="divide-y">{c.tools.map((t) => <Tool key={t.name} c={c} t={t} can={can} />)}</ul>
       )}
     </section>
   )
@@ -114,7 +114,7 @@ function Tool({ c, t, can }: { c: Connection; t: ConnectionTool; can: boolean })
       {review && (
         <div className="rounded-md bg-muted/40 px-3 py-2 text-sm">
           <p className="whitespace-pre-wrap break-words">{t.seen_description || "No description"}</p>
-          {!!t.seen_arguments.length && <p className="mt-1 font-mono text-[12px] text-muted-foreground">Takes: {t.seen_arguments.join(", ")}</p>}
+          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] text-muted-foreground">{JSON.stringify(t.seen_schema, null, 2)}</pre>
         </div>
       )}
     </li>

@@ -1,8 +1,9 @@
 """`/api/integrations/connections`: a workspace's shared MCP connections, for admins.
 
 An admin adds one MCP server and its bearer token, reads the tools it offers, and turns each on
-by approving the exact description and schema shown. No answer holds the credential. The rules
-and the calls themselves live in `daimon.core.shared_connections`.
+by approving the exact description, schema and effect shown. A declared connection's address,
+token and scope come from the deployment's file; its tools are approved here like any other.
+No answer holds the credential. The rules and calls live in `daimon.core.shared_connections`.
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ Manager = Annotated[WebCaller, Depends(requires("integrations.manage"))]
 NO_CONNECTION = "This connection isn't here."
 READ_ONLY = "This connection comes from the workspace's configuration. Change it there."
 OFF = "Shared connections are turned off for this workspace. Turn them on in Settings first."
-NO_KEY = "Shared connections aren't set up on this install."
 
 
 class ConnectionTool(BaseModel):
@@ -39,7 +39,8 @@ class ConnectionTool(BaseModel):
     description: str
     """What callers get: what was approved."""
     seen_description: str
-    seen_arguments: list[str]
+    seen_schema: dict[str, JsonValue]
+    """The whole schema a client is shown once the tool is on."""
     seen: str
     """Send this back to approve exactly what is shown."""
     changed: bool
@@ -86,17 +87,12 @@ class ToolBody(BaseModel):
     scope: str | None = Field(default=None, pattern=shared.SCOPE_PATTERN.pattern)
 
 
-def _arguments(schema: dict[str, JsonValue]) -> list[str]:
-    props = schema.get("properties")
-    return sorted(str(k) for k in props) if isinstance(props, dict) else []
-
-
 def _tool_out(tool: McpConnectionToolRow) -> ConnectionTool:
     return ConnectionTool(
         name=tool.name,
         description=tool.description,
         seen_description=tool.seen_description,
-        seen_arguments=_arguments(tool.seen_schema),
+        seen_schema=tool.seen_schema,
         seen=shared.seen_digest(tool),
         changed=tool.enabled and tool.changed,
         enabled=tool.enabled,
@@ -160,10 +156,7 @@ def connections_router(runtime: WebRuntime) -> APIRouter:
         await admin(db, caller)
         if not await is_on(db, caller):
             raise HTTPException(status_code=409, detail=OFF)
-        row = await one(db, caller, connection_id)
-        if row.declared:
-            raise HTTPException(status_code=403, detail=READ_ONLY)
-        return row
+        return await one(db, caller, connection_id)
 
     async def refresh(row: McpConnectionRow) -> None:
         # A failure is kept on the connection as its status and error.
@@ -232,6 +225,8 @@ def connections_router(runtime: WebRuntime) -> APIRouter:
         values: dict[str, object] = {}
         async with runtime.sessionmaker.begin() as db:
             row = await editable(db, caller, connection_id)
+            if row.declared and ({"scope", "token"} & body.model_fields_set):
+                raise HTTPException(status_code=403, detail=READ_ONLY)
             if body.status is not None:
                 values["status"] = body.status
                 values["last_error"] = None
@@ -303,7 +298,8 @@ def connections_router(runtime: WebRuntime) -> APIRouter:
                 values["enabled"] = False
                 what.append("turned off")
             if body.writes is not None:
-                values.update(writes=body.writes, writes_set=True)
+                # The admin's own switch is its approval.
+                values.update(writes=body.writes, approved_writes=body.writes, writes_set=True)
                 what.append("writes" if body.writes else "reads")
             if "scope" in body.model_fields_set:
                 values["scope"] = body.scope
