@@ -31,6 +31,8 @@ Capability = Literal[
     "credits.manage",
     "integrations.view",
     "integrations.manage",
+    "data.view",
+    "data.manage",
     "people.manage",
     "audit.view",
     "workspace.manage",
@@ -50,6 +52,8 @@ _ALL: tuple[Capability, ...] = (
     "credits.manage",
     "integrations.view",
     "integrations.manage",
+    "data.view",
+    "data.manage",
     "people.manage",
     "audit.view",
     "workspace.manage",
@@ -68,6 +72,7 @@ _BY_ROLE: dict[Role, frozenset[Capability]] = {
             "routines.view",
             "routines.manage",
             "credits.view_own",
+            "data.view",
         }
     ),
     "visitor": frozenset({"chat.use", "credits.view_own"}),
@@ -87,18 +92,20 @@ _MODULE_OF: dict[Capability, WebModuleKey] = {
     "credits.manage": "credits",
     "integrations.view": "integrations",
     "integrations.manage": "integrations",
+    "data.view": "data",
+    "data.manage": "data",
     "people.manage": "admin",
     "audit.view": "admin",
     "workspace.manage": "admin",
 }
 _MODULES_BY_ROLE: dict[Role, frozenset[WebModuleKey]] = {
     "owner": frozenset(
-        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
+        {"chat", "agents", "channels", "routines", "data", "credits", "integrations", "admin"}
     ),
     "admin": frozenset(
-        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
+        {"chat", "agents", "channels", "routines", "data", "credits", "integrations", "admin"}
     ),
-    "member": frozenset({"chat", "agents", "channels", "routines", "credits"}),
+    "member": frozenset({"chat", "agents", "channels", "routines", "data", "credits"}),
     "visitor": frozenset({"chat"}),
 }
 _MODULE_ORDER: tuple[WebModuleKey, ...] = (
@@ -106,6 +113,7 @@ _MODULE_ORDER: tuple[WebModuleKey, ...] = (
     "agents",
     "channels",
     "routines",
+    "data",
     "credits",
     "integrations",
     "admin",
