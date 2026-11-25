@@ -169,8 +169,18 @@ never add one for a rule you have not written down in prose.
 
 `scripts/lint_designators.sh` (pre-commit and CI) guards the other
 direction: this repository is public, so it must not name the maintainers'
-private planning repository, production hostnames or cloud project ids.
-Describe the behaviour instead.
+private planning repository, production hostnames or cloud project ids, or a
+person's home directory. Describe the behaviour instead, and use neutral
+example names such as "Acme" or `example-client` in skills and tests.
+
+The lint also reads a private list of names that must never appear, one
+regular expression per line, matched case-insensitively between
+non-alphanumeric characters. It comes from outside the repository: the
+`DAIMON_LINT_DENYLIST` variable (the CI secret of that name), a file named by
+`DAIMON_LINT_DENYLIST_FILE`, or `~/.config/daimon/lint-denylist`. Without one
+the lint skips that rule and says so; `DAIMON_LINT_DENYLIST_REQUIRED=1`
+makes that a failure. No rule prints a listed name: hits print as
+`file:line`, and a path containing one is withheld.
 
 ## Pull request expectations
 

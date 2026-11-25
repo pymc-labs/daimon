@@ -108,7 +108,9 @@ _NARROWED: dict[str, str] = {
     "mcp_connector_relay": "operator-only: sends connector data to another provider",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
+    "compute_wake_runs": "a server admin's choice for the team or one agent, read by a wake turn",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
+    "compute_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "secret_sharing": "a workspace or agent choice: a share has no channel or thread",
     "bot_access_wait": "a workspace choice, read by background work with no agent or thread",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
@@ -156,6 +158,20 @@ def test_most_specific_wins_and_says_which_tier_decided() -> None:
     got = resolve_feature(plans, [TierValue("workspace", "on"), TierValue("thread", "off")])
     assert (got.value, got.tier) == ("off", "thread")
     assert resolve_feature(plans, []).tier == "default"
+
+
+@pytest.mark.parametrize(
+    ("workspace", "agent"), [("on", "off"), ("off", "on"), (None, "on"), ("on", None)]
+)
+def test_the_nearer_tier_decides_whether_a_wake_turn_runs_commands(
+    workspace: str | None, agent: str | None
+) -> None:
+    """A server admin turns it on for the team but off for one agent, or on for one only."""
+    values = [TierValue("workspace", workspace)] if workspace else []
+    values += [TierValue("agent", agent)] if agent else []
+    got = resolve_feature(FEATURES["compute_wake_runs"], values)
+    assert got.value == (agent or workspace)
+    assert resolve_feature(FEATURES["compute_wake_runs"], []).value == "off"
 
 
 def test_a_capability_off_above_is_a_ceiling() -> None:
@@ -500,6 +516,7 @@ _KEY_READERS = {
     "place_feature_or_none": 3,
     "feature_in_or_none": 3,
     "_chosen": 2,
+    "_card_skipped": 4,
     "deployment_on": 1,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""

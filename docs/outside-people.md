@@ -22,7 +22,8 @@ A room is narrow in these cases:
 
 Admins and owners never count. A person with no internal role is an outsider,
 so a block on that person makes no room narrow. A public thread and a forum
-post follow their parent room. A change to a role or an overwrite makes Daimon
+post follow their parent room, also in the first seconds before the check has
+listed them; a private thread is narrow until then. A change to a role or an overwrite makes Daimon
 check the server again.
 
 ## Read a narrow room from your own DM

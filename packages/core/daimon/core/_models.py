@@ -5233,6 +5233,8 @@ class ComputeSessionRecord(Base):
     agent_name: Mapped[str]
     source_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, server_default="{}")
     extension_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    # The wake turns (origin ids, hex) that acted since the owner last acted here.
+    wake_turns: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
     request_key: Mapped[str]
     app_name: Mapped[str]
     profile: Mapped[str]
@@ -5318,6 +5320,8 @@ class ComputeTaskRecord(Base):
     created_at: Mapped[datetime]
     finished_at: Mapped[datetime | None]
     version: Mapped[int] = mapped_column(server_default="0")
+    # The scheduler does not poll the task before this: its caller still waits for it.
+    wait_until: Mapped[datetime | None]
 
 
 class AgentDaimonToolAllowlist(Base):

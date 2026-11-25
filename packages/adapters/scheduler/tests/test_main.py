@@ -2815,6 +2815,8 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=endless_pass,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -2846,6 +2848,8 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
     async with asyncio.timeout(5):
         await _run_loops(
             tick=slow_tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=usage_pass,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -2871,6 +2875,8 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
                 tick=tick,
+                housekeeping=unittest.mock.AsyncMock(),
+                github_sessions=unittest.mock.AsyncMock(),
                 usage_sweep=crashing_pass,
                 compute_sweep=unittest.mock.AsyncMock(),
                 compute_task_poll=unittest.mock.AsyncMock(),
@@ -2903,6 +2909,8 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
                 tick=crashing_tick,
+                housekeeping=unittest.mock.AsyncMock(),
+                github_sessions=unittest.mock.AsyncMock(),
                 usage_sweep=endless_pass,
                 compute_sweep=unittest.mock.AsyncMock(),
                 compute_task_poll=unittest.mock.AsyncMock(),
@@ -2915,6 +2923,52 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         "the tick's error propagates out of the loops"
     )
     assert pass_cancelled.is_set(), "the usage pass in flight is cancelled"
+
+
+@pytest.mark.parametrize("slow", ["housekeeping", "github_sessions"])
+async def test_run_loops_keeps_ticking_while_a_background_pass_is_in_flight(slow: str) -> None:
+    """Slow housekeeping or GitHub session upkeep never holds up routine claims or the
+    other, and a stop lets the pass in flight finish."""
+    stop = asyncio.Event()
+    slow_started = asyncio.Event()
+    ticks = 0
+    other_passes = 0
+    finished = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await slow_started.wait()
+        ticks += 1
+        if ticks >= 3 and other_passes >= 3:
+            stop.set()
+
+    async def slow_pass() -> None:
+        nonlocal finished
+        slow_started.set()
+        await stop.wait()
+        await asyncio.sleep(0.02)
+        finished = True
+
+    async def other_pass() -> None:
+        nonlocal other_passes
+        other_passes += 1
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            housekeeping=slow_pass if slow == "housekeeping" else other_pass,
+            github_sessions=slow_pass if slow == "github_sessions" else other_pass,
+            usage_sweep=unittest.mock.AsyncMock(),
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks >= 3
+    assert other_passes >= 3
+    assert finished, "a pass in flight finishes before the loops end"
 
 
 async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
@@ -2942,6 +2996,8 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=unittest.mock.AsyncMock(),
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -3038,6 +3094,8 @@ async def _fire_with_fake_turn(
     tenant_dms: bool = True,
     ran_agent_name: str = "daimon",
     fires: int = 1,
+    final: str = "Weekly summary: all green.",
+    reports_problem: bool = False,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -3087,10 +3145,22 @@ async def _fire_with_fake_turn(
                     status="complete",
                 )
             )
+        if reports_problem:
+            blocks.append(
+                ToolUseBlock(
+                    kind="tool_use",
+                    id="tu_problem",
+                    type="agent.mcp_tool_use",
+                    name="report_routine_problem",
+                    input={"category": "source_unavailable", "note": "x"},
+                    mcp_server_name="daimon-mcp",
+                    status="complete",
+                )
+            )
         on_state = kwargs["on_state"]
         assert callable(on_state)
         on_state(TurnState(content=list(blocks)))
-        return "Weekly summary: all green."
+        return final
 
     settings = _make_test_settings(monkeypatch)
     if dm_mode is not None:
@@ -3169,6 +3239,28 @@ async def test_fire_with_destination_queues_the_tail_when_the_agent_did_not_post
     assert '"schedule": "0 9 * * 1"' in trigger
     assert trigger.endswith("</turn_controls>\nsummarize the week")
     assert after.delivery_status == "pending"
+
+
+@pytest.mark.parametrize("reports_problem", [False, True], ids=["quiet", "reported_a_problem"])
+async def test_fire_with_destination_queues_no_text_for_a_quiet_run(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    reports_problem: bool,
+) -> None:
+    """Admins see a reported problem on Issues; the destination stays quiet."""
+    after, _seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+        final="I checked.\n\nNO_POST: nothing new",
+        reports_problem=reports_problem,
+    )
+
+    assert not after.delivery_payload, "the outbox settles it as no_result"
+    assert after.last_result_tail == "nothing new", "the record keeps the reason"
 
 
 async def test_fire_with_destination_skips_the_fallback_when_the_agent_posted(
@@ -3532,6 +3624,8 @@ async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> N
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=None,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),

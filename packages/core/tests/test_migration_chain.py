@@ -189,7 +189,9 @@ TAIL = (
     "0225_agent_github_grant_removals",
     "0226_compute_tool_names",
     "0227_turn_origin_own_dm_reach",
-    "0228_workflows",
+    "0228_compute_task_wait_until",
+    "0229_compute_started_by_wake",
+    "0230_workflows",
 )
 HEAD = TAIL[-1]
 
@@ -249,6 +251,8 @@ AFTER_MERGE_COLUMNS = {
     ("routines", "owner_notice"),
     ("lead_intake_executions", "workflow_run_id"),
     ("lead_intake_executions", "routine_id"),
+    ("compute_tasks", "wait_until"),
+    ("compute_sessions", "wake_turns"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 

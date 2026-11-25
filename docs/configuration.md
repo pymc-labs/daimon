@@ -214,6 +214,13 @@ Maximum launch or extension lifetime in hours. No dollar cap or metering is prov
 Maximum background commands running at once on one session. A background command may run
 for at most max_ttl_hours.
 
+### `DAIMON_COMPUTE__WAKE_RUN_LIMIT`
+
+`int` · optional · default `20`
+
+How many wake turns in a row may act on one session. The count starts again when the
+owner runs a command or writes a file on it; a chat message alone does not.
+
 ### `DAIMON_COMPUTE__PROFILES`
 
 `dict[str, ComputeProfile]` · optional · default `{}`

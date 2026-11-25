@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -144,6 +146,17 @@ def test_contract_covers_run_one_tick_and_the_loop_callbacks() -> None:
     assert "run_one_tick" not in steps
 
 
+def test_dispatch_shares_its_loop_with_no_other_step() -> None:
+    """A routine found more than 15 minutes late is skipped, so a slow sweep behind
+    dispatch makes routines miss their slots."""
+    ticks = [
+        node
+        for node in ast.walk(ast.parse(_main_source()))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "tick"
+    ]
+    assert [_called_names([tick]) for tick in ticks] == [["_run_one_tick_step"]]
+
+
 def test_contract_flags_a_named_unguarded_callback() -> None:
     source = _main_source().replace(
         "                compute_sweep=lambda: _sweep_compute(compute),\n",
@@ -249,6 +262,65 @@ async def test_scheduler_step_does_not_hide_other_errors() -> None:
         await broken()
 
 
+@pytest.mark.parametrize("step", ["tokens", "mapped", "mcp", "close"])
+async def test_a_stop_ends_a_github_session_pass_between_two_sessions(
+    monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """The session in hand finishes; the next one is not started."""
+    entered: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def fence(sm: object, session_id: str, *, check: bool) -> AsyncIterator[None]:
+        entered.append(session_id)
+        yield
+
+    def rows(name: str) -> AsyncMock:
+        found = [
+            SimpleNamespace(
+                session_id=f"{name}-{n}",
+                token_id=f"{name}-{n}",
+                mapping=SimpleNamespace(ma_session_id=f"{name}-{n}"),
+                expires_at=None,
+            )
+            for n in (1, 2)
+        ]
+
+        async def listed(*_: object, session_id: str | None = None, **__: object) -> list[Any]:
+            return found if name == step and session_id is None else []
+
+        return AsyncMock(side_effect=listed)
+
+    for attribute, value in {
+        "session_mutation_fence": fence,
+        "select_stale_tokens": rows("tokens"),
+        "select_abandoned_pending_tokens": AsyncMock(return_value=[]),
+        "select_due_superseded_tokens": AsyncMock(return_value=[]),
+        "recheck_token_revoke_due": AsyncMock(return_value=None),
+        "list_live_app_sessions": rows("mapped"),
+        "list_live_mcp_app_sessions": rows("mcp"),
+        "list_closed_app_sessions": rows("close"),
+        "closed_app_session_for_id": AsyncMock(return_value=None),
+    }.items():
+        monkeypatch.setattr(scheduler_main, attribute, value)
+
+    async def run(stopping: Callable[[], bool]) -> list[str]:
+        entered.clear()
+        sm: Any = MagicMock()
+        fernet = MultiFernet([Fernet(Fernet.generate_key())])
+        if step == "tokens":
+            await _sweep_github_app_tokens(sm, fernet=fernet, stopping=stopping)
+        elif step == "close":
+            await _close_github_app_sessions(MagicMock(), sm, fernet=fernet, stopping=stopping)
+        else:
+            await _refresh_github_app_sessions(
+                MagicMock(), sm, settings=MagicMock(), fernet=fernet, stopping=stopping
+            )
+        return list(entered)
+
+    assert await run(lambda: False) == [f"{step}-1", f"{step}-2"]
+    assert await run(lambda: bool(entered)) == [f"{step}-1"]
+
+
 async def test_a_failing_step_does_not_stop_the_next_tick() -> None:
     stop = asyncio.Event()
     ticks = 0
@@ -268,7 +340,13 @@ async def test_a_failing_step_does_not_stop_the_next_tick() -> None:
     kwargs: dict[str, Any] = {"usage_sweep": None, "interval_s": 0.01, "stop_event": stop}
     async with asyncio.timeout(5):
         await _run_loops(
-            tick=tick, privacy_sweep=noop, compute_sweep=noop, compute_task_poll=noop, **kwargs
+            tick=tick,
+            housekeeping=noop,
+            github_sessions=noop,
+            privacy_sweep=noop,
+            compute_sweep=noop,
+            compute_task_poll=noop,
+            **kwargs,
         )
     assert ticks == 3
 

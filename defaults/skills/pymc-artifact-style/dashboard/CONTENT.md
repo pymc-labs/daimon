@@ -1,7 +1,7 @@
 # What an MMM dashboard shows — client-validated checklist
 
-Sourced from delivered engagements (PayPal dashboard-wireframe review 2026-05,
-example-client dashboard debrief, Readystate dashboard feedback cycles). Use these views
+Sourced from delivered engagements (dashboard-wireframe reviews, dashboard
+debriefs and dashboard feedback cycles with clients). Use these views
 unless the client asks otherwise; drill-down order is **overview → channel deep
 dive → model inventory**.
 

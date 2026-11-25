@@ -201,6 +201,7 @@ async def test_a_proxied_call_when_the_feature_is_off_is_refused(
     async with Client(mcp) as client:
         message = await _error(client, "call_tool", {"name": "list_routines", "arguments": {}})
     assert OFF in message, f"the call_tool proxy reached list_routines: {message!r}"
+    assert message.endswith("Ask an admin or an owner to turn it on."), "an owner may turn it on"
 
 
 async def test_an_agent_key_when_its_channel_turns_the_feature_off_is_refused(
@@ -266,6 +267,44 @@ async def test_the_tool_list_when_a_feature_is_off_drops_its_tools_for_an_extern
     assert before & notebooks, "the notebook tools are listed while notebooks is On"
     assert not after & notebooks, f"Off notebook tools listed: {after & notebooks}"
     assert "get_long_job" in after, "a stop tool stays listed though long jobs is Off"
+
+
+async def test_cloud_computers_stay_off_until_a_workspace_turns_them_on(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off by default even once the operator set compute up: nothing is offered or runs."""
+    mcp = await _app(sessionmaker)
+    tenant_id = await _tenant(sessionmaker)
+    _as(monkeypatch, tenant_id, platform="cli")
+    launch = {"template": "mmm", "origin_context_id": str(uuid.uuid4())}
+    # The ones listed by name; the rest are found through search.
+    compute = frozenset({"compute_launch_session", "compute_extend_session"})
+    async with Client(mcp) as client:
+        before = {t.name for t in await client.list_tools()}
+        refused = await _error(client, "compute_launch_session", launch)
+        await _set(sessionmaker, tenant_id, "compute", "on")
+        after = {t.name for t in await client.list_tools()}
+        allowed = await _error(client, "compute_launch_session", launch)
+        # Turned Off again with a machine running: list and stop stay, the rest is refused.
+        await _set(sessionmaker, tenant_id, "compute", "off")
+        on_machine = {
+            "session_id": str(uuid.uuid4()),
+            "origin_context_id": launch["origin_context_id"],
+        }
+        run = await _error(client, "compute_run_bash", {**on_machine, "command": "id"})
+        kept = [
+            await _error(client, "compute_list_sessions", {"origin_context_id": str(uuid.uuid4())}),
+            await _error(client, "compute_stop_session", on_machine),
+        ]
+    assert not before & compute, f"cloud computer tools listed while Off: {before & compute}"
+    assert refused == (
+        "Cloud computers is turned off here, so compute_launch_session can't run. "
+        "Nothing was done. Ask a server admin to turn it on."
+    ), "only a server admin can turn it on, so the refusal names one"
+    assert compute <= after, "a workspace On offers them"
+    assert OFF not in allowed, f"the gate let the call through: {allowed!r}"
+    assert OFF in run, f"a command ran with cloud computers Off: {run!r}"
+    assert not [message for message in kept if OFF in message], "list and stop stay callable"
 
 
 async def test_the_tool_list_for_a_chat_credential_is_left_whole(

@@ -53,7 +53,7 @@ FILES: dict[str, str] = {
 }
 #: Prose no test or image reads; code trees keep their own (skills, fixtures).
 _PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
-#: Prose lint still scans for private material (TREES in scripts/lint_designators.sh).
+#: Prose the lint job checks (scripts/lint_designators.sh runs on every change in the changes job).
 _LINTED_PROSE = re.compile(r"^(?:apps|scripts|\.github)/\S*\.md$")
 #: First match wins, so narrower prefixes come first.
 RULES: tuple[tuple[str, str], ...] = (

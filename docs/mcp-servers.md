@@ -102,8 +102,8 @@ sandbox.
 
 The token carries `iss`, `aud`, `iat`, `exp`, `agent`, `agent_name`, `ws`
 (`<platform>:<workspace id>`) and, when a person asked, `sub`
-(`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat and senders
-from another organisation name no person. Without `workspaces`, every
+(`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat, the web
+app's tool list and senders from another organisation name no person. Without `workspaces`, every
 workspace's agents reach the server. Request bodies over 4 MiB are refused.
 
 A channel turn of an agent with a relay server runs held: it posts only in its

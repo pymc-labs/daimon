@@ -21,8 +21,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0228_workflows"
-down_revision: str | None = "0227_turn_origin_own_dm_reach"
+revision: str = "0230_workflows"
+down_revision: str | None = "0229_compute_started_by_wake"
 branch_labels: str | None = None
 depends_on: str | None = None
 

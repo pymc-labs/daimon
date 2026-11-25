@@ -43,10 +43,10 @@ class Pricing(Contract):
 
 
 class Alerts(Contract):
-    inbox: str = "/home/clsandoval/cs/root-opus-handoff-20260923/inbox"
+    inbox: str = str(Path.home() / "cs/root-opus-handoff-20260923/inbox")
     command: list[str] = Field(
         default_factory=lambda: [
-            "/home/clsandoval/cs/root-opus-handoff-20260923/tsend.sh",
+            str(Path.home() / "cs/root-opus-handoff-20260923/tsend.sh"),
             "%618",
         ]
     )

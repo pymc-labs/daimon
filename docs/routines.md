@@ -1,9 +1,8 @@
 # Routines
 
-How to create a routine, how the scheduler runs it, where its result goes and
-what happens when a run fails.
-
-Legacy: [workflows](workflows.md).
+How to create a routine, how it runs, where its result goes and what happens
+when it fails. Legacy: admins can
+[move routines to workflows](workflows.md#routines-and-workflows).
 
 A routine is a recurring [unattended](unattended.md) turn: a cron expression,
 a timezone, an agent and one prompt. The scheduler fires it, the agent runs
@@ -21,18 +20,16 @@ itself. Without one, the result is only recorded, and files stay in the
 workspace.
 
 For a one-off "remind me in two hours", use a timer (`create_timer`,
-[mcp-tools.md](mcp-tools.md#timers)). It fires once, runs in the conversation it
-was set in and needs no cleanup.
-
-Admins can [move routines to workflows](workflows.md#routines-and-workflows).
+[mcp-tools.md](mcp-tools.md#timers)). It fires once, in the conversation it
+was set in.
 
 ## Create a routine
 
 Five MCP tools manage routines: `create_routine`, `list_routines`,
 `get_routine`, `update_routine` and `delete_routine`
 ([mcp-tools.md](mcp-tools.md#routines)). There is no pause tool: pause with
-`update_routine(enabled=False)`. The last run is in the `last_*` fields that
-`get_routine` returns.
+`update_routine(enabled=False)`. `get_routine` returns the last run in its `last_*`
+fields.
 
 Ask the agent in chat ("every weekday at 9am, post the sales
 numbers"). Each platform has a panel:
@@ -63,7 +60,7 @@ token), an unknown IANA timezone, an unparseable cron expression and an
 
 Set `destination_kind` and `destination_id` together on `create_routine` or
 `update_routine`. Remove them with `update_routine(clear_destination=true)`.
-Changing it drops a result still pending for the old one. Before saving, the
+Changing it drops a result pending for the old one. Before saving, the
 tool checks that:
 
 - the id has the platform's shape: a Slack thread is `<channel>:<ts>` and a
@@ -74,7 +71,7 @@ tool checks that:
 - the tenant's access policy does not protect it ([permissions.md](permissions.md)).
 
 For the owner's DM, set `destination_kind="dm"` and leave out the id. Daimon
-uses the caller's own Discord id; nobody can send another person's routine to
+uses the caller's Discord id; nobody can send another person's routine to
 their DM. Slack and Teams refuse it. A DM routine runs as a live DM turn, with
 the owner's personal memory, and needs the server's DMs on and the agent's
 [DM grant](direct-messages.md#choose-who-may-dm-which-agent) for the owner.
@@ -93,7 +90,7 @@ Set `catch_up_policy` on `create_routine` or `update_routine`:
 - **`run-once`**: after downtime, an overdue slot fires once whatever its age.
   Missed slots coalesce into that one run and are never replayed one by one.
 
-Slots that pass while the same routine is still running are skipped under both
+Slots that pass while the routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
 reason (`stale` or `in_flight`), not a history.
 
@@ -203,7 +200,7 @@ Delivery is at most once and checks first:
 - **Never tag me.** Someone who opted out shows as a plain name and gets no
   Teams notice.
 
-An expired claim or a raising poster is not retried, as it may have posted. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
+An expired claim or a raising poster is not retried, as it may have posted. A run with no final text, or a `NO_POST:` line, posts no text. With [agent identity](agent-identity.md) on, Slack and Discord post as
 the agent. On Discord a reply to any delivered message starts a turn.
 
 ### Generated files

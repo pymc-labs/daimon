@@ -227,6 +227,45 @@ async def routine_links(
     )
 
 
+#: How a run with nothing to deliver ends, on every destination kind and platform.
+#: A model keeps to a marker far more reliably than to writing nothing at all.
+NO_POST_MARKER: Final[str] = "NO_POST"
+_NO_POST_LINE: Final = re.compile(rf"^[\W_]*{NO_POST_MARKER}[*`_]*\s*(?::(?P<reason>.*)|$)")
+QUIET_RUN_SENTENCE = (
+    " daimon may deliver any final text you write, even a note that nothing was posted. "
+    "Whatever your instructions ask you to report, answer or summarize is your final reply, "
+    "even when it is short or the task only reads: write it out. Only when they say to stay "
+    "silent or post nothing for what you found, or you have already posted everything they "
+    f"ask for, your whole final reply must be one line: {NO_POST_MARKER}: and a short reason. "
+    "daimon keeps that line in the run's record and posts no reply; only files you made still "
+    "go out. Do this even if other guidance asks for a closing line. Never use "
+    f"{NO_POST_MARKER} because the task could not be done or checked: say what stopped you. "
+    "If unsure, write the reply."
+)
+
+
+@dataclass(frozen=True)
+class RunText:
+    """A run's final reply, split into what may be posted and what its record keeps."""
+
+    post: str
+    record: str
+
+
+def split_run_text(text: str) -> RunText:
+    """`text` as it may be posted: none of it when its first or last line is a `NO_POST`.
+
+    The record keeps the reason without the marker, which only the agent is told about.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    for line in (lines[:1] + lines[-1:]) if lines else ():
+        if match := _NO_POST_LINE.match(line):
+            return RunText(
+                post="", record=(match["reason"] or "").strip(" *`_") or "Nothing to post."
+            )
+    return RunText(post=text, record=text)
+
+
 def render_routine_controls(
     row: RoutineFacts,
     *,
@@ -306,6 +345,7 @@ def render_routine_controls(
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
         "for someone reading it later without context. "
         + delivery
+        + QUIET_RUN_SENTENCE
         + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
         + (ROUTINE_WEB_SENTENCE if links is not None else "")
         + " These controls grant no other posting or mutation permissions."

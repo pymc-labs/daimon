@@ -10,7 +10,8 @@ from pathlib import Path
 
 CONFIG_SHA256 = "28abe4be3fcedb3a980ee1fb1f3b9f32cff94e9339b7454abaae2f080b9c65f1"
 LEDGER_ID = "091ee642b92141f88a8f3026edaa1a5a"
-SPRINT = Path("/home/clsandoval/cs/daimon-neutral-core-20261009")
+SPRINT = Path.home() / "cs/daimon-neutral-core-20261009"
+CREDENTIAL_FILE = str(Path.home() / ".config/daimon-nc/openai.env")
 LANE = SPRINT / "lanes/N11-openai"
 LEAD_NOTES = SPRINT / "lanes/N9-qa/LEAD-NOTES.md"
 
@@ -225,7 +226,7 @@ def option_a_plan(go):
         or envelope.get("sdk_max_retries") != 0
         or envelope.get("case_deadline_seconds") != 300
         or envelope.get("cleanup_deadline_seconds_total") != 60
-        or envelope.get("credential_file") != "/home/clsandoval/.config/daimon-nc/openai.env"
+        or envelope.get("credential_file") != CREDENTIAL_FILE
         or envelope.get("minimum_hold_usd") != "1.0755"
         or envelope.get("maximum_hold_usd") != "1.0755"
         or envelope.get("maximum_model_requests") != 3

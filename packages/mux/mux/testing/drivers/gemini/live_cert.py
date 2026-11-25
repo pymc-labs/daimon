@@ -48,12 +48,12 @@ from mux.testing.drivers.gemini.fake import MemoryStorage
 
 GEMINI_CAP = Decimal("30")
 GEMINI_STOP = Decimal("24")
-# Carlos 2026-10-10: explicit primary; each successor needs the prior POST HTTP503.
+# Lead decision 2026-10-10: explicit primary; each successor needs the prior POST HTTP503.
 LIVE_MODEL = "gemini-3.8-flash"
 MODEL_CHAIN = (LIVE_MODEL, "gemini-flash-latest", "gemini-3.5-flash-lite")
 PRICE_REVIEW_DATE = "2026-10-10"
 PRICE_SOURCE = "https://ai.google.dev/gemini-api/docs/pricing"
-SHARED_SPEND_PATH = Path("/home/clsandoval/cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md")
+SHARED_SPEND_PATH = (Path.home() / "cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md").resolve()
 KEY_PATH = Path.home() / ".config/daimon-nc/gemini.env"
 SCOPE = Scope(
     tenant_id="gemini-cert",

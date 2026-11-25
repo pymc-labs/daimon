@@ -2894,6 +2894,14 @@ class ComputeProfile(BaseModel):
         le=131072,
         description="Fixed RAM in MB: 512 to 32768, within the range its CPU count permits.",
     )
+    description: str = Field(
+        default="",
+        max_length=1000,
+        description=(
+            "What this image holds and how to use it, for the agent. Shown when profiles are "
+            "listed and when a session starts. Plain text; no secrets."
+        ),
+    )
 
 
 _CLOUD_RUN_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
@@ -2994,6 +3002,16 @@ class ComputeSettings(BaseModel):
         description=(
             "Maximum background commands running at once on one session. A background "
             "command may run for at most max_ttl_hours."
+        ),
+    )
+    wake_run_limit: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description=(
+            "How many wake turns in a row may act on one session. The count starts again "
+            "when the owner runs a command or writes a file on it; a chat message alone "
+            "does not."
         ),
     )
     profiles: dict[str, ComputeProfile] = Field(

@@ -13,6 +13,7 @@ from daimon.core.features.surface import (
     CATEGORIES,
     Choice,
     agent_listed,
+    ask_to_turn_on,
     choice,
     feature_schema,
     parse_choice,
@@ -126,3 +127,40 @@ def test_an_agent_listing_leaves_out_the_web_rows_while_web_awareness_is_off(web
     ]
     shown = [view.spec.key for view in agent_listed(views, None, FeaturePlace(TENANT, "slack"))]
     assert shown == (list(keys) if web == "on" else ["approvals"]), "only the web rows go"
+
+
+_SERVER_ADMIN_ASK = "Ask a server admin to turn it on."
+
+
+@pytest.mark.parametrize("key", sorted(FEATURES))
+def test_a_turned_off_feature_names_who_can_turn_it_on(key: str) -> None:
+    """One rule for every feature: only a server admin changes one that leaves agent owners
+    and delegated admins out, so its refusal names a server admin and no one else."""
+    authority = FEATURES[key].authority
+    server_only = authority.action is None and not authority.agent_owner
+    expected = _SERVER_ADMIN_ASK if server_only else "Ask an admin or an owner to turn it on."
+    assert ask_to_turn_on(FEATURES[key]) == expected
+
+
+def test_both_kinds_of_feature_are_in_the_registry() -> None:
+    assert ask_to_turn_on(FEATURES["compute"]) == _SERVER_ADMIN_ASK
+    assert ask_to_turn_on(FEATURES["long_jobs"]) == _SERVER_ADMIN_ASK
+    assert ask_to_turn_on(FEATURES["routines"]) == "Ask an admin or an owner to turn it on."
+
+
+def test_only_the_one_helper_words_who_to_ask_for_a_turned_off_feature() -> None:
+    """A second copy of the sentence would drift from the feature's authority."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4]
+    sources = [
+        *(root / "packages/core/daimon").rglob("*.py"),
+        *(root / "packages/adapters").glob("*/daimon/**/*.py"),
+    ]
+    assert len(sources) > 100, "the product sources moved; point this test at them"
+    copies = [
+        path.relative_to(root).as_posix()
+        for path in sources
+        if "to turn it on." in path.read_text() and path.name != "surface.py"
+    ]
+    assert copies == []

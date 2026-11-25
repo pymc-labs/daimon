@@ -243,14 +243,14 @@ Owner-only compute sessions bound to verified, attended conversation origins.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `compute_extend_session` | all callers | Set your session's expiry to this many hours from now, after owner approval. |
+| `compute_extend_session` | all callers | Set your session's expiry to this many hours from now. |
 | `compute_get_session_status` | all callers | Read your session's machine state, capacity and expiry without renewing it. |
 | `compute_launch_session` | all callers | Launch your own temporary machine from an operator image profile. |
 | `compute_list_files` | all callers | List paths and sizes on your session. |
-| `compute_list_sessions` | all callers | List your live sessions in this conversation. |
-| `compute_list_templates` | all callers | List operator image profiles, fixed CPU/RAM and allowed regions. |
+| `compute_list_sessions` | all callers | List your live machines from every conversation. |
+| `compute_list_templates` | all callers | List operator image profiles: what each holds, its fixed CPU/RAM and allowed regions. |
 | `compute_read_file` | all callers | Read a file from your session in byte chunks of at most 512 KiB. |
-| `compute_run_bash` | all callers | Run bash on your session; inline by default, returning exit code and stdout. |
+| `compute_run_bash` | all callers | Run bash on your session and wait up to wait_seconds (0 to 40) for it to end. |
 | `compute_stop_session` | all callers | Permanently delete a session and its files. |
 | `compute_task_result` | all callers | Read the end of a background command's output (last 16 KiB). |
 | `compute_task_status` | all callers | Check one of your background commands: state, exit code and output size. |

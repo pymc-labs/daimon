@@ -27,6 +27,7 @@ from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
+from daimon.core.features.surface import ask_to_turn_on
 from daimon.core.features.tool_gate import (
     GATED_KEYS,
     gated_tools,
@@ -60,7 +61,7 @@ UNSET_REASON: Final = "capability_unset"
 def _refusal(tool: str, key: str) -> str:
     return (
         f"{FEATURES[key].name} is turned off here, so {tool} can't run. Nothing was done. "
-        "Ask an admin or an owner to turn it on."
+        f"{ask_to_turn_on(FEATURES[key])}"
     )
 
 

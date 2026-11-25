@@ -509,6 +509,11 @@ def agent_permissions(
     return AgentPermissions(runs_in=rules, home=home)
 
 
+def is_barred_from_web_chat(policy: TenantAccessPolicy, agent_names: Iterable[str | None]) -> bool:
+    """Whether the agent is a channel's own, which answers only there (`authz._decide`)."""
+    return agent_permissions(policy, tuple(agent_names)).home is not None
+
+
 def rule_token(place_id: str | None) -> str | None:
     """The id an agent rule names for a place: `web` for any person's web chat place."""
     if place_id is not None and place_id.startswith(WEB_PLACE_PREFIX):

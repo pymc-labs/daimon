@@ -11,7 +11,14 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
 from daimon.core.channel_changes import Expected
-from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
+from daimon.core.config import (
+    AnthropicSettings,
+    ComputeProfile,
+    ComputeSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    Settings,
+)
 from daimon.core.errors import StaleChannelValue
 from daimon.core.features.model_input import (
     DEFAULT_TOOLSET,
@@ -21,7 +28,7 @@ from daimon.core.features.model_input import (
     builtin_enabled,
     with_builtin,
 )
-from daimon.core.features.registry import DEFAULT, FEATURES
+from daimon.core.features.registry import DEFAULT, FEATURES, Tier
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import (
     FeatureActor,
@@ -36,7 +43,7 @@ from daimon.core.features.snapshot import (
     place_feature,
     resolve_one,
 )
-from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
+from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS, gated_tools
 from daimon.core.features.toolset import place_session, place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import (
@@ -63,6 +70,17 @@ SETTINGS = Settings.model_validate(
     }
 )
 PUBLIC = "https://daimon.example/mcp"
+#: Cloud computers set up, so their Off comes from the default and not from a missing setup.
+_COMPUTE_READY = ComputeSettings(
+    enabled=True,
+    deployment_id="test-deployment",
+    cloud_run_project="test-project",
+    cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
+    session_auth_key=SecretStr("session-secret-test-only"),
+    profiles={
+        "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+    },
+)
 
 
 def _agent(*, isolated: bool = False) -> BetaManagedAgentsAgent:
@@ -92,13 +110,18 @@ def _dicts(tools: Any) -> list[Any]:
     return [tool.model_dump(mode="json") for tool in tools]
 
 
+#: The capabilities Off until a server admin turns them on, which a web place offers.
+_OFF_BY_DEFAULT = ("compute", "long_jobs")
+
+
 def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
-    """A web place with nothing set but long jobs turned On, so the baseline hides nothing;
-    `plain` leaves it at its default (Off)."""
+    """A web place with nothing set but the default-Off capabilities turned On, so the
+    baseline hides nothing; `plain` leaves them at their default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
     if not plain:
-        features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+        for key in _OFF_BY_DEFAULT:
+            features[key] = ResolvedFeature(key, "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
         features[name] = features[name].__class__(name, value, "channel")
@@ -227,8 +250,9 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
     """No tier set: every capability's tools stay offered, set up or not, except the ones
     that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
+    assert all(FEATURES[key].default == "off" for key in _OFF_BY_DEFAULT)
     plain = agent_toolset(_snapshot(plain=True), _agent())
-    assert plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "long jobs are Off"
+    assert plain.hidden_daimon_tools == gated_tools(_OFF_BY_DEFAULT), "they are Off"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)
@@ -295,7 +319,7 @@ def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_jud
     }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
-    expected = (unset if server_setup else set()) | {"long_jobs"}
+    expected = (unset if server_setup else set()) | set(_OFF_BY_DEFAULT)
     assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"
@@ -308,6 +332,16 @@ async def test_a_worker_without_the_mcp_servers_setup_keeps_its_tools_in_the_ses
     keeps their tools for the MCP server to judge, a session that server starts itself (agent
     chat) judges its own settings, and an Off still hides them."""
     tenant = await make_tenant(db_session)
+    # Cloud computers are Off until a server admin turns them on, as here.
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="compute",
+        value="on",
+        set_by=None,
+        surface="web",
+    )
     await db_session.commit()
     CACHE.clear()
     place = FeaturePlace(tenant.id, "web", agent_id="agent_tools")
@@ -333,13 +367,19 @@ async def test_a_worker_without_the_mcp_servers_setup_keeps_its_tools_in_the_ses
     assert "notebooks" in toolset.off_capabilities, "a workspace Off still hides the tools"
 
 
-def test_long_jobs_tools_return_when_a_workspace_turns_them_on() -> None:
+@pytest.mark.parametrize("tier", ["workspace", "agent"])
+@pytest.mark.parametrize("key", _OFF_BY_DEFAULT)
+def test_default_off_tools_return_when_a_workspace_or_agent_turns_them_on(
+    key: str, tier: Tier
+) -> None:
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
-    features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
-    features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+    ready = SETTINGS.model_copy(update={"compute": _COMPUTE_READY})
+    features = {key: resolve_one(spec, ready, place, []) for key, spec in FEATURES.items()}
+    assert not features[key].on and features[key].tier == "default", "Off with nothing set"
+    features[key] = ResolvedFeature(key, "on", tier)
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
-    assert "long_jobs" not in toolset.off_capabilities
-    assert not CAPABILITY_TOOLS["long_jobs"] & toolset.hidden_daimon_tools
+    assert key not in toolset.off_capabilities
+    assert not CAPABILITY_TOOLS[key] & toolset.hidden_daimon_tools
 
 
 def test_support_escalation_needs_the_platforms_own_channel() -> None:

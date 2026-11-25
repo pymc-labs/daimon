@@ -1383,6 +1383,8 @@ async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_
         key: CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
         for key in ("notebooks", "report_publish", "compute")
     }
+    # Cloud computers are Off until a server admin turns them on, as here.
+    await put(FeatureTarget("workspace"), "compute", "on")
     kept = await hidden()
     for key, gated in tools.items():
         assert gated and not gated & kept, f"{key} tools hidden: {gated & kept}"

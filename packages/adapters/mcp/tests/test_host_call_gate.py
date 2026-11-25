@@ -29,7 +29,13 @@ from daimon.adapters.mcp.tools._outbound import TurnScope, approve
 from daimon.core import host_calls
 from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
-from daimon.core.confirmation import ServerSkillUpdateCard, confirmed_tools_for_turn
+from daimon.core.confirmation import (
+    ServerSkillUpdateCard,
+    compute_card_skipped,
+    confirmed_tools_for_turn,
+)
+from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.host_calls import ConfirmedCallRunner, confirmed_call_prefix, run_confirmed_calls
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outbound.reach import ReachPlan, ReachTally, turn_tally_key
@@ -41,6 +47,7 @@ from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
 from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.turn_origins import create_origin, get_session_origin
 from daimon.core.tool_safety import (
+    COMPUTE_APPROVAL_TOOLS,
     CONFIRMED_DAIMON_TOOLS,
     DAIMON_SERVER_NAME,
     ToolCall,
@@ -506,6 +513,35 @@ async def test_each_gated_tool_asks_and_runs_as_on_claude(
     await _call(rig, await _credential(rig, card.id), name, args)
     assert [ran for ran, _, _ in rig.ran] == [name], "ran once after the press"
     assert (await _card(rig)).status == "applied"
+
+
+@pytest.mark.parametrize("name", sorted(COMPUTE_APPROVAL_TOOLS))
+async def test_compute_skip_still_cards_launch_and_extend_where_daimon_posts_the_card(
+    rig: Rig, name: str
+) -> None:
+    """A deliberate difference from Claude, as with `watch_approval`: with
+    `compute_approval` skip a Claude session starts or extends a machine without the
+    card, but on OpenAI and Gemini Daimon posts its own card for every gated tool
+    (`confirmation_gated_tools`), and neither switch changes that list. There the card
+    still asks, so the person sees the machine and its time before it starts."""
+
+    async def admin(_: object) -> bool:
+        return True
+
+    await change_feature(
+        rig.sessions, _settings(), FeatureActor(rig.tenant_id, None, "web", None, admin),
+        key="compute_approval", tier="agent", value="skip",
+        place=FeaturePlace(rig.tenant_id, "discord", None, agent_id=_MA_AGENT),
+    )  # fmt: skip
+    assert await compute_card_skipped(rig.sessions, rig.tenant_id, _MA_AGENT, "discord")
+    rig.extra = (name,)
+    _attach(rig)
+
+    text = await _call(rig, rig.identity(), name, {CONFIRMED_DAIMON_TOOLS[name]: "x"})
+
+    assert text == host_calls.waiting_text("the person who asked"), f"waiting result: {text}"
+    assert (await _card(rig)).tool_name == name, "the call waits on Daimon's own card"
+    assert rig.ran == [], "nothing starts before the press"
 
 
 async def test_ask_refuses_a_malformed_reach_plan_before_any_card(rig: Rig) -> None:

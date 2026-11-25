@@ -47,10 +47,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # What someone can pick, by the word they would use. "default" is the agent's own.
 THREAD_MODEL_CHOICES: Final[Mapping[str, str]] = {
-    "haiku": "claude-haiku-5-5",
-    "sonnet": "claude-sonnet-5-5",
-    "opus": "claude-opus-5-5",
     "fable": "claude-fable-5-2",
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-5-5",
 }
 
 #: The efforts a conversation can pick, plus "default" for the agent's own.
