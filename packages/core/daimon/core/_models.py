@@ -4473,6 +4473,9 @@ class SessionSettleState(Base):
     # The latest turn an agent-chat send started here, and its tool-rule channel.
     unattended_turn_event_id: Mapped[str | None]
     unattended_rules_channel_id: Mapped[str | None]
+    # Whether the latest send or resume on this agent-chat session came from a person
+    # signed in to the hub, on an idle session (`daimon.core.agent_chat_requester`).
+    agent_chat_signed_in: Mapped[bool | None]
     updated_at: Mapped[TsNow]
 
 

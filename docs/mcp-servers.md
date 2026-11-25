@@ -155,7 +155,11 @@ keys are removed under `_meta` of every method, not only tool calls.
   from it (fails closed); writes are unaffected.
 - `requester_kind`: `"person"` only while a person's own message or click is
   being answered. `"routine"` means any unattended run: a routine, watch,
-  timer, continuation wake or DM routine.
+  timer, continuation wake or DM routine. `"agent_chat"` is a turn a person
+  started from an MCP client signed in to the hub. It carries no
+  `requester_conversation` and no wake link. Daimon sends it only to a server
+  with `"agent_chat_requester": true`, off by default. Turns started with an
+  agent, coding or CLI key name nobody.
 
 A DM that is not open yet is `{"place_type": "dm", "channel_id": null,
 "parent_channel_id": null}`; a routine can only DM its owner.

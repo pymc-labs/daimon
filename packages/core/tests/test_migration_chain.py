@@ -191,6 +191,7 @@ TAIL = (
     "0227_turn_origin_own_dm_reach",
     "0228_compute_task_wait_until",
     "0229_compute_started_by_wake",
+    "0230_agent_chat_signed_in",
 )
 HEAD = TAIL[-1]
 

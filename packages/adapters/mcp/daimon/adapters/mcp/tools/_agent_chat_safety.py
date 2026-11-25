@@ -255,6 +255,41 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
     return turn
 
 
+async def earlier_turn_open(
+    runtime: McpRuntime, auth: AuthIdentity, handle: str, *, new_session: bool
+) -> bool:
+    """Whether a turn agent chat sent earlier on `handle` may still be running.
+
+    Read from Daimon's own record of the latest send (`record_turn`), not the session's
+    status, which can still read idle just after a send was accepted. On a session this
+    caller just created any recorded send is another caller's, so it counts as open.
+    Otherwise the turn counts as ended only once the transcript's newest boundary is
+    that send and an idle that is not a pause follows it; no record, another boundary
+    or an unreadable transcript counts as open.
+
+    Nothing is read for a caller who is not a signed-in person, or while no server
+    names the agent-chat requester: the send then names nobody (counted as open), so
+    with the option off a send does what it did before it existed.
+    """
+    if not (auth.signed_in_person and runtime.settings.mcp_identity.names_agent_chat_requester):
+        return True
+    recorded = await _recorded_turn(runtime, handle)
+    if new_session:
+        return recorded is not None
+    if recorded is None:
+        return True
+    try:
+        turn = await _read_turn(runtime, auth, handle)
+    except RuntimeError:
+        return True
+    stop = turn.state.stop_reason
+    return not (
+        turn.boundary_id == recorded.turn_event_id
+        and stop is not None
+        and stop.type != "requires_action"
+    )
+
+
 def watch_turn(
     runtime: McpRuntime,
     auth: AuthIdentity,

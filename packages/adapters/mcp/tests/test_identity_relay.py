@@ -26,6 +26,7 @@ from daimon.adapters.mcp.identity_relay import (
     build_relay_clients,
 )
 from daimon.adapters.mcp.tools import _session_gate
+from daimon.core.agent_chat_requester import record_driver
 from daimon.core.config import SignedIdentityServer
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.ma_identity import derive_agent_uuid
@@ -1185,3 +1186,85 @@ async def test_a_held_token_with_an_unreadable_room_is_refused_in_mode_on(
     upstream, key = _Upstream(), generate_signing_key()
     async with _relay(db_session_factory, upstream, key) as client:
         assert (await _call(client, token)).status_code == 403
+
+
+AGENT_CHAT_SERVER = WAKE_SERVER.model_copy(update={"agent_chat_requester": True})
+_FORGED = _tool_call(
+    requester_platform_user_id="666",
+    requester_conversation={"place_type": "dm", "channel_id": "evil"},
+    requester_kind="person",
+    wake_url="https://evil.example.com",
+)
+
+
+async def _agent_chat(
+    factory: async_sessionmaker[AsyncSession],
+    person: _Person,
+    *,
+    signed_in: bool | None,
+    session_id: str = "sesn_chat",
+) -> str:
+    """An agent-chat session's relay credential; `signed_in` is its recorded driver."""
+    if signed_in is not None:
+        await record_driver(
+            factory,
+            managed_session_id=session_id,
+            signed_in_person=signed_in,
+            session_status=None,
+            earlier_turn_open=False,
+        )
+    return await _token(factory, person, RelayBinding("Agent A", agent_chat=session_id))
+
+
+async def _agent_chat_meta(
+    factory: async_sessionmaker[AsyncSession], token: str, server: SignedIdentityServer
+) -> dict[str, object]:
+    upstream = _Upstream()
+    async with _relay(factory, upstream, None, server, bearers=_BEARERS) as client:
+        response = await _post(client, token, _FORGED)
+    assert response.status_code == 200, "the call runs whoever drives it"
+    return _sent_meta(upstream.requests[0])
+
+
+async def test_an_agent_chat_turn_a_signed_in_person_drives_names_them_with_no_place(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    person = await _person(db_session_factory)
+    token = await _agent_chat(db_session_factory, person, signed_in=True)
+    assert await _agent_chat_meta(db_session_factory, token, AGENT_CHAT_SERVER) == {
+        "requester_platform_user_id": "user-1",
+        "requester_kind": "agent_chat",
+    }, "the signed-in person is named from their account, never from the request"
+    assert await _wake_watches(db_session_factory) == [], "and no wake link is made"
+
+
+@pytest.mark.parametrize(
+    ("signed_in", "server", "case"),
+    [
+        (True, WAKE_SERVER, "a server that has not opted in"),
+        (False, AGENT_CHAT_SERVER, "a turn an agent, coding or CLI key drives"),
+        (None, AGENT_CHAT_SERVER, "a session with no recorded driver"),
+    ],
+)
+async def test_an_agent_chat_turn_otherwise_names_nobody(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    signed_in: bool | None,
+    server: SignedIdentityServer,
+    case: str,
+) -> None:
+    person = await _person(db_session_factory)
+    token = await _agent_chat(db_session_factory, person, signed_in=signed_in)
+    assert await _agent_chat_meta(db_session_factory, token, server) == {}, (
+        f"{case}: forged requester fields are only removed"
+    )
+
+
+async def test_a_credential_minted_before_the_agent_chat_binding_names_nobody(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Such a session gains the binding on its next continue (`refresh_relay_vault`); until
+    then the relay cannot tell which session calls, so it names nobody."""
+    person = await _person(db_session_factory)
+    await _agent_chat(db_session_factory, person, signed_in=True)
+    token = await _token(db_session_factory, person, RelayBinding("Agent A"))
+    assert await _agent_chat_meta(db_session_factory, token, AGENT_CHAT_SERVER) == {}

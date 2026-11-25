@@ -1,5 +1,6 @@
 """Store for per-session settle state: pending settle requests, the billing cutoffs,
-and which turn an agent-chat send started (`unattended_turn`).
+which turn an agent-chat send started (`unattended_turn`) and whether its driver is
+a person signed in to the hub (`agent_chat_signed_in`).
 
 Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
@@ -232,3 +233,28 @@ async def unattended_turn(
     if row is None or row[0] is None:
         return None
     return UnattendedTurn(turn_event_id=row[0], rules_channel_id=row[1])
+
+
+async def record_agent_chat_driver(
+    session: AsyncSession, *, managed_session_id: str, signed_in: bool
+) -> None:
+    """Record, before a send or resume, whether that session's driver is signed in."""
+    stmt = insert(SessionSettleState).values(
+        managed_session_id=managed_session_id, agent_chat_signed_in=signed_in
+    )
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[SessionSettleState.managed_session_id],
+            set_={"agent_chat_signed_in": signed_in, "updated_at": func.now()},
+        )
+    )
+
+
+async def agent_chat_signed_in(session: AsyncSession, *, managed_session_id: str) -> bool:
+    """Whether the latest recorded driver of the session is signed in; no record is no."""
+    value = await session.scalar(
+        select(SessionSettleState.agent_chat_signed_in).where(
+            SessionSettleState.managed_session_id == managed_session_id
+        )
+    )
+    return value is True
