@@ -26,6 +26,7 @@ from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, agent_converted
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
+from daimon.adapters.mcp.data_access import register_data_tools
 from daimon.adapters.mcp.hub.app import mount_hub_apps
 from daimon.adapters.mcp.middleware.call_origin import CallOriginMiddleware
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware
@@ -597,6 +598,7 @@ def create_mcp_app(
     long_jobs.register_long_job_tools(mcp, runtime)
     compute.register_compute_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
+    register_data_tools(mcp, runtime)  # data_* reads, behind data_reads
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 
     register_watch_tools(mcp, runtime)
