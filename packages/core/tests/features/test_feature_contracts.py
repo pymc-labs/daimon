@@ -380,7 +380,7 @@ _WEB_KEPT = {
 
 def _link_builders() -> list[str]:
     """`path::function` of each function that builds web links without asking a gate."""
-    found = []
+    found: list[str] = []
     for path in _PRODUCT:
         for fn in ast.walk(ast.parse(path.read_text())):
             if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):

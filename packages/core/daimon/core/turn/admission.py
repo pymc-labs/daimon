@@ -1635,7 +1635,7 @@ async def _admit_gates(
     except Exception:
         _log.warning("turn.data_reads_lookup_failed", tenant_id=str(tenant_id), exc_info=True)
         data_reading, data_unknown = False, True
-    if not data_reading and data_sources_on(deps.settings):
+    if not data_reading and (deps.settings is None or data_sources_on(deps.settings)):
         # A session that read data keeps the whole data seal until `/new`, whatever
         # `data_reads` says now: its context holds what it read.
         try:

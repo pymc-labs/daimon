@@ -90,6 +90,8 @@ class Store:
 async def store(data_db: DataDb, db_schema: str) -> AsyncIterator[Store]:
     async with data_db.aconnect() as conn:
         tenant = uuid.uuid4()
+        # The declared revision is one per store: each test starts with none applied.
+        await conn.execute(f"delete from {data_db.schemas.data}.declared_state".encode())
         await conn.execute(f"set search_path = {db_schema}".encode())
         await conn.execute(
             b"insert into tenants (id, platform, external_id) values (%s, 'discord', %s)",
