@@ -3,6 +3,8 @@ sources left alone, and no credential in any answer."""
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -12,6 +14,7 @@ from pathlib import Path
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from daimon.adapters.web import data_pages
 from daimon.core.config import Settings
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores.accounts import set_role
@@ -162,3 +165,13 @@ async def test_no_answer_holds_a_credential(rig: Rig) -> None:
             "a source's connection string must never be sent back"
         )
         assert uuid.UUID(source), "the answer names the new source"
+
+
+def test_what_redaction_cannot_cover_is_refused_on_the_web() -> None:
+    """While names hide, file bytes are refused and a query naming a hidden entity finds
+    nothing (`daimon.data.reading`), as in MCP (`test_data_reads_paths`)."""
+    tree = ast.parse(inspect.getsource(data_pages))
+    defs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)}
+    for name, guard in (("file", "redacted"), ("find", "names_hidden")):
+        attrs = {n.attr for n in ast.walk(defs[name]) if isinstance(n, ast.Attribute)}
+        assert guard in attrs, f"web {name} skips {guard}"

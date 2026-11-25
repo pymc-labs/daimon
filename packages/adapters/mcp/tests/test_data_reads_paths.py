@@ -13,7 +13,6 @@ import textwrap
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -98,27 +97,16 @@ def _attrs(node: ast.AST) -> set[str]:
     return {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
 
 
-#: The web data pages, read as source: adapters never import each other.
-_WEB_PAGES = Path(__file__).parents[2] / "web/daimon/adapters/web/data_pages.py"
-
-
 def test_what_redaction_cannot_cover_is_refused_on_every_surface() -> None:
     """While names hide, caller SQL and file bytes are refused and a query naming a hidden
-    entity finds nothing (`daimon.data.reading`), in MCP and on the web."""
-    web = {
-        n.name: n
-        for n in ast.walk(ast.parse(_WEB_PAGES.read_text()))
-        if isinstance(n, ast.AsyncFunctionDef)
-    }
+    entity finds nothing (`daimon.data.reading`). The web's twin is in its data route tests."""
     mcp = _tool_defs()
-    for where, node, guard in (
-        ("data_sql", mcp["data_sql"], "redacted"),
-        ("data_file", mcp["data_file"], "redacted"),
-        ("data_search", mcp["data_search"], "names_hidden"),
-        ("web file", web["file"], "redacted"),
-        ("web search", web["find"], "names_hidden"),
+    for name, guard in (
+        ("data_sql", "redacted"),
+        ("data_file", "redacted"),
+        ("data_search", "names_hidden"),
     ):
-        assert guard in _attrs(node), f"{where} skips {guard}"
+        assert guard in _attrs(mcp[name]), f"{name} skips {guard}"
 
 
 def test_every_model_spend_bills_the_asker() -> None:

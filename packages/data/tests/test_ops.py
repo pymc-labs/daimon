@@ -105,6 +105,8 @@ class Store:
 @pytest.fixture
 async def store(data_db: DataDb) -> AsyncIterator[Store]:
     async with data_db.aconnect() as conn:
+        # The declared revision is one per store: each test starts with none applied.
+        await conn.execute(f"delete from {data_db.schemas.data}.declared_state".encode())
         yield Store(conn, data_db, uuid.uuid4())
 
 

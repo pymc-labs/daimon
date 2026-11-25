@@ -272,10 +272,14 @@ async def _slack_people(
         return person
 
     unlinked = [user for user in users if user not in linked]
+    lookups = [asyncio.ensure_future(is_person(user)) for user in unlinked]
     try:
-        verdicts = await asyncio.gather(*map(is_person, unlinked))
+        verdicts = await asyncio.gather(*lookups)
     except SlackApiError:
         return None
+    finally:  # one failed lookup stops the rest
+        for lookup in lookups:
+            lookup.cancel()
     people = {user for user in users if user in linked}
     return frozenset(people | {u for u, ok in zip(unlinked, verdicts, strict=True) if ok})
 
