@@ -35,7 +35,7 @@ connections, and add the server's name, URL and token. The token is stored
 encrypted.
 
 Daimon lists the server's tools and shows each one's description and full input
-schema. Read them, then turn on the tools you want. A tool whose text changes
+schema. Turn on the tools you want. A tool whose text changes
 upstream stays off until you approve it again, and one named like a Daimon tool is
 left out. Each tool appears as `<name>_<tool>` on Daimon's MCP server, for
 members, not web guests. Daimon marks a tool that changes data by its name, and you
