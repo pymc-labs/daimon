@@ -491,7 +491,10 @@ async def test_one_stuck_server_does_not_stop_the_others_renewing(
         await _setup(session)
         await _setup(session, guild_id=4001)
     clock, world = Clock(), World(fake.GUILD, 4001)
-    audience = world.sync(factory, clock, db_wait_s=0.05)
+    # The wait is real time and bounds every database step, healthy ones too: 0.05 s
+    # let a slow runner time out server one's publish, which then read a third time.
+    # Only server two's step is meant to run into it, once per tick.
+    audience = world.sync(factory, clock, db_wait_s=0.25)
     await audience.tick(world.guilds)
     await audience.settle()
     assert (await _fact(factory, clock, "2", guild_id=4001)).contained
@@ -510,7 +513,7 @@ async def test_one_stuck_server_does_not_stop_the_others_renewing(
         clock.now += timedelta(seconds=60)
         started = loop.time()
         await audience.tick(world.guilds)
-        assert loop.time() - started < 0.5, "a tick never waits for a read"
+        assert loop.time() - started < 2, "a tick never waits for a read"
         await asyncio.sleep(0.005)
     assert (await _fact(factory, clock, "2")).contained, "server one renewed throughout"
     assert world.servers[0].reads["guild"] == 2, "and got its 300 s reconcile"
@@ -518,7 +521,7 @@ async def test_one_stuck_server_does_not_stop_the_others_renewing(
 
     started = loop.time()
     await audience.disconnected(world.guilds)  # cancels our own stuck read
-    assert loop.time() - started < 0.5
+    assert loop.time() - started < 2
     assert all(slot.task is None for slot in audience._slots.values())  # pyright: ignore[reportPrivateUsage]
 
 
