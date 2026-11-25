@@ -1527,15 +1527,15 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
     FeatureSpec(
         key="data_sources",
         name="Data sources",
-        category="capabilities",
+        category="model_input",
         effect="capability",
         values=_ON_OFF,
         default="off",
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "The data store, with its connected sources and search. Turned on for the "
-            "deployment first; a workspace can turn it off for itself."
+            "The data store, with its connected sources and search. The operator turns it on "
+            "first; a team can then turn it off for itself."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
