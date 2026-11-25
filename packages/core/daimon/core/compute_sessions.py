@@ -85,7 +85,7 @@ _INLINE_HANDOVER = 5
 #: How often a status read that waits looks at its command again.
 _STATUS_POLL_SECONDS = 2.0
 #: What a status read says when it could not read the command at all.
-_STATUS_REFUSED = "Could not check the command right now. Try again soon."
+STATUS_REFUSED = "Could not check the command right now. Try again soon."
 # How long after its deadline an unreachable or stuck task is given up.
 _DEADLINE_GRACE = timedelta(minutes=5)
 #: The machine operations that only read: the ones a completion wake's turn may always make.
@@ -843,7 +843,12 @@ class ComputeSessions:
         return task
 
     async def task_status(
-        self, caller: ComputeCaller, task_id: uuid.UUID, *, wait_seconds: float = 0
+        self,
+        caller: ComputeCaller,
+        task_id: uuid.UUID,
+        *,
+        wait_seconds: float = 0,
+        deadline: float | None = None,
     ) -> ComputeTask:
         """Read a task and, while it is active, probe the machine until it ends or
         `wait_seconds` pass. A task that already ended returns at once.
@@ -854,8 +859,9 @@ class ComputeSessions:
         the task, a probe only reads it. Like a poll, a probe that finds the command
         running keeps the lease alive.
 
-        One deadline on the event loop's clock, taken when the call starts, bounds every
-        step before a write: the one authorization read, and each poll's reads, lock wait
+        One deadline on the event loop's clock, taken when the call starts unless the
+        caller passes the one its own call started (`deadline`), bounds every step before
+        a write: the one authorization read, and each poll's reads, lock wait
         and probe. A step cut short settles nothing: the last state read is returned, or
         the plain refusal when nothing was read yet. With no wait there is one probe and
         no deadline, as before. A database error before the first probe succeeded is the
@@ -866,7 +872,8 @@ class ComputeSessions:
         """
         wait_seconds = max(0.0, wait_seconds)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + wait_seconds if wait_seconds else None
+        if deadline is None and wait_seconds:
+            deadline = loop.time() + wait_seconds
         give_up = self.clock() + timedelta(seconds=wait_seconds)
         try:
             async with self.sm.begin() as db:
@@ -874,7 +881,7 @@ class ComputeSessions:
                     task = await self._owned_task(db, caller, task_id)
         except (TimeoutError, SQLAlchemyError):
             log.warning("compute.task_status_retry", task_id=str(task_id))
-            raise StoreError(_STATUS_REFUSED) from None
+            raise StoreError(STATUS_REFUSED) from None
         if task.state not in ACTIVE_TASK_STATES:
             return task
         wake = not owner_present(caller.origin)
@@ -891,7 +898,7 @@ class ComputeSessions:
                 # Never relay database errors; the scheduler keeps polling.
                 log.warning("compute.task_status_retry", task_id=str(task.id))
                 if not probed:
-                    raise StoreError(_STATUS_REFUSED) from None
+                    raise StoreError(STATUS_REFUSED) from None
                 return task
             if polled.task is None:
                 return task

@@ -9,6 +9,7 @@ allows it, run commands, write files and stop it (`turn_may_act`).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from math import ceil
 
@@ -31,6 +32,7 @@ from daimon.core.compute_models import (
 from daimon.core.compute_provider import ComputeProviderError, compute_provider_for
 from daimon.core.compute_sessions import (
     READ_OPERATIONS,
+    STATUS_REFUSED,
     ComputeCaller,
     ComputeSessions,
     InlineRun,
@@ -554,17 +556,24 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         A running command is waited for up to wait_seconds (at most 40), and the result
         comes as soon as it ends. A finished command returns at once. Do not call this
         in a loop: end your reply, and this conversation gets a message when the command
-        ends. A running command keeps its session alive up to the maximum lifetime.
+        ends. A running command keeps its session alive up to the maximum lifetime. The
+        call can take a little longer than wait_seconds when the machine or the database
+        is slow.
         """
+        # One deadline for the whole call, so the reads before the wait count against it;
+        # with no wait there is one check, unbounded as before.
+        wait = min(max(wait_seconds, 0), 40)
+        deadline = asyncio.get_running_loop().time() + wait if wait else None
         auth, caller = await _caller(runtime, ctx, origin_context_id, wake_ok=True)
         try:
-            task = await service.task_result(caller, task_id)
-            await _readable(
-                runtime, auth, origin_context_id, await service.get(caller, task.session_id)
-            )
-            seen = await service.task_status(
-                caller, task_id, wait_seconds=min(max(wait_seconds, 0), 40)
-            )
+            try:
+                async with asyncio.timeout_at(deadline):
+                    task = await service.task_result(caller, task_id)
+                    session = await service.get(caller, task.session_id)
+                    await _readable(runtime, auth, origin_context_id, session)
+            except TimeoutError:
+                raise ToolError(STATUS_REFUSED) from None
+            seen = await service.task_status(caller, task_id, wait_seconds=wait, deadline=deadline)
         except (StoreError, ComputeProviderError) as exc:
             raise ToolError(str(exc)) from None
         return {**_task_view(seen, output=False), "note": _note(seen)}

@@ -994,6 +994,114 @@ async def test_an_inline_command_that_needs_longer_continues_with_a_note(woken):
     woken.replay.assert_not_awaited()
 
 
+async def test_a_status_check_never_waits_on_a_held_session_lock_past_its_wait(
+    committing_sessionmaker, monkeypatch
+):
+    """The reads before the wait take the session lock too, so they count against it."""
+    import asyncio
+
+    from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
+    from daimon.core.config import ComputeProfile
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import compute_sessions as session_store
+    from daimon.core.stores.turn_origins import bind_origin_session, create_origin
+    from daimon.testing.compute import FakeComputeProvider
+    from daimon.testing.factories import make_account, make_tenant
+    from pydantic import SecretStr
+
+    sm = committing_sessionmaker
+    settings = ComputeSettings(
+        enabled=True,
+        deployment_id="test-deployment",
+        cloud_run_project="test-project",
+        cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
+        session_auth_key=SecretStr("session-secret-test-only"),
+        profiles={
+            "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+        },
+    )
+    fake = FakeComputeProvider()
+    now = datetime.now(UTC)
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        origin = await create_origin(
+            db,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="parent",
+            thread_id="thread",
+            responder_ma_agent_id="agent",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + timedelta(minutes=5),
+            now=now,
+            sender_foreign=False,
+            shared_channel=False,
+            attended=True,
+        )
+        await bind_origin_session(
+            db, origin_id=origin.id, chat_session_id="signed", human_invocation=True
+        )
+    origin = origin.model_copy(update={"chat_session_id": "signed", "human_invocation": True})
+    owner = ComputeCaller(tenant.id, account.id, origin, "signed", "owner")
+    service = ComputeSessions(sm, settings, fake)
+    session = await service.launch(
+        owner,
+        profile="mmm",
+        region="us-central1",
+        ttl_hours=24,
+        approval_key="approved",
+        source_metadata={},
+    )
+    task = await service.start_task(
+        owner, session.id, command="python fit.py", timeout_minutes=60, request_key="use"
+    )
+    identity = auth_identity(
+        account.id,
+        tenant.id,
+        role=Role.USER,
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent"),
+        chat_session_id="signed",
+        platform_user_id="owner",
+        platform="discord",
+    )
+    monkeypatch.setattr(compute, "_auth", AsyncMock(return_value=identity))
+    monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=sm, settings=SimpleNamespace(compute=settings), compute_provider=fake
+    )
+    compute.register_compute_tools(mcp, runtime)
+    status = await mcp.get_tool("compute_task_status")
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_the_lock():
+        async with sm.begin() as db:
+            await session_store.get(db, tenant.id, session.id, lock=True)
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold_the_lock())
+    await held.wait()
+    started = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(ToolError, match="^Could not check the command right now"):
+            await asyncio.wait_for(
+                status.fn(
+                    ctx=None, task_id=task.id, origin_context_id=str(origin.id), wait_seconds=1
+                ),
+                5,
+            )
+    finally:
+        release.set()
+        await holder
+    assert asyncio.get_running_loop().time() - started < 2, "within the wait, not after it"
+
+
 @pytest.mark.parametrize(("asked", "waited"), [(45, 40), (40, 40), (5, 5), (0, 0), (-3, 0)])
 @pytest.mark.parametrize("state", ["running", "succeeded"])
 async def test_a_status_check_waits_at_most_40_seconds_and_says_to_end_the_reply(
@@ -1034,7 +1142,9 @@ async def test_a_status_check_waits_at_most_40_seconds_and_says_to_end_the_reply
     compute.register_compute_tools(mcp, runtime)
     tool = await mcp.get_tool("compute_task_status")
     view = await tool.fn(ctx=None, task_id=task.id, origin_context_id="o", wait_seconds=asked)
-    assert service.task_status.await_args.kwargs == {"wait_seconds": waited}
+    passed = service.task_status.await_args.kwargs
+    assert passed["wait_seconds"] == waited
+    assert (passed["deadline"] is None) == (waited == 0), "one deadline for the whole call"
     if state == "running":
         assert view["note"] == compute._STILL_RUNNING
         assert view["note"] == (
