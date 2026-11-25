@@ -1,0 +1,25 @@
+{
+  "questions": [
+    {
+      "id": "nests",
+      "q": "where does the heron colony nest",
+      "caller": {"label": "member", "tenant_id": "00000000-0000-0000-0000-000000000001", "scopes": ["internal"]},
+      "expected": [
+        {"source": "docs", "external_id": "heron"},
+        {"source": "docs", "external_id": "heron-secret"}
+      ]
+    },
+    {
+      "id": "soup",
+      "q": "cafeteria soup",
+      "caller": {"label": "member", "tenant_id": "00000000-0000-0000-0000-000000000001", "scopes": ["internal"]},
+      "expected": [{"source": "docs", "external_id": "soup"}]
+    },
+    {
+      "id": "outsider",
+      "q": "where does the heron colony nest",
+      "caller": {"label": "outsider", "tenant_id": "00000000-0000-0000-0000-000000000001"},
+      "expected": [{"source": "docs", "external_id": "heron"}]
+    }
+  ]
+}
