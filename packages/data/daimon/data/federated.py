@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Final
 
 import structlog
+from daimon.data import audit
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS, LiveHit
@@ -31,6 +32,23 @@ type Meter = Callable[[uuid.UUID, int], Awaitable[None]]
 
 LIMIT: Final = 10
 """Hits one source returns to one search, at most."""
+
+
+def audit_meter(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+) -> Meter:
+    """A meter that records each live call in the store's audit trail as the asker's."""
+
+    async def meter(source_id: uuid.UUID, hits: int) -> None:
+        await audit.record_audit(
+            conn, schemas, tenant_id=tenant_id, kind="source.live_search",
+            account_id=account_id, source_id=source_id, detail={"hits": hits},
+        )  # fmt: skip
+
+    return meter
 
 
 @dataclass(frozen=True)

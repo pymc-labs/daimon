@@ -23,7 +23,7 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.core.data_audience import DataAudience, scope_ceiling
 from daimon.core.data_tools import mark_data_result
 from daimon.core.ports.data_metering import SessionMeter
-from daimon.data import access, caller_sql, identity, pool, reads
+from daimon.data import access, caller_sql, federated, identity, pool, reads
 from daimon.data.access import ReadContext, person
 from daimon.data.caller_sql import SqlRefused
 from daimon.data.metering import Payer
@@ -76,6 +76,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     `data_reads` is On."""
     settings = runtime.settings
     schemas = Schemas.of(settings.data)
+    env = Env.of(settings)
 
     @asynccontextmanager
     async def reading(
@@ -108,7 +109,8 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Search the data sources for `query`; only what everyone who will see the answer may
         read. Filter by source ids (`data_sources`), record kind and date range. Each hit has a
-        `record_id` to open with `data_get`. No hit is not proof that nothing exists."""
+        `record_id` to open with `data_get`; `live` holds what live sources answered now. No
+        hit is not proof that nothing exists."""
         auth = await _auth(ctx)
         filters = Filters(
             sources=tuple(_uuid(s) for s in source_ids or ()),
@@ -127,12 +129,15 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 payer=Payer(auth.tenant_id, auth.platform_user_id),
                 limit=min(max(limit, 1), 25),
                 filters=filters,
+                env=env,
+                live_meter=federated.audit_meter(conn, schemas, auth.tenant_id, auth.account_id),
             )
         hits = [
             {k: v for k, v in dataclasses.asdict(h).items() if k not in ("text", "arms")}
             for h in result.hits
         ]
-        return _text({"hits": hits, "notes": result.notes})
+        live = [dataclasses.asdict(r) for r in result.live]
+        return _text({"hits": hits, "live": live, "notes": result.notes})
 
     @mcp.tool()
     async def data_get(ctx: Context, record_id: str, start: int = 0) -> str:  # pyright: ignore[reportUnusedFunction]
@@ -140,7 +145,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         `next_start` says where the rest continues) and its attached files for `data_file`."""
         auth = await _auth(ctx)
         async with reading(auth) as (conn, rc):
-            record = await reads.get(conn, schemas, rc, _uuid(record_id))
+            record = await reads.get(conn, schemas, rc, _uuid(record_id), env)
         if record is None:
             raise ToolError(NOT_FOUND)
         start = max(start, 0)
@@ -159,9 +164,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         text; other files only their type and size."""
         auth = await _auth(ctx)
         async with reading(auth) as (conn, rc):
-            got = await reads.read_file(
-                conn, schemas, rc, Env.of(settings), _uuid(record_id), index
-            )
+            got = await reads.read_file(conn, schemas, rc, env, _uuid(record_id), index)
         if got is None:
             raise ToolError(NOT_FOUND)
         data, content_type = got
