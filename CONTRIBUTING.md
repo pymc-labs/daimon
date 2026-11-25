@@ -174,10 +174,13 @@ person's home directory. Describe the behaviour instead, and use neutral
 example names such as "Acme" or `example-client` in skills and tests.
 
 The lint also reads a private list of names that must never appear, one
-regular expression per line. It comes from outside the repository: the
+regular expression per line, matched case-insensitively between
+non-alphanumeric characters. It comes from outside the repository: the
 `DAIMON_LINT_DENYLIST` variable (the CI secret of that name), a file named by
 `DAIMON_LINT_DENYLIST_FILE`, or `~/.config/daimon/lint-denylist`. Without one
-the lint skips that rule and says so. Hits print as `file:line` only.
+the lint skips that rule and says so; `DAIMON_LINT_DENYLIST_REQUIRED=1`
+makes that a failure. No rule prints a listed name: hits print as
+`file:line`, and a path containing one is withheld.
 
 ## Pull request expectations
 

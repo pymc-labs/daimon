@@ -48,7 +48,7 @@ from mux.testing.drivers.gemini.fake import MemoryStorage
 
 GEMINI_CAP = Decimal("30")
 GEMINI_STOP = Decimal("24")
-# Carlos 2026-10-10: explicit primary; each successor needs the prior POST HTTP503.
+# Lead decision 2026-10-10: explicit primary; each successor needs the prior POST HTTP503.
 LIVE_MODEL = "gemini-3.8-flash"
 MODEL_CHAIN = (LIVE_MODEL, "gemini-flash-latest", "gemini-3.5-flash-lite")
 PRICE_REVIEW_DATE = "2026-10-10"

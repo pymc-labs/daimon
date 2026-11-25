@@ -52,9 +52,82 @@ scan() {
 fail() {
     local rule="$1" why="$2" hits="$3"
     echo "FAIL [$rule] $why"
-    echo "$hits" | sed 's/^/    /'
+    printf '%s\n' "$hits" | redact | sed 's/^/    /'
     echo
     failed=1
+}
+
+# private-denylist: names that must never appear (real customers, partners).
+# One extended regex per line, matched case-insensitively between
+# non-alphanumeric boundaries (so "name_client" and "name-client" match, while
+# "namesake" does not); surrounding spaces are trimmed, and blank lines and lines
+# starting with # are ignored. Supplied from outside the repo, first match wins:
+#   1. DAIMON_LINT_DENYLIST         the list itself (CI: the repo secret of that name)
+#   2. DAIMON_LINT_DENYLIST_FILE    a path to the list
+#   3. ~/.config/daimon/lint-denylist
+# With none of these the rule is skipped with a notice (forks and fresh clones),
+# unless DAIMON_LINT_DENYLIST_REQUIRED=1. Every rule's output is redacted
+# against the list, so no rule echoes a listed name.
+denylist=""
+denylist_source=""
+if [[ -n "${DAIMON_LINT_DENYLIST:-}" ]]; then
+    denylist="$DAIMON_LINT_DENYLIST"
+    denylist_source="DAIMON_LINT_DENYLIST"
+elif [[ -n "${DAIMON_LINT_DENYLIST_FILE:-}" ]]; then
+    if [[ ! -r "$DAIMON_LINT_DENYLIST_FILE" ]]; then
+        echo "FAIL [private-denylist] DAIMON_LINT_DENYLIST_FILE is set but not readable"
+        exit 1
+    fi
+    denylist=$(<"$DAIMON_LINT_DENYLIST_FILE")
+    denylist_source="DAIMON_LINT_DENYLIST_FILE"
+elif [[ -r "${HOME:-/nonexistent}/.config/daimon/lint-denylist" ]]; then
+    denylist=$(<"$HOME/.config/daimon/lint-denylist")
+    denylist_source="~/.config/daimon/lint-denylist"
+fi
+
+patterns=""
+if [[ -n "$denylist" ]]; then
+    patterns=$(mktemp)
+    trap 'rm -f "$patterns"' EXIT
+    n=0
+    while IFS= read -r entry || [[ -n "$entry" ]]; do
+        n=$((n + 1))
+        entry="${entry%$'\r'}"
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -z "$entry" || "$entry" == \#* ]] && continue
+        wrapped="(^|[^[:alnum:]])(${entry})([^[:alnum:]]|\$)"
+        grep -E -e "$wrapped" /dev/null >/dev/null 2>&1
+        if [[ $? -eq 2 ]]; then
+            # Name the line, never the pattern: this output can be a public log.
+            echo "FAIL [private-denylist] line $n of $denylist_source is not a valid extended regex"
+            exit 1
+        fi
+        printf '%s\n' "$wrapped" >>"$patterns"
+    done <<<"$denylist"
+    [[ -s "$patterns" ]] || patterns=""
+fi
+
+# redact: reduce any output line that contains a listed name to file:line, and
+# withhold a path that contains one.
+redact() {
+    if [[ -z "$patterns" ]]; then
+        cat
+        return
+    fi
+    local line location path
+    while IFS= read -r line; do
+        if grep -qiEf "$patterns" <<<"$line"; then
+            location=$(cut -d: -f1,2 <<<"$line")
+            path="${location%%:*}"
+            if grep -qiEf "$patterns" <<<"$path"; then
+                location="(path withheld)${location#"$path"}"
+            fi
+            printf '%s\n' "$location"
+        else
+            printf '%s\n' "$line"
+        fi
+    done
 }
 
 # report <rule> <explanation> <extended-regex> [trees...]
@@ -97,46 +170,27 @@ home_hits=$(scan -E '/(home|Users)/[A-Za-z0-9_.-]+/' -- "${ALL_TREES[@]}" \
     "a person's home directory must not appear; use Path.home(), ~ or a generic path such as /home/user/" \
     "$home_hits"
 
-# private-denylist: names that must never appear (real customers, partners).
-# One extended regex per line, matched case-insensitively as a whole word;
-# blank lines and lines starting with # are ignored. Supplied from outside the
-# repo, first match wins:
-#   1. DAIMON_LINT_DENYLIST         the list itself (CI: the repo secret of that name)
-#   2. DAIMON_LINT_DENYLIST_FILE    a path to the list
-#   3. ~/.config/daimon/lint-denylist
-# With none of these the rule is skipped with a notice (forks and fresh clones).
-denylist=""
-denylist_source=""
-if [[ -n "${DAIMON_LINT_DENYLIST:-}" ]]; then
-    denylist="$DAIMON_LINT_DENYLIST"
-    denylist_source="DAIMON_LINT_DENYLIST"
-elif [[ -n "${DAIMON_LINT_DENYLIST_FILE:-}" ]]; then
-    if [[ ! -r "$DAIMON_LINT_DENYLIST_FILE" ]]; then
-        echo "FAIL [private-denylist] DAIMON_LINT_DENYLIST_FILE is set but not readable"
-        exit 1
-    fi
-    denylist=$(<"$DAIMON_LINT_DENYLIST_FILE")
-    denylist_source="DAIMON_LINT_DENYLIST_FILE"
-elif [[ -r "${HOME:-/nonexistent}/.config/daimon/lint-denylist" ]]; then
-    denylist=$(<"$HOME/.config/daimon/lint-denylist")
-    denylist_source="~/.config/daimon/lint-denylist"
-fi
-
 denylist_status="skipped"
-if [[ -n "$denylist" ]]; then
-    patterns=$(mktemp)
-    trap 'rm -f "$patterns"' EXIT
-    printf '%s\n' "$denylist" | tr -d '\r' | grep -vE '^[[:space:]]*(#|$)' >"$patterns" || true
-    if [[ -s "$patterns" ]]; then
-        # -o keeps the match out of the output; cut keeps file:line only.
-        deny_hits=$(scan -i -w -E -o -f "$patterns" -- "${ALL_TREES[@]}" | cut -d: -f1,2 | sort -u)
-        [[ -n "$deny_hits" ]] && fail "private-denylist" \
-            "a name on the private denylist ($denylist_source) appears at these lines; replace it with a neutral example such as \"Acme\" or \"example-client\"" \
-            "$deny_hits"
-        denylist_status="checked"
-    else
-        denylist_status="empty"
-    fi
+if [[ -n "$patterns" ]]; then
+    # Hits print as file:line only (the -o match is cut off); a path that itself
+    # matches is withheld. File names are checked as well as contents.
+    deny_hits=$(
+        {
+            scan -i -E -o -f "$patterns" -- "${ALL_TREES[@]}" | cut -d: -f1,2
+            mapfile -t trees < <(existing "${ALL_TREES[@]}")
+            find "${trees[@]}" -name node_modules -prune -o -name .git -prune -o -print 2>/dev/null \
+                | grep -iEf "$patterns" | sed 's/.*/(path withheld)/'
+        } | redact | sort -u
+    )
+    [[ -n "$deny_hits" ]] && fail "private-denylist" \
+        "a name on the private denylist ($denylist_source) appears at these lines; replace it with a neutral example such as \"Acme\" or \"example-client\"" \
+        "$deny_hits"
+    denylist_status="checked"
+elif [[ -n "$denylist_source" ]]; then
+    denylist_status="empty"
+elif [[ "${DAIMON_LINT_DENYLIST_REQUIRED:-}" == "1" ]]; then
+    echo "FAIL [private-denylist] DAIMON_LINT_DENYLIST_REQUIRED=1 but no denylist was supplied"
+    failed=1
 else
     echo "lint_designators: no private denylist supplied (DAIMON_LINT_DENYLIST); customer-name rule skipped"
 fi

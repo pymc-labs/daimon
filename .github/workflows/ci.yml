@@ -41,9 +41,12 @@ jobs:
           fetch-depth: 2
       # Runs on every change, prose included, before anything is planned.
       # The denylist secret holds the private name list; forks run without it.
+      # Set the repository variable DAIMON_LINT_DENYLIST_REQUIRED to 1 to make
+      # pushes to main fail when the secret is missing.
       - name: lint private material
         env:
           DAIMON_LINT_DENYLIST: ${{ secrets.DAIMON_LINT_DENYLIST }}
+          DAIMON_LINT_DENYLIST_REQUIRED: ${{ github.event_name == 'push' && vars.DAIMON_LINT_DENYLIST_REQUIRED || '' }}
         run: bash scripts/lint_designators.sh
       - id: plan
         env:

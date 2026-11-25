@@ -81,11 +81,49 @@ def test_personal_home_directories_fail_and_generic_ones_pass(tmp_path: Path) ->
     assert "apps/x/test_x.py" not in result.stdout
 
 
+def test_joined_names_are_caught_and_no_rule_echoes_a_listed_name(tmp_path: Path) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "tests/test_a.py": "zyxwco_client = 1\nZyxwcoRole = 2\n",
+            "tests/test_b.py": 'p = "/Users/' + 'jdoe/clients/zyxwco/x"\n',
+            "tests/zyxwco/test_c.py": "fine = 1\n",
+        },
+    )
+    # CRLF and surrounding spaces in the list are ignored.
+    result = _lint(repo, DAIMON_LINT_DENYLIST=" zyxwco \r\n")
+    assert result.returncode == 1, result.stdout
+    assert "tests/test_a.py:1" in result.stdout, "snake_case joins are caught"
+    assert "tests/test_a.py:2" not in result.stdout, "camelCase is only caught by its own pattern"
+    assert "tests/test_b.py:1" in result.stdout
+    assert "(path withheld)" in result.stdout, "a file under a listed name is caught by its path"
+    assert "zyxwco" not in result.stdout.casefold(), "no rule's output repeats the name"
+
+
+def test_an_invalid_pattern_fails_without_printing_it(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, {"tests/test_x.py": "fine\n"})
+    result = _lint(repo, DAIMON_LINT_DENYLIST="zyxwco\nqvzt(")
+    assert result.returncode == 1, result.stdout
+    assert "line 2 of DAIMON_LINT_DENYLIST is not a valid extended regex" in result.stdout
+    assert "qvzt" not in result.stdout
+
+
+def test_a_required_denylist_fails_when_missing(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, {"tests/test_x.py": "fine\n"})
+    result = _lint(repo, DAIMON_LINT_DENYLIST_REQUIRED="1")
+    assert result.returncode == 1, result.stdout
+    assert "no denylist was supplied" in result.stdout
+
+
 def test_the_repository_itself_is_clean() -> None:
+    # Without a denylist, so the result does not depend on the machine.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DAIMON_LINT_DENYLIST")}
+    env["HOME"] = str(_ROOT / "nonexistent-home")
     result = subprocess.run(
         ["bash", str(_ROOT / "scripts/lint_designators.sh")],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     assert result.returncode == 0, result.stdout
