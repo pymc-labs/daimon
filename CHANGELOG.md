@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemini 4 Neon is a selectable Gemini model.** It joins Argon, Carbon and Hydrogen wherever a
+  model is picked, as a single attempt with no fallback to Flash. It costs $3 per million input
+  tokens and $15 per million output tokens. The default Gemini model stays Gemini 3.8 Flash.
+
 - **Model pickers list models by provider, then strongest family, newest version first.** Every
   picker (web, Discord, Slack, MCP and the CLI) shares one order: providers in their usual order,
   each provider's families ranked by the current output price of their newest model (Fable, Opus,
