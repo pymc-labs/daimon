@@ -1,4 +1,4 @@
-"""Operations: the publish gate, the declared file, freshness and live sources."""
+"""Operations: the publish gate, the declared file, freshness, re-checks and live sources."""
 
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ from datetime import UTC, datetime
 
 import psycopg
 import pytest
-from daimon.data import acl, declared, federated, identity, parity
-from daimon.data.access import ReadContext, scoped
+from daimon.data import acl, declared, federated, identity, parity, reads
+from daimon.data.access import ReadContext
 from daimon.data.identity import IdentityKey, Proof
+from daimon.data.search import search
 from daimon.data.sync.connector import CONNECTORS, Connector, LiveHit, Source
 from daimon.data.sync.engine import Env
 from daimon.testing.data_db import DataDb
@@ -68,6 +69,22 @@ class Store:
     async def sql(self, query: str, *params: object) -> list[DictRow]:
         cur = await self.conn.execute(query.encode(), params)  # pyright: ignore[reportArgumentType]
         return await cur.fetchall() if cur.description else []
+
+    async def record(self, source_id: uuid.UUID, text: str = "the launch plan") -> uuid.UUID:
+        """A stored record of `source_id` in scope `internal`, with one chunk of `text`."""
+        rows = await self.sql(
+            f"insert into {self.d}.records (source_id, external_id, kind, occurred_at, scope)"
+            " values (%s, 'doc:1', 'doc', now(), 'internal') returning id",
+            source_id,
+        )
+        await self.sql(
+            f"insert into {self.d}.chunks (record_id, source_id, ord, text, scope)"
+            " values (%s, %s, 0, %s, 'internal')",
+            rows[0]["id"],
+            source_id,
+            text,
+        )
+        return rows[0]["id"]
 
     async def source(
         self, publication: str = "shadow", mode: str = "stored", **columns: object
@@ -189,19 +206,17 @@ async def test_declared_apply_never_deletes_and_refuses_a_lower_revision(
 
 
 async def test_a_source_past_its_ceiling_is_hidden(store: Store) -> None:
-    """Past its ceiling a source's records disappear from reads; a sync brings them back."""
+    """Past its ceiling a source's records disappear from search; a sync brings them back."""
     src = await store.source("published", fresh_ceiling_minutes=5)
-    await store.sql(
-        f"insert into {store.d}.records (source_id, external_id, kind, occurred_at, scope)"
-        " values (%s, 'doc:1', 'doc', now(), 'internal')",
-        src,
-    )
+    await store.record(src)
     ctx = ReadContext((store.tenant,), scopes=("internal",))
 
     async def seen() -> int:
-        async with scoped(store.conn, store.data.schemas, ctx) as c:
-            rows = await (await c.execute(f"select id from {store.d}.records".encode())).fetchall()
-        return len(rows)
+        found = await search(
+            store.conn, store.data.schemas, ctx, "launch plan", settings=store.data.settings,
+            use_vectors=False, use_rerank=False,
+        )  # fmt: skip
+        return len(found.hits)
 
     await store.sql(
         f"insert into {store.d}.source_cursors (source_id, last_sync_at, last_status)"
@@ -241,3 +256,69 @@ async def test_a_live_source_is_scope_gated_failing_open_and_stores_nothing(
         f"select count(*) as n from {store.d}.records where source_id = %s", src
     )
     assert stored[0]["n"] == 0, "nothing a live source returns is stored"
+
+
+async def test_a_record_the_source_now_refuses_is_not_shown(
+    store: Store, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source that re-checks reads is asked at read time; its refusal hides the record."""
+    monkeypatch.setattr(Fake, "recheck_reads", True)
+    src = await store.source("published")
+    record = await store.record(src)
+    ctx = ReadContext((store.tenant,), scopes=("internal",), readers=("fake/w:user:alice",))
+    schemas = store.data.schemas
+
+    assert await reads.get(store.conn, schemas, ctx, record, store.env), "the source opens it"
+    fake.verdict = False
+    assert await reads.get(store.conn, schemas, ctx, record, store.env) is None, "now refused"
+    found = await search(
+        store.conn, schemas, ctx, "launch plan", settings=store.data.settings,
+        use_vectors=False, use_rerank=False, env=store.env,
+    )  # fmt: skip
+    assert found.hits == [], "search drops it too"
+
+
+async def test_a_live_answer_in_search_is_recorded_as_the_askers(store: Store, fake: Fake) -> None:
+    """A search asks the caller's live sources and records each call under the asker."""
+    src = await store.source("published", "federated")
+    asker = uuid.uuid4()
+    found = await search(
+        store.conn, store.data.schemas, ReadContext((store.tenant,), scopes=("internal",)),
+        "plan", settings=store.data.settings, use_vectors=False, use_rerank=False,
+        env=store.env,
+        live_meter=federated.audit_meter(store.conn, store.data.schemas, store.tenant, asker),
+    )  # fmt: skip
+    assert [h.title for r in found.live for h in r.hits] == ["plan"], "the live source answered"
+    rows = await store.sql(
+        f"select account_id, kind, detail from {store.d}.audit where source_id = %s", src
+    )
+    assert [(r["account_id"], r["kind"], r["detail"]) for r in rows] == [
+        (asker, "source.live_search", {"hits": 1})
+    ]
+
+
+async def test_a_declared_workspace_may_be_named_by_its_platform_id(
+    store: Store, db_schema: str
+) -> None:
+    """`<platform>:<id>` resolves to the workspace here; an unknown one is skipped."""
+    external = f"guild-{uuid.uuid4().hex[:8]}"
+    await store.sql(f"set search_path = {db_schema}")
+    await store.sql(
+        "insert into tenants (id, platform, external_id) values (%s, 'discord', %s)",
+        store.tenant,
+        external,
+    )
+    decl = declared.Declaration.model_validate({
+        "revision": 1000,
+        "tenants": [
+            {"workspace": f"discord:{external}",
+             "scopes": [{"id": "shared:ops", "kind": "shared", "name": "Ops"}]},
+            {"workspace": "discord:nowhere", "scopes": []},
+        ],
+    })  # fmt: skip
+    report = await declared.apply(store.conn, store.data.schemas, store.env, decl)
+    rows = await store.sql(f"select id from {store.d}.scopes where tenant_id = %s", store.tenant)
+    assert [r["id"] for r in rows] == ["shared:ops"], "the scope lands in the named workspace"
+    assert {"section": "workspace", "id": "", "action": "error", "error": "no such workspace"} in (
+        report.results or []
+    )
