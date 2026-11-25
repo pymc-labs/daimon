@@ -138,8 +138,9 @@ async def finish(
     from daimon.core.stores.task_continuations import record_continuation
 
     reads = wake_reads_in(session)
+    on = reads and await wake_runs_on(db, session)
     # A new wake turn is not on the list yet: it may run while the list has room.
-    runs = reads and len(session.wake_turns) < run_limit and await wake_runs_on(db, session)
+    full = len(session.wake_turns) >= run_limit
     await record_continuation(
         db,
         tenant_id=session.tenant_id,
@@ -154,7 +155,9 @@ async def finish(
         idempotency_key=wake_key(task.id),
         available_at=now,
         attended=False,
-        requested_work=wake_text(done, reads=reads, runs=runs),
+        requested_work=wake_text(
+            done, reads=reads, runs=on and not full, limit=run_limit if on and full else None
+        ),
     )
     return done
 

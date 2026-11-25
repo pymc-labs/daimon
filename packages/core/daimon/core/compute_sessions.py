@@ -705,6 +705,8 @@ class ComputeSessions:
         # task stays starting and the poller marks it lost unless its pid appears.
         async with self.sm.begin() as db:
             session = await self._owned(db, caller, session_id, act=True)
+            # Again here: an owner act since the registration may have emptied the list.
+            session = await note_act(db, caller.account_id, caller.origin, session)
             if session.state != "running" or session.expires_at <= self.clock():
                 raise StoreError("The session is expired or stopping. Launch a new session.")
             scripts.parse_start(

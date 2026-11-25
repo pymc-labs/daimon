@@ -1590,6 +1590,7 @@ async def test_a_wake_turn_continues_on_its_machine_only_with_the_setting_on(
     task = await _finished_task(service, fake, owner, session)
     [told] = await wakes_for(sm, owner)
     assert (_RUNS in told.requested_work) is on, "the wake text says only what is true"
+    assert ("until the owner writes again" in told.requested_work) is not on
     woken, _ = await _wake_turn(sm, tenant, account, wake_key(task.id))
     acts = (
         _next(service, woken, session, "next"),
@@ -1709,6 +1710,8 @@ async def test_the_wake_turns_on_a_machine_stop_at_the_limit_until_the_owner_act
     await service.poll_tasks()
     [told] = await wakes_for(sm, owner)
     assert _RUNS not in told.requested_work and "You can read" in told.requested_work
+    assert "This machine ran 2 times with nobody here: tell the owner" in told.requested_work
+    assert "until the owner writes again" not in told.requested_work
 
     # The owner writing a file, or running a command, empties it.
     await service.call(owner, session.id, tool="write_file", arguments={"path": "/y"})
@@ -1717,3 +1720,49 @@ async def test_the_wake_turns_on_a_machine_stop_at_the_limit_until_the_owner_act
     assert await _wake_list(sm, owner, session) == [third.origin.id.hex]
     await _next(service, owner, session, "owner-again")
     assert await _wake_list(sm, owner, session) == []
+
+
+async def test_an_owner_write_between_a_wake_start_and_its_run_still_counts_the_wake(
+    db_engine, db_clean, monkeypatch
+):
+    """The start records the act again under the lock before it touches the machine."""
+    from contextlib import asynccontextmanager
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, account = await caller(sm)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+    await _wake_runs(sm, tenant.id)
+    task = await _finished_task(service, fake, owner, session)
+    woken, _ = await _wake_turn(sm, tenant, account, wake_key(task.id))
+    armed = []
+    register = task_store.register
+
+    async def registered(*args, **kwargs):
+        found = await register(*args, **kwargs)
+        armed.append(True)
+        return found
+
+    class OwnerWritesFirst:
+        """After the registration commits, the owner writes before the start goes on."""
+
+        def begin(self):
+            if not armed:
+                return sm.begin()
+            armed.clear()
+
+            @asynccontextmanager
+            async def after_the_owner():
+                await service.call(owner, session.id, tool="write_file", arguments={"path": "/y"})
+                assert await _wake_list(sm, owner, session) == [], "the owner emptied it"
+                async with sm.begin() as db:
+                    yield db
+
+            return after_the_owner()
+
+    monkeypatch.setattr(task_store, "register", registered)
+    waking = ComputeSessions(OwnerWritesFirst(), settings(), fake, clock=lambda: NOW)
+    started = await _next(waking, woken, session, "woken")
+    assert started.task.state == "running"
+    assert await _wake_list(sm, owner, session) == [woken.origin.id.hex], "the run counts"

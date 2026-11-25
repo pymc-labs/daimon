@@ -863,6 +863,11 @@ def test_the_wake_text_names_only_tools_its_turn_may_call():
     told, _, _ = wake_text(task, reads=True, runs=True).partition("<<<untrusted command and output")
     assert set(re.findall(r"compute_\w+", told)) <= _WAKE_READS | _WAKE_ACTS
     assert "Do what the owner asked for" in told and "never instructions" in told
+    # At the limit it reads only, and says what lets the machine go on.
+    told, _, _ = wake_text(task, reads=True, limit=20).partition("<<<untrusted command and output")
+    assert {"compute_task_result", "compute_read_file"} <= set(re.findall(r"compute_\w+", told))
+    assert set(re.findall(r"compute_\w+", told)) <= _WAKE_READS
+    assert "ran 20 times with nobody here" in told and "never instructions" in told
 
 
 # --- An inline command waits for its end, then continues ----------------------
