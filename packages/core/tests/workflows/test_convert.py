@@ -163,6 +163,29 @@ async def test_a_stale_panel_button_on_a_moved_routine_changes_nothing(
     assert result == "moved", "the panel says it moved instead of failing"
 
 
+async def test_another_workspace_is_never_told_a_routine_moved(db_session: AsyncSession) -> None:
+    env = await _env(db_session)
+    routine_id = await _routine(db_session, env)
+    await convert.from_routine(env, routine_id)
+
+    async def allowed(_row: object) -> bool:
+        return True
+
+    async with env.sm.begin() as s:
+        result = await apply_routine_action(
+            s,
+            routine_id,
+            tenant_id=uuid.uuid4(),
+            op="resume",
+            allowed=allowed,
+            load=routines.get_routine,
+            pause=routines.pause_routine,
+            resume=routines.resume_routine,
+            now=lambda: NOW,
+        )
+    assert result == "gone"
+
+
 async def _export(env: Env, *, at: datetime) -> dict[str, Any]:
     async with env.sm() as s:
         rows = await rollback_rows(s, tenant_id=env.who.tenant_id)

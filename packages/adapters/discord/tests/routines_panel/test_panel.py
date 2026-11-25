@@ -102,8 +102,8 @@ def _no_moved_routines_for_mock_sessions(monkeypatch: pytest.MonkeyPatch) -> Non
 
     real = controls.migrated_workflows
 
-    async def moved(session: Any, routine_ids: Any) -> Any:
-        return await real(session, routine_ids) if isinstance(session, AsyncSession) else {}
+    async def moved(session: Any, routine_ids: Any, **kw: Any) -> Any:
+        return await real(session, routine_ids, **kw) if isinstance(session, AsyncSession) else {}
 
     monkeypatch.setattr(controls, "migrated_workflows", moved)
 
