@@ -96,6 +96,8 @@ class Api:
             url = obj(r.links.get("next")).get("url")
             if not url:
                 return
+            if httpx.URL(url).host != self.client.base_url.host:
+                raise Upstream("GitHub paged to a host other than its API")
         raise Upstream(f"GitHub returned more than {PAGES} pages of {path}")
 
     async def graphql(self, query: str, **variables: object) -> Json:

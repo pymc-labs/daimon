@@ -17,8 +17,9 @@ from typing import Final
 
 import structlog
 from daimon.data.schema import Schemas
+from daimon.data.sync import request_cache
 from daimon.data.sync.connector import CONNECTORS, Source
-from daimon.data.sync.engine import Env, build_source
+from daimon.data.sync.engine import Env, build_source, with_people
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -106,16 +107,19 @@ async def allowed(
         else:
             out.add(ref)
     asked = pending[:limit]
+    for sid in {r[0] for r in asked}:
+        sources[sid] = await with_people(conn, env, sources[sid])
     subjects = {
         sid: await reader_subjects(conn, schemas, sources[sid], readers)
         for sid in {r[0] for r in asked}
     }
-    verdicts = await asyncio.gather(
-        *(
-            _ask(sources[sid], ext, subjects[sid]) if readers and all(subjects[sid]) else _no()
-            for sid, ext in asked
+    async with request_cache.scope():
+        verdicts = await asyncio.gather(
+            *(
+                _ask(sources[sid], ext, subjects[sid]) if readers and all(subjects[sid]) else _no()
+                for sid, ext in asked
+            )
         )
-    )
     out.update(ref for ref, ok in zip(asked, verdicts, strict=True) if ok)
     return out
 

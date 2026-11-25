@@ -58,6 +58,7 @@ from daimon.data.sync.connectors.toggl_api import (
     user_ref,
 )
 from daimon.data.sync.http import Upstream
+from daimon.data.sync.request_cache import once
 
 PAGE_ROWS: Final = 5000
 LISTING_DAYS: Final = 366
@@ -394,29 +395,15 @@ class TogglConnector(Connector):
 
     # ---- live ----
 
-    async def live_search_as(
-        self, source: Source, query: str, limit: int, subjects: Sequence[str]
-    ) -> list[LiveHit]:
-        """Entries of the last `LIVE_DAYS` days that match every word of `query` and that one
-        person may read now: their own, those of projects they manage, or all for a holder of
-        an "all" role. Read from Toggl at question time; the answer is never stored."""
-        cfg = Config(source.config)
+    async def _live_read(
+        self, source: Source, cfg: Config
+    ) -> tuple[dict[str, Json], list[Json], dict[str, str], list[Json]]:
+        """What every reader's live search needs of Toggl: users, managers, project names and
+        the recent report rows. Read once per request."""
         async with client_of(source, self.transport) as client:
             api = Api(client, source, cfg.workspace, live=True)
             users = {str(u["uid"]): u for u in await api.users()}
-            mine = {i for i in subjects if i in users and is_active(users[i])}
-            if not mine:
-                return []
-            everything = any(sees_all(users[i]) for i in mine)
-            managed: set[str] = (
-                set()
-                if everything
-                else {
-                    str(m["project_id"])
-                    for m in await api.managers()
-                    if m.get("manager") and str(m["user_id"]) in mine
-                }
-            )
+            managers = list(await api.managers())
             names = {
                 str(p["id"]): str(p["name"])
                 for p in await api.pages(f"{api.base}/projects", active="both")
@@ -437,6 +424,31 @@ class TogglConnector(Connector):
                 lines += page
                 if row is None:
                     break
+        return users, managers, names, lines
+
+    async def live_search_as(
+        self, source: Source, query: str, limit: int, subjects: Sequence[str]
+    ) -> list[LiveHit]:
+        """Entries of the last `LIVE_DAYS` days that match every word of `query` and that one
+        person may read now: their own, those of projects they manage, or all for a holder of
+        an "all" role. Read from Toggl at question time; the answer is never stored."""
+        cfg = Config(source.config)
+        users, managers, names, lines = await once(
+            ("toggl-live", source.id), lambda: self._live_read(source, cfg)
+        )
+        mine = {i for i in subjects if i in users and is_active(users[i])}
+        if not mine:
+            return []
+        everything = any(sees_all(users[i]) for i in mine)
+        managed: set[str] = (
+            set()
+            if everything
+            else {
+                str(m["project_id"])
+                for m in managers
+                if m.get("manager") and str(m["user_id"]) in mine
+            }
+        )
         want, without = terms(query)
         hits: list[LiveHit] = []
         for line in lines:

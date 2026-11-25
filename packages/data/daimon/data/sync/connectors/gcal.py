@@ -24,8 +24,10 @@ from daimon.data.sync.http import Upstream
 
 PROVIDER: Final = "google"
 EVENTS: Final = "/calendar/v3/calendars/primary/events"
-PAST: Final = timedelta(days=90)
-"""How far back a search looks."""
+WINDOW: Final = timedelta(days=90)
+"""How far back and ahead of now a search looks; the events nearest to now are kept."""
+FETCH: Final = 250
+"""Events one person's search reads from the window, to rank by distance from now."""
 TEXT_MAX: Final = 4_000
 REF: Final = re.compile(r"[\w.~#@-]+")
 
@@ -122,6 +124,7 @@ class GCalConnector(Connector):
         _, admin = self._domain(source)
         g = connect(source, self.transport)
         try:
+            now = datetime.now(UTC)
             found: dict[str, LiveHit] = {}
             for i in subjects:
                 email = await person_email(g, admin, i)
@@ -134,10 +137,11 @@ class GCalConnector(Connector):
                         EVENTS,
                         {
                             "q": query,
-                            "maxResults": min(limit, 50),
+                            "maxResults": FETCH,
                             "singleEvents": "true",
                             "orderBy": "startTime",
-                            "timeMin": (datetime.now(UTC) - PAST).isoformat(),
+                            "timeMin": (now - WINDOW).isoformat(),
+                            "timeMax": (now + WINDOW).isoformat(),
                         },
                     )
                 except DelegationRefused:
@@ -149,6 +153,7 @@ class GCalConnector(Connector):
                 for e in rows(body.get("items")):
                     if (h := hit(e)) and h.ref not in found:
                         found[h.ref] = h
-            return list(found.values())[:limit]
+            nearest = sorted(found.values(), key=lambda h: abs((h.occurred_at or now) - now))
+            return nearest[:limit]
         finally:
             await g.aclose()

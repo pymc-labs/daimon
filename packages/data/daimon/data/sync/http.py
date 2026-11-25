@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Collection, Mapping, Sequence
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Final
 
 import httpx
@@ -70,13 +72,28 @@ class GuardedTransport(httpx.AsyncBaseTransport):
 
 
 def _retry_after(r: httpx.Response) -> float:
-    """Seconds a 429 asks for: the `Retry-After` header, or the JSON body's `retry_after`."""
+    """Seconds a 429 asks for: the `Retry-After` header (seconds or an HTTP date), or the
+    JSON body's `retry_after`."""
     for raw in (r.headers.get("retry-after"), _body_retry(r)):
         try:
             return max(float(raw), FLOOR)  # pyright: ignore[reportArgumentType]
         except (TypeError, ValueError):
+            pass
+        try:
+            when = parsedate_to_datetime(str(raw))
+        except (TypeError, ValueError):
             continue
+        return max(
+            (when.replace(tzinfo=when.tzinfo or UTC) - datetime.now(UTC)).total_seconds(), FLOOR
+        )
     return 1.0
+
+
+def _clamp(seconds: float, deadline: float | None) -> float:
+    """`seconds`, cut to what is left of the run's deadline (and its grace)."""
+    if deadline is None:
+        return seconds
+    return max(min(seconds, deadline + GRACE - time.monotonic()), 0.0)
 
 
 def _body_retry(r: httpx.Response) -> object:
@@ -127,11 +144,11 @@ async def send(
         if r is not None and r.status_code < 500:
             if r.headers.get("x-ratelimit-remaining") == "0":
                 reset = float(r.headers.get("x-ratelimit-reset-after") or 0)
-                await asyncio.sleep(min(reset, RESET_CAP))
+                await asyncio.sleep(_clamp(min(reset, RESET_CAP), deadline))
             return r
         if tries >= len(delays):
             raise Upstream(f"the provider is unavailable ({path})")
-        await asyncio.sleep(delays[tries])
+        await asyncio.sleep(_clamp(delays[tries], deadline))
         tries += 1
 
 

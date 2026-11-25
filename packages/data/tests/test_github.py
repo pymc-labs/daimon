@@ -17,9 +17,12 @@ from daimon.data import declared, identity, recheck
 from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
-from daimon.data.sync.connector import CONNECTORS, Json
+from daimon.data.sync.connector import CONNECTORS, Json, Source
+from daimon.data.sync.connectors.github_api import API, Api
 from daimon.data.sync.credentials import seal
 from daimon.data.sync.engine import Env, run_source
+from daimon.data.sync.http import Upstream
+from daimon.data.sync.rate import RateBudget
 from daimon.testing.data_db import DataDb
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -247,6 +250,22 @@ async def test_a_record_is_read_by_the_people_github_lets_read_its_repository(
     await store.ok(src)
     assert await store.sees(11) == set(), "a person removed loses it on the next run"
     assert set(await store.stored(src)) == set(stored), "an incremental run removes nothing"
+
+
+async def test_paging_never_follows_a_next_link_to_another_host() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.github.com", "the token went to another host"
+        return httpx.Response(
+            200, json=[{"id": 1}], headers={"link": '<https://other.example.org/x>; rel="next"'}
+        )
+
+    source = Source(
+        uuid.uuid4(), uuid.uuid4(), "github", "g", "github", {}, {}, "internal", {}, None,
+        RateBudget(0),
+    )  # fmt: skip
+    async with httpx.AsyncClient(base_url=API, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(Upstream):
+            [u async for u in Api(client, source).pages("/orgs/acme/members")]
 
 
 async def test_a_lost_grant_is_dropped_at_read_before_any_sync(

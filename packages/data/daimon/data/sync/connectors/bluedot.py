@@ -4,17 +4,17 @@ proved by each person's own sign-in.
 Nothing is read with a shared key. Each person signed in at the source (`Source.people`) is
 read through Bluedot's MCP server with their own token: their `list_collections` (with the
 sub-collections they nest) and `list_meetings`. A person reads a meeting when its collection is
-in their list, or when it is private and they uploaded it or it is shared with them. Each run
+in their list. Each run
 publishes every completed list as one permission unit that lives `LEASE_MINUTES` (a group per
 collection, holding the person), so a person whose list is not renewed, or whose sign-in stops
 working, stops reading. A meeting of a collection is readable by that collection's group; any
-other (private, or in no collection) by the people who list it and the people named as its
-uploader or sharees. A meeting listed by nobody who is signed in is not stored.
+other (private, or in no collection) by the people who list it. A meeting listed by nobody who
+is signed in is not stored.
 
 A meeting is read once, through a person who lists it, and read again when its summary or
 transcript was missing (for `WAIT_DAYS`) or when who may read it changed. A meeting is removed
-only by a run in which every sign-in listed completely; a person whose list failed, or a read
-Bluedot refuses, removes nothing.
+only by a run in which every sign-in listed completely; a person whose list failed removes
+nothing. A meeting Bluedot refuses to give is left out of the run, so a complete run removes it.
 
 Credential: none; people sign in with their own account. Configuration (`sources.config`):
 
@@ -158,15 +158,6 @@ def uploader_of(detail: Json) -> str | None:
     return clean_email(x) or (str(x).strip().lower() if x else None)
 
 
-def shared_of(detail: Json) -> tuple[str, ...]:
-    found: set[str] = set()
-    for u in cast("list[object]", detail.get("sharedWithUsers") or []):
-        d = obj(u)
-        if e := clean_email(d.get("email") if isinstance(u, dict) else u):
-            found.add(e)
-    return tuple(sorted(found))
-
-
 def collection_ids(listed: list[Json]) -> list[str]:
     """The ids of the listed collections and, at any depth, of their `subCollections`."""
     out: list[str] = []
@@ -304,14 +295,13 @@ class Mcp:
 
 @dataclass(frozen=True)
 class Listed:
-    """A meeting as one person's list shows it; uploader and sharees are read for the
-    private ones only."""
+    """A meeting as one person's list shows it; the uploader is read for the private ones
+    only."""
 
     id: str
     collection: str | None
     tenancy: str
     uploader: str | None
-    shared: tuple[str, ...]
 
     @property
     def private(self) -> bool:
@@ -341,20 +331,15 @@ def agrees(rows_: list[Listed]) -> bool:
 
 
 def acl_of(ws: str, listers: list[tuple[Person, Listed]]) -> Acl:
-    """Who may read a meeting: its collection's group, or the people who list it and the
-    emails named as uploader or sharee (those ride on the first lister's list)."""
+    """Who may read a meeting: its collection's group, or the people who list it."""
     first = listers[0][1]
     if first.collection and not first.private:
         return Acl((AclRef(subject(PROVIDER, ws, "collection", first.collection), group=True),))
     refs: dict[str, AclRef] = {}
-    for p, m in listers:
+    for p, _ in listers:
         unit = ("list", f"person:{p.account_id}")
         mine = subject(PROVIDER, ws, "user", p.subject)
         refs.setdefault(mine, AclRef(mine, unit=unit))
-        for e in (m.uploader, *m.shared):
-            if e and "@" in e:
-                by_email = subject(PROVIDER, ws, "user", e)
-                refs.setdefault(by_email, AclRef(by_email, unit=unit))
     return Acl(tuple(refs[k] for k in sorted(refs)), personal=first.private)
 
 
@@ -441,15 +426,15 @@ class BluedotConnector(Connector):
             for m in await mcp.meetings():
                 mid, tenancy = str(m["id"]), str(m.get("tenancy") or "workspace")
                 cid = str(m["collectionId"]) if m.get("collectionId") else None
-                up, shared = None, ()
+                up = None
                 if tenancy == "user" or not cid:
                     try:
                         details[mid] = await mcp.call("get_meeting", {"videoId": mid})
                     except NotFound:
                         pass
                     else:
-                        up, shared = uploader_of(details[mid]), shared_of(details[mid])
-                listed[mid] = Listed(mid, cid, tenancy, up, shared)
+                        up = uploader_of(details[mid])
+                listed[mid] = Listed(mid, cid, tenancy, up)
         return PersonList(p, collections, listed, details)
 
     async def permissions(self, source: Source) -> AsyncGenerator[PermissionUnit]:

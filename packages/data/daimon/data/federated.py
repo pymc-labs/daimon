@@ -21,6 +21,7 @@ from daimon.data import audit
 from daimon.data.access import ReadContext
 from daimon.data.recheck import reader_subjects
 from daimon.data.schema import Schemas
+from daimon.data.sync import request_cache
 from daimon.data.sync.connector import CONNECTORS, LiveHit, Source
 from daimon.data.sync.engine import Env, build_source
 from psycopg import AsyncConnection
@@ -33,6 +34,8 @@ type Meter = Callable[[uuid.UUID, int], Awaitable[None]]
 
 LIMIT: Final = 10
 """Hits one source returns to one search, at most."""
+READERS: Final = 4
+"""Per-reader live searches one search runs at once."""
 
 
 def audit_meter(
@@ -93,6 +96,8 @@ async def search(
                 conn, schemas, build_source(r, env, None), ctx.readers
             )
 
+    gate = asyncio.Semaphore(READERS)
+
     async def read(source: Source, query: str, limit: int) -> list[LiveHit]:
         connector = CONNECTORS[source.kind]
         if not connector.live_as_reader:
@@ -100,7 +105,12 @@ async def search(
         who = people[source.id]
         if not who or not all(who):
             raise PermissionError("a reader the source cannot act as")
-        found = [await connector.live_search_as(source, query, limit, s) for s in who]
+
+        async def ask(subjects: tuple[str, ...]) -> list[LiveHit]:
+            async with gate:
+                return await connector.live_search_as(source, query, limit, subjects)
+
+        found = await asyncio.gather(*(ask(s) for s in who))
         shared = {h.ref for h in found[0]}.intersection(*({h.ref for h in x} for x in found[1:]))
         return [h for h in found[0] if h.ref in shared]
 
@@ -117,12 +127,13 @@ async def search(
 
     if not rows:
         return []
-    tasks = {asyncio.create_task(one(r)): r for r in rows}
-    done, late = await asyncio.wait(tasks, timeout=seconds)
-    for task in late:
-        task.cancel()
-    await asyncio.gather(*late, return_exceptions=True)
-    return [
-        task.result() if task in done else LiveResult(r["id"], r["name"], (), "timeout")
-        for task, r in tasks.items()
-    ]
+    async with request_cache.scope():
+        tasks = {asyncio.create_task(one(r)): r for r in rows}
+        done, late = await asyncio.wait(tasks, timeout=seconds)
+        for task in late:
+            task.cancel()
+        await asyncio.gather(*late, return_exceptions=True)
+        return [
+            task.result() if task in done else LiveResult(r["id"], r["name"], (), "timeout")
+            for task, r in tasks.items()
+        ]
