@@ -31,6 +31,7 @@ STORE_FILES: Final[tuple[str, ...]] = (
     "0003_store.sql",
     "0004_identity.sql",
     "0005_ops.sql",
+    "0006_redaction.sql",
 )
 """Schema files `daimon data init` applies, in order. An Alembic revision pins its own copy of
 the names it applied, so this list may grow without them."""

@@ -20,7 +20,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 revision: str = "0250_workspace_skills"
-down_revision: str | None = "0242_data_ops"
+down_revision: str | None = "0243_data_redaction"
 branch_labels: str | None = None
 depends_on: str | None = None
 

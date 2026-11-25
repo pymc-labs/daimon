@@ -95,7 +95,13 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
         tenant("scopes", f"delete from {d}.scopes where tenant_id = :tenant_id"),
         *(
             tenant(table, f"delete from {d}.{table} where tenant_id = :tenant_id")
-            for table in ("identities", "link_decisions", "data_admins", "identity_notices")
+            for table in (
+                "identities",
+                "link_decisions",
+                "data_admins",
+                "identity_notices",
+                "redaction_sets",
+            )
         ),
         tenant("audit", f"delete from {d}.audit where tenant_id = :tenant_id"),
     )
