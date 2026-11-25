@@ -109,8 +109,10 @@ KEPT: Final[dict[tuple[str, str], str]] = {
     ("web_workspace_settings", "default_agent"): "an agent name",
 }
 
-# Names and versions follow the agent by name, so they never need a move.
-_NOT_IDS: Final = ("agent_name", "agent_version")
+# Names and versions follow the agent by name, so they never need a move. The
+# `agent_chat_*` columns describe an agent-chat session (who drives it, which sends
+# were recorded) and hold no agent id.
+_NOT_IDS: Final = ("agent_name", "agent_version", "agent_chat")
 
 
 def agent_id_columns() -> set[tuple[str, str]]:
