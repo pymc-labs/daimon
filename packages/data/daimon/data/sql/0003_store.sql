@@ -57,12 +57,19 @@ end $$;
 
 -- Caller SQL, as a subquery of one statement, run as daimon_data_sql: the owner of this
 -- function, which Postgres keeps for its whole body (no SET ROLE or RESET ROLE can leave it),
--- and which reaches the views and nothing else of the store.
+-- and which reaches the views and nothing else of the store. The loop, not the text, holds
+-- the limit, so a comment in `q` cannot cut it off.
 create function {{data}}.caller_sql(q text, n int) returns setof json
   language plpgsql security definer set search_path = pg_catalog, {{views}}, pg_temp as $$
+declare r json;
+        i int := 0;
 begin
   if current_user <> 'daimon_data_sql' then
     raise exception 'caller_sql must run as daimon_data_sql';
   end if;
-  return query execute format('select row_to_json(t) from (%s) t limit %s', q, n);
+  for r in execute format(E'select row_to_json(t) from (%s\n) t', q) loop
+    exit when i >= n;
+    i := i + 1;
+    return next r;
+  end loop;
 end $$;
