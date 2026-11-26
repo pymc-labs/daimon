@@ -90,17 +90,18 @@ async def scoped_skill_audience(
 async def skills_to_drop(
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
-    withheld: frozenset[str] | None,
+    held: frozenset[str] | None,
     skill_ids: Collection[str],
 ) -> frozenset[str]:
-    """Which of `skill_ids` a session leaves out: the turn's withheld skills, or every
-    scoped one when the turn's audience was not checked (`Admission.withheld_skills`)."""
-    if withheld is not None or not skill_ids:
-        return withheld or frozenset()
+    """Which of `skill_ids` a session leaves out: each scoped one whose scope the turn's
+    audience does not hold, every scoped one when it was not checked (`held` None)."""
+    if not skill_ids:
+        return frozenset()
     async with sessions() as session:
-        return frozenset(
-            await workspace_skills.scopes_among(session, tenant_id=tenant_id, skill_ids=skill_ids)
+        scoped = await workspace_skills.scopes_among(
+            session, tenant_id=tenant_id, skill_ids=skill_ids
         )
+    return frozenset(sid for sid, scope in scoped.items() if held is None or scope not in held)
 
 
 async def person_may_open(

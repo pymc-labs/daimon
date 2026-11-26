@@ -199,7 +199,7 @@ def _all_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
 async def mountable_skills(
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
-    withheld: frozenset[str] | None,
+    held: frozenset[str] | None,
     skills: tuple[SkillRef, ...],
     rows: Sequence[ChannelSkillRow],
 ) -> tuple[tuple[SkillRef, ...], list[ChannelSkillRow]]:
@@ -208,7 +208,7 @@ async def mountable_skills(
     from daimon.core.skill_audience import skills_to_drop
 
     drop = await skills_to_drop(
-        sessionmaker, tenant_id, withheld, [*(s.id for s in skills), *(r.skill_id for r in rows)]
+        sessionmaker, tenant_id, held, [*(s.id for s in skills), *(r.skill_id for r in rows)]
     )
     return tuple(s for s in skills if s.id not in drop), [r for r in rows if r.skill_id not in drop]
 
@@ -415,7 +415,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         agent_skills, channel_rows = await mountable_skills(
             request.deps.sessionmaker,
             request.tenant_id,
-            preparation.admission.withheld_skills,
+            preparation.admission.held_skill_scopes,
             tuple(agent.spec.skills or ()),
             channel_rows,
         )

@@ -496,6 +496,9 @@ class Admission:
     # the session runs without them (`daimon.core.skill_audience`); None when not checked,
     # and the session then leaves out every scoped skill of the agent's.
     withheld_skills: frozenset[str] | None = None
+    # The scopes that audience holds (None: not checked). Every path that mounts skills
+    # drops a scoped one outside them, whatever pinned it (`skill_audience.skills_to_drop`).
+    held_skill_scopes: frozenset[str] | None = None
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -2256,6 +2259,7 @@ async def _admit_gates(
         channel_skills=channel_skills,
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         withheld_skills=withheld,
+        held_skill_scopes=held_scopes,
         grant=grant,
         model_override=thread_model.model_override,
         model_effort=thread_model.model_effort,

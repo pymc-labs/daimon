@@ -149,18 +149,20 @@ async def test_a_failed_scope_check_holds_no_scope(
     assert found == ({"skill_fin": "finance"}, frozenset())
 
 
-# None is a turn whose audience was not checked: every scoped skill stays off.
-_WITHHELD = [frozenset({"skill_fin"}), None]
+# The audience's held scopes; None is a turn whose audience was not checked.
+_HELD = [frozenset({"ops"}), None, frozenset({"finance"})]
+_HELD_IDS = ["unheld", "unchecked", "held"]
 
 
-@pytest.mark.parametrize("withheld", _WITHHELD, ids=["withheld", "unchecked"])
+@pytest.mark.parametrize("held", _HELD, ids=_HELD_IDS)
 async def test_another_providers_session_copies_no_withheld_skill(
-    withheld: frozenset[str] | None,
+    held: frozenset[str] | None,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An agent-origin template pins the agent's capture, scoped skills included."""
+    """An agent-origin template pins the agent's capture: a scoped skill there mounts only
+    for an audience holding its scope, even one the live agent no longer carries."""
     place = await _place(db_session, "4105")
     pins = (SkillRef(id="skill_fin", version="v1"), SkillRef(id="skill_open", version="v1"))
     monkeypatch.setattr(
@@ -176,7 +178,7 @@ async def test_another_providers_session_copies_no_withheld_skill(
 
     monkeypatch.setattr(session_skills, "copy_skills", copy)
     request = SimpleNamespace(
-        admission=SimpleNamespace(backend_revision_origin="agent", withheld_skills=withheld),
+        admission=SimpleNamespace(backend_revision_origin="agent", held_skill_scopes=held),
         source=SimpleNamespace(source=None),
         target_spec=None,
         tenant_id=place.tenant_id,
@@ -189,12 +191,13 @@ async def test_another_providers_session_copies_no_withheld_skill(
         scope=cast(Any, None),
         account_scope_id="project",
     )
-    assert copied == [(SkillRef(id="skill_open", version="v1"),)], f"copied {copied}"
+    kept = pins if held is not None and "finance" in held else pins[1:]
+    assert copied == [kept], f"copied {copied}"
 
 
-@pytest.mark.parametrize("withheld", _WITHHELD, ids=["withheld", "unchecked"])
+@pytest.mark.parametrize("held", _HELD, ids=_HELD_IDS)
 async def test_a_self_hosted_turn_mounts_no_withheld_skill(
-    withheld: frozenset[str] | None,
+    held: frozenset[str] | None,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -217,9 +220,10 @@ async def test_a_self_hosted_turn_mounts_no_withheld_skill(
     skills, rows = await mountable_skills(
         db_session_factory,
         place.tenant_id,
-        withheld,
+        held,
         (SkillRef(id="skill_fin"), SkillRef(id="skill_open")),
         [row("skill_fin"), row("skill_open")],
     )
-    assert skills == (SkillRef(id="skill_open"),), f"the record mounts {skills}"
-    assert [r.skill_id for r in rows] == ["skill_open"], "the channel's scoped row stays off"
+    kept = ["skill_fin", "skill_open"] if held is not None and "finance" in held else ["skill_open"]
+    assert [s.id for s in skills] == kept, f"the record mounts {skills}"
+    assert [r.skill_id for r in rows] == kept, "the channel's scoped row follows the same rule"

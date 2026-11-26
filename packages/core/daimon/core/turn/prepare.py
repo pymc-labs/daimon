@@ -491,7 +491,8 @@ async def create_ma_session(
             system_override=identity.system(admission.agent.system, platform),
             relay_session_key=mapping_id,
             identity=identity,
-            withheld_skills=admission.withheld_skills,
+            withheld_skills=admission.withheld_skills or frozenset(),
+            held_skill_scopes=admission.held_skill_scopes,
         )
 
     while True:

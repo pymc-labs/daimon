@@ -776,7 +776,7 @@ async def turn_session_skills(
         drop = await skills_to_drop(
             request.deps.sessionmaker,
             request.tenant_id,
-            request.admission.withheld_skills,
+            request.admission.held_skill_scopes,
             [p.id for p in pins],
         )
         pins = tuple(p for p in pins if p.id not in drop)

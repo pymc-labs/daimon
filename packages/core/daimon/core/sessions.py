@@ -122,6 +122,7 @@ from daimon.core.session_snapshot import (
     session_tools,
     snapshot_from_created_session,
 )
+from daimon.core.skill_audience import skills_to_drop
 from daimon.core.skills.unresolved import (
     report_skill_unavailable,
     skill_unavailable,
@@ -131,7 +132,6 @@ from daimon.core.stores import (
     agent_files,
     agent_memory_stores,
     github_router_sessions,
-    workspace_skills,
 )
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
@@ -694,20 +694,6 @@ async def _channel_skill_name(
     return next((row.name for row in rows if row.tenant_id == tenant_id), None)
 
 
-async def _scoped_skills(
-    session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    agent: BetaManagedAgentsAgent,
-) -> set[str]:
-    """The agent's own skills that are limited to a scope."""
-    async with session_factory() as session:
-        return set(
-            await workspace_skills.scopes_among(
-                session, tenant_id=tenant_id, skill_ids={skill.skill_id for skill in agent.skills}
-            )
-        )
-
-
 async def create_session(
     anthropic: AsyncAnthropic,
     *,
@@ -758,7 +744,8 @@ async def create_session(
     relay_owner: str | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
-    withheld_skills: frozenset[str] | None = None,
+    withheld_skills: frozenset[str] = frozenset(),
+    held_skill_scopes: frozenset[str] | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -804,10 +791,10 @@ async def create_session(
     channel's), added after the agent's own (`session_skills`, the shape the
     drift check hashes too).
 
-    ``withheld_skills`` are the scoped skills the caller checked and the audience may not
-    read (a chat turn, `daimon.core.skill_audience`); None leaves out every scoped skill
-    of the agent's. Either way the skills are sent as an override, so the provider does
-    not mount the agent's stored ones.
+    ``withheld_skills`` are the scoped skills a chat turn's admission took off ``agent``
+    (`daimon.core.skill_audience`); ``held_skill_scopes`` the scopes its audience holds, None
+    when unchecked. A scoped skill outside them is left out too, and either way the skills
+    go as an override, so the provider never mounts the agent's stored ones.
 
     ``identity`` is the session's identity features: a memory store whose feature
     is off is not mounted (personal memory still needs ``personal_memory``), and
@@ -1311,12 +1298,14 @@ async def create_session(
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
-        if withheld_skills is not None:
-            scoped = set(withheld_skills)
-        elif session_factory is None or tenant_id is None or not agent.skills:
-            scoped = set[str]()
-        else:
-            scoped = await _scoped_skills(session_factory, tenant_id, agent)
+        scoped = set(withheld_skills)
+        if session_factory is not None and tenant_id is not None:
+            scoped |= await skills_to_drop(
+                session_factory,
+                tenant_id,
+                held_skill_scopes,
+                {s.skill_id for s in (*agent.skills, *channel_skills)},
+            )
         if scoped:
             _log.warning("session.scoped_skills_withheld", agent_id=agent.id, skills=sorted(scoped))
         if (

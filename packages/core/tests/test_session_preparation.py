@@ -58,7 +58,7 @@ from daimon.core.session_preparation import (
 )
 from daimon.core.session_snapshot import hash_env_bytes, hash_tools
 from daimon.core.skills.unresolved import SkillUnavailable
-from daimon.core.stores import usage_events
+from daimon.core.stores import usage_events, workspace_skills
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import (
@@ -1503,6 +1503,42 @@ async def test_a_scoped_skill_withheld_from_a_new_audience_never_reaches_its_nex
             "the replacement runs without the agent's stored skill"
         )
         assert transfers == [], "nothing of the old session is carried over"
+
+
+@pytest.mark.parametrize("held", [frozenset({"ops"}), None], ids=["unheld", "unchecked"])
+async def test_a_scoped_skill_admission_did_not_withhold_still_stays_off(
+    held: frozenset[str] | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A scoped skill on the agent that admission never saw drops by the held scopes."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await workspace_skills.record_version(
+        db_session,
+        tenant_id=tenant.id,
+        skill_id="skill_fin",
+        name="fin",
+        version="v1",
+        digest="d",
+        files={"SKILL.md": b"x"},
+        scope="finance",
+    )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    scoped = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_fin", version="v1")
+    transport.state.ma.agents[_AGENT_ID]["skills"] = [scoped.model_dump(mode="json")]
+    admission = replace(
+        _admission(account=account, agent=_agent().model_copy(update={"skills": [scoped]})),
+        withheld_skills=frozenset(),
+        held_skill_scopes=held,
+    )
+    prepared = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(prepared, PreparedTurn)
+    assert transport.state.sessions[prepared.ma_session_id].agent.skills == [], (
+        "the session runs without a skill whose scope the audience does not hold"
+    )
 
 
 def _with_features(admission: Admission, **values: str) -> Admission:
