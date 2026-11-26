@@ -98,25 +98,24 @@ async def test_feature_off_hides_the_routes(rig: Rig) -> None:
 
 
 async def test_only_admins_write(rig: Rig) -> None:
-    """Admins add sources; scopes and their grants need a data admin, who never grants
-    themselves."""
+    """Workspace admins manage data access as data admins do; a self-grant is audited."""
     scope = {"id": "ops", "kind": "internal", "name": "Ops"}
     async with rig.open(as_="member") as (client, _):
         assert (await client.get("/api/data/sources")).status_code == 200, "members read"
         assert (await client.post(_SOURCES, json=_NEW)).status_code == 403
         assert (await client.post("/api/admin/data/scopes", json=scope)).status_code == 403
-    async with rig.open(as_="owner") as (client, ws):
+    async with rig.open(as_="owner") as (client, ws), rig.data.aconnect() as conn:
         assert (await client.post(_SOURCES, json=_NEW)).status_code == 201
-        res = await client.post("/api/admin/data/scopes", json=scope)
-        assert res.status_code == 403, "an owner who is not a data admin makes no scope"
-        me = str(ws.person.account_id)
-        res = await client.post("/api/admin/data/admins", json={"account_id": me})
-        assert res.status_code == 204, res.text
         assert (await client.post("/api/admin/data/scopes", json=scope)).status_code == 201
+        me = str(ws.person.account_id)
         res = await client.post(
             "/api/admin/data/scopes/ops/grants", json={"holder": f"account:{me}"}
         )
-        assert res.status_code == 403, "a data admin never grants themselves a scope"
+        assert res.status_code == 204, res.text
+        cur = await conn.execute(
+            f"select detail from {rig.data.schemas.data}.audit where kind = 'grant.created'".encode()
+        )
+        assert [r["detail"] async for r in cur] == [{"scope": "ops", "self": True}]
 
 
 async def test_declared_sources_refuse_edits(rig: Rig) -> None:
