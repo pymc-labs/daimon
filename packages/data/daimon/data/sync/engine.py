@@ -614,6 +614,8 @@ async def ready(
         except (Upstream, httpx.HTTPError, TimeoutError, ValueError) as e:
             log.warning("data.app_token_failed", source=str(source.id), error=type(e).__name__)
             token = None
+            fail = f"Daimon's GitHub App gave no token: {_error_text(e)}"
+            source = replace(source, credentials={**source.credentials, "mint_error": fail})
         if token:
             source = replace(source, credentials={**source.credentials, "token": token})
     return source

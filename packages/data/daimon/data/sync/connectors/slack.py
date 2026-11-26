@@ -460,6 +460,10 @@ class SlackConnector(Connector):
                 except Unreadable as e:
                     log.info("slack.channel_unreadable", channel=cid, reason=str(e))
                     continue
+                except MissingScope as e:  # e.g. groups:history: skip it, keep the source going
+                    log.warning("slack.channel_skipped", channel=cid, reason=str(e))
+                    world.warning = f"Some private channels skipped: {e}."
+                    continue
                 run.trim()
                 yield Checkpoint(state)
         state["complete"] = True

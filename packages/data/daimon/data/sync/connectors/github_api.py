@@ -32,7 +32,8 @@ _minted: dict[tuple[int, tuple[int, ...]], tuple[float, str]] = {}
 def client_of(source: Source, transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
     token = source.credentials.get("token", "")
     if not token:
-        raise ValueError("the credential needs a token, or Daimon's GitHub App connected")
+        why = source.credentials.get("mint_error")
+        raise ValueError(why or "the credential needs a token, or Daimon's GitHub App connected")
     return httpx.AsyncClient(
         base_url=API,
         headers={

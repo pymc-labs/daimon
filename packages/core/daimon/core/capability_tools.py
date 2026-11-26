@@ -11,7 +11,6 @@ from daimon.core.data_tools import (
     DATA_TOOLS,
     PERSONAL_DRIVE,
     PERSONAL_DRIVE_TOOLS,
-    PERSONAL_READS_TOOLS,
 )
 
 CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
@@ -99,7 +98,7 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
             "lead_intake_health",
         }
     ),
-    DATA_READS: DATA_TOOLS | PERSONAL_READS_TOOLS,
+    DATA_READS: DATA_TOOLS,
     PERSONAL_DRIVE: PERSONAL_DRIVE_TOOLS,
     DATA_SOURCES: DATA_SOURCE_TOOLS,
 }

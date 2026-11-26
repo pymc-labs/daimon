@@ -324,6 +324,7 @@ class FakeSlack:
         self.messages: dict[str, list[Json]] = {}
         self.calls: list[str] = []
         self.private_scope = True
+        self.history_scope = True
         self._n = count(1)
 
     def person(
@@ -419,6 +420,8 @@ class FakeSlack:
             return reply(ok=True, members=self.members[cid])
         msgs = self.messages[cid]
         if method == "conversations.history":
+            if self.channels[cid].get("is_private") and not self.history_scope:
+                return reply(ok=False, error="missing_scope", needed="groups:history")
             top = [m for m in msgs if m.get("thread_ts") in (None, m["ts"])]
             lo, hi = float(q.get("oldest", 0)), float(q.get("latest") or "inf")
             found = [m for m in top if lo <= float(m["ts"]) <= hi]
@@ -525,7 +528,10 @@ async def test_slack_without_private_scopes_still_syncs_and_private_off_deletes_
     assert leads in await store.bodies(src), "kept while the scope may come back"
     assert leads not in await store.sees("slack", TEAM, SALICE), "hidden at once"
 
-    workspace.private_scope = True
+    workspace.private_scope, workspace.history_scope = True, False
+    result = await store.run(src)
+    assert result.status == "ok" and result.warning and "groups:history" in result.warning
+    workspace.history_scope = True
     await store.conn.execute(
         f"update {store.d}.sources set config = config || %s where id = %s".encode(),
         (Jsonb({"private": False}), src),

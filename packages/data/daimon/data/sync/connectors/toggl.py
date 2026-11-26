@@ -77,10 +77,10 @@ OVERLAP: Final = timedelta(minutes=10)
 EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 LIVE_DAYS: Final = 90
 LIVE_PAGES: Final = 3
+"""Report pages one live search reads at most."""
 USERS_SECONDS: Final = 60.0
 """How long a source's member list answers the admin check of stored entries' rates."""
 _users_seen: dict[uuid.UUID, tuple[float, dict[str, Json]]] = {}
-"""Report pages one live search reads at most."""
 WORD: Final = re.compile(r"\w+")
 
 

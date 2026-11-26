@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Final
+from typing import Any, Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.data_access import data_audience_for, ledgers
@@ -219,7 +219,11 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             )
         if hits:
             await noted(auth, [f"person:{auth.account_id}"])
-        files = [r.show({"source_id": str(s), **dataclasses.asdict(h)}) for s, h in hits]
+        files, left = list[dict[str, Any]](), my_drive.ANSWER_TEXT
+        for s, h in hits:  # cut after the redaction, so no rule's match straddles the cut
+            shown = r.show({"source_id": str(s), **dataclasses.asdict(h)})
+            files.append({**shown, "text": shown["text"][:left]})
+            left = max(left - len(shown["text"]), 0)
         return _text({"files": files})
 
     @mcp.tool()

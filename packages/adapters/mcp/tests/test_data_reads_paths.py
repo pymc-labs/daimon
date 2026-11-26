@@ -11,7 +11,7 @@ import ast
 import inspect
 import textwrap
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -32,12 +32,11 @@ from daimon.adapters.mcp.tools import (
 )
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_audience import channel_has_outsiders
-from daimon.core.data_audience import Reader, user_subject
+from daimon.core.data_audience import DataOrigin, Reader, user_subject
 from daimon.core.data_tools import (
     DATA_READS,
     DATA_TOOLS,
     PERSONAL_DRIVE_TOOLS,
-    PERSONAL_READS_TOOLS,
     REDACTED_DATA_RESULT,
     mark_data_result,
 )
@@ -51,6 +50,7 @@ from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
 from daimon.data.identity import IdentityKey
 from daimon.testing.factories import make_tenant
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -165,9 +165,7 @@ def test_a_data_reading_agent_is_unsealed_and_guarded() -> None:
     assert admission.Admission.stores_read_only.fget is not None
     assert "data_reading" in inspect.getsource(admission.Admission.stores_read_only.fget)
     assert "tool_safety" in FEATURES[DATA_READS].depends_on, "writes after a data read are carded"
-    assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS | PERSONAL_READS_TOOLS, (
-        "they hide with data_reads"
-    )
+    assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS, "they hide with data_reads"
 
 
 def _auth(**fields: Any) -> AuthIdentity:
@@ -269,6 +267,44 @@ async def test_a_teams_room_found_with_a_guest_holds_its_next_turns(
     _teams_graph(monkeypatch, "19:c@thread.v2", _NO_CONSENT)
     with pytest.raises(ToolError, match="consent"):
         await data_access._room(runtime, auth, asker, "19:d@thread.v2", None, now=now)  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_own_drive_is_refused_in_a_contained_room_before_any_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def contained(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("room", contained=True)
+
+    card = AsyncMock()
+    monkeypatch.setattr(data_access, "data_origin", contained)
+    monkeypatch.setattr(data, "require_card", card)
+    monkeypatch.setattr("daimon.data.schema.Schemas.of", lambda _s: None)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr("daimon.data.sync.engine.Env.of", lambda _s: None)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    mcp, auth = FastMCP("t"), _auth(platform="discord", external_id="u")
+    data.register_data_tools(
+        mcp,
+        cast(
+            McpRuntime,
+            SimpleNamespace(settings=SimpleNamespace(data=None), session_factory=_Sessions()),
+        ),
+    )
+    found: Sequence[Any] = await mcp.local_provider.list_tools()
+    tool = next(t for t in found if t.name == "data_my_drive")
+    ctx = SimpleNamespace(get_state=AsyncMock(return_value=auth))
+    with pytest.raises(ToolError, match="outside the team"):
+        await tool.fn(ctx=ctx, query="plans", origin_context_id="c")
+    card.assert_not_called()
+
+
+class _Sessions:
+    def __call__(self) -> _Sessions:
+        return self
+
+    async def __aenter__(self) -> _Sessions:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
 
 
 def test_a_transcript_read_elsewhere_hides_data_results() -> None:

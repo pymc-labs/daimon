@@ -18,9 +18,8 @@ DATA_TOOLS: Final[frozenset[str]] = frozenset(
 """The data tools registered behind `data_reads` (`daimon.adapters.mcp.tools.data`)."""
 PERSONAL_DRIVE: Final = "data_personal_drive"
 PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive"})
-"""Reading a person's own Drive as them, each read on their card (`daimon.data.my_drive`)."""
-PERSONAL_READS_TOOLS: Final[frozenset[str]] = frozenset({"data_personal_reads"})
-"""A person turning their personal parts on or off (`daimon.data.personal`), behind `data_reads`."""
+"""Reading a person's own Drive as them, each read on their card (`daimon.data.my_drive`);
+hidden with `data_reads` too (`daimon.core.relay_scope.without_data_reads`)."""
 DATA_SOURCES: Final = "data_sources"
 DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
     {
@@ -35,12 +34,11 @@ DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
         "connect_my_data",
         "check_my_data_connection",
         "dismiss_data_notices",
-        "data_my_drive",
         "data_personal_reads",
     }
 )
-"""The data management, sign-in and personal read tools: hidden with `data_sources`, and until a
-workspace has a source (`daimon.core.ports.data_ready`)."""
+"""The data management, sign-in and personal-reads opt-out tools: hidden with `data_sources`,
+and until a workspace has a source (`daimon.core.ports.data_ready`)."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
 

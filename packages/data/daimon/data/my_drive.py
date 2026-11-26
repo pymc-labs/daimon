@@ -20,7 +20,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
 ANSWER_TEXT: Final = 60_000
-"""Characters of file text one search returns in all; later files keep their titles only."""
+"""Characters of file text one answer holds in all, cut after the answer's redaction; later
+files keep their titles only."""
 
 
 async def search(
@@ -65,8 +66,4 @@ async def search(
                 for h in found
                 if not (rules and rules.excludes(h.ref))
             ]
-    left, out = ANSWER_TEXT, list[tuple[uuid.UUID, LiveHit]]()
-    for sid, h in hits[:limit]:
-        out.append((sid, replace(h, text=h.text[:left])))
-        left = max(left - len(h.text), 0)
-    return out
+    return hits[:limit]

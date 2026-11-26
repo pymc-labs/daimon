@@ -20,7 +20,7 @@ from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
 from daimon.data.sync import engine
 from daimon.data.sync.connector import CONNECTORS, Json, Source
-from daimon.data.sync.connectors.github_api import API, Api, app_token
+from daimon.data.sync.connectors.github_api import API, Api, app_token, client_of
 from daimon.data.sync.credentials import seal
 from daimon.data.sync.engine import Env, run_source
 from daimon.data.sync.http import Upstream
@@ -405,3 +405,5 @@ async def test_the_github_app_mints_a_read_token_for_the_repositories_the_worksp
     monkeypatch.setattr(engine, "app_token", refused)
     got = await engine.ready(store.conn, replace(store.env, github_app=("1", pem)), other)
     assert "token" not in got.credentials, "a failed mint leaves no token: its reads fail closed"
+    with pytest.raises(ValueError, match="HTTP 422"):
+        client_of(got, None)  # a run records why
