@@ -1,5 +1,6 @@
 """Exercise the pinned SDK over HTTPX; every response is synthetic and offline."""
 
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -711,3 +712,36 @@ async def test_sdk_effort_when_a_model_interaction_then_rides_generation_config(
         "a model interaction sends effort in generation_config"
     )
     assert "agent_config" not in posted, "a model interaction sends no agent_config"
+
+
+async def test_an_event_stream_waits_twenty_minutes_between_bytes_a_plain_read_does_not() -> None:
+    """Google's long-decode guidance: a stream's HTTP read timeout is 15-20 minutes."""
+    timeouts: dict[str, dict[str, float | None]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        kind = "stream" if request.url.params.get("stream") == "true" else "get"
+        timeouts[kind] = request.extensions["timeout"]
+        if kind == "stream":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b"")
+        return httpx.Response(200, json={"id": "i1", "status": "in_progress"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=60) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        transport = SDKTransport(client)
+        stream = await transport.open_stream("i1")
+        async for _ in stream:
+            pass
+        with contextlib.suppress(ProviderError, ValueError, KeyError):
+            await transport.get("i1")
+        await client.aio.aclose()
+    assert timeouts["stream"]["read"] == 1200.0
+    assert timeouts["stream"]["connect"] == 60.0
+    # The SDK sends no timeout of its own, so without this a stream had no read bound.
+    assert timeouts["get"] == {"connect": None, "read": None, "write": None, "pool": None}, (
+        "a plain read is unchanged"
+    )

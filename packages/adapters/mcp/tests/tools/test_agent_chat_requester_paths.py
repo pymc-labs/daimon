@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import re
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -42,6 +43,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import relay_url
 from daimon.core.stores import session_settle_state
 from daimon.core.stores.domain import Role
+from daimon.core.stores.session_settle_state import AgentChatSession, SessionProvenance
 from daimon.testing import AGENT_ID, build_turn_router
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -52,7 +54,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
+from ..harness import stop_confirmation_workers
 from ..hub.test_turn_parity import _call_tool, _runtime
+
+#: A send whose session carries no provenance stamp.
+NO_PROVENANCE = SessionProvenance(grant=None, channel_id=None, account_id=None)
 
 _TOKEN = "tok"
 _NEW = "ses_new_chat"
@@ -132,6 +138,12 @@ def test_every_send_or_resume_of_an_agent_chat_turn_records_its_driver_first() -
                 k.arg == "signed_in_person" and ast.unparse(k.value) == "auth.signed_in_person"
                 for k in nearest.keywords
             ), f"{name}: the driver comes from the caller's verified identity alone"
+            sent = send.args[1] if _called(send) == "_send_billed" else send.args[2]
+            assert any(
+                k.arg == "provenance"
+                and ast.unparse(k.value) == f"session_provenance({ast.unparse(sent)}.metadata)"
+                for k in nearest.keywords
+            ), f"{name}: the provenance is the stamp of the session this call sends to"
 
 
 def test_only_the_hub_identity_is_a_signed_in_person() -> None:
@@ -154,13 +166,17 @@ def test_only_the_hub_identity_is_a_signed_in_person() -> None:
 
 
 #: What decides whether a send names its driver: the driver itself, the sends begun and
-#: recorded, and the recorded turn. The settle columns are billing state, written by
-#: turn workers and the settle outside the fence, and must never decide it.
+#: recorded, and the recorded turn; and where the session came from, which the MCP server
+#: finds it by. The settle columns are billing state, written by turn workers and the
+#: settle outside the fence, and must never decide either.
 _DRIVER_STATE = {
     "agent_chat_signed_in",
     "agent_chat_sends",
     "agent_chat_recorded_send",
     "unattended_turn_event_id",
+    "agent_chat_grant",
+    "agent_chat_channel",
+    "agent_chat_account_id",
 }
 _REPO = _MCP_ROOT.parents[4].parent
 
@@ -192,7 +208,19 @@ def _fenced(fn: ast.AST, call: ast.Call) -> bool:
 
 
 #: Store functions that only read the driver state; any other that names it writes it.
-_DRIVER_STATE_READERS = {"count_agent_chat_sends", "is_agent_chat_signed_in", "unattended_turn"}
+_DRIVER_STATE_READERS = {
+    "count_agent_chat_sends",
+    "is_agent_chat_signed_in",
+    "unattended_turn",
+    "find_agent_chat_session",
+    "count_agent_chat_provenance_for_account",
+}
+#: Writers outside the fence that only clear where a session came from, for an account's
+#: erasure or its tenant's deletion; no send decides from those columns.
+_PROVENANCE_ERASERS = {
+    "erase_agent_chat_provenance_for_account",
+    "erase_agent_chat_provenance_for_tenant",
+}
 
 
 def _strings(node: ast.AST) -> list[str]:
@@ -238,7 +266,12 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
         assert "delete" not in calls, f"{fn.name} deletes a settle-state row"
         if fn.name not in _DRIVER_STATE_READERS and _names_driver_state(fn):
             writers.add(fn.name)
-    assert writers == {"record_agent_chat_driver", "record_unattended_turn"}
+    assert writers == {
+        "record_agent_chat_driver",
+        "record_agent_chat_provenance",
+        "record_unattended_turn",
+        *_PROVENANCE_ERASERS,
+    }
 
     functions = _source_functions()
 
@@ -249,8 +282,23 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
             if any(isinstance(n, ast.Call) and _called(n) == name for n in ast.walk(fn))
         }
 
-    assert callers("record_agent_chat_driver") == {
-        "packages/core/daimon/core/agent_chat_requester.py:record_driver"
+    for writer in ("record_agent_chat_driver", "record_agent_chat_provenance"):
+        assert callers(writer) == {
+            "packages/core/daimon/core/agent_chat_requester.py:record_driver"
+        }, writer
+    assert callers("erase_agent_chat_provenance_for_tenant") == {
+        "packages/core/daimon/core/stores/tenants.py:delete_tenant"
+    }
+    # The account eraser is an `erasure.ERASABLE` entry, named there and nowhere else.
+    users = {
+        str(path.relative_to(_REPO))
+        for path in (_REPO / "packages").rglob("*.py")
+        if not {"tests", ".venv"} & set(path.parts)
+        and "erase_agent_chat_provenance_for_account" in path.read_text()
+    }
+    assert users == {
+        "packages/core/daimon/core/erasure.py",
+        "packages/core/daimon/core/stores/session_settle_state.py",
     }
     assert callers("record_unattended_turn") == {
         "packages/adapters/mcp/daimon/adapters/mcp/tools/_agent_chat_safety.py:record_turn"
@@ -277,13 +325,21 @@ _NAMES_THE_COLUMNS = {
     "packages/core/daimon/core/stores/agent_rekey.py": "exempts them as not agent ids",
     "packages/core/alembic/versions/0230_agent_chat_signed_in.py": "adds a column",
     "packages/core/alembic/versions/0231_agent_chat_send_count.py": "adds two columns",
+    "packages/core/alembic/versions/0232_agent_chat_session_grant.py": "adds three columns",
 }
 
 
 def test_no_other_file_names_the_agent_chat_columns() -> None:
     """Raw SQL, a migration or a second store would write these columns outside the
     fence without calling the store, so no other non-test file may name them."""
-    columns = ("agent_chat_signed_in", "agent_chat_sends", "agent_chat_recorded_send")
+    columns = (
+        "agent_chat_signed_in",
+        "agent_chat_sends",
+        "agent_chat_recorded_send",
+        "agent_chat_grant",
+        "agent_chat_channel",
+        "agent_chat_account_id",
+    )
     naming = sorted(
         str(path.relative_to(_REPO))
         for top in ("packages", "apps", "scripts")
@@ -360,9 +416,10 @@ async def _world(
     factory: async_sessionmaker[AsyncSession],
     *,
     opted_in: bool = True,
+    stamp: dict[str, str] | None = None,
 ) -> _World:
     """A hub person `u1`, with a server named for agent-chat requesters unless not
-    `opted_in`."""
+    `opted_in`. `stamp` adds to the metadata of every session the provider returns."""
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     principal = await make_platform_principal(
         db_session, platform="discord", external_id="u1", tenant=tenant
@@ -397,7 +454,11 @@ async def _world(
             session_id=m.group(1),
             status=status["value"],
             agent_id=AGENT_ID,
-            metadata={"daimon_agent_chat": "true", "daimon_account": str(principal.account_id)},
+            metadata={
+                "daimon_agent_chat": "true",
+                "daimon_account": str(principal.account_id),
+                **(stamp or {}),
+            },
         ),
     )
     router.add(
@@ -452,7 +513,7 @@ async def _recorded_send(
     """A key's send recorded as the send paths record it: counted, then its turn."""
     async with factory.begin() as db:
         send = await session_settle_state.record_agent_chat_driver(
-            db, managed_session_id=session_id, signed_in=False, send=True
+            db, managed_session_id=session_id, provenance=NO_PROVENANCE, signed_in=False, send=True
         )
         await session_settle_state.record_unattended_turn(
             db,
@@ -470,6 +531,7 @@ async def _mark(factory: async_sessionmaker[AsyncSession], session_id: str) -> N
         await session_settle_state.record_agent_chat_driver(
             db,
             managed_session_id=session_id,
+            provenance=NO_PROVENANCE,
             signed_in=True,
             send=True,
             new_session=sends is None,
@@ -498,6 +560,50 @@ async def test_a_hub_turn_records_the_signed_in_person(
     assert not result["result"].get("isError"), result
     session_id = _EXISTING if continuing else _NEW
     assert await _signed_in(db_session_factory, session_id), "the hub sign-in names the person"
+
+
+@pytest.mark.parametrize("opted_in", [True, False])
+@pytest.mark.parametrize("tool", ["start_turn", "continue_turn"])
+async def test_every_send_records_where_its_session_came_from(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tool: str,
+    opted_in: bool,
+) -> None:
+    """With a relay server opted in or not, the MCP server can then find the session by its
+    credential's grant, for the account that created it only."""
+    stamp = {"daimon_chat_session_id": "grant-1", "daimon_channel": "chan-k"}
+    world = await _world(db_session, db_session_factory, opted_in=opted_in, stamp=stamp)
+    account = str(world.auth.account_id)
+    created = ma_session(
+        id=_NEW, agent_id=AGENT_ID, environment_id="env_test", status="idle",
+        metadata={**stamp, "daimon_agent_chat": "true", "daimon_account": account},
+    )  # fmt: skip
+    arguments = {"daimon_id": world.daimon_id, "message": "status?"}
+    if tool == "continue_turn":
+        arguments["handle"] = _EXISTING
+    with patch.object(agent_chat, "create_session", new=AsyncMock(return_value=created)):
+        result = await _call_tool(
+            world.app.http_app(path="/mcp", stateless_http=True, json_response=True),
+            "/mcp",
+            _TOKEN,
+            name=tool,
+            arguments=arguments,
+        )
+    # The send's confirmation worker reads through this test's connection: stop it before
+    # the database fixture rolls the connection back (`stop_confirmation_workers`).
+    await stop_confirmation_workers()
+    assert not result["result"].get("isError"), result
+    async with db_session_factory() as db:
+        found = await session_settle_state.find_agent_chat_session(
+            db, grant="grant-1", account_id=world.auth.account_id
+        )
+        other = await session_settle_state.find_agent_chat_session(
+            db, grant="grant-1", account_id=uuid.uuid4()
+        )
+    session_id = _EXISTING if tool == "continue_turn" else _NEW
+    assert found == AgentChatSession(managed_session_id=session_id, channel_id="chan-k")
+    assert other is None, "another account's credential does not find it"
 
 
 async def test_a_hub_send_to_a_session_running_another_turn_names_nobody(
@@ -747,7 +853,7 @@ async def test_a_send_begun_is_open_until_its_turn_is_recorded(
         ).open, "the recorded send was seen to end"
     async with db_session_factory.begin() as db:
         await session_settle_state.record_agent_chat_driver(
-            db, managed_session_id=session_id, signed_in=False, send=True
+            db, managed_session_id=session_id, provenance=NO_PROVENANCE, signed_in=False, send=True
         )
     assert (
         await _agent_chat_safety.earlier_turn_open(

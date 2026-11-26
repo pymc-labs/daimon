@@ -30,9 +30,17 @@ MCP verifier; nothing from the request or the tool arguments is used.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_CHAT_SESSION,
+)
 from daimon.core.stores import session_settle_state
+from daimon.core.stores.session_settle_state import SessionProvenance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: The session status in which no other turn can be calling the relay.
@@ -61,6 +69,23 @@ def counts_as_signed_in(
     return signed_in_person and session_status in (None, IDLE_STATUS) and not earlier_turn_open
 
 
+def session_provenance(metadata: Mapping[str, str] | None) -> SessionProvenance:
+    """Where an agent-chat session came from, read from the metadata Daimon stamped on it
+    at creation (`sessions.create_session`), which a caller cannot set: the grant of its
+    Daimon credential, the channel its tools were chosen for and its creator's account."""
+    stamp = metadata or {}
+    account = stamp.get(MA_METADATA_KEY_ACCOUNT)
+    try:
+        account_id = None if account is None else uuid.UUID(account)
+    except ValueError:
+        account_id = None
+    return SessionProvenance(
+        grant=stamp.get(MA_METADATA_KEY_CHAT_SESSION) or None,
+        channel_id=stamp.get(MA_METADATA_KEY_CHANNEL) or None,
+        account_id=account_id,
+    )
+
+
 async def record_driver(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -68,6 +93,7 @@ async def record_driver(
     signed_in_person: bool,
     session_status: str | None,
     earlier: EarlierTurn,
+    provenance: SessionProvenance,
     resuming: bool = False,
     new_session: bool = False,
 ) -> int | None:
@@ -82,8 +108,15 @@ async def record_driver(
     creates the row; on another, only if the count of sends is still the one read.
     A resume carries on a turn someone else may have started, so it can only take a
     name away: a signed-in person's resume keeps the record, anyone else's clears it.
+    Each write also copies `provenance` (`session_provenance`), whether or not a relay
+    server opted in, so the MCP server can find the session by its credential's grant. A
+    signed-in person's resume copies only that, leaving the driver record as it is.
     """
     if resuming and signed_in_person:
+        async with sessionmaker.begin() as db:
+            await session_settle_state.record_agent_chat_provenance(
+                db, managed_session_id=managed_session_id, provenance=provenance
+            )
         return None
     async with sessionmaker.begin() as db:
         return await session_settle_state.record_agent_chat_driver(
@@ -96,6 +129,7 @@ async def record_driver(
                 earlier_turn_open=earlier.open,
             ),
             send=not resuming,
+            provenance=provenance,
             new_session=new_session,
             sends_read=earlier.sends,
         )

@@ -110,6 +110,7 @@ _NARROWED: dict[str, str] = {
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "compute_wake_runs": "a server admin's choice for the team or one agent, read by a wake turn",
+    "compute_agent_chat": "a server admin's choice for the team or one agent; agent chat has no thread",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "compute_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "secret_sharing": "a workspace or agent choice: a share has no channel or thread",
