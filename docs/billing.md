@@ -19,11 +19,10 @@ daimon tenants funding-mode slack <team-id> prepaid
 daimon tenants list --json
 ```
 
-Usage, debits, markup and allowances still apply, so the balance can go negative as a
-spend signal. Each admission at a depleted balance logs the warning
-`billing.operator_funded_balance_alert` with `tenant_id` and `balance_usd`.
-Route it to your log alerting. Switching
-back to `prepaid` restores the gate at once and adds no credit.
+Usage and debits still apply, so the balance can go negative. Each admission
+at a depleted balance logs `billing.operator_funded_balance_alert` with
+`tenant_id` and `balance_usd`; route it to your alerting. Switching back to
+`prepaid` restores the gate and adds no credit.
 
 ## What is metered
 
@@ -50,6 +49,10 @@ write and cache read. The table holds the provider's list price.
 The prompt counts input, cache reads and cache writes. All cache writes are
 priced as five-minute writes.
 
+Each web search costs its provider's list price: $0.01 on Anthropic and OpenAI,
+$0.014 on Gemini. Gemini's first 5,000 a month are free, shared across the
+deployment's Gemini project.
+
 `DAIMON_BILLING__MARKUP` multiplies the cost before it is debited
 ([configuration.md](configuration.md#daimon_billing__markup)). It applies to
 the ledger and to a finished turn's summary line. Usage panels and
@@ -58,20 +61,30 @@ the ledger and to a finished turn's summary line. Usage panels and
 > **Warning:** An Anthropic model with no pricing row runs free: the debit is
 > zero and Daimon logs `billing.unpriced_model`. OpenAI, Gemini and
 > self-hosted turns on an unpriced model are refused instead. Token rates
-> exclude provider tool, container and storage charges.
+> exclude container and storage charges, such as an OpenAI workspace's
+> hosted container fee.
 
 ## The gates
 
-Three gates run before a turn starts, always in this order: balance, channel
-budget, allowance.
+Three gates run before a turn, in this order: balance, channel budget,
+allowance.
 
 1. **Balance.** A prepaid tenant needs a strictly positive balance. This holds
-   even with no Stripe setup, so a spent trial credit blocks the tenant.
+   without Stripe, so a spent trial credit blocks the tenant.
 2. **Channel budget.** The channel's spend in its window must be under its
-   [budget](#channel-budgets).
+   [budget](#channel-budgets), unless that budget only alerts.
 3. **Allowance.** A person's spend must be under the [allowance](allowances.md)
    that governs them, if one does. [Long jobs](#long-jobs) add a separate
    per-job limit.
+
+GPT and Gemini turns pass two more checks as they start, counted from today's
+(UTC) usage at list price. Each tenant has a daily cap per model
+(`DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`,
+`DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, $20 each). The install has a daily
+ceiling per provider across tenants (`DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI`,
+`DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`, $200 each). Both reset at midnight
+UTC. A row's `spend_limit_usd_cents` stops a running reply once passed: 50
+cents on built-in rows.
 
 A denial aborts the turn with a plain notice, such as "Your team's Daimon
 credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn,
@@ -79,39 +92,36 @@ routine runs and wakes pass the same gates. Unprompted thread participation skip
 A watch wake checks all three again before each model call, approval card and
 report it sends.
 
-A finished turn ends with one summary line: the agent, the time, what the turn
-was debited and the money left, for example `Ada  12s  $0.042 used  $41.20
+A finished turn ends with one summary line: agent, time, debit and money left,
+for example `Ada  12s  $0.042 used  $41.20
 left`. The money left is the channel budget's remainder, else the prepaid
 balance.
 
-An admin can hide that line for the whole server under Cost footer in
-`/settings` (`settings` on Teams), the web app's Settings section, or by asking
-Daimon. Failure notices still show, and billing is unchanged.
+An admin can hide that line under Cost footer in `/settings` (`settings` on
+Teams), the web app's Settings section, or by asking Daimon. Failure notices still show, and billing is unchanged.
 
 ### Overdraft bound
 
-The gates run once, before the turn, and debits land per model call. Nothing
-re-checks mid-turn, so one long turn can take a balance negative. Concurrent
-turns compound this: every turn admitted while the balance was positive runs
-to completion, so a chat tenant can overdraw by up to its concurrent-turn cap
-times one turn's cost. The cap is the adapter's
+The gates run once, before the turn, and debits land per model call, so one
+long turn can take a balance negative. Every turn admitted while the balance
+was positive runs to completion, so a chat tenant can overdraw by up to its
+concurrent-turn cap times one turn's cost. The cap is the adapter's
 `max_concurrent_turns_per_tenant` (default 3), or the tenant's override from
-`daimon tenants turn-cap`. A turn over the cap waits in the queue and runs the
-balance gate again once it holds a slot.
+`daimon tenants turn-cap`. A turn over the cap queues and runs the balance gate
+again once it holds a slot.
 
-MCP `start_turn` sessions are worse. Their spend reaches the ledger only when
+MCP `start_turn` sessions are worse: their spend reaches the ledger only when
 a read or the sweep settles it, and they have no concurrency cap.
 
 ### Exempt usage
 
 A caller with no platform user, such as an operator, the CLI or an internal
-token, runs with no balance check, no allowance check and no debit. The operator
-absorbs that spend. The session is stamped billing-exempt when created, so its
+token, runs with no balance check, no allowance check and no debit. The session is stamped billing-exempt when created, so its
 creator's posture covers every turn on it. An exempt caller on a billed
 session, such as `daimon run --session` on a chat thread, is debited to the
 tenant. `daimon sessions create` makes a session that is never settled.
 
-To see absorbed spend, total the `usage_sweep.exempt_skipped` log lines by
+To see the spend the operator absorbs, total the `usage_sweep.exempt_skipped` log lines by
 distinct `managed_session_id`, taking the latest line of each.
 
 ## Channel budgets
@@ -123,15 +133,16 @@ or the CLI. With no budget there is no limit, and nothing is set by default.
 daimon channels budget set <platform> <workspace-id> <channel-id> <usd>
 ```
 
-Budgets work on Discord, Slack and Teams channels, with or without Stripe.
-A Teams 1:1 chat has none.
+Budgets work on Discord, Slack and Teams channels, not Teams 1:1 chats,
+with or without Stripe.
 
 - **Spend** is the channel's debits in the window, markup included. A thread
   counts toward its channel.
 - **Window** is `monthly` (the UTC month), `total` (since `starts_at`, or ever)
   or `fixed` (from `starts_at` to `ends_at`).
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
-  channel. A turn in progress finishes past it.
+  channel. A turn in progress finishes past it. An `--on-limit alert` budget
+  only posts an alert at each multiple of the limit.
 - **The notice.** The first chat turn refused in a window DMs the server
   admins. Raising the budget re-arms it.
   `DAIMON_BUDGET_NOTICES` turns it off per tenant
@@ -157,8 +168,7 @@ Set it to `0` to require payment before first use
 
 Admins buy credit with Stripe Checkout, as one-time payments. `/billing`
 offers fixed amounts, each labelled with an estimated number of turns. Admin
-status is checked at click time. The checkout takes the tenant from a verified
-token and the amount from Stripe, and a repeated completion event cannot add a
+status is checked at click time. A repeated completion event cannot add a
 second top-up. Refunds and disputes debit the ledger, never more than the
 original credit.
 
@@ -217,8 +227,6 @@ Five refused redemptions in 15 minutes pause that person's attempts only. Every
 attempt is audited. Revoking stops new redemptions only, and credit already
 redeemed stays.
 
-Issuing, listing and revoking codes uses the local `daimon promo` CLI only.
-
 Budgets, caps, promo redemption and checkout need a platform admin acting
 directly, never a chat turn, routine, agent key or operator token. See
 [admins](admins.md#changes-that-need-a-person).
@@ -234,9 +242,8 @@ calendar month.
   person** picker.
 - **Expiry dates** list timed credit with its end date, soonest first.
 
-Panel figures are before markup and leave out exempt usage. For one finished turn,
-`get_turn_cost` returns a raw, pre-markup figure, and `None` rather than zero
-for an unpriced model.
+Panel figures leave out exempt usage. `get_turn_cost` returns `None` rather
+than zero for an unpriced model.
 
 To list measured turns, without prompts or answers:
 
@@ -314,6 +321,5 @@ daimon usage pending <tenant-uuid> --limit 1000 --json
 
 Each row carries a reason such as `usage_unknown`, `infrastructure_unknown`,
 `admission_missing`, `model_mismatch` or `tariff_context_invalid`. Pass
-`--cursor <next-cursor>` for the next page. The command is read-only. The
-runtime repairs gaps by replaying the harness's measured usage, and a tariff
-added after a request cannot repair it. Never treat pending turns as free.
+`--cursor <next-cursor>` for the next page. The command is read-only. The scheduler re-reads a GPT turn's
+usage for a day, until it is final.

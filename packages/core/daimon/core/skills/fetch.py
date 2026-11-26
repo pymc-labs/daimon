@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import io
-import tarfile
+import asyncio
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +11,8 @@ from pathlib import Path
 import httpx
 import structlog
 from daimon.core.errors import DaimonError
+from daimon.core.skill_sync.bundler import extract_tarball
+from daimon.core.skill_sync.fetcher import read_capped
 
 _log = structlog.get_logger(__name__)
 
@@ -48,16 +50,6 @@ def _parse_github_url(url: str) -> str:
     if "github.com/" not in stripped:
         raise DaimonError(f"not a GitHub URL: {url!r}")
     return stripped.split("github.com/", 1)[1]
-
-
-def _smart_strip(extract_root: Path) -> Path:
-    """If extract_root has exactly one subdir and no root SKILL.md, descend into it."""
-    entries = list(extract_root.iterdir())
-    dirs = [e for e in entries if e.is_dir()]
-    has_root_skill = (extract_root / "SKILL.md").exists()
-    if len(dirs) == 1 and not has_root_skill:
-        return dirs[0]
-    return extract_root
 
 
 async def fetch_repo(
@@ -115,36 +107,21 @@ async def fetch_repo(
                 status_code=exc.response.status_code,
             ) from exc
 
-        if max_tarball_bytes > 0:
-            content_length = response.headers.get("content-length")
-            if content_length is not None and int(content_length) > max_tarball_bytes:
-                raise DaimonError(
-                    f"tarball for {url!r} exceeds max_tarball_bytes cap of "
-                    f"{max_tarball_bytes} bytes (Content-Length={content_length})"
-                )
+        # `url` is quoted: this caller's cap message has always named it with repr.
+        body = await read_capped(response, url=repr(url), cap=max_tarball_bytes)
 
-        body = io.BytesIO()
-        async for chunk in response.aiter_bytes():
-            if max_tarball_bytes > 0 and body.tell() + len(chunk) > max_tarball_bytes:
-                raise DaimonError(
-                    f"tarball for {url!r} exceeds max_tarball_bytes cap of "
-                    f"{max_tarball_bytes} bytes (streamed body)"
-                )
-            body.write(chunk)
-
-    body_bytes = body.getvalue()
-
-    with tarfile.open(fileobj=io.BytesIO(body_bytes), mode="r:gz") as tf:
-        members = tf.getmembers()
-        total = sum(m.size for m in members)
-        if max_tarball_decompressed_bytes > 0 and total > max_tarball_decompressed_bytes:
-            raise DaimonError(
-                f"tarball for {url!r} decompresses to {total} bytes, exceeding "
-                f"max_tarball_decompressed_bytes cap of {max_tarball_decompressed_bytes} bytes"
-            )
-        tmp_dir = Path(tempfile.mkdtemp())
-        tf.extractall(tmp_dir, filter="data")
-
+    tmp_dir = Path(tempfile.mkdtemp())
+    try:
+        root = await asyncio.to_thread(
+            extract_tarball,
+            body,
+            tmp_dir,
+            label=url,
+            max_tarball_decompressed_bytes=max_tarball_decompressed_bytes,
+            max_tarball_members=0,
+        )
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
     _log.info("fetch.downloaded", url=url, branch=branch)
-
-    return FetchResult(path=_smart_strip(tmp_dir), cleanup_dir=tmp_dir)
+    return FetchResult(path=root, cleanup_dir=tmp_dir)

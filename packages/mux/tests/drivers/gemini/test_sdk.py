@@ -1,5 +1,6 @@
 """Exercise the pinned SDK over HTTPX; every response is synthetic and offline."""
 
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -474,13 +475,118 @@ async def test_sdk_errors_record_the_http_status_for_logs(status: int, category:
         await client.aio.aclose()
 
 
+REFUSED_REOPEN = {
+    "error": {
+        "code": 400,
+        "status": "INVALID_ARGUMENT",
+        "message": "Invalid value at 'last_event_id', \"user prompt text\" with key"
+        " AIzaSyFAKEFAKEFAKEFAKEFAKEFAKE00, see https://example.invalid/errors",
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [
+        (
+            400,
+            REFUSED_REOPEN,
+            "INVALID_ARGUMENT: Invalid value at 'last_event_id', \"[redacted]\" with key"
+            " [redacted], see [redacted URL]",
+        ),
+        (404, {"error": {"code": 404, "message": "not\nfound"}}, "not found"),
+        (400, {"error": {"code": 400, "message": "x" * 1000}}, "x" * 300),
+        (400, {"error": {"code": 400}}, None),
+        (500, REFUSED_REOPEN, None),  # only a refusal (4xx) carries its reason
+    ],
+)
+async def test_a_refused_stream_open_keeps_a_redacted_capped_reason(
+    status: int, body: dict[str, JsonValue], reason: str | None
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).open_stream("i1", after="7")
+        assert exc.value.native_error_code == f"http_{status}"
+        assert exc.value.native_message == reason
+        # The exception text, which reaches user-facing paths, never carries it.
+        assert str(exc.value) == f"provider error: {exc.value.category}"
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize("call", ["create", "get"])
+async def test_a_refused_request_with_a_body_or_a_plain_read_keeps_no_reason(call: str) -> None:
+    # Only a stream open keeps the reason: a create's refusal can echo its prompt.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json=REFUSED_REOPEN)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            if call == "create":
+                await SDKTransport(client).create(
+                    {"agent": "antigravity-preview-05-2026", "input": "user prompt text"}
+                )
+            else:
+                await SDKTransport(client).get("i1")
+        assert exc.value.native_error_code == "http_400"
+        assert exc.value.native_message is None
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(400, text="raw body echoing user prompt text"),
+        httpx.Response(400, json=[{"error": {"message": "user prompt text"}}]),
+    ],
+)
+async def test_a_refused_stream_open_without_a_json_error_object_keeps_no_reason(
+    response: httpx.Response,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).open_stream("i1", after="7")
+        assert exc.value.native_error_code == "http_400"
+        assert exc.value.native_message is None
+        await client.aio.aclose()
+
+
 def _quota_body(
-    limit: int, model: str = "gemini-4-argon", *, line_end: str = ", ", also: str | None = None
+    limit: int,
+    model: str = "gemini-4-argon",
+    *,
+    line_end: str = ", ",
+    also: str | None = None,
+    window: str = "Day",
 ) -> dict[str, JsonValue]:
     """Google's 429 shape (smoke 2026-10-23), trimmed to the fields read.
 
     `line_end` ends the "limit: N" line; `also` names a second model's violation
-    (one 429 can name several, and then no single model is named on the card).
+    (one 429 can name several, and then no single model is named on the card);
+    `window` is the quota's period in its id ("Day" as captured, or "Minute").
     """
     quota = "free_tier_requests"
     models = [model, *([also] if also else [])]
@@ -499,7 +605,7 @@ def _quota_body(
                     "violations": [
                         {
                             "quotaMetric": f"generativelanguage.googleapis.com/generate_content_{quota}",
-                            "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                            "quotaId": f"GenerateRequestsPer{window}PerProjectPerModel-FreeTier",
                             "quotaDimensions": {"location": "global", "model": named},
                         }
                         for named in models
@@ -512,20 +618,44 @@ def _quota_body(
 
 
 @pytest.mark.parametrize(
-    ("body", "native_code", "retryable", "model"),
+    ("body", "native_code", "retryable", "model", "wait"),
     [
-        (_quota_body(0), "quota_zero", False, "gemini-4-argon"),
-        (_quota_body(10), "quota_exhausted", True, "gemini-4-argon"),
-        (_quota_body(0, line_end="\n"), "quota_zero", False, "gemini-4-argon"),
-        (_quota_body(100), "quota_exhausted", True, "gemini-4-argon"),
-        (_quota_body(0, also="gemini-3.8-flash"), "quota_zero", False, None),
-        ({"error": {"code": 429, "message": "slow down"}}, None, True, None),
+        (_quota_body(0), "quota_zero", False, "gemini-4-argon", None),
+        # RetryInfo asks for 62776 s; the wait is capped at 10 minutes.
+        (_quota_body(10), "quota_daily", False, "gemini-4-argon", 600.0),
+        (_quota_body(10, window="Minute"), "quota_exhausted", True, "gemini-4-argon", 600.0),
+        (_quota_body(0, line_end="\n"), "quota_zero", False, "gemini-4-argon", None),
+        (_quota_body(100), "quota_daily", False, "gemini-4-argon", 600.0),
+        (_quota_body(0, also="gemini-3.8-flash"), "quota_zero", False, None, None),
+        ({"error": {"code": 429, "message": "slow down"}}, None, True, None, 30.0),
+        (
+            {
+                "error": {
+                    "code": 429,
+                    "details": [
+                        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "7.5s"}
+                    ],
+                }
+            },
+            None,
+            True,
+            None,
+            7.5,
+        ),
     ],
 )
 async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
-    body: dict[str, JsonValue], native_code: str | None, retryable: bool, model: str | None
+    body: dict[str, JsonValue],
+    native_code: str | None,
+    retryable: bool,
+    model: str | None,
+    wait: float | None,
 ) -> None:
-    """A model the plan gives no quota is never retried; a spent quota refills."""
+    """A model the plan gives no quota is never retried, nor is a spent daily one; a
+    per-minute quota refills.
+
+    A 429 other than a zero quota carries its wait: Google's hint, else 30 s, at most 10 minutes.
+    """
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -546,5 +676,72 @@ async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
         assert error.retryable is retryable
         assert error.native_param == model
         assert error.native_error_code == "http_429"
+        assert error.retry_after_s == wait, "the 429 carries its bounded wait"
         assert len(calls) == 1
         await client.aio.aclose()
+
+
+async def test_sdk_effort_when_a_model_interaction_then_rides_generation_config() -> None:
+    """google-genai 2.7 sends a model interaction's thinking level in generation_config."""
+    from contextlib import AsyncExitStack
+
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec
+    from mux.drivers.gemini.core import compile_agent
+    from mux.testing.isolated_sdk import build_gemini_client
+
+    captured: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"id": "i1", "status": "completed", "steps": []})
+
+    body = compile_agent(
+        AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
+        max_output_tokens=4096,
+        thinking_level="low",
+    )
+    body.update(input=[{"type": "text", "text": "question"}], background=True, store=True)
+    async with AsyncExitStack() as stack:
+        client = build_gemini_client(transport=httpx.MockTransport(handle), api_key="offline")
+        stack.callback(client.close)
+        stack.push_async_callback(client.aio.aclose)
+        await SDKTransport(client).create(body)
+    posted = json.loads(captured[0].content)
+    assert posted["generation_config"]["thinking_level"] == "low", (
+        "a model interaction sends effort in generation_config"
+    )
+    assert "agent_config" not in posted, "a model interaction sends no agent_config"
+
+
+async def test_an_event_stream_waits_twenty_minutes_between_bytes_a_plain_read_does_not() -> None:
+    """Google's long-decode guidance: a stream's HTTP read timeout is 15-20 minutes."""
+    timeouts: dict[str, dict[str, float | None]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        kind = "stream" if request.url.params.get("stream") == "true" else "get"
+        timeouts[kind] = request.extensions["timeout"]
+        if kind == "stream":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b"")
+        return httpx.Response(200, json={"id": "i1", "status": "in_progress"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=60) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        transport = SDKTransport(client)
+        stream = await transport.open_stream("i1")
+        async for _ in stream:
+            pass
+        with contextlib.suppress(ProviderError, ValueError, KeyError):
+            await transport.get("i1")
+        await client.aio.aclose()
+    assert timeouts["stream"]["read"] == 1200.0
+    assert timeouts["stream"]["connect"] == 60.0
+    # The SDK sends no timeout of its own, so without this a stream had no read bound.
+    assert timeouts["get"] == {"connect": None, "read": None, "write": None, "pool": None}, (
+        "a plain read is unchanged"
+    )

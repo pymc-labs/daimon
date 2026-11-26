@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Literal, NoReturn, cast
 
 import anthropic
@@ -43,6 +44,11 @@ from .test_run_prepared_turn import _deps
 
 TENANT = uuid.UUID(int=6604)
 ACCOUNT = uuid.UUID(int=6605)
+
+_prepared_turn = partial(
+    PreparedTurn, mapping_id=None, watermark=None, reused=False, session_account_id=ACCOUNT
+)
+
 CHANNEL = ChannelRef(tenant_id=str(TENANT), platform="slack", channel_id="channel")
 NATIVE = ResourceRef(
     id="native-session",
@@ -81,14 +87,8 @@ async def test_default_anthropic_recorder_receives_the_original_sdk_event() -> N
     async def record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
         calls.append(event)
 
-    prepared = PreparedTurn(
-        admission=admitted(),
-        ma_session_id="anthropic-session",
-        mapping_id=None,
-        watermark=None,
-        reused=False,
-        session_account_id=ACCOUNT,
-        _record=record,
+    prepared = _prepared_turn(
+        admission=admitted(), ma_session_id="anthropic-session", _record=record
     )
     billing = prepared_billing(prepared, tenant_id=TENANT)
     assert isinstance(billing, Billed)
@@ -121,13 +121,9 @@ async def test_foreign_callback_receives_usage_only_frame_and_keeps_pending_sign
             )
         ),
     )
-    prepared = PreparedTurn(
+    prepared = _prepared_turn(
         admission=replace(admitted(), backend_revision=revision, backend_revision_origin="channel"),
         ma_session_id=NATIVE.id,
-        mapping_id=None,
-        watermark=None,
-        reused=False,
-        session_account_id=ACCOUNT,
         _record=record,
         session_ref=NATIVE,
     )
@@ -173,13 +169,9 @@ def test_foreign_recorder_requires_an_admitted_authorized_native_ref(change: str
             "kind": "kind",
         }[change]
         ref = NATIVE.model_copy(update={field: "anthropic" if change == "provider" else "other"})
-    prepared = PreparedTurn(
+    prepared = _prepared_turn(
         admission=replace(admitted(), backend_revision=revision, backend_revision_origin="channel"),
         ma_session_id=NATIVE.id,
-        mapping_id=None,
-        watermark=None,
-        reused=False,
-        session_account_id=ACCOUNT,
         _record=record,
         session_ref=ref,
     )
@@ -191,15 +183,8 @@ def test_default_profile_cannot_bill_a_foreign_native_session() -> None:
     async def record(*, observation: UsageObservation) -> bool:
         raise AssertionError("foreign recorder must not run under the default profile")
 
-    prepared = PreparedTurn(
-        admission=admitted(),
-        ma_session_id=NATIVE.id,
-        mapping_id=None,
-        watermark=None,
-        reused=False,
-        session_account_id=ACCOUNT,
-        _record=record,
-        session_ref=NATIVE,
+    prepared = _prepared_turn(
+        admission=admitted(), ma_session_id=NATIVE.id, _record=record, session_ref=NATIVE
     )
     with pytest.raises(ScopeViolation, match="admitted profile"):
         prepared_billing(prepared, tenant_id=TENANT)
@@ -238,7 +223,6 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
     await store.put_binding(binding, expected_generation=0)
     deps = replace(
         _deps(sessionmaker=db_session_factory, router=MARouter()),
-        turn_path="mux",
         state_store=store,
     )
     recorded: list[UsageObservation] = []
@@ -247,13 +231,9 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
         recorded.append(observation)
         return False
 
-    prepared = PreparedTurn(
+    prepared = _prepared_turn(
         admission=replace(admitted(), backend_revision=revision, backend_revision_origin="channel"),
         ma_session_id=ref.id,
-        mapping_id=None,
-        watermark=None,
-        reused=False,
-        session_account_id=ACCOUNT,
         _record=record,
         session_ref=ref,
     )
@@ -347,15 +327,7 @@ async def test_anthropic_prepared_turn_never_forwards_a_provider_action_callback
     async def record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
         raise AssertionError("the mocked turn cannot bill")
 
-    prepared = PreparedTurn(
-        admission=selected,
-        ma_session_id="anthropic-session",
-        mapping_id=None,
-        watermark=None,
-        reused=False,
-        session_account_id=ACCOUNT,
-        _record=record,
-    )
+    prepared = _prepared_turn(admission=selected, ma_session_id="anthropic-session", _record=record)
     calls: list[dict[str, object]] = []
 
     async def run(*args: object, **kwargs: object) -> TurnState:

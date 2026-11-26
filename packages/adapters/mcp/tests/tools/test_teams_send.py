@@ -35,7 +35,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ..harness import registered_account_token
+from ..harness import auth_identity, registered_account_token
 
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
@@ -99,9 +99,9 @@ def _runtime(
 def _auth(
     platform_user_id: str | None = _CALLER, tenant_id: uuid.UUID | None = None
 ) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id or uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        tenant_id or uuid.uuid4(),
         role=Role.USER,
         platform="teams",
         external_id=_ENTRA,

@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import CodeType
@@ -15,24 +15,54 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cas
 from uuid import UUID
 
 import structlog
+from daimon.core.caller_resources import (
+    APP_REPO_CREDENTIAL_PREFIX,
+    APP_SESSION_VAULT_PREFIX,
+    CALLER_RESOURCES_ID,
+    CALLER_VAULT_PREFIX,
+)
 from daimon.core.config import get_repo_memory_settings
+from daimon.core.connector_relay import relay_key
+from daimon.core.constants import DEFAULT_AGENT_MODEL
+from daimon.core.credential_env import ENV_REQUIREMENT_PREFIX
 from daimon.core.errors import DaimonError
+from daimon.core.finer_drops import FINER_DROPS, kept_environment, sandbox_losses
+from daimon.core.host_web_fetch import WEB_FETCH_TOOL
+from daimon.core.self_helpers import MULTIAGENT, self_roster_extension, translates_self_roster
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.provider_env import carries_keys
+from daimon.core.turn.stage_timing import stage_timer
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, Provider, ResourceRef, SkillRef
-from mux.contracts.profile import Capability
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding, ToolSpec
+from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
+from mux.contracts.profile import Capability, Effort, Profile
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    MCPConnection,
+    ResourceBinding,
+    ToolSpec,
+)
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
 from mux.profiles import (
-    CONSENTED_DEFAULT_MODELS,
+    DAIMON_RECORD_PROVIDERS,
+    PROFILES,
     backend_selection,
     get_profile,
     native_agent_tools,
 )
+from mux.profiles.anthropic import (
+    AGENT_CREATE_NULLS_NAMESPACE,
+    MODEL_CONFIG_NAMESPACE,
+    MULTIAGENT_NAMESPACE,
+    SESSION_RESOURCE_CREATE_NAMESPACE,
+    is_builtin_skill,
+)
+from mux.profiles.gemini import INLINE_REUSE
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 from mux.state.operations import request_digest
 from pydantic import (
     AfterValidator,
@@ -49,20 +79,23 @@ if TYPE_CHECKING:
     from daimon.core.neutral_resources import NeutralResourceHost
     from daimon.core.stores.domain import (
         BackendAgent,
-        SourceRepresentation,
-        _BackendDropConsent,  # pyright: ignore[reportPrivateUsage]
+        SourceRepresentation,  # pyright: ignore[reportPrivateUsage]
     )
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.prepare import ProviderPreparationRequest
+    from mux.contracts.ids import Scope
     from mux.contracts.ports import ManagedAgents
+    from mux.state.lease import Slot
 
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
 _WILDCARD = "*"
-#: Built-in web tools an agent template never carries off Anthropic: they are named
-#: losses (OpenAI's web_search is unpriced and uncounted; Gemini's grounding is off).
-_WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+#: Built-in web tools an agent template never carries off Anthropic: named losses.
+#: Web search maps to the provider's own search, metered per search.
+_WEB_TOOLS = frozenset({"web_fetch"})
+_EXECUTION_TOOLS = frozenset({"bash", "read", "edit", "write", "grep", "glob"})
+"""Source tools the provider's one execution tool carries: any one off cuts them all."""
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -79,7 +112,7 @@ _ADMISSION_FACTS = {
 }
 
 #: Admission facts a root retained before they existed read as their default.
-_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools"})
 
 log = structlog.get_logger(__name__)
 
@@ -124,6 +157,39 @@ ApiKeyEnvironment = Annotated[
 ]
 
 
+class ManifestUnreadable(Exception):
+    """A configured manifest that can't be read, is too large or isn't a list of objects."""
+
+
+def manifest_rows() -> list[dict[str, JsonValue]]:
+    """The operator manifest's rows; none when no manifest is configured."""
+    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not path:
+        return []
+    try:
+        with Path(path).open("rb") as manifest:
+            raw = manifest.read(_MAX_BYTES + 1)
+        if len(raw) > _MAX_BYTES:
+            raise ManifestUnreadable
+        return _ROWS.validate_json(raw)
+    except (OSError, ValidationError):
+        raise ManifestUnreadable from None
+
+
+def tenant_deployments[Row: BaseModel](
+    model: type[Row], profile: str, tenant_id: str
+) -> tuple[Row, ...]:
+    """One tenant's validated rows for `profile`; none if the manifest can't be read."""
+    try:
+        return tuple(
+            model.model_validate(row)
+            for row in manifest_rows()
+            if row.get("profile") == profile and row.get("tenant_id") == tenant_id
+        )
+    except (ManifestUnreadable, ValidationError):
+        return ()
+
+
 def validate_configured_runtime_manifest() -> None:
     """Check an explicitly configured manifest's references, without constructing plans.
 
@@ -131,16 +197,9 @@ def validate_configured_runtime_manifest() -> None:
     manifests retain the existing selected-turn refusal; no discovery happens here.
     Scope/digest, full provider policy and key availability remain admission checks.
     """
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not path:
-        return
     try:
-        with Path(path).open("rb") as manifest:
-            raw = manifest.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise ProviderRuntimeConfigurationError("invalid_manifest")
-        rows = _ROWS.validate_json(raw)
-    except (OSError, ValidationError):
+        rows = manifest_rows()
+    except ManifestUnreadable:
         raise ProviderRuntimeConfigurationError("invalid_manifest") from None
     for row in rows:
         reference = row.get("api_key_env")
@@ -254,28 +313,77 @@ def fixed_plan_origin_allowed(origin: str | None) -> bool:
     return origin == "channel"
 
 
+def preparation_account(request: ProviderPreparationRequest) -> str:
+    """The account a preparation runs as: a shared thread's owner, else the asker."""
+    shared = request.admission.shared_owner
+    return str(shared if shared is not None else request.admission.account_id)
+
+
+def caller_scope(request: ProviderPreparationRequest) -> Scope:
+    """The asker's own scope, which mints its MCP credential; never the thread owner's."""
+    from daimon.core.mux_backend import resource_scope
+
+    if request.scope.account_id == str(request.admission.account_id):
+        return request.scope
+    return resource_scope(
+        tenant_id=request.scope.tenant_id,
+        account_id=str(request.admission.account_id),
+        authorization_id=request.scope.authorization_id,
+    )
+
+
+def shared_copy_slot(request: ProviderPreparationRequest) -> Slot | None:
+    """A shared thread's slot when its owner holds the agent copy, else None."""
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    admission = request.admission
+    revision = admission.backend_revision
+    if (
+        admission.shared_owner is None
+        or admission.backend_revision_origin != "agent"
+        or revision is None
+    ):
+        return None
+    return Slot(thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id))
+
+
 async def capture_preparation_source(
-    request: ProviderPreparationRequest, *, fresh: bool = False, capability_preview: bool = False
+    request: ProviderPreparationRequest,
+    *,
+    fresh: bool = False,
+    capability_preview: bool = False,
+    stage_ms: dict[str, float] | None = None,
 ) -> BackendAgent:
-    """Capture source facts; the existing proof and materializer validate them."""
+    """Capture source facts; the existing proof and materializer validate them.
+
+    `stage_ms` gets each stage's time, for the caller's timing line.
+    """
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.sessions import project_session_resources
-    from mux.errors import ScopeViolation
 
-    if request.admission.hold is not None:
-        # The source records the agent-wide memory store; a held turn mounts its
-        # channel's store only, so it never has a source to capture.
-        raise ScopeViolation("source-preparation", "a held turn cannot capture an unheld source")
+    mark = stage_timer(stage_ms)
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 
-        actual = await retrieve_agent(
-            request.deps.anthropic, request.admission.agent.id, scope=request.scope
+        records = request.deps.sessionmaker
+        # Independent reads: one round trip, not two.
+        actual, environment = await asyncio.gather(
+            retrieve_agent(
+                request.deps.anthropic,
+                request.admission.agent.id,
+                scope=request.scope,
+                records=records,
+            ),
+            retrieve_environment(
+                request.deps.anthropic,
+                request.admission.environment.id,
+                scope=request.scope,
+                records=records,
+            ),
         )
-        environment = await retrieve_environment(
-            request.deps.anthropic, request.admission.environment.id, scope=request.scope
-        )
+        mark("fresh_reads")
         request = replace(
             request,
             source=None,
@@ -293,6 +401,7 @@ async def capture_preparation_source(
             or "",
             actual_agent=request.admission.agent,
         )
+        mark("load_backend_agent")
     captured = await project_session_resources(
         source,
         agent=request.admission.agent,
@@ -300,9 +409,8 @@ async def capture_preparation_source(
         session_factory=request.deps.sessionmaker,
         tenant_id=request.tenant_id,
         agent_uuid=source.agent_id,
-        account_id=(
-            None if request.admission.shared_owner is not None else request.admission.account_id
-        ),
+        # A shared thread's copy is its owner's; personal sign-ins stay off it.
+        account_id=UUID(preparation_account(request)),
         resource_scope=request.scope,
         memory_read_only=request.admission.memory_read_only,
         fernet=request.deps.fernet,
@@ -316,21 +424,75 @@ async def capture_preparation_source(
         agent_github_app=request.deps.agent_github_app,
         hide_personal_for=request.admission.shared_owner,
         slack_turn_context_id=request.admission.slack_turn_context_id,
-        hold=None if request.admission.shared_owner is not None else request.admission.hold,
+        # A held turn captures its channel's store only, shared thread or not.
+        hold=request.admission.hold,
         private_dm_id=request.admission.private_dm_id,
         origin_seal_ids=request.admission.origin_seal_ids,
+        caller_resources_on_credential=carries_caller_resources(request, capability_preview),
     )
-    return await _capture_source_capabilities(
-        request, captured, capability_preview=capability_preview
+    mark("project_session_resources")
+    captured = await _capture_source_capabilities(
+        request, captured, capability_preview=capability_preview, mark=mark
     )
+    mark("capabilities")
+    return captured
+
+
+def carries_caller_resources(request: ProviderPreparationRequest, preview: bool) -> bool:
+    """Whether the target host signs the caller's seals and contexts on its turn
+    credential. A preview captures for a provider target, so it matches that turn."""
+    revision = request.admission.backend_revision
+    profile = None if revision is None else PROFILES.get(revision.profile)
+    return preview or (profile is not None and profile.carries_caller_resources)
 
 
 #: A connector name a declared `mcp_server:<name>` loss can spell (mux contracts).
 _CONNECTOR_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 
 
+def relayed_connectors(
+    source: AgentSpec,
+    daimon: MCPConnection,
+    *,
+    provider: str,
+    relay_on: bool,
+    public_url: str,
+) -> tuple[MCPConnection, ...]:
+    """The source's connectors this target mounts through Daimon's relay.
+
+    Each shares Daimon's turn credential (`connector_relay.daimon_destination`) and
+    sits under its URL, as mux's shared-credential contract needs. A connector Gemini
+    could not tell apart, or one past OpenAI's metadata room, stays a named loss.
+    """
+    from daimon.core.connector_relay import connectors_of, relay_url
+    from mux.drivers.gemini import native_server_name
+    from mux.drivers.openai import fits_shared_credential
+
+    if not relay_on:
+        return ()
+    names = sorted(n for n in connectors_of(source) if _CONNECTOR_NAME.fullmatch(n))
+    if provider == INLINE_REUSE.provider:
+        natives = [native_server_name(n) for n in (DAIMON_SERVER_NAME, *names)]
+        names = [n for n in names if natives.count(native_server_name(n)) == 1]
+    relayed: list[MCPConnection] = []
+    for name in names:
+        connection = MCPConnection(
+            name=name, url=relay_url(public_url, name), credential_ref=daimon.credential_ref
+        )
+        if provider == PERSISTENT_WORKSPACE.provider and not fits_shared_credential(
+            (daimon, *relayed, connection)
+        ):
+            break
+        relayed.append(connection)
+    return tuple(relayed)
+
+
 async def _capture_source_capabilities(
-    request: ProviderPreparationRequest, source: BackendAgent, *, capability_preview: bool = False
+    request: ProviderPreparationRequest,
+    source: BackendAgent,
+    *,
+    capability_preview: bool = False,
+    mark: Callable[[str], None],
 ) -> BackendAgent:
     """Verify configured representations at the common preview/preparation capture edge.
 
@@ -344,10 +506,20 @@ async def _capture_source_capabilities(
     from daimon.core.mux_backend import managed_agents
     from daimon.core.mux_compat import legacy_call
     from daimon.core.skills.ingest import retained_archive_files
-    from daimon.core.stores.domain import SourceRepresentation
+    from daimon.core.stores.domain import SkillSizeRow, SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from daimon.core.turn.runtime_defaults import capture_template_rows
-    from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
+    from daimon.core.turn.session_skills import (
+        attaches_session_skills,
+        carried_skills,
+        environment_inline_bytes,
+        fitting_skills,
+        measure_carried_skills,
+        open_skills,
+        skill_losses,
+        skill_names,
+    )
+    from mux.contracts.resources import SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
         AgentToolsConfig,
@@ -359,20 +531,13 @@ async def _capture_source_capabilities(
     from sqlalchemy.exc import SQLAlchemyError
 
     source = source.model_copy(update={"representations": ()})
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    rows: list[dict[str, JsonValue]] = []
-    if path is not None:
-        try:
-            with Path(path).open("rb") as stream:
-                raw = stream.read(_MAX_BYTES + 1)
-            if len(raw) > _MAX_BYTES:
-                raise ValueError("manifest too large")
-            rows = _ROWS.validate_json(raw)
-        except (OSError, ValueError):
-            # This optional capability evidence cannot break an ordinary source
-            # capture. A full deployment still refuses without the representation,
-            # and its closed runtime-manifest loader independently rejects bad input.
-            return source
+    try:
+        rows = manifest_rows()
+    except ManifestUnreadable:
+        # This optional capability evidence cannot break an ordinary source
+        # capture. A full deployment still refuses without the representation,
+        # and its closed runtime-manifest loader independently rejects bad input.
+        return source
     # A code-default agent template counts only where the operator configured no
     # row for this tenant's profile at all, matching selection's last resort.
     tenant = str(source.tenant_id)
@@ -386,10 +551,16 @@ async def _capture_source_capabilities(
         ),
     ]
     revision = request.admission.backend_revision
-    if (
-        (request.admission.private_dm_id is not None)
+    private = (
+        request.admission.private_dm_id is not None
         or request.admission.slack_turn_context_id is not None
-        or request.admission.origin_channel_id is None
+    )
+    origin = request.admission.origin_channel_id
+    if (
+        (private and not carries_caller_resources(request, capability_preview))
+        # An agent's own (channel-less) preview reads its wildcard templates only.
+        or origin is None
+        and not capability_preview
         or not capability_preview
         and (revision is None or request.admission.backend_revision_origin != "agent")
     ):
@@ -398,7 +569,8 @@ async def _capture_source_capabilities(
         selected = [
             row
             for row in rows
-            if row.get("source_capabilities") is not None
+            if origin is not None
+            and row.get("source_capabilities") is not None
             and row.get("platform") == request.platform
             and row.get("channel_id") == request.admission.origin_channel_id
             and (
@@ -420,7 +592,11 @@ async def _capture_source_capabilities(
             and row.get("template_capabilities") == "mcp"
             and row.get("tenant_id") == str(source.tenant_id)
             and row.get("platform") in (request.platform, _WILDCARD)
-            and row.get("channel_id") in (request.admission.origin_channel_id, _WILDCARD)
+            and (
+                row.get("channel_id") == _WILDCARD
+                or origin is not None
+                and row.get("channel_id") == origin
+            )
             and row.get("account_id") in (request.scope.account_id, _WILDCARD)
             and (
                 capability_preview
@@ -435,6 +611,15 @@ async def _capture_source_capabilities(
         spec, scope = source.effective_spec, source.resource_scope
         if spec is None or scope is None or scope != request.scope:
             raise ValueError("missing captured source")
+        if _host_supplies_tools(source) and request.deps.mcp.public_url is not None:
+            from daimon.core.defaults.owned import host_tools_spec
+
+            spec = host_tools_spec(
+                spec,
+                str(request.deps.mcp.public_url),
+                tool_safety=request.deps.tool_safety,
+                asks_before_publishing=bool(source.asks_before_publishing),
+            )
         pin = source_preservation_pin(source)
         represented: list[SourceRepresentation] = []
         candidates: list[tuple[dict[str, JsonValue], SourceCapabilities | _TemplateInputs]] = []
@@ -452,6 +637,19 @@ async def _capture_source_capabilities(
                     ),
                 )
             )
+        # Every candidate shares one source: read its catalogue and measure its
+        # skills once, not once per model the preview offers.
+        source_catalogue: frozenset[str] | None = None
+        measured: tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]] | None = None
+        env_refs = (
+            tuple(
+                requirement.credential_ref
+                for requirement in source.resource_requirements
+                if requirement.id.startswith(ENV_REQUIREMENT_PREFIX) and requirement.credential_ref
+            )
+            if carries_keys(request)
+            else ()
+        )
         for row, inputs in candidates:
             template = isinstance(inputs, _TemplateInputs)
             profile_id = row.get("profile")
@@ -486,39 +684,47 @@ async def _capture_source_capabilities(
                 raise ValueError("environment representation differs from captured policy")
             if request.deps.mcp.public_url is None or request.deps.mcp.jwt_secret is None:
                 raise ValueError("MCP catalogue requires the captured caller")
-            # Use the runtime's registered chat-execution authority, never the
-            # restricted external-agent key (which sees a different catalogue).
-            # This preview credential is revoked before returning and never
-            # exposed to a provider; the ACK owner mints the runtime credential.
-            now = request.now()
-            secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
-            async with request.deps.sessionmaker.begin() as db:
-                catalogue_token = await mint_agent_mcp_token(
-                    db,
-                    account_id=request.admission.account_id,
-                    tenant_id=source.tenant_id,
-                    agent_id=source.agent_id,
-                    label="source-catalogue",
-                    secret=secret,
-                    now=now,
-                    ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
-                    chat_execution=True,
-                    surface="provider_turn",
-                )
-            try:
-                await validate_agent_mcp_token(
-                    request.deps.sessionmaker,
-                    token=catalogue_token,
-                    secret=secret,
-                    scope=scope,
-                    agent_id=source.agent_id,
-                    now=now,
-                    chat_execution=True,
-                )
-                catalogue = await list_mcp_tools(str(request.deps.mcp.public_url), catalogue_token)
-            finally:
+            if source_catalogue is None:
+                # Use the runtime's registered chat-execution authority, never the
+                # restricted external-agent key (which sees a different catalogue).
+                # This preview credential is revoked before returning and never
+                # exposed to a provider; the ACK owner mints the runtime credential.
+                mark("capabilities")
+                now = request.now()
+                secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
                 async with request.deps.sessionmaker.begin() as db:
-                    await revoke_mcp_token(db, jti=token_jti(catalogue_token), now=request.now())
+                    catalogue_token = await mint_agent_mcp_token(
+                        db,
+                        account_id=request.admission.account_id,
+                        tenant_id=source.tenant_id,
+                        agent_id=source.agent_id,
+                        label="source-catalogue",
+                        secret=secret,
+                        now=now,
+                        ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
+                        chat_execution=True,
+                        surface="provider_turn",
+                    )
+                try:
+                    await validate_agent_mcp_token(
+                        request.deps.sessionmaker,
+                        token=catalogue_token,
+                        secret=secret,
+                        scope=caller_scope(request),
+                        agent_id=source.agent_id,
+                        now=now,
+                        chat_execution=True,
+                    )
+                    source_catalogue = await list_mcp_tools(
+                        str(request.deps.mcp.public_url), catalogue_token
+                    )
+                finally:
+                    async with request.deps.sessionmaker.begin() as db:
+                        await revoke_mcp_token(
+                            db, jti=token_jti(catalogue_token), now=request.now()
+                        )
+                    mark("catalogue")
+            catalogue = source_catalogue
             allowed = next(
                 (
                     server.tool_policy.get("allowed_tools")
@@ -604,18 +810,38 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
-            # No OpenAI/Gemini turn has a confirmation card, pinned or template:
-            # every confirmation-gated or publishing tool stays unavailable (and
-            # the server refuses it for their provider-turn credentials too),
-            # except those whose card Daimon posts itself.
-            from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
+            # Gemini has no MCP approval step, and an OpenAI agent cannot choose
+            # which MCP tools raise one, so Daimon posts the card for each gated call
+            # while the host call gate is on for this platform. Otherwise a gated tool
+            # stays unavailable (the server refuses it for provider-turn credentials).
+            from daimon.core.features.snapshot import deployment_on_everywhere
+            from daimon.core.tool_safety import confirmation_gated_tools
 
-            gated, carded = confirmation_gated_tools(), self_carded_tools()
+            settings = request.deps.settings
+            gated, carded = confirmation_gated_tools(), frozenset[str]()
+            # The catalogue lists every tool (`_lists_everything`); a feature Off here leaves
+            # its tools out of a template's allowlist, as a Claude session's toolset does. A
+            # pinned install keeps its exact allowlist; the server refuses them on call.
+            # A built-in a place switched off leaves this reply, as on Claude.
+            off = {name for name, on in request.admission.toolset.builtins.items() if not on}
+            if off & _EXECUTION_TOOLS:
+                off |= _EXECUTION_TOOLS
+            hidden = (
+                request.admission.toolset.hidden_daimon_tools | (off & {WEB_FETCH_TOOL})
+                if template
+                else frozenset[str]()
+            )
+            if settings is not None and deployment_on_everywhere(
+                settings, "host_call_gate", request.answers_on or (request.platform,)
+            ):
+                carded |= gated
             permissions = {
-                # A self-carded tool runs (Daimon posts its card) unless the agent
+                # A carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.
                 name: (
-                    "auto"
+                    "disabled"
+                    if name in hidden
+                    else "auto"
                     if name in carded and permission != "disabled"
                     else "ask"
                     if name in gated
@@ -626,28 +852,45 @@ async def _capture_source_capabilities(
             if not any(permission == "auto" for permission in permissions.values()):
                 raise ValueError("source has no automatically executable MCP tools")
             # URL fetching has no native hosted-Agents tool. Keep the exact
-            # source capability visible as a consented loss instead of silently
+            # source capability visible as a declared loss instead of silently
             # treating shell HTTP execution as the provider's fetch tool.
+            # Daimon's own `web_fetch` (`daimon.core.host_web_fetch`) carries it when listed.
+            host_fetch = permissions.get(WEB_FETCH_TOOL) == "auto"
+            own_tools = tuple(
+                tool
+                for tool in tools
+                if tool.kind != "mcp_toolset" and not (tool.kind == "builtin" and tool.name in off)
+            )
             unavailable_builtin_tools = (
                 ("builtin_tool:web_fetch",)
-                if profile.provider == "openai"
-                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
+                if profile.provider == PERSISTENT_WORKSPACE.provider
+                and not host_fetch
+                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in own_tools)
                 else ()
             )
-            own_tools = tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             template_losses: tuple[str, ...] = ()
+            # A template's custom and channel skills, where its provider installs them.
+            carried: tuple[SkillRef, ...] = ()
             if template:
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
                 # are billed as tokens and container time already measured, never per
-                # call. Web tools stay named losses: OpenAI's web_search is unpriced
-                # and uncounted, and Gemini's grounding is off. Custom skills are a
-                # whole loss its consent must name.
+                # call. Web search maps to the provider's search, metered per search;
+                # one that must ask first, and web_fetch, stay named losses. Custom skills
+                # go per session where the profile installs them, else a whole named loss.
                 web = tuple(
-                    tool for tool in own_tools if tool.kind == "builtin" and tool.name in _WEB_TOOLS
+                    tool
+                    for tool in own_tools
+                    if tool.kind == "builtin"
+                    and (
+                        tool.name in _WEB_TOOLS
+                        or (tool.name == "web_search" and tool.permission != "auto")
+                    )
                 )
                 unavailable_builtin_tools = tuple(
-                    f"builtin_tool:{tool.name}" for tool in sorted(web, key=lambda t: t.name)
+                    f"builtin_tool:{tool.name}"
+                    for tool in sorted(web, key=lambda t: t.name)
+                    if not (host_fetch and tool.name == WEB_FETCH_TOOL)
                 )
                 try:
                     mapped_tools = (
@@ -661,8 +904,18 @@ async def _capture_source_capabilities(
                     # Tools it can't map (custom tools, a partial toolset) go whole.
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
-                if any(s.source in (None, "custom") for s in spec.skills or ()):
-                    template_losses = ("skills", *template_losses)
+                carried = carried_skills(spec)
+                built_ins = tuple(s.id for s in spec.skills or () if is_builtin_skill(s))
+                if (carried or built_ins) and not attaches_session_skills(profile):
+                    template_losses, carried = ("skills", *template_losses), ()
+                elif built_ins:
+                    # Anthropic's built-ins have no bytes to carry: their open copies go
+                    # instead, and one with no copy is a named loss.
+                    copies, missing = await open_skills(
+                        request.deps.sessionmaker, source.tenant_id, built_ins
+                    )
+                    carried = (*carried, *copies)
+                    template_losses = (*template_losses, *missing)
             else:
                 mapped_tools = represented_execution_tools(
                     profile,
@@ -670,9 +923,9 @@ async def _capture_source_capabilities(
                         tool
                         for tool in own_tools
                         if not (
-                            unavailable_builtin_tools
+                            (unavailable_builtin_tools or host_fetch)
                             and tool.kind == "builtin"
-                            and tool.name == "web_fetch"
+                            and tool.name == WEB_FETCH_TOOL
                         )
                     ),
                 )
@@ -712,10 +965,9 @@ async def _capture_source_capabilities(
                 or set(inputs.mcp_tools) != set(allowed)
             ):
                 raise ValueError("MCP representation expands the source allowlist")
-            # Hosted Agents MCP currently has no approval request/response
-            # protocol (unlike Responses). Keep confirmation-gated tools out
-            # of its executable allowlist and require explicit per-tool loss
-            # consent. Never convert `ask` into `auto` or drop sibling tools.
+            # An agent cannot choose which hosted MCP tools ask for approval, so
+            # a tool still asking here (no card for it) stays out of the allowlist
+            # as a per-tool loss. Never convert `ask` into `auto` or drop siblings.
             unavailable_mcp_tools = tuple(
                 f"mcp_tool:{DAIMON_SERVER_NAME}:{name}"
                 for name, permission in sorted(permissions.items())
@@ -731,8 +983,20 @@ async def _capture_source_capabilities(
                     },
                 }
             )
+            relayed = relayed_connectors(
+                spec,
+                connection,
+                provider=profile.provider,
+                relay_on=settings is not None
+                and deployment_on_everywhere(
+                    settings, "mcp_connector_relay", request.answers_on or (request.platform,)
+                ),
+                public_url=str(request.deps.mcp.public_url),
+            )
+            mounted = {f"mcp_server:{server.name}" for server in relayed}
+            connector_losses = tuple(c for c in connector_losses if c not in mounted)
             # The provider's built-in skills (docx, pptx, ...) have no bytes to
-            # carry and run only there: another backend goes without them.
+            # carry and run only there; a template carries open ones instead.
             portable = tuple(
                 s for s in spec.skills or () if s.source in (None, "custom") and not template
             )
@@ -768,7 +1032,9 @@ async def _capture_source_capabilities(
                 latest = dict(await asyncio.gather(*(resolve_latest(s) for s in unresolved)))
 
             async def verify_skill(
-                item: SourceSkillMapping, versions: Mapping[str, str] = latest
+                item: SourceSkillMapping,
+                versions: Mapping[str, str] = latest,
+                pinned: Profile = profile,
             ) -> None:
                 attached = next(s for s in spec.skills or () if s.id == item.source.id)
                 version = (
@@ -799,10 +1065,51 @@ async def _capture_source_capabilities(
                         for path, body in sorted(retained.items())
                     )
                 )
-                if request_digest(canonical.model_dump(mode="json")) != item.target.digest:
+                from mux.drivers.openai import bundle_digest
+
+                # The digest the target driver pinned: a content pin is of the bytes the
+                # OpenAI driver uploads (`plain_bundle`); a version pin, of the source bytes.
+                digest = (
+                    bundle_digest(canonical)
+                    if pinned.skill_digest == "content"
+                    else request_digest(canonical.model_dump(mode="json"))
+                )
+                if digest != item.target.digest:
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
+            # A template's sandbox is set up as the source's environment, as far as
+            # the provider can recreate it (`finer_drops.kept_environment`). An
+            # operator's own OpenAI environment (`environment_id`) serves as it is.
+            kept = (
+                kept_environment(profile.profile_id, source.environment.spec)
+                if template
+                and mapped_tools
+                and source.environment is not None
+                and row.get("environment_id") is None
+                else None
+            )
+            session_skills: tuple[SkillRef, ...] = ()
+            names: dict[str, str] = {}
+            if carried:
+                # Measured here, uploaded by the turn: a preview never writes to the provider.
+                if measured is None:
+                    measured = await measure_carried_skills(
+                        request.deps.sessionmaker,
+                        request.deps.anthropic,
+                        scope=scope,
+                        tenant_id=source.tenant_id,
+                        carried=carried,
+                        record=source.source,
+                        manifests=profile.skill_upload_limits is not None,
+                    )
+                pins, sizes = measured
+                # Unmeasured or over the limits: that skill alone is a named loss.
+                session_skills = fitting_skills(
+                    profile, pins, sizes, reserved=environment_inline_bytes(profile, kept)
+                )
+                template_losses = (*template_losses, *skill_losses(pins, session_skills))
+                names = skill_names(sizes)
             target = AgentSpec(
                 name=spec.name,
                 description=spec.description,
@@ -811,17 +1118,26 @@ async def _capture_source_capabilities(
                 metadata=spec.metadata,
                 tools=mapped_tools,
                 skills=tuple(item.target for item in inputs.skills),
-                mcp_servers=(connection,),
+                mcp_servers=(connection, *relayed),
+            )
+            # The agent's keys go as a file in the provider's sandbox (`provider_env`).
+            keys = (
+                env_refs
+                if profile.provider in (PERSISTENT_WORKSPACE.provider, INLINE_REUSE.provider)
+                else ()
             )
             represented.append(
                 SourceRepresentation(
                     source_pin=pin,
                     target=target,
-                    credential_refs=(reference,),
+                    credential_refs=(reference, *keys),
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
-                    environment=inputs.environment,
+                    environment=kept if template else inputs.environment,
                     unavailable_capabilities=(*template_losses, *connector_losses),
+                    session_skills=session_skills,
+                    skill_names=names,
+                    provider_execution=template and bool(mapped_tools),
                 )
             )
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
@@ -834,8 +1150,19 @@ async def _capture_source_capabilities(
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
         # sentences and code labels are logged, never a provider's or a validator's text.
-        from daimon.core.channel_backend import exception_labels
+        from daimon.core.channel_backend import (
+            backend_refusal_causes,
+            exception_labels,
+            transient_failure,
+        )
+        from daimon.core.errors import TurnError
 
+        # A blip (a timeout, a lost connection, a 5xx or 429) proves no loss: the
+        # caller retries rather than confirm or run without MCP, tools and skills.
+        busy = TurnError(kind="upstream", cause=error)
+        busy.__cause__ = error
+        if transient_failure(busy):
+            raise busy from error
         log.warning(
             "source_capture.representation_skipped",
             error=type(error).__name__,
@@ -846,6 +1173,7 @@ async def _capture_source_capabilities(
             profile=revision.profile if revision is not None else None,
             model=revision.model if revision is not None else None,
             capability_preview=capability_preview,
+            causes=backend_refusal_causes(error),
         )
         return source
 
@@ -881,6 +1209,19 @@ def source_instructions_preserved(required: str | None, system: str | None) -> b
     )
 
 
+def unavailable_line(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
+    """The agent's own line of what its copy lacks: a skill by its name, never its id."""
+    from daimon.core.confirmation import agent_loss_word
+
+    words = (
+        f"skill:{(names or {}).get(d.removeprefix('skill:'), d.removeprefix('skill:'))}"
+        if d.startswith("skill:")
+        else agent_loss_word(d)
+        for d in drops
+    )
+    return "Unavailable capabilities: " + ", ".join(words) + "."
+
+
 def compose_source_instructions(
     required: str | None, system: str | None, *, deduplicate_prefix: bool = False
 ) -> str:
@@ -905,41 +1246,78 @@ def _source_extension_obligation(
     *,
     native_target: AgentSpec | None = None,
     foreign_target: bool = False,
-) -> Literal["model_controls", "source_definition"] | None:
+    target_effort: Effort | None = None,
+) -> tuple[Literal["fast_mode", "inference_region", "effort_setting", "source_definition"], ...]:
+    """What the source's extension needs the target to carry; empty when it carries all."""
     if extension.version != 1:
-        return "source_definition"
-    if extension.namespace == "anthropic.model_config":
+        return ("source_definition",)
+    if extension.namespace == MODEL_CONFIG_NAMESPACE:
         from mux.drivers.anthropic import AgentModelConfig
 
         try:
             native = AgentModelConfig.model_validate(dict(extension.value))
         except ValueError:
-            return "source_definition"
+            return ("source_definition",)
         if native_target is not None and extension in (native_target.extensions or ()):
             model_id = native.model if isinstance(native.model, str) else native.model.id
             if model_id != native_target.model.id:
-                return "source_definition"
+                return ("source_definition",)
             profile = get_profile(backend_selection(native_target.model.provider).profile)
             if any(
                 offered.namespace == extension.namespace and offered.version == extension.version
                 for offered in profile.extensions
             ):
                 # The owning native compiler emits the complete unchanged model object.
-                return None
+                return ()
         model = extension.value.get("model")
         if isinstance(model, dict):
-            if set(model) <= {"id", "speed"} and model.get("speed") is None:
-                return None
-            if foreign_target:
-                return "model_controls"
-        return "source_definition"
+            # Unset fields and Claude's defaults (as the panel saves them) are no loss.
+            model = {
+                key: value
+                for key, value in model.items()
+                if (value.get("type") if isinstance(value, dict) else value)
+                not in (None, {"speed": "standard", "effort": "high"}.get(key))
+            }
+            if not foreign_target:
+                return (
+                    ()
+                    if set(model) <= {"id", "speed"} and model.get("speed") is None
+                    else ("source_definition",)
+                )
+            # Each lost control is named on its own; an effort the target carries is no loss.
+            return (
+                *(("fast_mode",) if model.get("speed") is not None else ()),
+                *(("inference_region",) if model.get("inference_geo") is not None else ()),
+                *(("effort_setting",) if model.get("effort") and target_effort is None else ()),
+            )
+        return ("source_definition",)
     if (
-        extension.namespace == "anthropic.multiagent"
+        extension.namespace == MULTIAGENT_NAMESPACE
         and extension.value == {"clear": True}
-        or extension.namespace == "anthropic.agent_create_nulls"
+        or extension.namespace == AGENT_CREATE_NULLS_NAMESPACE
     ):
-        return None
-    return "source_definition"
+        return ()
+    return ("source_definition",)
+
+
+def source_translations(source: BackendAgent, profile_id: str) -> tuple[Capability, ...]:
+    """What the host runs for `source` on `profile_id` in place of a native feature.
+
+    A `[self]` roster on a provider without multiagent runs as self-helpers
+    (`daimon.core.self_helpers`): recorded as translated, never as a loss.
+    """
+    spec = source.effective_spec
+    if (
+        spec is None
+        or source.source is None
+        or profile_id == backend_selection(spec.model.provider).profile
+        or not translates_self_roster(profile_id)
+    ):
+        return ()
+    own_id = source.source.ref.id
+    if any(self_roster_extension(item, own_id) for item in spec.extensions or ()):
+        return (MULTIAGENT,)
+    return ()
 
 
 def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> frozenset[str]:
@@ -997,13 +1375,32 @@ def memory_mount_retained(source: BackendAgent, resources: tuple[ResourceBinding
         and (ref.tenant_id, ref.account_id)
         == (source.resource_scope.tenant_id, source.resource_scope.account_id)
         and native is not None
-        and (native.namespace, native.version) == ("anthropic.session_resource_create", 1)
+        and (native.namespace, native.version) == (SESSION_RESOURCE_CREATE_NAMESPACE, 1)
         and native.value
         in (
             {"resource": memory_mount(source.memory_store_id, read_only=True)},
             {"resource": memory_mount(source.memory_store_id, read_only=source.memory_read_only)},
         )
     )
+
+
+def host_memory_represented(target: AgentSpec | None) -> bool:
+    """Whether an OpenAI or Gemini target reaches the agent's memory stores through
+    Daimon's own memory tools (`daimon.core.host_memory`), all executable. Self-hosted
+    turns never call Anthropic, so their memory stays a declared drop."""
+    from daimon.core.host_memory import HOST_MEMORY_TOOLS
+
+    if target is None or target.model.provider not in DAIMON_RECORD_PROVIDERS:
+        return False
+    allowed = next(
+        (
+            server.tool_policy.get("allowed_tools")
+            for server in target.mcp_servers or ()
+            if server.name == DAIMON_SERVER_NAME
+        ),
+        None,
+    )
+    return isinstance(allowed, list) and set(HOST_MEMORY_TOOLS) <= set(cast(list[str], allowed))
 
 
 def classify_source_obligations(
@@ -1014,6 +1411,7 @@ def classify_source_obligations(
     resources: tuple[ResourceBinding, ...] = (),
     asks_before_publishing: bool = False,
     retained_agent: ResourceRef | None = None,
+    target_effort: Effort | None = None,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
     spec = source.effective_spec
@@ -1053,6 +1451,13 @@ def classify_source_obligations(
     source_tools = tuple(spec.tools or ())
     from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE, agent_tools
 
+    translated = (
+        source_translations(source, backend_selection(target.model.provider).profile)
+        if target is not None
+        else ()
+    )
+    own_id = source.source.ref.id if source.source is not None else None
+
     for extension in spec.extensions or ():
         if extension.version != 1:
             missing.add("source_definition")
@@ -1070,17 +1475,21 @@ def classify_source_obligations(
                         source_tools = tuple(target.tools or ())
                     elif not represented and native.has_unrepresented_toolset():
                         missing.add("tools")
+        elif translated and self_roster_extension(extension, own_id):
+            continue
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
-            obligation = _source_extension_obligation(
+            for obligation in _source_extension_obligation(
                 extension,
                 native_target=target if not foreign_target else None,
                 foreign_target=foreign_target,
-            )
-            if obligation is not None and not (
-                obligation == "model_controls" and obligation in drops
+                target_effort=target_effort,
             ):
-                missing.add(obligation)
+                if not (
+                    obligation in FINER_DROPS
+                    and (obligation in drops or FINER_DROPS[obligation] in drops)
+                ):
+                    missing.add(obligation)
     profile = get_profile(backend_selection(spec.model.provider).profile)
     tools_required = bool(
         spec.tools or any(item.value.get("tools") for item in spec.extensions or ())
@@ -1126,6 +1535,17 @@ def classify_source_obligations(
         else set()
     )
     retained_servers = (target.mcp_servers or ()) if target is not None else ()
+    # Relayed connectors run on Daimon's turn credential; their own stays with Daimon.
+    relayed = {
+        server.name
+        for server in retained_servers
+        if represented is not None
+        and server.name != DAIMON_SERVER_NAME
+        and relay_key(server.url) == server.name
+        and server.credential_ref in represented.credential_refs
+    }
+    lost_servers |= relayed
+    retained_servers = tuple(s for s in retained_servers if s.name not in relayed)
     retained_mcp = {server.name for server in retained_servers}
     retained_credentials = {binding.credential_ref for binding in resources} | {
         server.credential_ref for server in retained_servers
@@ -1144,10 +1564,31 @@ def classify_source_obligations(
     if (
         not native_retained
         and "credentials" not in drops
-        and any(repository.credential_ref for repository in source.repository_sources)
+        # An App repository's token is minted per session, never one of the
+        # agent's keys: it goes with the repository.
+        and any(
+            repository.credential_ref
+            and not repository.credential_ref.startswith(APP_REPO_CREDENTIAL_PREFIX)
+            for repository in source.repository_sources
+        )
     ):
         missing.add("credentials")
+    # A provider turn's relay routes `github` through a turn's own App tokens.
+    github_relayed = target is not None and target.model.provider in (
+        PERSISTENT_WORKSPACE.provider,
+        INLINE_REUSE.provider,
+    )
     for resource in source.resource_requirements:
+        if (
+            github_relayed
+            and resource.kind == "native"
+            and resource.id.startswith(APP_SESSION_VAULT_PREFIX)
+        ):
+            # The App vault's shell tokens stay with the repository; its `github`
+            # MCP is relayed (`relayed_connectors`, `github_turn_router`).
+            if "repository" not in drops:
+                missing.add("repository")
+            continue
         if (
             native_retained
             and resource.kind == "credential"
@@ -1156,10 +1597,11 @@ def classify_source_obligations(
             and resource.resource is None
         ):
             continue
+        # A credential the representation carries (Daimon's own, the agent's keys file).
+        if represented and resource.credential_ref in represented.credential_refs:
+            continue
         paired = _mcp_credential_servers(source, resource)
         if paired:
-            if represented and resource.credential_ref in represented.credential_refs:
-                continue
             if paired <= lost_servers:
                 continue
             if paired & retained_mcp or resource.credential_ref in retained_credentials:
@@ -1195,6 +1637,7 @@ def classify_source_obligations(
         and "memory" not in drops
         and not native_retained
         and not memory_mount_retained(source, resources)
+        and not (represented is not None and host_memory_represented(target))
     ):
         missing.add("memory")
     if source.environment is not None and source.environment.spec.native_config is not None:
@@ -1206,9 +1649,23 @@ def classify_source_obligations(
             missing.add("source_definition")
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
+    # Its code runs in the provider's sandbox, set up as the representation's
+    # environment; each setting it can't recreate (packages, network, files) is a
+    # named loss, covered by a declared `sandbox`.
+    sandbox_parts = (
+        sandbox_losses(
+            source.environment.spec if source.environment is not None else None,
+            represented.environment,
+        )
+        if represented is not None and represented.provider_execution and not resources
+        else ("sandbox",)
+    )
+    if sandbox_parts != ("sandbox",) and "sandbox" not in drops:
+        missing.update(set(sandbox_parts) - set(drops))
     if target is None or not (
         native_retained
         or ("sandbox" in drops and environment is None and not resources)
+        or sandbox_parts != ("sandbox",)
         or (
             source.environment is not None
             and environment is not None
@@ -1222,8 +1679,17 @@ def classify_source_obligations(
     return frozenset(missing)
 
 
-def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
+def _host_supplies_tools(source: BackendAgent) -> bool:
+    """A Daimon record: it runs its provider's template representation, never its raw spec."""
+    return source.source is not None and source.source.ref.id.startswith("dm_agent_")
+
+
+def preview_source_drops(
+    source: BackendAgent, model: ModelRef, *, effort: Effort | None = None
+) -> AgentSpec:
     """Derive explicit losses using the same complete source-preservation rule."""
+    from daimon.core.channel_backend import loss_names
+
     spec = source.effective_spec
     profile = backend_selection(model.provider).profile
     if (
@@ -1237,7 +1703,9 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
         or model.options
     ):
         raise UnsupportedCapability(("source_context",), profile)
-    if profile == backend_selection(spec.model.provider).profile:
+    if profile == backend_selection(spec.model.provider).profile and not _host_supplies_tools(
+        source
+    ):
         target = spec.model_copy(update={"model": model})
         missing = classify_source_obligations(
             source,
@@ -1246,6 +1714,7 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
             resources=source.resource_requirements,
             retained_agent=source.source.ref,
             asks_before_publishing=source.asks_before_publishing,
+            target_effort=effort,
         )
         if missing:
             raise UnsupportedCapability(tuple(sorted(missing)), profile)
@@ -1274,6 +1743,7 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
         target,
         environment=environment,
         asks_before_publishing=source.asks_before_publishing,
+        target_effort=effort,
     )
     try:
         target = AgentSpec.model_validate(
@@ -1291,6 +1761,7 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
         target,
         environment=environment,
         asks_before_publishing=source.asks_before_publishing,
+        target_effort=effort,
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), profile)
@@ -1298,171 +1769,31 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
         target = target.model_copy(
             update={
                 "system": compose_source_instructions(
-                    spec.system,
-                    "Unavailable capabilities: " + ", ".join(target.declared_drops) + ".",
+                    spec.system, unavailable_line(target.declared_drops, loss_names(source))
                 )
             }
         )
     return target
 
 
-#: The template drop a provider turn's consent named before Daimon posted the
-#: switch card itself (`tool_safety.self_carded_tools`).
-_SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
-
-
-def _model_consented(backend: Provider, model: str | None, picked: str | None) -> bool:
-    """The resolved `model` is the one the consent was confirmed for.
-
-    A consent stores no model (a release before this one must still read the
-    row), so a default-model setting counts only while the provider default is
-    still the one such consents were recorded under. No model means the
-    source's own, which the source pin covers.
-    """
-    return model is None or model == (picked or CONSENTED_DEFAULT_MODELS.get(backend))
-
-
-def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
-    return (
-        target is not None
-        and target.declared_drops == consent.declared_drops
-        and request_digest(target.model_dump(mode="json")) == consent.target_digest
-    )
-
-
-def _same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
-    """`target` loses what `consent` accepted, apart from what Daimon's own tools decide.
-
-    Daimon's gating and catalogue change with a release, not with the agent: the
-    server refuses a gated tool to provider turns whatever the consent says, and a
-    tool Daimon no longer serves can't be lost. The source pin covers the owner's
-    tool settings. Any other difference, a gain included (a tool Daimon stops
-    gating, MCP back on a copy confirmed without it), asks again.
-    """
-    from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
-
-    prefix = f"mcp_tool:{DAIMON_SERVER_NAME}:"
-    # A self-carded tool runs on provider turns: offering it is a gain.
-    gated = confirmation_gated_tools() - self_carded_tools()
-    served = {
-        drop.removeprefix(prefix) for drop in target.declared_drops if drop.startswith(prefix)
-    }
-    for server in target.mcp_servers or ():
-        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
-            served.update(name for name in allowed if isinstance(name, str))
-    today = {
-        drop
-        for drop in target.declared_drops
-        if not drop.startswith(prefix) or drop.removeprefix(prefix) not in gated
-    }
-    # A consent from before the switch tool was offered names it a loss; one the
-    # owner confirmed with it turned off still loses it.
-    switch_offered = _SWITCH_TOOL_DROP not in target.declared_drops
-    accepted = {
-        drop
-        for drop in consent.declared_drops
-        if not drop.startswith(prefix)
-        or (
-            not (switch_offered and drop == _SWITCH_TOOL_DROP)
-            and drop.removeprefix(prefix) in served - gated
-        )
-    }
-    if "tools" in accepted and "tools" not in today and target.tools:
-        # Before #1483 a template lost the source's tools whole; now it keeps
-        # them and names only the web tools it can't carry.
-        accepted = (accepted - {"tools"}) | {d for d in today if d.startswith("builtin_tool:")}
-    return today == accepted
-
-
-def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
-    """`target` as a consent recorded before the switch tool was offered names it.
-
-    That consent declared the tool a loss: not allowed on Daimon's MCP, one more
-    drop, and the drops line in the instructions. Only that one difference is
-    rebuilt; anything else still differs and still needs a fresh confirmation.
-    """
-    if _SWITCH_TOOL_DROP in target.declared_drops:
-        return None
-    tool = _SWITCH_TOOL_DROP.rsplit(":", 1)[1]
-    from mux.contracts.resources import MCPConnection
-
-    servers: list[MCPConnection] = []
-    found = False
-    for server in target.mcp_servers or ():
-        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list) and tool in allowed:
-            found = True
-            server = server.model_copy(
+def _source_facts(source: BackendAgent, *, readdress: bool = True) -> dict[str, object]:
+    updates: dict[str, object] = {"resource_scope": None}
+    if readdress and source.resource_scope is not None:
+        # The caller's own Daimon credential is addressed per person: any person's
+        # capture pins the same source (a shared thread captures as its owner).
+        caller = f"{CALLER_VAULT_PREFIX}{source.tenant_id}:{source.resource_scope.account_id}:"
+        anyone = f"{CALLER_VAULT_PREFIX}{source.tenant_id}::"
+        updates["resource_requirements"] = tuple(
+            binding.model_copy(
                 update={
-                    "tool_policy": {
-                        **server.tool_policy,
-                        "allowed_tools": [name for name in allowed if name != tool],
-                    }
+                    "id": binding.id.replace(caller, anyone, 1),
+                    "credential_ref": binding.credential_ref.replace(caller, anyone, 1),
                 }
             )
-        servers.append(server)
-    if not found:
-        return None
-    drops = tuple(sorted((*target.declared_drops, _SWITCH_TOOL_DROP)))
-    return target.model_copy(
-        update={
-            "mcp_servers": tuple(servers),
-            "declared_drops": drops,
-            "system": compose_source_instructions(
-                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
-            ),
-        }
-    )
-
-
-def _with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
-    """`target` as a consent recorded before a template kept the source's tools names it.
-
-    That consent (before #1483) declared `tools` a whole loss: no tools on the
-    target, `tools` among its drops, and neither of today's granular web losses
-    (an OpenAI consent already named web fetch). Only that difference is rebuilt;
-    the copy then runs with its tools from now on.
-    """
-    if "tools" in target.declared_drops or not target.tools:
-        return None
-    from mux.profiles.openai import PERSISTENT_WORKSPACE
-
-    granular: set[str] = {"builtin_tool:web_search"}
-    if target.model.provider != PERSISTENT_WORKSPACE.provider:
-        granular.add("builtin_tool:web_fetch")
-    drops = tuple(sorted({*target.declared_drops, "tools"} - granular))
-    return target.model_copy(
-        update={
-            "tools": (),
-            "declared_drops": drops,
-            "system": compose_source_instructions(
-                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
-            ),
-        }
-    )
-
-
-def _consented_before(
-    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
-) -> bool:
-    """A consent recorded before a template kept the source's tools (#1483) or
-    offered the switch tool (#1438).
-
-    Either difference alone, or both, is rebuilt; anything else still needs a
-    fresh confirmation.
-    """
-    without_tools = _with_tools_dropped(target, source_system)
-    candidates = (
-        _with_switch_tool_dropped(target, source_system),
-        without_tools,
-        _with_switch_tool_dropped(without_tools, source_system) if without_tools else None,
-    )
-    return any(_consented(candidate, consent) for candidate in candidates)
-
-
-def _source_facts(source: BackendAgent) -> dict[str, object]:
-    updates: dict[str, object] = {"resource_scope": None}
+            if binding.credential_ref is not None and binding.credential_ref.startswith(caller)
+            else binding
+            for binding in source.resource_requirements
+        )
     for name in ("source", "environment"):
         resource = getattr(source, name)
         if resource is not None:
@@ -1472,9 +1803,10 @@ def _source_facts(source: BackendAgent) -> dict[str, object]:
     captured = source.model_copy(update=updates)
     # Direct facts include the intentionally non-serialized resource projection.
     facts = dict(captured)
-    # Derived representation evidence must not change old consent pins, nor
+    # Derived representation evidence must not change old source pins, nor
     # recursively become part of the source it attests.
     facts.pop("representations", None)
+    facts.pop("owner_spec", None)
     return facts
 
 
@@ -1482,11 +1814,52 @@ def _digest(facts: dict[str, object]) -> str:
     return request_digest(cast(JsonValue, TypeAdapter(object).dump_python(facts, mode="json")))
 
 
-def source_preservation_pin(source: BackendAgent) -> str:
-    """Pin complete owner-captured intent independently of the current caller address."""
-    facts = _source_facts(source)
-    # Daimon's own gating changes with a release or a place, not with the agent:
-    # pin the source before it, so gating alone never asks to confirm a switch again.
+#: Facts of the place a turn runs in (held or read-only memory, its instructions),
+#: of a credential's last write and of Daimon's gating: each turn checks what they cost.
+_PLACE_FACTS: Final = (
+    "memory_store_id",
+    "memory_read_only",
+    "memory_instructions",
+    "resource_generations",
+    "asks_before_publishing",
+)
+
+
+def _owner_binding(binding: ResourceBinding) -> ResourceBinding | None:
+    """`binding` as the owner set it up: a Slack turn's own caller credential is the
+    caller's, and a private place's carried resources are that turn's."""
+    if binding.id == CALLER_RESOURCES_ID:
+        return None
+    ref = binding.credential_ref
+    if ref is None or not ref.startswith(CALLER_VAULT_PREFIX) or ":slack-turn:" not in ref:
+        return binding
+    plain = ref.split(":slack-turn:", 1)[0]
+    return binding.model_copy(update={"id": plain, "credential_ref": plain})
+
+
+def source_preservation_pin(source: BackendAgent, *, readdress: bool = True) -> str:
+    """Pin the owner's setup: the agent, its environment, repositories and credentials.
+
+    A place's facts (a channel's skills, held or read-only memory, servers hidden
+    from one person, a DM's or Slack turn's context) are left out: preparation
+    checks what each costs on every turn, so one confirmation holds in every place.
+    Daimon's own gating changes with a release, not with the agent, and is left out too.
+    """
+    facts = _source_facts(source, readdress=readdress)
+    for name in (*_PLACE_FACTS, "ungated_spec"):
+        facts.pop(name, None)
+    facts["effective_spec"] = source.owner_spec or source.ungated_spec or source.effective_spec
+    bindings = (
+        _owner_binding(binding)
+        for binding in cast(tuple[ResourceBinding, ...], facts["resource_requirements"])
+    )
+    facts["resource_requirements"] = tuple(b for b in bindings if b is not None)
+    return _digest(facts)
+
+
+def _gated_pin(source: BackendAgent, *, readdress: bool) -> str:
+    """The pin before places left it: Daimon's gating out, every place fact in."""
+    facts = _source_facts(source, readdress=readdress)
     facts.pop("asks_before_publishing", None)
     ungated = facts.pop("ungated_spec", None)
     if ungated is not None:
@@ -1495,14 +1868,19 @@ def source_preservation_pin(source: BackendAgent) -> str:
 
 
 def source_pin_matches(source: BackendAgent, pin: str) -> bool:
-    """Whether `pin` pins this source, by the current formula or the one before it.
+    """Whether `pin` pins this source, by the current formula or one before it.
 
-    Consents and operator rows stored before Daimon's gating left the pin still
-    hold: the older pin also covers that gating, so it is stricter and safe to accept.
+    Operator rows stored before places, Daimon's gating or the
+    caller's re-addressed credential left the pin still hold: each older pin
+    also covers those facts, so it is stricter and safe to accept.
     """
-    if pin == source_preservation_pin(source):
+    if any(
+        pin == formula(source, readdress=readdress)
+        for formula in (source_preservation_pin, _gated_pin)
+        for readdress in (True, False)
+    ):
         return True
-    legacy = _source_facts(source)
+    legacy = _source_facts(source, readdress=False)
     legacy.pop("ungated_spec", None)
     return pin == _digest(legacy)
 
@@ -1539,11 +1917,10 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         request.admission.backend_revision_origin != "agent"
         or not request.deps.agent_backends
         or not request.deps.channel_backends
-        or request.deps.turn_path != "mux"
         or revision is None
         or request.scope.tenant_id != str(request.tenant_id)
         or request.scope.account_id != str(request.session_account_id)
-        or request.scope.account_id != str(request.admission.account_id)
+        or request.scope.account_id != preparation_account(request)
         or request.scope.is_platform
         or request.scope.is_legacy_host_authorized
     ):
@@ -1562,7 +1939,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
     )
     setting = None
-    from daimon.core.stores import agent_backends, mux_state
+    from daimon.core.stores import agent_backends, mux_state, thread_models
 
     async with asyncio.timeout(
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
@@ -1582,15 +1959,28 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                         )
                         is None
                     ):
-                        setting = await agent_backends.current(
-                            session, request.tenant_id, agent_id, persisted=True
+                        thread_id = request.admission.backend_thread_id
+                        setting = (
+                            await thread_models.get_thread_consent(
+                                session,
+                                tenant_id=request.tenant_id,
+                                platform=request.platform,
+                                thread_id=thread_id,
+                                agent_id=agent_id,
+                            )
+                            if thread_id is not None
+                            else await agent_backends.current(
+                                session, request.tenant_id, agent_id, persisted=True
+                            )
                         )
-                    if setting != provisional or setting is None or setting.drop_consent is None:
-                        raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")
+                    if setting != provisional:
+                        # Changed since admission read it; the next message runs the new one.
+                        raise AgentBackendRefused("revision_busy")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+    owned = request.admission.agent.id.startswith("dm_agent_")
     source = await asyncio.wait_for(
         capture_preparation_source(request, fresh=True)
-        if setting is not None
+        if setting is not None or owned
         else capture_preparation_source(request),
         timeout=timeout,
     )
@@ -1606,39 +1996,46 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         or source.source.revision.local != request.admission.agent.version
     ):
         if setting is not None:
-            raise AgentBackendRefused("re_confirm", detail="source_identity")
+            # An edit landed between admission and this capture.
+            raise AgentBackendRefused("revision_busy")
         raise UnsupportedCapability(("source_context",), revision.profile)
     # Capture is evidence of source intent, not evidence that a target preserved it.
     spec = source.effective_spec
     if spec is None:
         raise UnsupportedCapability(("source_definition",), revision.profile)
     target = None
-    if setting is not None:
-        consent = setting.drop_consent
-        if consent is None:
-            raise AgentBackendRefused("re_confirm", detail="no_consent")
-        if setting.backend != revision.backend:
-            raise AgentBackendRefused("re_confirm", detail="backend_mismatch")
-        if revision.model is None and revision.backend != spec.model.provider:
-            raise AgentBackendRefused("re_confirm", detail="model_unpinned")
-        if not source_pin_matches(source, consent.source_pin):
-            raise AgentBackendRefused("re_confirm", detail="source_pin")
+    native = revision.profile == backend_selection(spec.model.provider).profile
+    # A Daimon record born on this profile runs there with no switch.
+    born_native = setting is None and owned and native
+    if born_native:
         target = preview_source_drops(
-            source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
+            source,
+            ModelRef(provider=revision.backend, id=revision.model or spec.model.id),
+            effort=revision.effort,
         )
-        if not (
-            _consented(target, consent)
-            or (
-                _model_consented(revision.backend, revision.model, setting.model)
-                and _same_losses(target, consent)
-            )
-            or _consented_before(target, spec.system, consent)
-        ):
-            raise AgentBackendRefused("re_confirm", detail="losses_differ")
+    if setting is not None:
+        if setting.backend != revision.backend:
+            # The agent's setting moved to another provider than this turn's
+            # revision: not a race a retry clears, so `preparation_failed`.
+            raise UnsupportedCapability(("source_drift",), revision.profile)
+        model = revision.model
+        if model is None and revision.backend != spec.model.provider:
+            # Only Claude names no model: a source born elsewhere runs Claude's default.
+            model = DEFAULT_AGENT_MODEL
+        # Built from the source as it is now: an edit applies on the next turn, and
+        # what the provider can't carry is off there.
+        target = preview_source_drops(
+            source,
+            ModelRef(provider=revision.backend, id=model or spec.model.id),
+            effort=revision.effort,
+        )
+    # A record runs a counterpart built from its representation, as a switched source does.
     retain_native = (
-        (setting is not None)
-        and not setting.declared_drops
-        and revision.profile == backend_selection(spec.model.provider).profile
+        not owned
+        and setting is not None
+        and target is not None
+        and not target.declared_drops
+        and native
     )
     missing = classify_source_obligations(
         source,
@@ -1651,6 +2048,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         else None,
         resources=source.resource_requirements if retain_native else (),
         asks_before_publishing=request.admission.asks_before_publishing,
+        target_effort=revision.effort,
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
@@ -1701,7 +2099,8 @@ async def read_preparation_counterpart(
         )
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         if (target is not None) and current_source != source:
-            raise AgentBackendRefused("re_confirm", detail="source_drift")
+            # Edited mid-preparation: the next message builds from the edit.
+            raise AgentBackendRefused("revision_busy")
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)
@@ -1710,15 +2109,18 @@ async def read_preparation_counterpart(
         # tenant) reaches the person as itself; anything else stays "unsupported".
         if error.reason != "backend_unsupported":
             raise
+        if error.cause == "channel_row_missing":
+            raise
         raise AdmissionDenied(reason="backend_unsupported") from error
     except AgentBackendRefused as error:
-        # A stale consent is not missing provider setup: name the fresh preview
-        # the person needs. Any other backend refusal stays unsupported (J6g).
-        if error.reason == "re_confirm":
-            raise AdmissionDenied(reason="backend_unsupported", cause="re_confirm") from error
+        # A race with an edit is not missing provider setup: the same message works
+        # once it settles. Any other backend refusal stays unsupported (J6g).
+        if error.reason == "revision_busy":
+            raise AdmissionDenied(reason="backend_unsupported", cause="preparation_busy") from error
         raise AdmissionDenied(reason="backend_unsupported") from error
     except UnsupportedCapability as error:
-        raise AdmissionDenied(reason="backend_unsupported") from error
+        # The provider is set up; this agent can't be built there (the log names why).
+        raise AdmissionDenied(reason="backend_unsupported", cause="preparation_failed") from error
     except Exception as error:
         from daimon.core.channel_backend import backend_refusal_causes, transient_failure
 
@@ -1934,16 +2336,9 @@ def _configured_rows() -> list[dict[str, JsonValue]]:
     A configured manifest that can't be read refuses (`AdmissionDenied`) rather than
     falling back to the code defaults, so a broken operator file never widens access.
     """
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
-        return []
     try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise AdmissionDenied(reason="backend_unsupported")
-        return _ROWS.validate_json(raw)
-    except (OSError, ValidationError):
+        return manifest_rows()
+    except ManifestUnreadable:
         raise AdmissionDenied(reason="backend_unsupported") from None
 
 
@@ -1996,6 +2391,11 @@ def select_runtime_manifest[Plan: CounterpartPlan](
             selected = _most_specific(
                 _matching_rows(defaults, revision, request, allow_wildcard=True)
             )
+            if not selected and request.admission.backend_revision_origin != "agent":
+                # A channel pin the code defaults can't serve: name the fix.
+                raise AdmissionDenied(
+                    reason="backend_unsupported", cause="channel_row_missing", provider=provider
+                )
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
         resolved = dict(selected[0])
@@ -2035,7 +2435,7 @@ def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
     """The one catalog entry a template row's counterpart lives at for this agent version.
 
     Keyed by the admitted agent's scoped identity, its MA version, the admitted
-    profile and model and the consented target spec, so an agent edit, a model
+    profile and model and the derived target spec, so an agent edit, a model
     change or a different derivation gets a new entry, and an entry can never
     serve another agent, version, model or spec.
     """
@@ -2047,7 +2447,7 @@ def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
     agent_id = derive_agent_uuid(
         tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
     )
-    # The consented target's digest: a different derived target never reuses an entry.
+    # The derived target's digest: a different target never reuses an entry.
     spec = request_digest(target.model_dump(mode="json"))[:16]
     return (
         f"root:{agent_id}:{request.admission.agent.version}:{revision.profile}"
@@ -2075,9 +2475,8 @@ def validate_counterpart_request(
             or revision is None
             or not request.deps.channel_backends
             or not request.deps.agent_backends
-            or request.deps.turn_path != "mux"
             or scope.tenant_id != str(request.tenant_id)
-            or scope.account_id != str(request.admission.account_id)
+            or scope.account_id != preparation_account(request)
             or scope.account_id != str(request.session_account_id)
             or (plan.tenant_id, plan.account_id) != (scope.tenant_id, scope.account_id)
             or (revision.channel.tenant_id, revision.channel.platform, revision.channel.channel_id)
@@ -2093,9 +2492,8 @@ def validate_counterpart_request(
         request.admission.backend_revision_origin != "agent"
         or revision is None
         or not request.deps.channel_backends
-        or request.deps.turn_path != "mux"
         or scope.tenant_id != str(request.tenant_id)
-        or scope.account_id != str(request.admission.account_id)
+        or scope.account_id != preparation_account(request)
         or scope.account_id != str(request.session_account_id)
         or (plan.tenant_id, plan.account_id) != (scope.tenant_id, scope.account_id)
         or (revision.channel.tenant_id, revision.channel.platform, revision.channel.channel_id)
@@ -2126,10 +2524,10 @@ async def materialize_root_counterpart(
     *,
     resources: NeutralResourceHost,
 ) -> AgentRevision:
-    """Publish this agent version's counterpart from its consented target, once.
+    """Publish this agent version's counterpart from its derived target, once.
 
-    Runs after source preparation proved the drop consent, so the target is the
-    exact spec the admin confirmed. A concurrent first turn loses the catalog
+    Runs after source preparation built the target from the current source and
+    the agent's revision. A concurrent first turn loses the catalog
     compare-and-set and reads the winner's entry; the native key is the catalog
     id, so native creation is idempotent too. `read_counterpart` then verifies
     the entry like any operator-installed counterpart.

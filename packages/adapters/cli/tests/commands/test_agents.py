@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -37,12 +38,14 @@ from daimon.adapters.cli.commands.agents import (
     agents_fork,
     agents_get,
     agents_list,
+    agents_rename,
     agents_update,
 )
 from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime
 from daimon.core import agent_identity
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.agent_rename import AgentRenameRefused
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError, SpecError, StoreError
@@ -56,9 +59,11 @@ from daimon.core.stores.agent_tool_rules import get_rule
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_routine, make_tenant
+from mux.contracts.ids import ModelRef
 from mux.testing.drivers.anthropic.ma import MARouter, build_stub_anthropic, list_response
 from rich.console import Console
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
@@ -407,6 +412,71 @@ async def test_agents_create_calls_sdk_create(
     assert md.get("daimon_account") == str(derive_guild_account_uuid(tenant_id)), (
         "CLI-created agents must carry the derived guild account so the panel can edit them"
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("openai:gpt-6-luna", ModelRef(provider="openai", id="gpt-6-luna")),
+        ("anthropic:claude-sonnet-4-6", ModelRef(provider="anthropic", id="claude-sonnet-4-6")),
+        ("claude-sonnet-4-6", ModelRef(provider="anthropic", id="claude-sonnet-4-6")),
+    ],
+)
+def test_model_flag_reads_provider_and_id(value: str, expected: ModelRef) -> None:
+    assert agents_cmd.parse_model_flag(value) == expected, f"{value} names {expected}"
+
+
+@pytest.mark.parametrize("value", ["nope:gpt-6-luna", "claude-nope", "gpt-6-luna"])
+def test_model_flag_refuses_what_no_provider_runs(value: str) -> None:
+    with pytest.raises(typer.BadParameter):
+        agents_cmd.parse_model_flag(value)
+
+
+@pytest.mark.asyncio
+async def test_agents_create_with_another_provider_sets_its_backend(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--model openai:...` creates the record from the file, then sets the backend."""
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+    created: list[dict[str, object]] = []
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        created.append(json.loads(req.content))
+        return httpx.Response(
+            200, json=_agent_json(agent_id="ag_new", name="new-agent", tenant_id=tenant_id)
+        )
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([]))
+    router.add("POST", r"/v1/agents", on_create)
+    changes: list[dict[str, object]] = []
+
+    async def backend_change(**kw: object) -> None:
+        changes.append(kw)
+
+    monkeypatch.setattr(agents_cmd, "agents_backend_change", backend_change)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+    spec_path = tmp_path / "agent.yaml"
+    spec_path.write_text("name: new-agent\nmodel: claude-sonnet-4-6\n")
+
+    await agents_create(
+        rt=rt,
+        console=console,
+        path=spec_path,
+        model=ModelRef(provider="openai", id="gpt-6-luna"),
+        yes=True,
+    )
+
+    assert len(created) == 1, "the record is created from the file"
+    assert [(c["name"], c["backend"], c["model"], c["yes"]) for c in changes] == [
+        ("new-agent", "openai", "gpt-6-luna", True)
+    ], "the backend change gets the provider and model, consent passed through"
 
 
 @pytest.mark.asyncio
@@ -1614,3 +1684,116 @@ async def test_agents_fork_succeeds_when_the_face_render_fails(
 
     out = console.file.getvalue()  # type: ignore[attr-defined]
     assert "forked agent 'base-agent' → 'forked-agent'" in out, out
+
+
+async def _rename_setup(
+    factory: async_sessionmaker[AsyncSession], *, with_seeded: bool
+) -> tuple[MARouter, list[tuple[str, dict[str, object]]], list[str]]:
+    """A cli tenant with a routine on `own`, the provider listing, and its write logs."""
+    async with factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        await make_routine(s, tenant=tenant, agent_name="own")
+        tenant_id = tenant.id
+    own = _agent_json(agent_id="ag_own", name="own", tenant_id=tenant_id)
+    listed = [own]
+    if with_seeded:
+        seeded = _agent_json(
+            agent_id="ag_seeded",
+            name="default",
+            tenant_id=tenant_id,
+            metadata={"daimon_managed": "true"},
+        )
+        listed.append(seeded)
+    updates: list[tuple[str, dict[str, object]]] = []
+    archives: list[str] = []
+
+    def on_update(req: httpx.Request, _m: object) -> httpx.Response:
+        updates.append((req.url.path, json.loads(req.content)))
+        return httpx.Response(200, json=own)
+
+    def on_archive(req: httpx.Request, _m: object) -> httpx.Response:
+        archives.append(req.url.path)
+        return httpx.Response(200, json=own)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response(listed))
+    for agent in listed:
+        data = agent
+        router.add(
+            "GET", rf"/v1/agents/{agent['id']}", lambda req, m, d=data: httpx.Response(200, json=d)
+        )
+        router.add("POST", rf"/v1/agents/{agent['id']}/archive", on_archive)
+        router.add("POST", rf"/v1/agents/{agent['id']}", on_update)
+    return router, updates, archives
+
+
+async def _routine_names(factory: async_sessionmaker[AsyncSession]) -> list[str]:
+    async with factory() as s:
+        return list((await s.execute(text("SELECT agent_name FROM routines"))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_agents_rename_when_dry_run_then_prints_plan_and_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, updates, archives = await _rename_setup(db_session_factory, with_seeded=True)
+    out = StringIO()
+    console = Console(file=out, force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    await agents_rename(
+        rt=rt, console=console, old="own", new="default", replace_seeded=True, dry_run=True
+    )
+
+    text_out = out.getvalue()
+    assert "routines.agent_name: 1" in text_out, f"counts per table are shown: {text_out}"
+    assert "ag_seeded" in text_out and "Dry run" in text_out, text_out
+    assert updates == [] and archives == [], "a dry run writes nothing to the provider"
+    assert await _routine_names(db_session_factory) == ["own"], "nor to the database"
+
+
+@pytest.mark.asyncio
+async def test_agents_rename_when_confirmed_then_moves_name_tag_and_rows(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, updates, archives = await _rename_setup(db_session_factory, with_seeded=True)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    await agents_rename(
+        rt=rt, console=console, old="own", new="default", replace_seeded=True, yes=True
+    )
+
+    bodies = {path: body for path, body in updates}
+    own = bodies["/v1/agents/ag_own"]
+    assert own["name"] == "default", "the provider name moves"
+    assert cast("dict[str, str]", own["metadata"])["daimon_name"] == "default", "and its tag"
+    retired = bodies["/v1/agents/ag_seeded"]
+    assert str(retired["name"]).startswith("default-seeded-retired-"), "the seeded agent is retired"
+    assert archives == ["/v1/agents/ag_seeded/archive"], "only the seeded agent is archived"
+    assert await _routine_names(db_session_factory) == ["default"], "references follow"
+
+
+@pytest.mark.asyncio
+async def test_agents_rename_when_seeded_holds_name_without_flag_then_refuses(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    router, updates, _ = await _rename_setup(db_session_factory, with_seeded=True)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    with pytest.raises(AgentRenameRefused, match="--replace-seeded"):
+        await agents_rename(rt=rt, console=console, old="own", new="default", yes=True)
+
+    assert updates == [], "nothing was written"
+
+
+def test_agents_rename_is_listed_with_its_flags() -> None:
+    # Rich styles each dash of a flag and wraps at the terminal width, so fix both.
+    env = {"COLUMNS": "200", "NO_COLOR": "1", "TERM": "dumb"}
+    result = CliRunner().invoke(main_mod.app, ["agents", "rename", "--help"], env=env)
+
+    assert result.exit_code == 0, result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    for flag in ("--replace-seeded", "--dry-run", "--yes", "--tenant", "--guild"):
+        assert flag in plain, f"{flag} is documented: {plain}"

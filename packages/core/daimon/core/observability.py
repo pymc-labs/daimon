@@ -664,13 +664,6 @@ def redact_text(text: str) -> str:
     return _redact_secret_text(text)
 
 
-def redact_field(name: str, value: object) -> object:
-    """The one redaction entry point for a named value (log field, context
-    entry): a secret-named field loses its value, anything else is redacted
-    inside, recursively."""
-    return _redact_log_field(name, value)
-
-
 # Kept for callers of the earlier name.
 redact_log_text = redact_text
 

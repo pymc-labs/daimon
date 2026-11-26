@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from functools import partial
 
 import httpx
 import pytest
@@ -14,7 +15,11 @@ from daimon.adapters.teams.attachments import (
     parse_attachments,
     prepare_attachments,
 )
-from daimon.core.media.vision import MAX_VISION_IMAGE_BYTES, MAX_VISION_IMAGE_DIMENSION
+from daimon.core.media.vision import (
+    MAX_DOWNSCALE_SOURCE_BYTES,
+    MAX_VISION_IMAGE_DIMENSION,
+    UNFIT_REASON,
+)
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
 from PIL import Image
 
@@ -32,6 +37,9 @@ def _png(width: int = 4, height: int = 4) -> bytes:
 
 async def _bot_token() -> str:
     return "bot-token"
+
+
+_prepare_attachments = partial(prepare_attachments, bot_token=_bot_token, service_url=SERVICE_URL)
 
 
 def test_parse_keeps_pasted_images_and_one_to_one_files_and_skips_cards() -> None:
@@ -87,11 +95,8 @@ async def test_pasted_image_is_fetched_with_the_bot_token_and_inlined() -> None:
         return httpx.Response(200, content=_png())
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await prepare_attachments(
-            http,
-            [InboundFile("pasted_image", "image", PASTED_URL)],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
+        prepared = await _prepare_attachments(
+            http, [InboundFile("pasted_image", "image", PASTED_URL)]
         )
 
     assert len(prepared.image_blocks) == 1, "the image becomes a vision block"
@@ -111,12 +116,7 @@ async def test_bot_token_never_reaches_a_host_outside_bot_framework(url: str) ->
         return httpx.Response(302, headers={"Location": "https://images.example.com/cat.png"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await prepare_attachments(
-            http,
-            [InboundFile("pasted_image", "image", url)],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
-        )
+        prepared = await _prepare_attachments(http, [InboundFile("pasted_image", "image", url)])
 
     assert all(r.url.host != "images.example.com" for r in requests), "no request off-host"
     assert prepared.image_blocks == []
@@ -128,11 +128,8 @@ async def test_shared_file_is_linked_for_the_agent_without_a_download() -> None:
         raise AssertionError("a non-image file must not be downloaded")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await prepare_attachments(
-            http,
-            [InboundFile("shared_file", "report.pdf", DOWNLOAD_URL)],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
+        prepared = await _prepare_attachments(
+            http, [InboundFile("shared_file", "report.pdf", DOWNLOAD_URL)]
         )
 
     assert DOWNLOAD_URL in prepared.prefix and "`report.pdf`" in prepared.prefix
@@ -150,14 +147,7 @@ async def test_a_channel_file_line_names_the_link_and_version_a_replace_takes() 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _: httpx.Response(500))
     ) as http:
-        prepared = await prepare_attachments(
-            http,
-            [],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
-            channel=True,
-            channel_media=media,
-        )
+        prepared = await _prepare_attachments(http, [], channel=True, channel_media=media)
 
     assert DOWNLOAD_URL in prepared.prefix, "the file is still fetched by its download URL"
     assert f"replace_channel_file link `{link}` and version `{{D}},3`." in prepared.prefix, (
@@ -170,38 +160,41 @@ async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"0" * MAX_VISION_IMAGE_BYTES)
+        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"0" * MAX_DOWNSCALE_SOURCE_BYTES)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await prepare_attachments(
-            http,
-            [InboundFile("shared_file", "big.png", DOWNLOAD_URL)],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
+        prepared = await _prepare_attachments(
+            http, [InboundFile("shared_file", "big.png", DOWNLOAD_URL)]
         )
 
     assert "authorization" not in requests[0].headers, "a download URL carries its own auth"
     assert prepared.image_blocks == []
-    assert "larger than 5 MiB" in prepared.prefix and DOWNLOAD_URL in prepared.prefix
+    assert "larger than 25 MiB" in prepared.prefix and DOWNLOAD_URL in prepared.prefix
 
 
-async def test_image_past_the_pixel_cap_and_channel_shares_are_explained() -> None:
+async def test_an_image_past_the_edge_cap_is_resized_and_one_that_cannot_be_read_is_explained() -> (
+    None
+):
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=_png(width=MAX_VISION_IMAGE_DIMENSION + 1, height=1))
+        png = _png(width=MAX_VISION_IMAGE_DIMENSION + 1, height=200)
+        return httpx.Response(200, content=png if request.url.path.endswith("wide") else png[:-30])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await prepare_attachments(
+        resized = await _prepare_attachments(
+            http, [InboundFile("pasted_image", "wide", PASTED_URL + "/wide")]
+        )
+        refused = await _prepare_attachments(
             http,
-            [InboundFile("pasted_image", "image", PASTED_URL), InboundFile("unreachable", "r.pdf")],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
+            [
+                InboundFile("pasted_image", "image", PASTED_URL + "/bad"),
+                InboundFile("unreachable", "r.pdf"),
+            ],
         )
 
-    assert prepared.image_blocks == [], "an image past the pixel cap would end the session"
-    assert f"`image` was not inlined (larger than {MAX_VISION_IMAGE_DIMENSION}px)" in (
-        prepared.prefix
-    )
-    assert "`r.pdf` was shared but can't be opened: daimon could not fetch it" in prepared.prefix
+    assert len(resized.image_blocks) == 1, "a panorama under 25 MiB is shrunk, not linked"
+    assert refused.image_blocks == [], "a cut-off image never becomes a block"
+    assert f"`image` was not inlined ({UNFIT_REASON})" in refused.prefix, "the reason is plain"
+    assert "`r.pdf` was shared but can't be opened: daimon could not fetch it" in refused.prefix
 
 
 async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained() -> None:
@@ -220,11 +213,9 @@ async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained()
     )
     media = ChannelMedia(image_urls=(hosted, "https://evil.example/hostedContents/h/$value"))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await prepare_attachments(
+        prepared = await _prepare_attachments(
             http,
             [InboundFile("embedded_image", "image")],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
             channel_media=media,
             graph_token=graph_token,
         )
@@ -246,11 +237,9 @@ async def test_history_images_follow_the_messages_own_and_a_miss_is_admitted() -
         "https://graph.microsoft.com/v1.0/teams/g/channels/c/messages/1/hostedContents/h/$value"
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await prepare_attachments(
+        prepared = await _prepare_attachments(
             http,
             [],
-            bot_token=_bot_token,
-            service_url=SERVICE_URL,
             channel_media=ChannelMedia(),
             graph_token=graph_token,
             history_images=(hosted, "https://evil.example/hostedContents/h/$value"),

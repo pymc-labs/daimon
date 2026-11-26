@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.stores.domain import WebMessageRow, WebThreadRow
 from pydantic import BaseModel
 
@@ -34,9 +35,15 @@ def agent_ref(agent: BetaManagedAgentsAgent | None, agent_id: str, avatar: str =
 
 
 def agent_json(
-    agent: BetaManagedAgentsAgent | None, thread: WebThreadRow | None = None, avatar: str = ""
+    agent: BetaManagedAgentsAgent | None,
+    thread: WebThreadRow | None = None,
+    avatar: str = "",
+    model: str | None = None,
 ) -> dict[str, Any]:
-    """An agent card; a thread whose agent is gone keeps the name it was started with."""
+    """An agent card; a thread whose agent is gone keeps the name it was started with.
+
+    `model` is the one a chat answers on when that is not the agent's own record.
+    """
     if agent is None:
         assert thread is not None
         return {
@@ -50,7 +57,7 @@ def agent_json(
         "id": agent.id,
         "name": agent.name,
         "avatar": avatar,
-        "model": agent.model.id,
+        "model": model if model is not None else agent.model.id,
         "description": agent.description or "",
     }
 
@@ -61,14 +68,19 @@ def session_json(
     *,
     running: bool = False,
     avatar: str = "",
+    model: str | None = None,
 ) -> dict[str, Any]:
     return {
         "id": str(thread.id),
         "title": thread.title,
-        "agent": agent_json(agent, thread, avatar),
+        "agent": agent_json(agent, thread, avatar, model),
         "updated_at": thread.updated_at.isoformat(),
         "running": running,
     }
+
+
+def notice_json(notice: MonitoringNotice) -> dict[str, str]:
+    return {"line": notice.line, "help": notice.help}
 
 
 def message_json(row: WebMessageRow) -> dict[str, Any]:

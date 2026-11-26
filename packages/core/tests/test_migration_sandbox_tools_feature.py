@@ -1,0 +1,439 @@
+"""Migration 0212: routine sandbox opt-ins move into the feature system and back."""
+
+import importlib.util
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from daimon.core._models import Base, Routine
+from daimon.core.stores.domain import FeatureValueRow, SandboxPin, stored_pin
+from daimon.core.stores.routines import create_routine
+from daimon.testing.builders import new_routine
+from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy import Connection, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+_TABLES = ("feature_values", "channel_changes", "routines")
+
+
+def migration() -> ModuleType:
+    path = Path(__file__).parents[1] / "alembic/versions/0212_sandbox_tools_feature.py"
+    spec = importlib.util.spec_from_file_location("sandbox_tools_feature_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_migration_follows_web_search_usage() -> None:
+    """0212 sits on main's head; a sibling adding 0212 renumbers."""
+    assert migration().down_revision == "0211_callback_watch_imports", "on main's head"
+
+
+def _rows(sync: Connection, sql: str) -> list[tuple[object, ...]]:
+    return [tuple(row) for row in sync.execute(text(sql))]
+
+
+def _mapped_by_this_release(
+    _obj: object, name: str | None, kind: str, _reflected: bool, _compare_to: object
+) -> bool:
+    return not (kind == "column" and name in _OLD_SANDBOX_COLUMNS)
+
+
+@pytest.mark.fresh_schema
+async def test_opt_ins_and_history_move_to_the_routine_tier_and_back(
+    db_session: AsyncSession,
+) -> None:
+    """A pinned opt-in becomes a routine-tier On with its pin; one without a pin is dropped."""
+    tenant = await make_tenant(db_session)
+    routines = [
+        await create_routine(
+            db_session,
+            tenant_id=tenant.id,
+            created_by_user_id="owner-1",
+            agent_id="agent_a",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message=name,
+        )  # fmt: skip
+        for name in ("pinned", "unpinned")
+    ]
+    pinned, unpinned = (str(row.id) for row in routines)
+    account = str((await make_account(db_session, tenant=tenant)).id)
+    connection = await db_session.connection()
+    module = migration()
+
+    def cycle(sync: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync)):
+            module.downgrade()
+            sync.execute(text(
+                "UPDATE routines SET sandbox_tools_enabled = true, sandbox_tools_set_by = :by,"
+                " sandbox_tools_set_at = '2026-10-01T00:00Z', sandbox_agent_id = 'agent_a',"
+                " sandbox_agent_version = 3, sandbox_environment_id = 'env_1',"
+                " sandbox_environment_updated_at = '2026-10-01T00:00Z' WHERE id = :id"
+            ), {"id": pinned, "by": account})  # fmt: skip
+            sync.execute(
+                text("UPDATE routines SET sandbox_tools_enabled = true WHERE id = :id"),
+                {"id": unpinned},
+            )
+            sync.execute(text(
+                "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled,"
+                " after_enabled, set_by, set_at, via, agent_id, agent_version, environment_id,"
+                " environment_updated_at) VALUES"
+                " (:t, :r, false, true, :by, '2026-09-01T00:00Z', 'mcp', 'agent_a', 2, 'env_1',"
+                " '2026-09-01T00:00Z'),"
+                " (:t, :r, true, false, 'o', '2026-09-02T00:00Z', 'edit', NULL, NULL, NULL, NULL),"
+                " (:t, :r, false, true, 'cli-principal', '2026-10-01T00:00Z', 'cli', 'agent_a', 3,"
+                " 'env_1', '2026-10-01T00:00Z')"
+            ), {"t": tenant.id, "r": pinned, "by": account})  # fmt: skip
+            module.upgrade()
+            assert _rows(
+                sync, "SELECT tier, routine_id::text, value, surface FROM feature_values"
+                " WHERE key = 'routine_sandbox_tools'",
+            ) == [("routine", pinned, "on", "migration")], "only the pinned opt-in moves"  # fmt: skip
+            assert _rows(
+                sync, "SELECT pin ->> 'agent_id', (pin ->> 'agent_version')::int,"
+                " pin ->> 'environment_id', (pin ->> 'environment_updated_at')::timestamptz"
+                " FROM feature_values WHERE key = 'routine_sandbox_tools'",
+            ) == [("agent_a", 3, "env_1", datetime(2026, 10, 1, tzinfo=UTC))], "with its pin"  # fmt: skip
+            history = _rows(
+                sync, "SELECT surface, before ->> 'value', after -> 'pin' ->> 'agent_version'"
+                " FROM channel_changes WHERE setting = 'routine_sandbox_tools' ORDER BY at",
+            )  # fmt: skip
+            assert history == [
+                ("chat", None, "2"),
+                ("system", "on", None),
+                ("cli", None, "3"),
+            ], "the history moves with its surfaces and pins"
+            assert _rows(
+                sync, "SELECT sandbox_tools_enabled, sandbox_agent_id, sandbox_agent_version,"
+                " sandbox_environment_id, sandbox_environment_updated_at FROM routines"
+            ) == [(False, None, None, None, None)] * 2, "the kept columns no longer opt in"  # fmt: skip
+            assert _rows(
+                sync, "SELECT sandbox_tools_set_by FROM routines ORDER BY trigger_message"
+            ) == [(account,), (None,)], "setters stay for account erasure to reach"
+            assert _rows(
+                sync, "SELECT set_by::text FROM feature_values WHERE key = 'routine_sandbox_tools'"
+            ) == [(account,)], "an account setter moves with the opt-in"
+            assert _rows(
+                sync, "SELECT actor_account_id::text FROM channel_changes"
+                " WHERE setting = 'routine_sandbox_tools' ORDER BY at",
+            ) == [(account,), (None,), (None,)], "and with its history; other setters are dropped"  # fmt: skip
+            assert _rows(sync, "SELECT count(*) FROM routine_sandbox_history") == [(3,)], (
+                "the old history stays"
+            )
+            context = MigrationContext.configure(
+                sync, opts={"include_object": _mapped_by_this_release}
+            )
+            differences = compare_metadata(context, Base.metadata)
+            assert not [d for d in differences if any(t in str(d) for t in _TABLES)], differences
+
+            sync.execute(text(
+                "INSERT INTO feature_values (tenant_id, tier, agent_id, key, value, pin, surface)"
+                " VALUES (:t, 'agent', 'agent_a', 'routine_sandbox_tools', 'on',"
+                " '{\"agent_id\": \"agent_a\", \"environment_name\": \"default\"}', 'cli')"
+            ), {"t": tenant.id})  # fmt: skip
+            module.downgrade()
+            assert _rows(
+                sync, "SELECT id::text, sandbox_tools_enabled, sandbox_agent_version FROM routines"
+                " ORDER BY trigger_message",
+            ) == [(pinned, True, 3), (unpinned, False, None)], "the routine opt-in comes back"  # fmt: skip
+            assert _rows(
+                sync, "SELECT via, before_enabled, after_enabled FROM routine_sandbox_history"
+                " ORDER BY set_at",
+            ) == [
+                ("mcp", False, True), ("edit", True, False), ("cli", False, True),
+            ], "and its history"  # fmt: skip
+            assert _rows(
+                sync, "SELECT count(*) FROM feature_values WHERE key = 'routine_sandbox_tools'"
+            ) == [(0,)], "an agent opt-in has no older form"
+            module.upgrade()
+
+    await connection.run_sync(cycle)
+
+
+_OPTED_IN = (
+    "UPDATE routines SET sandbox_tools_enabled = true, sandbox_tools_set_by = 'a',"
+    " sandbox_tools_set_at = '2026-10-01T00:00Z', sandbox_agent_id = 'agent_a',"
+    " sandbox_agent_version = 3, sandbox_environment_id = 'env_1',"
+    " sandbox_environment_updated_at = '2026-10-01T00:00Z' WHERE id = :id"
+)
+
+
+@pytest.mark.fresh_schema
+async def test_a_dm_routine_is_dropped_whatever_the_session_timezone(
+    db_session: AsyncSession,
+) -> None:
+    """A DM routine's full opt-in never ran built-ins, so it is not carried over; a channel
+    routine's pin keeps its instant when the session is not UTC."""
+    tenant = await make_tenant(db_session)
+    dm, channel = [
+        await create_routine(
+            db_session,
+            tenant_id=tenant.id,
+            created_by_user_id="1234567890",
+            agent_id="agent_a",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message=name,
+            **kind,
+        )  # fmt: skip
+        for name, kind in (
+            ("dm", {"destination_kind": "dm"}),
+            ("channel", {"destination_kind": "channel", "destination_id": "C1"}),
+        )
+    ]
+    connection = await db_session.connection()
+    module = migration()
+
+    def cycle(sync: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync)):
+            module.downgrade()
+            for row in (dm, channel):
+                sync.execute(text(_OPTED_IN), {"id": str(row.id)})
+            sync.execute(text("SET LOCAL TIME ZONE 'Asia/Kolkata'"))
+            module.upgrade()
+            moved = _rows(
+                sync, "SELECT routine_id::text FROM feature_values"
+                " WHERE key = 'routine_sandbox_tools'",
+            )  # fmt: skip
+            assert moved == [(str(channel.id),)], "the DM routine's opt-in is dropped"
+            pin = _rows(
+                sync, "SELECT pin ->> 'environment_updated_at' FROM feature_values"
+                " WHERE key = 'routine_sandbox_tools'",
+            )  # fmt: skip
+            assert pin == [("2026-10-01T05:30:00+05:30",)], "the pin is written in session time"
+            found = FeatureValueRow.model_validate(
+                sync.execute(text(
+                    "SELECT tenant_id, tier, agent_id, channel_id, thread_key, routine_id, key,"
+                    " value, locked, pin, set_by, surface, set_at, revision FROM feature_values"
+                    " WHERE key = 'routine_sandbox_tools'"
+                )).mappings().one()
+            )  # fmt: skip
+            assert stored_pin(found) == SandboxPin(
+                "agent_a", 3, "env_1", datetime(2026, 10, 1, tzinfo=UTC)
+            ), "the same instant when read back"
+            module.downgrade()
+            assert _rows(
+                sync, "SELECT id::text, sandbox_environment_updated_at = '2026-10-01T00:00Z'"
+                " FROM routines WHERE sandbox_tools_enabled",
+            ) == [(str(channel.id), True)], "restored to the same instant"  # fmt: skip
+            module.upgrade()
+
+    await connection.run_sync(cycle)
+
+
+@pytest.mark.fresh_schema
+async def test_the_downgrade_drops_what_has_no_older_form(db_session: AsyncSession) -> None:
+    """Agent opt-ins, routine Offs and Daimon's own (`system`) changes are deleted; a routine's
+    pinned On and its history come back."""
+    tenant = await make_tenant(db_session)
+    routine = await new_routine(
+        db_session,
+        tenant,
+        created_by_user_id="owner-1",
+        cron_expr="0 9 * * *",
+        trigger_message="kept",
+    )
+    off = await new_routine(
+        db_session,
+        tenant,
+        created_by_user_id="owner-1",
+        cron_expr="0 9 * * *",
+        trigger_message="off",
+    )
+    connection = await db_session.connection()
+    module = migration()
+    pin = json.dumps({
+        "agent_id": "agent_a", "agent_version": 3, "environment_id": "env_1",
+        "environment_updated_at": "2026-10-01T00:00:00+00:00",
+    })  # fmt: skip
+
+    def cycle(sync: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync)):
+            sync.execute(text(
+                "INSERT INTO feature_values (tenant_id, tier, channel_id, routine_id, key, value,"
+                " pin, surface) VALUES (:t, 'routine', CAST(:on AS uuid)::text, :on,"
+                " 'routine_sandbox_tools', 'on', CAST(:pin AS jsonb), 'cli'),"
+                " (:t, 'routine', CAST(:off AS uuid)::text, :off, 'routine_sandbox_tools', 'off',"
+                " NULL, 'cli')"
+            ), {"t": tenant.id, "on": routine.id, "off": off.id, "pin": pin})  # fmt: skip
+            sync.execute(text(
+                "INSERT INTO feature_values (tenant_id, tier, agent_id, key, value, pin, surface)"
+                " VALUES (:t, 'agent', 'agent_a', 'routine_sandbox_tools', 'on',"
+                " CAST(:pin AS jsonb), 'cli'),"
+                " (:t, 'workspace', '', 'unattended_capabilities', 'off', NULL, 'system')"
+            ), {"t": tenant.id, "pin": '{"agent_id": "agent_a", "environment_name": "d"}'})  # fmt: skip
+            sync.execute(text(
+                "INSERT INTO channel_changes (tenant_id, platform, channel_id, setting, before,"
+                " after, surface) VALUES (:t, 'discord', '*', 'routine_sandbox_tools', NULL,"
+                " CAST(:after AS jsonb), 'cli'),"
+                " (:t, 'discord', '*', 'unattended_capabilities', NULL, NULL, 'system')"
+            ), {"t": tenant.id, "after": '{"routine": "' + str(routine.id) + '", "value": "on"}'})  # fmt: skip
+            module.downgrade()
+            assert _rows(sync, "SELECT count(*) FROM feature_values") == [(0,)], (
+                "agent opt-ins, routine Offs and system rows go"
+            )
+            assert _rows(sync, "SELECT surface FROM channel_changes") == [], (
+                "the sandbox history moved to its table and system changes go"
+            )
+            assert _rows(
+                sync, "SELECT id::text FROM routines WHERE sandbox_tools_enabled"
+            ) == [(str(routine.id),)], "only the routine's pinned On comes back"  # fmt: skip
+            module.upgrade()
+
+    await connection.run_sync(cycle)
+
+
+# What a release before 0212 maps and writes, still running for minutes after a deploy
+# migrates: `Routine` with these columns, `RoutineSandboxHistoryRecord`, and the upsert
+# `set_feature_value` names its index with.
+_OLD_SANDBOX_COLUMNS = (
+    "sandbox_tools_enabled",
+    "sandbox_tools_set_by",
+    "sandbox_tools_set_at",
+    "sandbox_agent_id",
+    "sandbox_agent_version",
+    "sandbox_environment_id",
+    "sandbox_environment_updated_at",
+)
+_OLD_HISTORY_COLUMNS = (
+    "id, tenant_id, routine_id, before_enabled, after_enabled, set_by, set_at, via, agent_id,"
+    " agent_version, environment_id, environment_updated_at"
+)
+_OLD_OPT_OUT = (
+    "UPDATE routines SET sandbox_tools_enabled = false, sandbox_tools_set_by = 'b',"
+    " sandbox_tools_set_at = now(), sandbox_agent_id = NULL, sandbox_agent_version = NULL,"
+    " sandbox_environment_id = NULL, sandbox_environment_updated_at = NULL WHERE id = :id",
+    "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled, after_enabled,"
+    " set_by, set_at, via) VALUES (:t, :id, true, false, 'b', now(), 'mcp')",
+)
+_OLD_UPSERT = (
+    "INSERT INTO feature_values (tenant_id, tier, agent_id, channel_id, thread_key, key, value,"
+    " locked, set_by, surface, set_at) VALUES (:t, :tier, :agent, :channel, '', 'web_search',"
+    " :value, false, NULL, 'web', now())"
+    " ON CONFLICT (tenant_id, tier, agent_id, channel_id, key) WHERE tier <> 'thread'"
+    " DO UPDATE SET value = excluded.value, locked = excluded.locked, set_by = excluded.set_by,"
+    " surface = excluded.surface, set_at = now(), revision = feature_values.revision + 1"
+    " RETURNING revision"
+)
+
+
+@pytest.mark.fresh_schema
+async def test_a_release_before_the_migration_still_reads_and_writes_the_migrated_schema(
+    db_session: AsyncSession,
+) -> None:
+    """The previous release's routine select, sandbox opt-out and feature upsert all run on
+    the migrated schema, next to two routines' routine-tier rows."""
+    tenant = await make_tenant(db_session)
+    routines = [
+        await create_routine(
+            db_session,
+            tenant_id=tenant.id,
+            created_by_user_id="owner-1",
+            agent_id="agent_a",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message=name,
+        )  # fmt: skip
+        for name in ("first", "second")
+    ]
+    old_routine = ", ".join([*(c.name for c in Routine.__table__.columns), *_OLD_SANDBOX_COLUMNS])
+    connection = await db_session.connection()
+    module = migration()
+
+    def cycle(sync: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync)):
+            module.downgrade()
+            for row in routines:
+                sync.execute(text(_OPTED_IN), {"id": str(row.id)})
+            sync.execute(text(
+                "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled,"
+                " after_enabled, set_by, set_at, via) VALUES (:t, :r, false, true, 'a', now(), 'cli')"
+            ), {"t": tenant.id, "r": routines[0].id})  # fmt: skip
+            module.upgrade()
+            assert _rows(sync, "SELECT count(*) FROM feature_values WHERE tier = 'routine'") == [
+                (2,)
+            ], "both routines' opt-ins move"
+            selected = _rows(
+                sync, f"SELECT sandbox_tools_enabled, sandbox_tools_set_by FROM"
+                f" (SELECT {old_routine} FROM routines) old",
+            )  # fmt: skip
+            assert selected == [(False, "a")] * 2, "the old select finds no opt-in"
+            for statement in _OLD_OPT_OUT:
+                sync.execute(text(statement), {"t": tenant.id, "id": routines[0].id})
+            history = _rows(
+                sync, f"SELECT {_OLD_HISTORY_COLUMNS} FROM routine_sandbox_history ORDER BY id"
+            )
+            assert [row[5] for row in history] == ["a", "b"], "the old history reads and writes"
+            for tier, agent, channel in (
+                ("workspace", "", ""), ("agent", "agent_a", ""), ("channel", "", "C1"),
+            ):  # fmt: skip
+                revisions = [
+                    sync.execute(
+                        text(_OLD_UPSERT),
+                        {
+                            "t": tenant.id,
+                            "tier": tier,
+                            "agent": agent,
+                            "channel": channel,
+                            "value": value,
+                        },
+                    ).scalar_one()  # fmt: skip
+                    for value in ("on", "off")
+                ]
+                assert revisions == [1, 2], f"the old upsert still finds its {tier} index"
+            module.downgrade()
+            module.upgrade()
+
+    await connection.run_sync(cycle)
+
+
+@pytest.mark.fresh_schema
+async def test_erasing_a_setter_reaches_the_kept_columns_within_its_tenant(
+    db_session: AsyncSession,
+) -> None:
+    """A purged id is replaced in the old columns; a platform user only in their own tenant."""
+    from daimon.core.stores.routines import SANDBOX_SETTER_ERASED, erase_sandbox_setter
+
+    connection = await db_session.connection()
+
+    def old_columns(sync: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync)):
+            migration().downgrade()
+
+    await connection.run_sync(old_columns)
+    mine, other = await make_tenant(db_session), await make_tenant(db_session)
+    rows = [
+        await new_routine(db_session, tenant, created_by_user_id="1", cron_expr="0 9 * * *", trigger_message="x")
+        for tenant in (mine, other, other)
+    ]  # fmt: skip
+    for row, setter in zip(rows, ("acct", "2002", "kept"), strict=True):
+        await db_session.execute(
+            text("UPDATE routines SET sandbox_tools_set_by = :s WHERE id = :id"),
+            {"s": setter, "id": row.id},
+        )
+        await db_session.execute(
+            text(
+                "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled,"
+                " after_enabled, set_by, set_at, via) VALUES (:t, :r, false, true, :s, now(), 'cli')"
+            ),
+            {"t": row.tenant_id, "r": row.id, "s": setter},
+        )
+    await erase_sandbox_setter(db_session, ids=["acct"], platform_users=[(mine.id, "2002")])
+    for sql in (
+        "SELECT sandbox_tools_set_by FROM routines ORDER BY created_at, id",
+        "SELECT set_by FROM routine_sandbox_history ORDER BY id",
+    ):
+        found = {r[0] for r in (await db_session.execute(text(sql))).all()}
+        assert found == {SANDBOX_SETTER_ERASED, "2002", "kept"}, (
+            "the id is erased anywhere; the platform user is not, in another tenant"
+        )

@@ -32,7 +32,7 @@ from daimon.testing.turn_conformance import (
 )
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.events import Event, NativeProvenance
+from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
@@ -42,6 +42,7 @@ from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from mux.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_anthropic
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from ..shared_fakes import terminal
 from .conformance_support import (
     ACCOUNT,
     REVISION,
@@ -65,22 +66,6 @@ def session(provider: str, id_: str = "session") -> ResourceRef:
         tenant_id=SCOPE.tenant_id,
         account_id=SCOPE.account_id,
         account_scope_id="offline-project",
-    )
-
-
-def terminal(provider: str, outcome: str) -> Event:
-    return Event.model_validate(
-        {
-            "id": "ended:" + outcome,
-            "session_id": "session",
-            "sequence": 0,
-            "type": "session.turn_ended",
-            "authority": "record",
-            "observed_at": datetime.now(UTC),
-            "turn_id": "root",
-            "payload": {"root_turn_id": "root", "outcome": outcome},
-            "native": NativeProvenance(provider=provider, api_revision="offline"),
-        }
     )
 
 
@@ -160,7 +145,6 @@ async def run_host(monkeypatch, event, persistence=None, *, io_factory=OfflineIO
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
             billing=BillingExempt(reason="headless-unrecorded"),
-            path="mux",
             scope=SCOPE,
             render_interval_s=3600,
         )

@@ -3,6 +3,7 @@
 import pytest
 from daimon.core.agent_model_names import resolve_model
 from mux.contracts.ids import ModelRef
+from mux.profiles.gemini import OPT_IN_MODELS
 
 
 @pytest.mark.parametrize(
@@ -21,13 +22,37 @@ from mux.contracts.ids import ModelRef
         ("cheapest anthropic", "claude-haiku-5-5"),
         ("luna", "gpt-6-luna"),
         ("flash", "gemini-3.8-flash"),
-        ("gemini 4", "gemini-4-argon"),
         ("argon", "gemini-4-argon"),
+        ("carbon", "gemini-4-carbon"),
+        ("hydrogen", "gemini-4-hydrogen"),
+        ("neon", "gemini-4-neon"),
+        ("gemini 4 neon", "gemini-4-neon"),
+        ("gemini 4 carbon", "gemini-4-carbon"),
+        ("Gemini 4 Hydrogen", "gemini-4-hydrogen"),
         ("lunaa", "gpt-6-luna"),
+        ("astra", "gpt-6.2-astra"),
+        ("gpt 6 astra", "gpt-6-astra"),
+        ("sol", "gpt-6.2-sol"),
     ],
 )
 def test_natural_names_use_the_priced_runtime_catalog(name, model):
     assert resolve_model(name).id == model
+
+
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_every_opt_in_model_resolves_by_id_and_natural_name(model):
+    from daimon.core.agent_model_names import model_name
+
+    assert resolve_model(model).id == model
+    assert resolve_model(model.removeprefix("gemini-4-")).id == model
+    assert model_name(ModelRef(provider="gemini", id=model)).startswith("Gemini 4 ")
+
+
+def test_a_bare_generation_never_picks_one_of_the_opt_in_models():
+    with pytest.raises(ValueError, match="could mean") as error:
+        resolve_model("gemini 4")
+    for word in ("argon", "carbon", "hydrogen", "neon"):
+        assert word in str(error.value).lower()
 
 
 def test_cheapest_claude_is_the_current_haiku_not_the_older_row():
@@ -97,8 +122,13 @@ def test_family_shorthand_never_means_the_pricier_fast_preset():
         ("anthropic", "claude-opus-5-5-fast", "Claude Opus 5.5 fast"),
         ("anthropic", "claude-opus-9-1", "Claude Opus 9.1"),
         ("openai", "gpt-6-astra", "GPT-6 Astra"),
+        ("openai", "gpt-6.2-astra", "GPT-6.2 Astra"),
+        ("openai", "gpt-6.2-sol", "GPT-6.2 Sol"),
         ("openai", "gpt-6-luna", "GPT-6 Luna"),
         ("gemini", "gemini-4-argon", "Gemini 4 Argon"),
+        ("gemini", "gemini-4-carbon", "Gemini 4 Carbon"),
+        ("gemini", "gemini-4-hydrogen", "Gemini 4 Hydrogen"),
+        ("gemini", "gemini-4-neon", "Gemini 4 Neon"),
         ("gemini", "gemini-3.8-flash", "Gemini 3.8 Flash"),
     ],
 )
@@ -106,3 +136,53 @@ def test_model_names_are_the_ones_people_say(provider, model_id, name):
     from daimon.core.agent_model_names import model_name
 
     assert model_name(ModelRef(provider=provider, id=model_id)) == name
+
+
+def test_catalog_order_ranks_families_by_price_then_newest_version() -> None:
+    """Every picker shares one order: provider, strongest family first, newest version first."""
+    from daimon.core.agent_model_names import catalog_order
+    from mux.contracts.ids import ModelRef
+
+    priced = {  # (provider, id): output price, fixed here so the rule is date-independent
+        ("gemini", "gemini-4-hydrogen"): 7.5,
+        ("anthropic", "claude-haiku-4-5"): 5.0,
+        ("openai", "gpt-6-luna"): 0.5,
+        ("anthropic", "claude-sonnet-4-20250514"): 15.0,
+        ("anthropic", "claude-opus-4-7"): 25.0,
+        ("openai", "gpt-6-astra"): 50.0,
+        ("anthropic", "claude-opus-5-5-fast"): 40.0,
+        ("anthropic", "claude-opus-5-5"): 20.0,
+        ("anthropic", "claude-fable-5-2"): 40.0,
+        ("openai", "gpt-6.2-astra"): 40.0,
+        ("openai", "gpt-7-astra"): 60.0,
+        ("openai", "gpt-6.2-sol"): 10.0,
+        ("gemini", "gemini-4-argon"): 10.0,
+        ("gemini", "gemini-3.8-flash"): 7.5,
+        ("selfhosted", "qwen3-coder-480b"): 1.0,
+        ("selfhosted", "mystery"): 0.0,
+    }
+    refs = [ModelRef.model_validate({"provider": p, "id": i}) for p, i in priced]
+    unpriced = {"mystery"}
+    ordered = catalog_order(
+        refs,
+        lambda ref: ref,
+        lambda ref: None if ref.id in unpriced else priced[(ref.provider, ref.id)],
+    )
+    assert [ref.id for ref in ordered] == [
+        "claude-fable-5-2",
+        "claude-opus-5-5",
+        "claude-opus-5-5-fast",
+        "claude-opus-4-7",
+        "claude-sonnet-4-20250514",
+        "claude-haiku-4-5",
+        "gpt-7-astra",
+        "gpt-6.2-astra",
+        "gpt-6-astra",
+        "gpt-6.2-sol",
+        "gpt-6-luna",
+        "gemini-4-argon",
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+        "qwen3-coder-480b",
+        "mystery",
+    ], "providers in PROVIDERS order, families by price, ties by newer model, newest version first"

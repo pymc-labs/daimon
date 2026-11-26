@@ -20,7 +20,13 @@ from daimon.core import coding_keys, profile
 from daimon.core.authz import Subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.privacy import PurgePreview, collect_purge_preview, held_lines
+from daimon.core.privacy import (
+    PurgePreview,
+    account_other_providers,
+    collect_purge_preview,
+    delete_scope_lines,
+    held_lines,
+)
 from daimon.core.purge import purge_account
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import platform_names
@@ -97,6 +103,7 @@ class DisconnectBody(BaseModel):
 
 class DeletePreviewOut(BaseModel):
     enabled: bool
+    scope: list[str]
     held: list[str]
     kept: list[str]
 
@@ -325,11 +332,12 @@ def profile_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/delete")
     async def delete_preview(caller: Caller) -> DeletePreviewOut:  # pyright: ignore[reportUnusedFunction]
-        preview = await collect_purge_preview(
-            sm=runtime.sessionmaker, account_id=caller.person.account_id
-        )
+        account_id = caller.person.account_id
+        preview = await collect_purge_preview(sm=runtime.sessionmaker, account_id=account_id)
+        providers = await account_other_providers(runtime.sessionmaker, account_id=account_id)
         return DeletePreviewOut(
             enabled=runtime.settings.privacy.delete_enabled,
+            scope=list(delete_scope_lines("Daimon", providers)),
             held=held_lines(preview),
             kept=_kept(preview),
         )

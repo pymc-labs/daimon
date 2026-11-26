@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import itertools
 import uuid
-from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -30,7 +29,6 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_participation import ThreadParticipant
 from daimon.core.config import McpSettings, ThreadParticipationSettings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
@@ -42,6 +40,7 @@ from daimon.core.thread_classifier import ClassifierOutcome
 from daimon.core.thread_participation import (
     ClassifierVerdict,
 )
+from daimon.testing.builders import provision_workspace
 from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -83,7 +82,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # _handle_mention stubbed
+        turn_deps=deps_for(),  # _handle_mention stubbed
     )
 
 
@@ -177,11 +176,8 @@ async def _drain_timer(bot: DaimonBot, thread_id: int = THREAD_ID) -> None:
 @pytest_asyncio.fixture
 async def tenant_id(db_session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
     # Trial credit: the balance gate runs before the classifier, as it does for a mention.
-    result = await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id=str(GUILD_ID),
-        signup_credit=Decimal("10"),
+    result = await provision_workspace(
+        db_session_factory, str(GUILD_ID), signup_credit=Decimal("10")
     )
     return result.tenant_id
 

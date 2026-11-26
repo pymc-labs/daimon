@@ -23,15 +23,29 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
+from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_result_event import (
+    BetaManagedAgentsAgentToolResultEvent,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_use_event import (
+    BetaManagedAgentsAgentToolUseEvent,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.model_presets import OPUS, OPUS_FAST
-from daimon.core.pricing import ModelRates, ProviderPrice, cost_of, usage_tokens
+from daimon.core.pricing import (
+    AGENT_WEB_SEARCH_USD,
+    ModelRates,
+    ProviderPrice,
+    UsageTokens,
+    cost_of,
+    side_call_rates,
+    usage_tokens,
+)
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_compat import event_observation
-from mux.contracts.ids import ModelRef, ResourceRef
+from mux.contracts.ids import ModelRef, Provider, ResourceRef
 from mux.contracts.usage import UsageObservation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -48,6 +62,7 @@ SPEND_LEDGER_REASONS: tuple[str, ...] = (
     "media_debit",
     "classifier_debit",
     "thread_naming_debit",
+    "owner_notice_debit",
 )
 """Every debit reason this module writes: model spend, as opposed to clawbacks
 or promo expiries. Timed promo credit is drawn down by exactly these rows, so a
@@ -61,6 +76,39 @@ class _UsageEventTime:
     processed_at: datetime
 
 
+@dataclass(frozen=True)
+class WebSearchCall:
+    """One web search a Claude agent ran: its spans carry no search count.
+
+    `id` is the search's `agent.tool_use` event id, so each search bills once.
+    """
+
+    id: str
+    processed_at: datetime
+
+
+_SEARCH_USE = "web_search_use:"
+
+
+def web_search_call(event: object, seen: set[str]) -> WebSearchCall | None:
+    """The search `event` completes, if any; `seen` keeps the search uses met so far.
+
+    A search counts once its result arrives without an error, as the provider
+    bills no failed search. Callers dedupe the returned call themselves.
+    """
+    if isinstance(event, BetaManagedAgentsAgentToolUseEvent):
+        if event.name == "web_search":
+            seen.add(_SEARCH_USE + event.id)
+        return None
+    if (
+        isinstance(event, BetaManagedAgentsAgentToolResultEvent)
+        and not event.is_error
+        and _SEARCH_USE + event.tool_use_id in seen
+    ):
+        return WebSearchCall(id=event.tool_use_id, processed_at=event.processed_at)
+    return None
+
+
 async def record_turn_usage(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -69,7 +117,7 @@ async def record_turn_usage(
     managed_session_id: str | None = None,
     model_id: str | None = None,
     observation: UsageObservation | None = None,
-    event: BetaManagedAgentsSpanModelRequestEndEvent | None = None,
+    event: BetaManagedAgentsSpanModelRequestEndEvent | WebSearchCall | None = None,
     markup: Decimal = Decimal("1.0"),
     pricing: ModelRates | None = None,
     reason: TurnLedgerReason = "turn_debit",
@@ -99,10 +147,28 @@ async def record_turn_usage(
     channel's budget counts the debit; None leaves the spend unattributed.
     `agent_id` stamps the usage row with the agent that answered, for per-agent spend.
 
+    A `WebSearchCall` writes a token-free row for that one search, charged at
+    the list price per search.
+
     tenant_id=None is the DM signal — no tenant, no usage row, no ledger row.
     """
     if tenant_id is None:
         return None  # DM turn — no tenant to bill, skip write
+    if isinstance(event, WebSearchCall):
+        if observation is not None or managed_session_id is None or model_id is None:
+            raise ValueError("a web search requires its bound session and model")
+        return await _record_web_search(
+            sessionmaker,
+            event,
+            tenant_id=tenant_id,
+            platform_user_id=platform_user_id,
+            managed_session_id=managed_session_id,
+            model_id=model_id,
+            markup=markup,
+            reason=reason,
+            channel_id=channel_id,
+            agent_id=agent_id,
+        )
     if observation is None:
         if event is None or managed_session_id is None or model_id is None:
             raise ValueError("usage requires an observation or a bound legacy event")
@@ -169,6 +235,51 @@ async def record_turn_usage(
     return debit if inserted else None
 
 
+async def _record_web_search(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    call: WebSearchCall,
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    managed_session_id: str,
+    model_id: str,
+    markup: Decimal,
+    reason: TurnLedgerReason,
+    channel_id: str | None,
+    agent_id: str | None,
+) -> Decimal | None:
+    debit = debit_amount(float(AGENT_WEB_SEARCH_USD), markup=markup)
+    async with sessionmaker() as s, s.begin():
+        if not await usage_events.record(
+            s,
+            tenant_id=tenant_id,
+            platform_user_id=platform_user_id,
+            managed_session_id=managed_session_id,
+            model=model_id,
+            model_usage=UsageTokens(
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+            event_id=call.id,
+            channel_id=channel_id,
+            agent_id=agent_id,
+            paid_web_searches=1,
+        ):
+            return None  # a replay of a search already billed
+        inserted = await tenant_ledger.insert_entry(
+            s,
+            tenant_id=tenant_id,
+            delta_usd=-debit,
+            reason=reason,
+            idempotency_key=f"turn:{managed_session_id}:{call.id}",
+            channel_id=channel_id,
+            occurred_at=call.processed_at,
+        )
+    return debit if inserted else None
+
+
 async def record_provider_usage(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -194,6 +305,8 @@ async def record_provider_usage(
     Callers retain attribution, binding and the dated price context.
     """
     from daimon.core.accounting_outbox import record_observation_usage
+    from daimon.core.provider_turn_cost import LATE_TURN_COSTS
+    from daimon.core.stores.mux_state import get_newest_usage_revision
     from daimon.core.turn.outcomes import current_outcome
 
     if tenant_id is None:
@@ -231,6 +344,13 @@ async def record_provider_usage(
             channel_id=channel_id,
             agent_id=agent_id,
         )
+        newest = await get_newest_usage_revision(session, binding_id, observation.id)
+    # Whichever reader recorded the revision first, an ended turn's footer shows its debit;
+    # a stale revision, recorded after a newer one, must not overwrite the newer debit.
+    if newest == observation.revision:
+        LATE_TURN_COSTS.settle(
+            observation, price=provider_price, infrastructure_usd=infrastructure_usd, markup=markup
+        )
     if (outcome := current_outcome.get()) is not None:
         outcome.note_usage(
             observation,
@@ -259,6 +379,7 @@ async def _record_tool_model_usage(
     idempotency_prefix: str,
     channel_id: str | None,
     agent_id: str | None = None,
+    provider: Provider | None = None,
 ) -> None:
     """One usage_events row plus one debit ledger row for a model call made outside a turn.
 
@@ -271,6 +392,8 @@ async def _record_tool_model_usage(
     function existed and must keep that prefix.
     Exceptions are NOT swallowed (see module docstring).
     """
+    if provider is None:
+        provider = "gemini" if session_prefix == "gemini" else "anthropic"
     if managed_session_id is None:
         managed_session_id = f"{session_prefix}:{uuid.uuid4()}"
     if event_id is None:
@@ -281,13 +404,11 @@ async def _record_tool_model_usage(
         session=ResourceRef(
             id=managed_session_id,
             kind="session",
-            provider="gemini" if session_prefix == "gemini" else "anthropic",
+            provider=provider,
             account_scope_id="host-tools",
             tenant_id=str(tenant_id),
         ),
-        model=ModelRef(
-            provider="gemini" if session_prefix == "gemini" else "anthropic", id=model_id
-        ),
+        model=ModelRef(provider=provider, id=model_id),
         grain="model_request",
         basis="increment",
         input_tokens=input_tokens + cache_read_input_tokens,
@@ -429,4 +550,51 @@ async def record_thread_naming_usage(
         idempotency_prefix="thread-naming",
         channel_id=channel_id,
         agent_id=agent_id,
+    )
+
+
+_AUXILIARY_PURPOSES = {
+    "thread_naming": ("thread_naming_debit", "thread-naming"),
+    "classifier": ("classifier_debit", "classifier"),
+    "owner_notice": ("owner_notice_debit", "owner-notice"),
+}
+
+
+async def record_auxiliary_usage(
+    *,
+    purpose: Literal["thread_naming", "classifier", "owner_notice"],
+    provider: Provider,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int,
+    managed_session_id: str | None = None,
+    event_id: str | None = None,
+    markup: Decimal = Decimal("1.0"),
+    channel_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """A side call on any provider, billed to the message's author at a required price."""
+    reason, prefix = _AUXILIARY_PURPOSES[purpose]
+    await _record_tool_model_usage(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        platform_user_id=platform_user_id,
+        model_id=model_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        managed_session_id=managed_session_id,
+        event_id=event_id,
+        markup=markup,
+        pricing=side_call_rates(model_id, input_tokens + cache_read_input_tokens),
+        reason=reason,
+        session_prefix=prefix,
+        idempotency_prefix=prefix,
+        channel_id=channel_id,
+        agent_id=agent_id,
+        provider=provider,
     )

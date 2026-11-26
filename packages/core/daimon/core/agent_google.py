@@ -20,7 +20,7 @@ async def get_binding(
 ) -> GoogleBinding | None:
     """The agent's Google identity and its scopes, or None when it has none."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
-    require_setup(target, "Google access")
+    require_setup(target, "Google access", read_only=True)
     async with deps.session_factory() as session:
         row = await get_agent_google_binding(session, agent_id=target.agent_id)
     return None if row is None else GoogleBinding(email=row.email, scopes=list(row.scopes))

@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 
 import httpx
@@ -33,7 +34,6 @@ from daimon.core.message_split import split_fenced
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
@@ -47,6 +47,8 @@ from microsoft_teams.api import (
 from sqlalchemy.exc import OperationalError
 
 from .conftest import CHANNEL_ID, CONVERSATION_ID, SERVICE_URL, THREAD_ID, FakeSender
+
+_teams_turn_lifecycle = partial(TeamsTurnLifecycle, service_url=SERVICE_URL, cancel_key="key-1")
 
 
 class Clock:
@@ -266,11 +268,9 @@ async def test_recovery_attempt_stays_stopping_and_follows_the_old_attempts_edit
     old = await _posted(sender)
     old.request_stop()
     await sender.entered.wait()
-    adopted = TeamsTurnLifecycle(
+    adopted = _teams_turn_lifecycle(
         sender=sender,
         conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         adopt_message_id=old.message_id,
     )
@@ -285,11 +285,9 @@ async def test_recovery_attempt_stays_stopping_and_follows_the_old_attempts_edit
 
 
 def _adopt(old: TeamsTurnLifecycle, sender: FakeSender) -> TeamsTurnLifecycle:
-    adopted = TeamsTurnLifecycle(
+    adopted = _teams_turn_lifecycle(
         sender=sender,
         conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         adopt_message_id=old.message_id,
     )
@@ -614,11 +612,9 @@ async def test_every_fresh_post_of_a_turn_is_recorded_for_tidying(
     monkeypatch.setattr(lifecycle_module, "cost_footer_shown", hidden)
     tenant, intent = uuid.uuid4(), uuid.uuid4()
     sender = FakeSender()
-    lifecycle = TeamsTurnLifecycle(
+    lifecycle = _teams_turn_lifecycle(
         sender=sender,
         conversation_id=THREAD_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         tenant_id=tenant,
         sessionmaker=_Sessions(),
@@ -666,11 +662,9 @@ async def test_an_unlabelled_fresh_post_is_recorded_and_an_unlabelled_edit_is_no
         recorded.append(kw)
 
     monkeypatch.setattr(lifecycle_module, "record_turn_post", record)
-    lifecycle = TeamsTurnLifecycle(
+    lifecycle = _teams_turn_lifecycle(
         sender=FakeSender(),
         conversation_id=THREAD_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         tenant_id=uuid.uuid4(),
         sessionmaker=_Sessions(),
@@ -850,11 +844,9 @@ async def test_a_failed_answer_or_an_unprompted_turn_earns_no_check() -> None:
     )
     await lifecycle.on_terminal_success(_answer("Done."))
     await lifecycle.on_acknowledgment("done")
-    unprompted = TeamsTurnLifecycle(
+    unprompted = _teams_turn_lifecycle(
         sender=FakeSender(),
         conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         unprompted=True,
         completion_ping=True,
         acknowledge=phases.append,
@@ -1319,13 +1311,8 @@ def test_a_long_non_ascii_answer_splits_under_the_teams_payload_cap() -> None:
 
 
 def _unprompted(sender: FakeSender) -> TeamsTurnLifecycle:
-    return TeamsTurnLifecycle(
-        sender=sender,
-        conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
-        clock=Clock(),
-        unprompted=True,
+    return _teams_turn_lifecycle(
+        sender=sender, conversation_id=CONVERSATION_ID, clock=Clock(), unprompted=True
     )
 
 
@@ -1459,28 +1446,12 @@ async def test_watch_posts_controls_before_its_output_grant_closes():
     assert len(sender.activities) == count
 
 
-async def test_nothing_posted_names_another_app() -> None:
-    sender, clock = FakeSender(), Clock()
-    inner = await _posted(sender, clock)
-    lc = OtherAppsScrubbedLifecycle(inner, "teams")
-    await lc.on_sse_event(
-        BetaManagedAgentsAgentMessageEvent(
-            id="e1",
-            type="agent.message",
-            content=[BetaManagedAgentsTextBlock(type="text", text="Looking in Discord or Slack")],
-            processed_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-    )
-    tool = ToolUseBlock(
-        kind="tool_use", id="t1", type="agent.tool_use", name="discord_read_messages", input={}
-    )
-    clock.now += 10
-    await lc.on_render(TurnState(content=[tool]))
-    live = _card_json(sender, -1)
-    assert "Looking in another app" in live
-    assert "Discord" not in live and "Slack" not in live
-
-    reply = "Teams is right here. Never upload customer data to Discord or Slack."
-    await lc.on_terminal_success(_answer(reply))
-    answer = sender.activities[-2].text
-    assert answer == "Teams is right here. Never upload customer data to another app."
+async def test_a_late_debit_whose_notice_edit_is_refused_is_reported_unshown() -> None:
+    """A refused edit (a 429) is not counted as shown, so the late debit is tried again."""
+    sender = FakeSender(refuse_status=429)
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState())  # no answer: the notice carries the summary
+    sender.refuse_on = {len(sender.sent)}
+    assert not await lifecycle._show_late_debit(0.015), "a refused edit was counted as shown"
+    assert await lifecycle._show_late_debit(0.015), "the next try edits the notice"
+    assert "$0.015" in _card_json(sender, -1), _card_json(sender, -1)

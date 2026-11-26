@@ -2,13 +2,16 @@ import { useState } from "react"
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import { NotSupported } from "../bits"
 import { Section, type Props } from "../inspector/parts"
+import { NOTHING } from "../unsupported"
 import { useKnowledge, useMemoryPaths, useMemoryText } from "./api"
 
 const SHARED = "shared"
 
 /** What the agent remembers, to read: its shared memory, and for admins each channel's. */
-export function KnowledgePanel({ agent }: Props) {
+export function KnowledgePanel({ agent, unsupported = NOTHING }: Props) {
+  const lost = unsupported.capabilities.has("memory") || unsupported.capabilities.has("memory_stores")
   const stores = useKnowledge(agent.id, agent.can_view_details)
   const [picked, setPicked] = useState("")
   const [path, setPath] = useState("")
@@ -24,7 +27,7 @@ export function KnowledgePanel({ agent }: Props) {
   if (!options.length) return <Section title="Memory"><div className="text-sm text-muted-foreground">{stores.isPending ? "Loading" : "None"}</div></Section>
   return (
     <>
-      <Section title="Memory">
+      <Section title="Memory" action={lost && <NotSupported />}>
         <Select value={store} onValueChange={(v) => { setPicked(v); setPath("") }}>
           <SelectTrigger size="sm" className="w-full" aria-label="Memory"><SelectValue /></SelectTrigger>
           <SelectContent>{options.map((o) => <SelectItem key={o.store} value={o.store}>{o.name}</SelectItem>)}</SelectContent>

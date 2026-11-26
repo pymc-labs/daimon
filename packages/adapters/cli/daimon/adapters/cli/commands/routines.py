@@ -1,15 +1,11 @@
 """Routines admin CLI commands.
 
-Currently exposes the one-shot `backfill-agent-names` migration bridge for
-Between migration 0011 (nullable `agent_name`) and the
-forthcoming NOT NULL flip, this command walks every routine whose
-`agent_name IS NULL`, retrieves the agent from MA, and writes the daimon-tag
-into the row.
-
-Owner-DM creation is available to operators; interactive edits use chat tools
+Operators create owner-DM and channel or thread routines; interactive edits use chat tools
 and the adapters' `/routines` command. `sandbox-tools` is the operator's
 switch for a routine's built-in sandbox tools, one routine or a confirmed list
-of them (the cutover), with a dry run.
+of them, or `--agent` for every routine run of an agent (kept through agent edits),
+with a dry run. `check-roles` lists routines whose owner would be refused or paused
+at the next run for the agent's roles.
 """
 
 from __future__ import annotations
@@ -17,26 +13,34 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, cast
 
 import httpx
-import structlog
 import typer
 from anthropic import APIStatusError
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.core.access_policy import agent_invoker_roles
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
-from daimon.core.config import DirectMessagePolicy, load_settings
+from daimon.core.bot_access import bot_access_wait_on
+from daimon.core.channel_changes import ChannelChangeRefused
+from daimon.core.config import env_admits, load_settings
 from daimon.core.cron import validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.discord_destination import DiscordRestDestinationResolver
 from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
 from daimon.core.errors import StoreError, UserFacingError
+from daimon.core.features.registry import DEFAULT
+from daimon.core.features.service import FeatureActor
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.routine_delivery import lapsed_role
 from daimon.core.routine_move import (
     RoutineFreshnessSettings,
     RoutineSeedEntry,
@@ -44,120 +48,43 @@ from daimon.core.routine_move import (
     seed_scheduler_action,
 )
 from daimon.core.routine_sandbox import (
+    AgentSandboxPin,
     SandboxPin,
-    SandboxPinUnavailable,
+    change_sandbox,
+    current_agent_pin,
     current_pin,
-    pin_of,
+    own_opt_in,
+    routine_place,
 )
-from daimon.core.routines import routine_for_reader
+from daimon.core.routine_service import (
+    DestinationResolver,
+    Happened,
+    NewRoutine,
+    RoutineCaller,
+    RoutineEnv,
+    RoutineRefused,
+)
+from daimon.core.routine_service import create_routine as create_routine_checked
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
+from daimon.core.stores.domain import SANDBOX_KEY, AnySandboxPin, RoutineRow, stored_pin
+from daimon.core.stores.feature_values import list_feature_values
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.routine_move import pause_for_handback, rollback_rows, seed_routines
 from daimon.core.stores.routines import (
-    DM_SANDBOX_REFUSAL,
-    PIN_UNAVAILABLE_REFUSAL,
     create_routine,
     get_routine,
     link_source_routine,
-    list_routines_missing_agent_name,
-    set_sandbox_tools,
-    update_routine,
+    list_routines_for_tenant,
     validate_dm_source,
 )
 from daimon.core.stores.tenants import get_tenant
 from pydantic import JsonValue, ValidationError
 from rich.console import Console
 from sqlalchemy import text
-
-_log = structlog.get_logger(__name__)
+from sqlalchemy.ext.asyncio import AsyncSession
 
 routines_app = typer.Typer(help="Routines admin tasks.")
-
-_FALLBACK_NAME = "daimon"
-
-
-@routines_app.command("backfill-agent-names")
-def backfill_agent_names_command(
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-) -> None:
-    """Populate ``routines.agent_name`` from MA agent metadata.
-
-    Idempotent — skips rows where ``agent_name`` is already non-NULL.
-    Falls back to ``"daimon"`` when MA returns 404 OR the agent is archived
-    OR the agent's metadata lacks ``daimon_name`` (only one
-    daimon-tagged agent per tenant today).
-
-    Non-404 ``APIStatusError`` (5xx, network) propagates; the operator re-runs
-    after MA recovers.
-    """
-    settings = load_settings()
-    console = Console(highlight=False)
-
-    async def _with_runtime() -> None:
-        async with build_runtime(settings) as rt:
-            await run_backfill_agent_names(rt=rt, console=console, dry_run=dry_run)
-
-    asyncio.run(_with_runtime())
-
-
-async def run_backfill_agent_names(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    dry_run: bool,
-) -> None:
-    """Behavior body, callable by tests with an injected CliRuntime.
-
-    Mirrors the `defaults_apply(rt=...)` split in `commands/defaults.py` so
-    tests don't need to round-trip through `asyncio.run` + `load_settings`.
-    """
-    async with rt.sessionmaker() as session:
-        rows = await list_routines_missing_agent_name(session)
-
-    from_metadata = 0
-    fallback = 0
-
-    for row in rows:
-        row = routine_for_reader(row, user_id=None)
-        resolved: str
-        try:
-            agent = await retrieve_agent(
-                rt.anthropic, row.agent_id, scope=resource_scope(tenant_id=str(row.tenant_id))
-            )
-        except APIStatusError as err:
-            if err.status_code == 404:
-                resolved = _FALLBACK_NAME
-                fallback += 1
-            else:
-                raise
-        else:
-            tag = agent.metadata.get(MA_METADATA_KEY_NAME)
-            if agent.archived_at is not None or tag is None:
-                resolved = _FALLBACK_NAME
-                fallback += 1
-            else:
-                resolved = tag
-                from_metadata += 1
-
-        if dry_run:
-            _log.info(
-                "backfill.dry_run",
-                routine_id=str(row.id),
-                agent_id=row.agent_id,
-                resolved_agent_name=resolved,
-            )
-            continue
-
-        # Per-row tx — canonical async sessionmaker pattern.
-        async with rt.sessionmaker() as s, s.begin():
-            await update_routine(s, row.id, tenant_id=row.tenant_id, agent_name=resolved)
-
-    console.print(
-        f"Backfilled {len(rows)} routine(s) "
-        f"({from_metadata} from metadata, {fallback} fallback to {_FALLBACK_NAME!r})."
-        + (" [dry-run, no writes]" if dry_run else "")
-    )
 
 
 @routines_app.command("create")
@@ -168,15 +95,46 @@ def create_command(
     schedule: Annotated[str, typer.Option("--schedule")],
     timezone: Annotated[str, typer.Option("--timezone")],
     trigger: Annotated[str, typer.Option("--trigger")],
-    destination: Annotated[Literal["dm"], typer.Option("--destination")],
+    destination: Annotated[
+        Literal["dm", "channel", "thread"],
+        typer.Option(
+            "--destination", help="Where results go: the owner's DM, a channel or a thread."
+        ),
+    ],
+    destination_id: Annotated[
+        str | None,
+        typer.Option("--destination-id", help="The channel or thread id; not used for dm."),
+    ] = None,
     source_channel: Annotated[str | None, typer.Option("--source-channel")] = None,
     paused: Annotated[
         bool, typer.Option("--paused", help="Create paused, with no next fire time scheduled.")
     ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    defer_bot_access: Annotated[
+        bool,
+        typer.Option(
+            "--defer-bot-access",
+            help="Save a channel the bot has no access to yet; it waits until the bot has access. "
+            "Channel destinations only; needs the bot_access_wait feature on.",
+        ),
+    ] = False,
 ) -> None:
-    """Create a Discord owner-DM routine; --owner is the sole recipient."""
-    del destination  # Typer validates the only supported operator destination.
+    """Create a Discord routine for --owner, who is its owner and, for dm, sole recipient.
+
+    A channel or thread destination must be one the owner could post in, the same
+    checks as creating the routine in chat. --defer-bot-access skips them for a channel
+    Discord says the bot cannot access yet (not for a thread or dm).
+    """
+    if defer_bot_access and destination == "dm":
+        raise UserFacingError("--defer-bot-access is for a channel destination, not dm.")
+    if (destination == "dm") != (destination_id is None):
+        raise UserFacingError(
+            "Give --destination-id with channel or thread, and not with dm."
+            if destination == "dm"
+            else f"--destination {destination} needs --destination-id."
+        )
+    if destination != "dm" and source_channel is not None:
+        raise UserFacingError("--source-channel is only for dm; a channel routine posts there.")
     settings = load_settings()
 
     if settings.discord is None:
@@ -185,6 +143,24 @@ def create_command(
 
     async def run() -> None:
         async with build_runtime(settings) as rt:
+            if destination != "dm":
+                await run_create_channel_routine(
+                    rt=rt,
+                    console=Console(highlight=False),
+                    tenant_id=tenant,
+                    owner=owner,
+                    agent_name=agent,
+                    schedule=schedule,
+                    timezone=timezone,
+                    trigger=trigger,
+                    kind=destination,
+                    destination_id=cast("str", destination_id),
+                    paused=paused,
+                    dry_run=dry_run,
+                    resolver=DiscordRestMembershipResolver(bot_token),
+                    defer_bot_access=defer_bot_access,
+                )
+                return
             await run_create_dm_routine(
                 rt=rt,
                 console=Console(highlight=False),
@@ -230,10 +206,8 @@ async def run_create_dm_routine(
         if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
             raise UserFacingError("Select an active Discord tenant.")
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not await dm_enabled(
-            session, tenant_id=tenant_id
-        ) or not rt.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy()).allows(
-            owner
+        if not await dm_enabled(session, tenant_id=tenant_id) or not env_admits(
+            rt.settings.direct_message_policies, tenant_id, owner
         ):
             raise UserFacingError("Routine DMs are disabled or the owner is not allowed.")
         source_thread_id = None
@@ -257,7 +231,9 @@ async def run_create_dm_routine(
         policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
     ):
         raise UserFacingError("The owner is not a verified, allowed tenant member.")
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent_name, records=rt.sessionmaker
+    )
     if agent is None or not authorize(
         policy,
         subject=subject,
@@ -297,35 +273,338 @@ async def run_create_dm_routine(
     console.print(f"Created routine {row.id}.")
 
 
+class _DryRun(Exception):
+    """Raised inside the creating transaction so a dry run rolls back."""
+
+
+async def run_create_channel_routine(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    owner: str,
+    agent_name: str,
+    schedule: str,
+    timezone: str,
+    trigger: str,
+    kind: Literal["channel", "thread"],
+    destination_id: str,
+    resolver: MembershipResolver,
+    dry_run: bool = False,
+    paused: bool = False,
+    destination_resolver: DestinationResolver | None = None,
+    defer_bot_access: bool = False,
+) -> None:
+    """Create a routine that posts to a channel or thread, as the owner would in chat.
+
+    The owner is the routine's owner, attribution and budget source. Every check
+    chat applies runs once, in `create_routine`; the operator choosing the agent
+    stands in for the owner talking to it. A dry run does all of it, then rolls back.
+    """
+    if not owner.isdecimal():
+        raise UserFacingError("The owner must be a Discord user ID.")
+    if not trigger.strip():
+        raise UserFacingError("A trigger message is required.")
+    if defer_bot_access and kind != "channel":
+        raise UserFacingError("--defer-bot-access is for a channel destination, not a thread.")
+    if defer_bot_access and not (destination_id.isascii() and destination_id.isdecimal()):
+        raise UserFacingError("--defer-bot-access needs the channel's Discord ID.")
+    async with rt.sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
+        raise UserFacingError("Select an active Discord tenant.")
+    if defer_bot_access and not await bot_access_wait_on(
+        rt.sessionmaker, tenant_id=tenant_id, platform="discord"
+    ):
+        raise UserFacingError("Turn on the bot_access_wait feature for this workspace first.")
+    subject = await resolve_subject(
+        rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
+    )
+    if subject.verified_membership is not True or not authorize(
+        policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+    ):
+        raise UserFacingError("The owner is not a verified, allowed tenant member.")
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent_name, records=rt.sessionmaker
+    )
+    if agent is None:
+        raise UserFacingError(f"No agent named {agent_name!r} found for this tenant.")
+    if destination_resolver is None:
+        if rt.settings.discord is None:
+            raise UserFacingError("Discord bot credentials are required to verify the destination.")
+        destination_resolver = DiscordRestDestinationResolver(
+            rt.settings.discord.bot_token.get_secret_value(),
+            guild_id=tenant.external_id,
+            owner_id=owner,
+            defer_bot_access=defer_bot_access,
+        )
+
+    async def stop_if_dry(_session: AsyncSession, _happened: Happened, _row: RoutineRow) -> None:
+        if dry_run:
+            raise _DryRun
+
+    env = RoutineEnv(
+        sessionmaker=rt.sessionmaker,
+        anthropic=rt.anthropic,
+        resolve_destination=destination_resolver,
+        on_change=stop_if_dry,
+    )
+
+    async def fresh_subject() -> Subject:
+        return await resolve_subject(
+            rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
+        )
+
+    caller = RoutineCaller(
+        tenant_id=tenant_id,
+        subject=subject,
+        platform="discord",
+        own_agent_ids=frozenset({derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)}),
+        fresh_subject=fresh_subject,
+    )
+    new = NewRoutine(
+        agent_name=agent_name,
+        cron_expr=schedule,
+        timezone=timezone,
+        trigger_message=trigger,
+        enabled=not paused,
+        destination_kind=kind,
+        destination_id=destination_id,
+    )
+    try:
+        row = await create_routine_checked(env, caller, new)
+    except RoutineRefused as exc:
+        raise UserFacingError(str(exc)) from exc
+    except _DryRun:
+        console.print(
+            f"Owner: {owner}; destination: {kind} {destination_id}\n"
+            "Dry run: no routine created. "
+            + ("Would be created paused." if paused else "Would be created enabled.")
+        )
+        return
+    console.print(f"Created routine {row.id}.")
+
+
 @routines_app.command("sandbox-tools")
 def sandbox_tools_command(
-    routine_ids: Annotated[list[uuid.UUID], typer.Argument(help="Routine ids to change.")],
+    routine_ids: Annotated[
+        list[uuid.UUID] | None, typer.Argument(help="Routine ids to change.")
+    ] = None,
+    *,
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
-    off: Annotated[
-        bool, typer.Option("--off", help="Turn sandbox tools off instead of on.")
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", help="Change the agent's value instead, for all its routines."),
+    ] = None,
+    agent_id: Annotated[
+        str | None,
+        typer.Option(
+            "--agent-id",
+            help="With --off or --inherit: the agent id (see sandbox-tools-list), for an "
+            "agent renamed or gone.",
+        ),
+    ] = None,
+    environment: Annotated[
+        str | None,
+        typer.Option(
+            "--environment", help="With --agent: the environment name; default is the workspace's."
+        ),
+    ] = None,
+    off: Annotated[bool, typer.Option("--off", help="Set Off instead of On.")] = False,
+    inherit: Annotated[
+        bool, typer.Option("--inherit", help="Clear the value, so the level above decides.")
     ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
-    """Turn built-in sandbox tools on (or --off) for each listed routine's own runs.
+    """Set the `routine_sandbox_tools` setting On (or --off, --inherit) for each routine.
 
-    Operator only. Every id must name a routine in --tenant, or nothing is
-    changed. A routine already set that way is left alone, so re-running is
-    safe. Each change records the CLI operator and the time.
+    Operator only. A routine's own value beats its agent's, unless a level above locks
+    it. Every id must name a routine in --tenant, or nothing is changed; a routine
+    already set that way is left alone. A routine's On covers its current agent version
+    and environment. With --agent the value is the agent's: its On names the agent and
+    the environment's name, so an agent edit keeps it, and it covers DM routines too.
+    `unattended_capabilities` still caps both. `sandbox-tools-list` shows the opt-ins.
     """
+    if off and inherit:
+        raise typer.BadParameter("Give --off or --inherit, not both.")
+    if agent is not None and agent_id is not None:
+        raise typer.BadParameter("Give --agent or --agent-id, not both.")
+    by_agent = agent is not None or agent_id is not None
+    if by_agent == bool(routine_ids):
+        raise typer.BadParameter("Give routine ids, or --agent / --agent-id, not both or neither.")
+    if agent_id is not None and not (off or inherit):
+        raise typer.BadParameter("--agent-id only turns an opt-in off; add --off or --inherit.")
+    if environment is not None and agent is None:
+        raise typer.BadParameter("--environment needs --agent.")
+    value = DEFAULT if inherit else "off" if off else "on"
     settings = load_settings()
 
     async def run() -> None:
         async with build_runtime(settings) as rt:
+            console = Console(highlight=False)
+            if by_agent:
+                await run_agent_sandbox_tools(
+                    rt=rt,
+                    console=console,
+                    tenant_id=tenant,
+                    agent_name=agent,
+                    agent_id=agent_id,
+                    environment_name=environment,
+                    value=value,
+                    dry_run=dry_run,
+                )
+                return
             await run_sandbox_tools(
                 rt=rt,
-                console=Console(highlight=False),
+                console=console,
                 tenant_id=tenant,
-                routine_ids=routine_ids,
-                enabled=not off,
+                routine_ids=routine_ids or [],
+                value=value,
                 dry_run=dry_run,
             )
 
     asyncio.run(run())
+
+
+@routines_app.command("sandbox-tools-list")
+def sandbox_tools_list_command(*, tenant: Annotated[uuid.UUID, typer.Option("--tenant")]) -> None:
+    """List the agents and routines opted in to built-in sandbox tools."""
+    settings = load_settings()
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            async with rt.sessionmaker() as session:
+                lines = await sandbox_pin_lines(session, tenant_id=tenant)
+            console = Console(highlight=False)
+            for line in lines or ["No agent or routine is opted in."]:
+                console.print(line)
+
+    asyncio.run(run())
+
+
+async def sandbox_pin_lines(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[str]:
+    """One line per pinned On, agents first."""
+    rows = await list_feature_values(session, tenant_id=tenant_id, keys=[SANDBOX_KEY])
+    pinned = [(row, pin) for row in rows if (pin := stored_pin(row)) is not None]
+    return [
+        f"{row.tier} {row.agent_id or row.routine_id}  {_pin_words(pin)}  "
+        f"since {row.set_at:%Y-%m-%d %H:%M} UTC"
+        for row, pin in sorted(pinned, key=lambda e: (e[0].tier, e[0].set_at))
+    ]
+
+
+def _pin_words(pin: AnySandboxPin) -> str:
+    if isinstance(pin, AgentSandboxPin):
+        return f"environment {pin.environment_name}, any agent version"
+    return (
+        f"agent {pin.agent_id} version {pin.agent_version}, environment "
+        f"{pin.environment_id} as of {pin.environment_updated_at.isoformat()}"
+    )
+
+
+def _value_words(value: str | None) -> str:
+    return "inherited" if value in (None, DEFAULT) else value
+
+
+@dataclass(frozen=True)
+class _CliFeatureTarget:
+    platform: str
+    actor: FeatureActor
+
+
+async def _feature_target(rt: CliRuntime, tenant_id: uuid.UUID) -> _CliFeatureTarget:
+    """The tenant's platform and the CLI operator as a feature writer."""
+    async with rt.sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        if tenant is None or tenant.archived_at is not None:
+            raise UserFacingError("Select an active tenant.")
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+
+    async def is_admin(_: object) -> bool:
+        return True  # whoever holds the database credentials is the operator
+
+    actor = FeatureActor(tenant_id, principal.account_id, "cli", None, is_admin, operator=True)
+    return _CliFeatureTarget(tenant.platform, actor)
+
+
+async def run_agent_sandbox_tools(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    agent_name: str | None,
+    environment_name: str | None,
+    value: str,
+    dry_run: bool,
+    agent_id: str | None = None,
+) -> None:
+    """Set one agent's value, after checking an On's agent and environment are live.
+
+    Off and inherit take the agent by name or by id, as the opt-in may sit on an agent
+    that was renamed, or whose name another agent now uses.
+    """
+    target = await _feature_target(rt, tenant_id)
+    pin: AgentSandboxPin | None = None
+    if value == "on":
+        assert agent_name is not None
+        try:
+            pin = await current_agent_pin(
+                rt.anthropic,
+                rt.sessionmaker,
+                tenant_id=tenant_id,
+                agent_name=agent_name,
+                environment_name=environment_name,
+                default=rt.deployment_default,
+            )
+        except ChannelChangeRefused as exc:
+            raise UserFacingError(str(exc)) from exc
+        agent_id = pin.agent_id
+    elif agent_id is None:
+        assert agent_name is not None
+        found = await find_agent_by_daimon_tag(
+            rt.anthropic,
+            tenant_id=tenant_id,
+            name=agent_name,
+            include_archived=True,
+            records=rt.sessionmaker,
+        )
+        if found is None:
+            raise UserFacingError(f"No agent named {agent_name}. Nothing was changed.")
+        agent_id = found.id
+    label = f"{agent_name or agent_id} ({agent_id})"
+    place = FeaturePlace.of(tenant_id, target.platform, None, agent_id=agent_id)
+    if await own_opt_in(rt.sessionmaker, place) == (
+        None if value == DEFAULT else value,
+        pin,
+    ):
+        console.print(f"Agent {label}: already {_value_words(value)}.")
+        if value != "on" and agent_name is not None:
+            console.print(
+                "If the opt-in sits on another agent id, find it with "
+                "`routines sandbox-tools-list` and use --agent-id."
+            )
+        return
+    detail = f" ({_pin_words(pin)})" if pin else ""
+    console.print(f"Agent {label}: set {_value_words(value)}{detail}")
+    if dry_run:
+        console.print("Dry run: nothing written.")
+        return
+    try:
+        await change_sandbox(
+            rt.sessionmaker, rt.settings, target.actor, place, value=value, pin=pin
+        )
+    except ChannelChangeRefused as exc:
+        raise UserFacingError(str(exc)) from exc
+    console.print(f"Sandbox tools {_value_words(value)} for agent {label}.")
+    if pin is not None:
+        console.print(
+            "The opt-in names this agent id and the environment's name, so an environment "
+            "recreated under the same name keeps built-ins. It covers every routine of the "
+            "agent without a value of its own, DM routines included."
+        )
 
 
 async def run_sandbox_tools(
@@ -334,86 +613,66 @@ async def run_sandbox_tools(
     console: Console,
     tenant_id: uuid.UUID,
     routine_ids: list[uuid.UUID],
-    enabled: bool,
+    value: str,
     dry_run: bool,
 ) -> None:
-    """Check every id first, then change each routine not already set, in one transaction."""
+    """Check every id and read every pin first, then change each routine not already set."""
     ids = list(dict.fromkeys(routine_ids))
-    state = "on" if enabled else "off"
-    async with rt.sessionmaker.begin() as session:
-        tenant = await get_tenant(session, tenant_id)
-        if tenant is None or tenant.archived_at is not None:
-            raise UserFacingError("Select an active tenant.")
+    target = await _feature_target(rt, tenant_id)
+    async with rt.sessionmaker() as session:
         rows = {rid: await get_routine(session, rid, tenant_id=tenant_id) for rid in ids}
-        missing = [str(rid) for rid, row in rows.items() if row is None]
-        if missing:
-            raise UserFacingError(
-                f"No routine in this tenant with id {', '.join(missing)}. Nothing was changed."
-            )
-        dms = [
-            str(rid)
-            for rid, row in rows.items()
-            if row is not None and row.destination_kind == "dm"
-        ]
-        if enabled and dms:
-            raise UserFacingError(f"{', '.join(dms)}: {DM_SANDBOX_REFUSAL}")
-        # An opt-in covers the agent version and environment each routine would
-        # run with now; one that can't be read refuses the whole list.
-        pins: dict[uuid.UUID, SandboxPin] = {}
-        if enabled:
-            unreadable: list[str] = []
-            for rid, row in rows.items():
-                assert row is not None
-                try:
-                    pins[rid] = await current_pin(
-                        rt.anthropic, rt.sessionmaker, row, default=rt.deployment_default
-                    )
-                except SandboxPinUnavailable:
-                    unreadable.append(str(rid))
-            if unreadable:
-                raise UserFacingError(f"{', '.join(unreadable)}: {PIN_UNAVAILABLE_REFUSAL}")
-        pending = [
-            rid
-            for rid, row in rows.items()
-            if row is not None
-            and (row.sandbox_tools_enabled != enabled or (enabled and pin_of(row) != pins[rid]))
-        ]
-        for rid in ids:
-            row = rows[rid]
-            label = (
-                "already " + state
-                if rid not in pending
-                else "re-approve current agent and environment"
-                if enabled and row is not None and row.sandbox_tools_enabled
-                else "turn " + state
-            )
-            pinned = pins.get(rid)
-            if pinned is not None:
-                label += (
-                    f" (agent {pinned.agent_id} version {pinned.agent_version}, environment "
-                    f"{pinned.environment_id} as of {pinned.environment_updated_at.isoformat()})"
-                )
-            console.print(f"{rid}: {label}")
-        if dry_run:
-            console.print(f"Dry run: {len(pending)} routine(s) would change; nothing written.")
-            return
-        principal = await get_or_create_cli_principal(
-            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+    found = {rid: row for rid, row in rows.items() if row is not None}
+    if missing := [str(rid) for rid in ids if rid not in found]:
+        raise UserFacingError(
+            f"No routine in this tenant with id {', '.join(missing)}. Nothing was changed."
         )
-        for rid in pending:
-            await set_sandbox_tools(
-                session,
-                rid,
-                tenant_id=tenant_id,
-                enabled=enabled,
-                set_by=str(principal.id),
-                # Whoever holds the database credentials is the operator.
-                actor=Subject(is_admin=True),
-                via="cli",
-                pin=pins.get(rid),
+    pins: dict[uuid.UUID, SandboxPin | None] = {}
+    refused: list[str] = []
+    for rid, row in found.items():
+        try:
+            pins[rid] = (
+                await current_pin(rt.anthropic, rt.sessionmaker, row, default=rt.deployment_default)
+                if value == "on"
+                else None
             )
+        except ChannelChangeRefused as exc:
+            refused.append(f"{rid}: {exc}")
+    if refused:
+        raise UserFacingError("\n".join(refused))
+    pending: list[uuid.UUID] = []
+    want = None if value == DEFAULT else value
+    for rid, row in found.items():
+        place = routine_place(row, target.platform)
+        own, own_pin = await own_opt_in(rt.sessionmaker, place)
+        pin = pins[rid]
+        if (own, own_pin) == (want, pin):
+            label = f"already {_value_words(value)}"
+        else:
+            pending.append(rid)
+            label = (
+                "re-approve current agent and environment"
+                if own == want
+                else f"set {_value_words(value)}"
+            )
+        console.print(f"{rid}: {label}" + (f" ({_pin_words(pin)})" if pin else ""))
+    if dry_run:
+        console.print(f"Dry run: {len(pending)} routine(s) would change; nothing written.")
+        return
+    for rid in pending:
+        try:
+            await change_sandbox(
+                rt.sessionmaker,
+                rt.settings,
+                target.actor,
+                routine_place(found[rid], target.platform),
+                value=value,
+                pin=pins[rid],
+            )
+        except ChannelChangeRefused as exc:
+            raise UserFacingError(f"{rid}: {exc}") from exc
     console.print(
-        f"Sandbox tools {state} for {len(pending)} routine(s); {len(ids) - len(pending)} unchanged."
+        f"Sandbox tools {_value_words(value)} for {len(pending)} routine(s); "
+        f"{len(ids) - len(pending)} unchanged."
     )
 
 
@@ -684,3 +943,93 @@ async def run_pause_for_handback(
             markup=False,
         )
     console.print("Applied atomically." if apply else "Dry run: nothing written.")
+
+
+@routines_app.command("check-roles")
+def check_roles_command(tenant: Annotated[uuid.UUID, typer.Option("--tenant")]) -> None:
+    """Read only: list enabled routines whose owner fails the agent's role check."""
+    settings = load_settings()
+    if settings.discord is None:
+        raise UserFacingError("Discord bot credentials are required to read roles.")
+    resolver = DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            await run_check_roles(
+                rt=rt, console=Console(highlight=False), tenant_id=tenant, resolver=resolver
+            )
+
+    asyncio.run(run())
+
+
+async def run_check_roles(
+    *, rt: CliRuntime, console: Console, tenant_id: uuid.UUID, resolver: MembershipResolver
+) -> None:
+    """The run-time rule per owner: lacking a role pauses; unverified is refused."""
+    async with rt.sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+        if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
+            raise UserFacingError("Select an active Discord tenant.")
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
+    # Every name the agent answers to, as a fire checks them: an alias can add a gate.
+    names: dict[uuid.UUID, tuple[str | None, ...]] = {}
+    gated: list[RoutineRow] = []
+    for r in rows:
+        if not r.enabled or r.created_by_user_id is None:
+            continue
+        names[r.id] = await _agent_names(rt, r)
+        if agent_invoker_roles(policy, names[r.id]):
+            gated.append(r)
+    subjects: dict[str, Subject] = {}
+    flagged = 0
+    for row in sorted(gated, key=lambda r: str(r.id)):
+        owner = cast("str", row.created_by_user_id)
+        if owner not in subjects:
+            subjects[owner] = await resolve_subject(
+                rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
+            )
+        subject = subjects[owner]
+        if subject.verified_membership is not True or not authorize(
+            policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+        ):
+            # The scheduler retries an unreadable membership only when the saved
+            # name itself is gated; any other unverified owner is refused.
+            unreadable = subject.verified_membership is None and bool(
+                agent_invoker_roles(policy, (row.agent_name,))
+            )
+            verdict = (
+                "owner's membership could not be read: retried each run"
+                if unreadable
+                else "owner not a verified, allowed member: refused each run"
+            )
+        elif lapsed_role(policy, names[row.id], subject):
+            verdict = "owner lacks a role: pauses at its next run"
+        else:
+            continue
+        flagged += 1
+        console.print(f"{row.id} owner={owner} agent={row.agent_name}: {verdict}", markup=False)
+    console.print(f"{flagged} of {len(gated)} role-gated routines need attention.")
+
+
+async def _agent_names(rt: CliRuntime, row: RoutineRow) -> tuple[str | None, ...]:
+    """The names a fire of `row` checks: its saved name plus the agent's own."""
+    agent = None
+    try:
+        agent = await retrieve_agent(
+            rt.anthropic,
+            row.agent_id,
+            scope=resource_scope(tenant_id=str(row.tenant_id)),
+            records=rt.sessionmaker,
+        )
+    except APIStatusError as err:
+        if err.status_code != 404:
+            raise
+    if agent is None or agent.archived_at is not None:
+        # A fire self-heals to the agent now carrying the saved name.
+        agent = await find_agent_by_daimon_tag(
+            rt.anthropic, tenant_id=row.tenant_id, name=row.agent_name, records=rt.sessionmaker
+        )
+    if agent is None:
+        return (row.agent_name,)
+    return build_agent_ref(agent.name, agent.metadata, row.agent_name).names

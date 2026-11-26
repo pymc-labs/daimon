@@ -3,6 +3,7 @@ import { ExternalLink, Plus, RotateCcw, Trash2, X } from "lucide-react"
 import { useState } from "react"
 
 import { Ago, Mono, StatusDot } from "@/components/common"
+import { ErrorState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -226,10 +227,11 @@ function Scopes({ agentId, a }: { agentId: string; a: DataServerAgent }) {
 }
 
 function Tools({ agentId, canWrite, admin }: { agentId: string; canWrite: boolean; admin: boolean }) {
-  const { data } = useDataServerTools(agentId)
+  const tools = useDataServerTools(agentId)
+  const { data } = tools
   const edit = useDataServerEdit(agentId)
   const [open, setOpen] = useState(false)
-  if (!data) return <Section title="Tools"><Skeleton className="h-16" /></Section>
+  if (!data) return <Section title="Tools">{tools.isError ? <ErrorState error={tools.error} onRetry={() => void tools.refetch()} className="py-4" /> : <Skeleton className="h-16" />}</Section>
   const put = edit.setTool.mutate
   // An admin's remove sticks for everyone else; a write tool needs the agent to write.
   const stuck = (r: { admin: boolean; allow: boolean | null }) => !admin && r.admin && r.allow === false

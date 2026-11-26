@@ -7,9 +7,11 @@ recheck. No SDK client or provider configuration is loaded during app startup.
 
 from __future__ import annotations
 
+import functools
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -18,15 +20,20 @@ from uuid import UUID
 import structlog
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import provider_prices
+from daimon.core.provider_key_gate import ProviderKey
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.openai_codec import PROFILE, PROFILES
+from daimon.core.turn.host_spend_cap import SpendGuard, spend_cap_notifier
+from daimon.core.turn.hosted_codec import OPENAI
 from daimon.core.turn.openai_environment import EnvironmentPort
-from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
+from daimon.core.turn.openai_host import HOST, OpenAIHostRuntime, driver
+from daimon.core.turn.openai_late_usage import LATE_USAGE
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
@@ -39,31 +46,34 @@ from daimon.core.turn.runtime_manifest import (
     represented_source,
     root_counterpart_catalog_id,
     select_runtime_manifest,
+    shared_copy_slot,
     source_pin_matches,
+    tenant_deployments,
     validate_counterpart_pins,
     validate_counterpart_request,
 )
+from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ResourceRef, Revision, Scope
+from mux.contracts.ids import ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
-from mux.drivers.openai import SessionControls, Transport
+from mux.contracts.usage import UsageObservation
+from mux.drivers.openai import OpenAIClients, SessionControls, Transport
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile, selectable_models
-from mux.profiles.openai import NATIVE_MODELS
+from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    JsonValue,
-    TypeAdapter,
-    ValidationError,
     model_validator,
 )
 
+PROFILE = OPENAI.profile
+PROFILES = OPENAI.profiles
+
+
 log = structlog.get_logger(__name__)
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
-_MANIFEST = TypeAdapter(list[dict[str, JsonValue]])
-_MAX_MANIFEST_BYTES = 1_048_576
 
 
 class OpenAIDeployment(BaseModel):
@@ -97,7 +107,7 @@ class OpenAIDeployment(BaseModel):
     counterpart_catalog_id: Nonblank | None = None
     counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
     # A template's capability: "mcp" represents the source's Daimon MCP toolset
-    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    # (its live catalogue) with a per-turn caller credential; skills attach per session.
     template_capabilities: Literal["mcp"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -283,21 +293,7 @@ def authorized_deployments(
     tenant, or a file that cannot be read or validated means none: nothing is
     authorized, and callers keep their existing path.
     """
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
-        return ()
-    try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_MANIFEST_BYTES + 1)
-        if len(raw) > _MAX_MANIFEST_BYTES:
-            return ()
-        return tuple(
-            OpenAIDeployment.model_validate(row)
-            for row in _MANIFEST.validate_json(raw)
-            if row.get("profile") == profile and row.get("tenant_id") == tenant_id
-        )
-    except (OSError, ValidationError):
-        return ()
+    return tenant_deployments(OpenAIDeployment, profile, tenant_id)
 
 
 def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRuntime:
@@ -309,6 +305,10 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = load_deployment(request)
+    if deployment.mcp_credential_file is not None and shared_copy_slot(request) is not None:
+        # The pinned file names the owner's credential, not the asker's: a shared copy's
+        # MCP could only fail late, after the native writes began.
+        raise AdmissionDenied(reason="backend_unsupported")
     spend_limit = deployment.spend_limit_usd_cents
     # Whether this project honours a native session cap: the profile says it doesn't
     # (OpenAI answers `spend_control` with HTTP 400), so nothing below may count on one.
@@ -318,10 +318,24 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     root_agent: ResourceRef | None = None
     allocating = False
     counterpart_verified = False
-    from daimon.core.turn.template_mcp import TemplateMCPCredential, template_mcp_kept
+    # A template's carried skills: uploading them, and the copies its session attaches.
+    copying = False
+    copied: set[str] = set()
+    from daimon.core.turn.template_mcp import (
+        TemplateMCPCredential,
+        needs_turn_credential,
+        origin_read_only,
+        template_mcp_kept,
+        unattended_turn,
+    )
 
     mcp_template = deployment.template_capabilities == "mcp"
-    template_mcp = TemplateMCPCredential(request, scope, label=OPENAI_TEMPLATE_MCP_LABEL)
+    from daimon.core.turn.runtime_manifest import caller_scope
+
+    # A shared thread's copy runs as its owner (`scope`); each asker mints its own.
+    template_mcp = TemplateMCPCredential(
+        request, caller_scope(request), label=OPENAI_TEMPLATE_MCP_LABEL, session_scope=scope
+    )
 
     def check(config: ConfigRevision, authorized: Scope) -> None:
         if config != revision or authorized != scope:
@@ -374,6 +388,13 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             agent = checked.agent.ref
         return SessionSpec(
             agent=agent,
+            # A template's carried skills; on a channel's own deployment, its channel skills.
+            skills=(
+                await template_skills(preparation)
+                if deployment.root_materialization
+                or preparation.admission.backend_revision_origin != "agent"
+                else ()
+            ),
             agent_revision=Revision(local=0),
             environment=(
                 ref(deployment.environment_id, "environment")
@@ -383,9 +404,30 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             config_revision=revision.local,
         )
 
+    async def template_skills(preparation: ProviderPreparationRequest) -> tuple[SkillRef, ...]:
+        """The provider's copies of the custom and channel skills the session carries."""
+        nonlocal copying
+        from daimon.core.turn.session_skills import turn_session_skills
+
+        copying = True
+        try:
+            copies = await turn_session_skills(
+                preparation,
+                lambda: driver(runtime, revision, scope).skills,
+                profile=get_profile(deployment.profile),
+                scope=scope,
+                account_scope_id=deployment.project,
+            )
+        finally:
+            copying = False
+        copied.update(copy.id for copy in copies)
+        return copies
+
     def authorize(authorized: Scope, kind: str, id_: str | None) -> bool:
         if authorized != scope:
             return False
+        if kind == "skill" and (id_ in copied or (copying and id_ is None)):
+            return True
         if kind == "session":
             # The host driver obtains existing sessions from its persisted scoped
             # binding; creation publishes the acknowledged native identity there.
@@ -401,6 +443,10 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             *(("skill", skill) for skill in deployment.skill_ids),
         }
 
+    provider_key = functools.partial(
+        ProviderKey.from_env, PERSISTENT_WORKSPACE.provider, deployment.api_key_env
+    )
+
     def transport(config: ConfigRevision, authorized: Scope) -> Transport:
         check(config, authorized)
         secret = os.environ.get(deployment.api_key_env)
@@ -410,9 +456,17 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         # request/stream lifetimes and disables retry of uncertain mutations.
         from mux.drivers.openai import configured_transport
 
-        return configured_transport(
-            api_key=secret, project=deployment.project if deployment.project_header else None
+        inner = configured_transport(
+            api_key=secret,
+            project=deployment.project if deployment.project_header else None,
+            clients=request.deps.provider_clients.openai,
         )
+        gate, key = request.deps.provider_gate, provider_key()
+        if gate is None or key is None or config.model is None:
+            return inner
+        from daimon.core.turn.provider_gate import CooldownTransport
+
+        return CooldownTransport(inner, gate, key, config.model)
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal counterpart_verified
@@ -440,6 +494,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             scope=scope,
             account_scope_id=deployment.project,
             operation_key="counterpart-read",
+            shared_slot=shared_copy_slot(preparation),
         )
         checked = await deployment.read_counterpart(preparation, source=source, resources=resources)
         # A template that keeps the agent's MCP serves one whose switch dropped it
@@ -451,7 +506,13 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         counterpart_verified = True
         return checked
 
+    # The token resolved for Daimon's own server, reused for its relay URLs in the same
+    # request: mux resolves Daimon's destination first, then each relayed connector.
+    daimon_token: list[str] = []
+
     async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
+        from daimon.core.connector_relay import daimon_destination
+
         capabilities = deployment.source_capabilities
         public_url = request.deps.mcp.public_url
         if (
@@ -462,26 +523,37 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             or reference
             != f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{deployment.source_agent_id}"
             or public_url is None
-            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or (own := daimon_destination(destination, str(public_url))) is None
             or request.deps.mcp.jwt_secret is None
             or deployment.mcp_credential_file is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        if own.rstrip("/") != destination.rstrip("/") and daimon_token:
+            return daimon_token[-1]
+        admission = request.admission
         try:
-            return await resolve_agent_mcp_credential(
+            token = await resolve_agent_mcp_credential(
                 request.deps.sessionmaker,
                 path=deployment.mcp_credential_file,
                 secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
                 scope=scope,
                 agent_id=deployment.source_agent_id,
-                destination=destination,
+                destination=own,
                 tools=capabilities.mcp_tools,
                 chat_execution=True,
                 # A pinned OpenAI/Gemini turn has no confirmation card: its credential
                 # must be one the server refuses gated and publishing tools for.
                 surface="provider_turn",
                 now=request.now(),
+                memory_read_only=origin_read_only(admission),
             )
+            if needs_turn_credential(admission) or unattended_turn():
+                # The pinned file cannot carry this turn's hold, seals, Slack context or
+                # built-in leave: once proven, the turn runs on its own minted credential.
+                template_mcp.catalogue = frozenset(capabilities.mcp_tools)
+                token = await template_mcp.mint(own, agent_id=deployment.source_agent_id)
+            daimon_token[:] = [token]
+            return token
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
 
@@ -501,6 +573,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             scope=scope,
             account_scope_id=deployment.project,
             operation_key="counterpart-read",
+            shared_slot=shared_copy_slot(preparation),
         )
         await deployment.verify_environment(preparation, resources=resources, expected=None)
         allocating = True
@@ -512,39 +585,89 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         return row
 
     # A row's limit compiles to `spend_control` only where the project honours it. Without
-    # it, a turn is bounded by admission (balance, user and channel caps), the per-model
-    # daily cap (`openai_host._check_daily_model_cap`) and its deadline. Astra included.
+    # it, the host enforces the limit while the turn streams (`host_spend_cap`); admission,
+    # the per-model daily cap and the deadline bound it too. Astra included.
     native_limit = spend_limit if native_cap else None
+    price = provider_prices(deployment.profile).get((revision.backend, revision.model))
+    infrastructure_usd = known_infrastructure_usd(deployment.profile)
+
+    async def known_infrastructure(observation: UsageObservation) -> Decimal | None:
+        return infrastructure_usd
+
+    guard = None
+    if spend_limit is not None and not native_cap and price is not None:
+        guard = SpendGuard(limit_cents=spend_limit, price=price, notify=spend_cap_notifier(request))
+    # A shared thread on a channel's own deployment has no caller to mint for; an
+    # agent's own copy mints each asker's credential, which hides personal sign-ins.
+    shared = (
+        request.admission.shared_owner is not None
+        and request.admission.backend_revision_origin != "agent"
+    )
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
+        provider_key=provider_key,
         read_agent_counterpart=read,
         materialize_root=materialize_root if deployment.root_materialization else None,
         journal=OpenAIRecoveryJournal(),
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,
-        price=provider_prices(deployment.profile).get((revision.backend, revision.model)),
-        # A conversation-only session runs no container: its usage settles at $0
-        # infrastructure. A persistent workspace's container cost stays unknown.
+        price=price,
+        spend_guard=guard,
+        late_usage=LATE_USAGE,
+        # Settles at $0 infrastructure (infrastructure_cost), never pending forever.
+        infrastructure=known_infrastructure,
         session_plan=plan,
         authorization=authorize,
-        mcp_secrets=resolve_mcp
+        mcp_secrets=None
+        if shared
+        else resolve_mcp
         if deployment.source_capabilities is not None
         else template_mcp.resolve
         if mcp_template
         else None,
-        end_of_turn=template_mcp.finalize if mcp_template else None,
+        # Revokes whatever the turn minted; nothing when it ran on the pinned file.
+        end_of_turn=None if shared else template_mcp.finalize,
         controls=SessionControls(
             model=revision.model,
             multi_agent_enabled=False,
             container_size="small" if deployment.profile == PROFILE else None,
             spend_limit_usd_cents=native_limit,
+            mcp_enabled=False if shared else None,
+            reasoning_effort=revision.effort,
         ),
     )
 
     return runtime
 
 
-def _environments(key: str) -> EnvironmentPort:
+def usage_transport(tenant_id: str, profile: str, account_scope_id: str) -> Transport | None:
+    """A transport that reads a tenant's turn usage outside a turn (no I/O yet).
+
+    The operator's rows for the session's project name the key and whether the
+    project header is sent; with none, the code-default row's. None when no single
+    key applies or it is not set.
+    """
+    from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
+
+    rows = {
+        (row.api_key_env, row.project_header)
+        for row in authorized_deployments(tenant_id, profile=profile)
+        if row.project == account_scope_id
+    }
+    if not rows and account_scope_id == DEFAULT_PROJECT:
+        rows = {(DEFAULT_KEY_ENV[get_profile(profile).provider], False)}
+    if len(rows) != 1:
+        return None
+    ((key_env, header),) = rows
+    secret = os.environ.get(key_env)
+    if secret is None or not secret.strip():
+        return None
+    from mux.drivers.openai import configured_transport
+
+    return configured_transport(api_key=secret, project=account_scope_id if header else None)
+
+
+def _environments(key: str, clients: OpenAIClients) -> EnvironmentPort:
     """The environment port on the install's OpenAI key (no I/O yet).
 
     Like the code-default rows (`runtime_defaults`): no `OpenAI-Project` header, so
@@ -554,14 +677,15 @@ def _environments(key: str) -> EnvironmentPort:
     from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
     from mux.drivers.openai import Context, OpenAIEnvironments, configured_transport
 
-    transport = configured_transport(api_key=key, project=None)
+    transport = configured_transport(api_key=key, project=None, clients=clients)
     return OpenAIEnvironments(Context(transport, DEFAULT_PROJECT, PROFILE, None))
 
 
-async def _deployment_id() -> str | None:
+async def _deployment_id(request: ProviderPreparationRequest) -> str | None:
     from daimon.core.turn.openai_environment import deployment_id
+    from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
 
-    return await deployment_id()
+    return await deployment_id(sessionmaker=request.deps.sessionmaker, project=DEFAULT_PROJECT)
 
 
 async def prepare_tenant_environment(
@@ -572,13 +696,14 @@ async def prepare_tenant_environment(
     Only for an agent's own `openai.persistent_workspace` turn on a tenant whose
     runtime file has no row for it (its own row, e.g. the template `daimon openai
     init` writes, always wins), on an install with a deployment OpenAI key. The
-    code-default root row (`runtime_defaults`) then uses it. Everything else passes
-    through unchanged and is refused, or served, exactly as before.
+    code-default root row (`runtime_defaults`) then uses it, set up as the
+    representation's environment (`finer_drops.kept_environment`). Everything else
+    passes through unchanged and is refused, or served, exactly as before.
     """
     from daimon.core.provider_keys import DEFAULT_KEY_ENV
     from daimon.core.turn.openai_environment import tenant_environment
     from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT, OPENAI
-    from daimon.core.turn.runtime_manifest import manifest_has_row
+    from daimon.core.turn.runtime_manifest import manifest_has_row, represented_source
 
     revision = request.admission.backend_revision
     store = request.deps.state_store
@@ -592,36 +717,45 @@ async def prepare_tenant_environment(
         or manifest_has_row(request)
     ):
         return request
-    deployment = await _deployment_id()
+    deployment = await _deployment_id(request)
     if deployment is None:
         # Fail closed: without a name only this deployment uses, a reconcile could
         # adopt another deployment's environment. The turn stays as it was before.
         log.warning("openai_environment.deployment_unknown", tenant_id=request.scope.tenant_id)
         return request
+    represented = (
+        represented_source(request.source, request.target_spec)
+        if request.source is not None
+        else None
+    )
     environment_id = await tenant_environment(
         store,
-        _environments(key),
+        _environments(key, request.deps.provider_clients.openai),
         tenant_id=request.scope.tenant_id,
         project=DEFAULT_PROJECT,
         deployment=deployment,
         # Wall-clock time: a turn's `now` can be frozen at admission, and waiting
         # for another replica's create must actually time out.
         now=lambda: datetime.now(UTC),
+        spec=represented.environment
+        if represented is not None and represented.provider_execution
+        else None,
     )
     return replace(request, openai_environment_id=environment_id)
 
 
-def register_runtime() -> None:
-    """Install the provider's host callbacks without transports or credential access."""
-    from daimon.core.turn.runtimes import register_channel_runtime
+def _side_call_completions() -> Completions:
+    from mux.drivers.openai import configured_completions
 
-    register_host()
-    for profile in PROFILES:
-        register_channel_runtime(
-            profile,
-            build_openai_runtime,
-            authorizations=partial(authorized_deployments, profile=profile),
-            tariffs=partial(provider_prices, PROFILE) if profile == PROFILE else None,
-            fallback=True,
-            prepare=prepare_tenant_environment if profile == PROFILE else None,
-        )
+    return configured_completions(api_key=os.environ.get(DEFAULT_KEY_ENV["openai"]) or "")
+
+
+BACKEND = replace(
+    HOST,
+    runtime=build_openai_runtime,
+    authorizations=partial(authorized_deployments, profile=PROFILE),
+    tariffs=partial(provider_prices, PROFILE),
+    prepare_runtime=prepare_tenant_environment,
+    shares_agent_threads=True,
+    completions=_side_call_completions,
+)

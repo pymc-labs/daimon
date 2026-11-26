@@ -6,12 +6,13 @@ import uuid
 
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.session_snapshot import hash_env_bytes
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.turn_keys import (
     list_mounted_key_names,
     list_turn_key_names,
     render_keys_element,
 )
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,14 +22,7 @@ async def test_list_turn_key_names_returns_ascending_by_key(db_session: AsyncSes
     agent_id = tenant.id  # any stable uuid works; the store keys on (tenant_id, agent_id)
 
     for key in ("ZED", "ALPHA", "mid"):
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=agent_id,
-            key=key,
-            content="secret-value",
-            set_by_account_id=None,
-        )
+        await new_agent_file(db_session, tenant, agent_id=agent_id, key=key, content="secret-value")
 
     names = await list_turn_key_names(db_session, tenant_id=tenant.id, agent_id=agent_id)
 
@@ -47,14 +41,7 @@ async def test_list_turn_key_names_empty_for_agent_with_no_rows(db_session: Asyn
 
 async def test_list_turn_key_names_returns_a_plain_tuple_of_str(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key="TOGGL_TOKEN",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=tenant.id, key="TOGGL_TOKEN", content="v")
 
     names = await list_turn_key_names(db_session, tenant_id=tenant.id, agent_id=tenant.id)
 
@@ -71,13 +58,8 @@ async def test_list_turn_key_names_and_render_never_leak_a_stored_value(
     from the projection's repr or from the rendered element."""
     tenant = await make_tenant(db_session)
     sentinel_value = "sk-sentinel-do-not-leak-9f3a1c"
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key="OPENAI_API_KEY",
-        content=sentinel_value,
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=tenant.id, key="OPENAI_API_KEY", content=sentinel_value
     )
 
     names = await list_turn_key_names(db_session, tenant_id=tenant.id, agent_id=tenant.id)
@@ -132,13 +114,8 @@ async def test_list_mounted_key_names_returns_names_when_hash_matches(
 ) -> None:
     tenant = await make_tenant(db_session)
     for key in ("ALPHA", "ZED"):
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=tenant.id,
-            key=key,
-            content="secret-value",
-            set_by_account_id=None,
+        await new_agent_file(
+            db_session, tenant, agent_id=tenant.id, key=key, content="secret-value"
         )
     env_sha256 = await _mounted_hash(db_session, tenant_id=tenant.id)
 
@@ -156,22 +133,12 @@ async def test_list_mounted_key_names_returns_empty_when_hash_is_stale(
 ) -> None:
     """A key added after the session mounted its .env is not readable by that session."""
     tenant = await make_tenant(db_session)
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key="ALPHA",
-        content="secret-value",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=tenant.id, key="ALPHA", content="secret-value"
     )
     frozen = await _mounted_hash(db_session, tenant_id=tenant.id)
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key="ZED",
-        content="added-after-the-mount",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=tenant.id, key="ZED", content="added-after-the-mount"
     )
 
     names = await list_mounted_key_names(
@@ -187,13 +154,8 @@ async def test_list_mounted_key_names_returns_empty_without_a_hash(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key="ALPHA",
-        content="secret-value",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=tenant.id, key="ALPHA", content="secret-value"
     )
 
     names = await list_mounted_key_names(
@@ -208,13 +170,8 @@ async def test_list_mounted_key_names_never_leaks_a_stored_value(
 ) -> None:
     tenant = await make_tenant(db_session)
     sentinel_value = "sk-sentinel-do-not-leak-9f3a1c"
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key="OPENAI_API_KEY",
-        content=sentinel_value,
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=tenant.id, key="OPENAI_API_KEY", content=sentinel_value
     )
     env_sha256 = await _mounted_hash(db_session, tenant_id=tenant.id)
 
@@ -238,13 +195,8 @@ async def test_list_mounted_key_names_leaves_out_rows_the_mount_skipped(
     from sqlalchemy import text
 
     tenant = await make_tenant(db_session)
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key="ALPHA_TOKEN",
-        content="secret-value",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=tenant.id, key="ALPHA_TOKEN", content="secret-value"
     )
     # Written the way pre-policy code did, bypassing the store's name check.
     await db_session.execute(

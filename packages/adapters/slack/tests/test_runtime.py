@@ -8,7 +8,6 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -48,10 +47,12 @@ class TestSlackRuntime:
             "deployment_default",
             "mcp_token_probe",
             "slack_http",
+            "group_members",
+            "dm_bursts",
         }, (
             "expected exactly settings/anthropic/sessionmaker/billing_config/http_client/"
             "resolver_cache/turn_deps/deployment_default/mcp_token_probe/"
-            f"slack_http fields, "
+            f"slack_http/group_members/dm_bursts fields, "
             f"got {fields}"
         )
 
@@ -64,7 +65,7 @@ class TestSlackRuntime:
             billing_config=None,
             http_client=MagicMock(),  # pyright: ignore[reportArgumentType]
             resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]
-            turn_deps=replace(deps_for(), turn_path=None),
+            turn_deps=deps_for(),
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             rt.settings = MagicMock()  # type: ignore[misc]  # intentionally testing frozen

@@ -41,6 +41,7 @@ import uuid
 from dataclasses import dataclass
 
 from daimon.core.admin_actions import DelegatedAction, admin_for_action, is_personal_user_credential
+from daimon.core.channel_audience import AudienceMode
 from daimon.core.stores.domain import McpTokenKind, Role
 from daimon.core.turn_hold import TurnHold
 
@@ -59,6 +60,10 @@ class AuthIdentity:
     # Ordinary chat execution identity (see the module docstring).
     chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
+    # A person signed in to the MCP hub with their platform login, set only by the hub's
+    # own identity. Never a token kind: an agent, coding or CLI key's holder is not
+    # established as one person (`daimon.core.agent_chat_requester`).
+    signed_in_person: bool = False
     # Resolved from current platform authority and grants at the request boundary.
     # Platform callers never inherit a baked JWT admin claim.
     is_admin: bool = False
@@ -68,6 +73,9 @@ class AuthIdentity:
     verified_role_ids: tuple[str, ...] = ()
     # against the token row; None for every unheld credential.
     hold: TurnHold | None = None
+    # The `audience_hold` mode when the caller already knows it; None means the write guard
+    # reads it, once per call. `off` here skips the read (hand-built identities of tests).
+    audience_mode: AudienceMode | None = None
     # The principal was verified to belong to another organisation (read live from
     # the principal by the verifier): a client on every call, held credential or not.
     foreign_home_id: str | None = None
@@ -75,6 +83,8 @@ class AuthIdentity:
     slack_turn_context_id: uuid.UUID | None = None
     # Signed grant for one isolated provider session, never a tool argument.
     chat_session_id: str | None = None
+    # A provider turn's signed seals (`SEAL_CLAIM`): sealed sessions it reads stay inside them.
+    seal_ids: frozenset[str] = frozenset()
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
     is_chat_execution: bool = False
     token_kind: McpTokenKind | None = None
@@ -89,6 +99,12 @@ class AuthIdentity:
     anthropic_disabled: bool = False
     # A provider turn with no confirmation card: confirmation-gated tools refuse.
     no_confirmation_surface: bool = False
+    # The one press-approved call this credential may run (`daimon.core.host_calls`).
+    confirmed_call_id: uuid.UUID | None = None
+    # Who asked in a shared thread; signed only on a shared thread's credential.
+    requester_account_id: uuid.UUID | None = None
+    # A provider turn's signed leave to run host built-ins when nobody attends.
+    host_builtins: bool = False
     # The daimon tools a chat agent enables by name (`stores.agent_daimon_tools`);
     # None when its toolset enables every tool.
     daimon_tools: frozenset[str] | None = None
@@ -100,10 +116,14 @@ class AuthIdentity:
                 daimon_admin=self.is_admin,
                 action=action,
             )
-            and not self.is_external_agent
-            and self.hold is None
-            and not self.client
+            and self.holds_own_authority
         )
+
+    @property
+    def holds_own_authority(self) -> bool:
+        """Not an external agent key, a held credential or another organisation's client: the
+        caller acts as themselves, so their own configuration authority applies."""
+        return not self.is_external_agent and self.hold is None and not self.client
 
     @property
     def is_personal_user(self) -> bool:

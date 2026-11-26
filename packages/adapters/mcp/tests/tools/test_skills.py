@@ -28,15 +28,16 @@ from daimon.adapters.mcp.tools.skills import (
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_skills import add_channel_skill
-from daimon.core.stores.domain import Role
 from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 
 def _runtime(
@@ -76,7 +77,7 @@ async def test_list_impl_returns_skill_info_list(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
     assert isinstance(result, list), "should return a list"
     assert len(result) == 1, "should return one skill"
@@ -115,7 +116,7 @@ async def test_get_impl_returns_skill_detail_with_version_count(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     result = await _get_impl(_runtime(client, session_factory=db_session_factory), auth, "found")
     assert isinstance(result, SkillDetail), "should return a SkillDetail"
     assert result.name == "found", "should return the bare skill name"
@@ -130,7 +131,7 @@ async def test_get_impl_raises_tool_error_not_found() -> None:
     router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     with pytest.raises(ToolError, match="not found"):
         await _get_impl(_runtime(client), auth, "nope")
 
@@ -184,7 +185,7 @@ async def test_list_impl_excludes_foreign_tenant_skill_and_includes_own_and_buil
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_a, is_platform_admin=False)
     result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
 
     result_names = [r.name for r in result]
@@ -225,7 +226,7 @@ async def test_list_impl_synced_shaped_skill_displays_as_agent_slash_name(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     result = await _list_impl(_runtime(client, session_factory=db_session_factory), auth)
 
     assert len(result) == 1, "synced skill must appear in list"
@@ -261,7 +262,7 @@ async def test_get_impl_foreign_tenant_bare_name_raises_not_found() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_a, is_platform_admin=False)
     with pytest.raises(ToolError, match="not found"):
         await _get_impl(_runtime(client), auth, "their-skill")
 
@@ -304,7 +305,7 @@ async def test_delete_impl_calls_delete_skill_and_versions(
     router.add_agent_list()
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     await _delete_impl(_runtime(client, sessionmaker), auth, "doomed")
 
     assert deleted == ["sk_d"], "should delete the correct skill ID"
@@ -369,9 +370,7 @@ async def test_delete_impl_refuses_while_attached_naming_only_own_places(
         ma_agent(id="agent_theirs", name="secret-bot", tenant_id=other_tenant, skills=pinned),
         ma_agent(id="agent_unrelated", name="other-bot", tenant_id=tenant_id),
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
 
     with pytest.raises(ToolError, match="still attached to") as refused:
         await _delete_impl(
@@ -398,7 +397,7 @@ async def test_delete_impl_raises_tool_error_not_found(
     router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     with pytest.raises(ToolError, match="not found"):
         await _delete_impl(_runtime(client, sessionmaker), auth, "nope")
 
@@ -421,9 +420,7 @@ async def test_delete_impl_refuses_a_seeded_skill(
 
     router = MARouter()
     router.add("DELETE", r"/v1/skills/([^/]+)", on_delete)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id, is_platform_admin=False)
 
     with pytest.raises(ToolError, match="default skills"):
         await _delete_impl(
@@ -463,9 +460,7 @@ async def test_sync_impl_returns_outcomes(
         router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         result = await _sync_impl(
             _runtime(client, sessionmaker),
             auth,
@@ -499,9 +494,7 @@ async def test_sync_impl_passes_the_tenant_seeded_names_to_the_sync(
     cleanup_dir.mkdir()
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id, is_platform_admin=False)
 
     with (
         patch("daimon.core.skills.pipeline.fetch_repo") as mock_fetch,
@@ -539,9 +532,7 @@ async def test_sync_impl_raises_tool_error_for_invalid_path(
         router = MARouter()
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         with pytest.raises(ToolError, match="not found in fetched repository"):
             await _sync_impl(
                 _runtime(client, sessionmaker),
@@ -571,9 +562,7 @@ async def test_sync_impl_rejects_path_traversal(
         router = MARouter()
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         with pytest.raises(ToolError, match="escapes the repository root"):
             await _sync_impl(
                 _runtime(client, sessionmaker),
@@ -594,14 +583,10 @@ def _agent_json(
     extra_metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """A minimal user-owned MA agent payload for ``tenant_id``, attaching ``skill_ids``."""
-    return ma_agent(
+    return ma_agent_payload(
         id=agent_id,
         name="agent",
         model="claude-opus-4-7",
-        # daimon_name too: name lookups go through the metadata tag, not the
-        # MA `name` field, so an agent without it is invisible to them. The
-        # account stamp marks it user-owned; without one it reads as a system
-        # agent and chat tools refuse to attach to it.
         metadata={
             "daimon_tenant": str(tenant_id),
             "daimon_name": "agent",
@@ -612,7 +597,7 @@ def _agent_json(
             BetaManagedAgentsCustomSkill(skill_id=skill_id, type="custom", version="1")
             for skill_id in skill_ids
         ],
-    ).model_dump(mode="json")
+    )
 
 
 async def test_sync_impl_reports_zero_attached_when_no_agent_attaches_synced_skills(
@@ -656,9 +641,7 @@ async def test_sync_impl_reports_zero_attached_when_no_agent_attaches_synced_ski
         router.add("GET", r"/v1/agents", on_agents_list)
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         result = await _sync_impl(
             _runtime(client, sessionmaker),
             auth,
@@ -713,9 +696,7 @@ async def test_sync_impl_reports_one_attached_when_an_existing_agent_already_has
         )
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         result = await _sync_impl(
             _runtime(client, sessionmaker),
             auth,
@@ -764,9 +745,7 @@ async def test_sync_impl_excludes_failed_outcome_from_both_counts(
         router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         result = await _sync_impl(
             _runtime(client, sessionmaker),
             auth,
@@ -805,9 +784,7 @@ def _registered_mcp(client: AsyncAnthropic, auth: AuthIdentity) -> FastMCP:
 
 
 async def test_register_skill_tools_uses_only_canonical_names() -> None:
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), is_platform_admin=False)
     mcp = _registered_mcp(build_fake_anthropic(MARouter().dispatch), auth)
     names = {tool.name for tool in await mcp.list_tools()}
     assert names == {"list_skills", "get_skill", "sync_skills", "delete_skill"}, (
@@ -879,9 +856,7 @@ async def test_sync_impl_attaches_to_the_named_agent_and_preserves_its_existing_
         router.add("POST", r"/v1/agents/ag_1$", on_agent_update)
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         result = await _sync_impl(
             _runtime(client, sessionmaker),
             auth,
@@ -925,9 +900,7 @@ async def test_sync_impl_refuses_a_seeded_agent_before_importing(
     router = MARouter()
     router.add("GET", r"/v1/agents$", lambda _req, _m: list_response([managed]))
     router.add("GET", r"/v1/agents/ag_seeded$", lambda _req, _m: httpx.Response(200, json=managed))
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
 
     with (
         patch("daimon.core.skills.pipeline.fetch_repo") as mock_fetch,
@@ -964,9 +937,7 @@ async def test_sync_impl_anonymous_404_names_the_credential_remedy(
     ):
         mock_fetch.side_effect = GitHubFetchError("HTTP 404", status_code=404)
 
-        auth = AuthIdentity(
-            account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(uuid.uuid4(), uuid.uuid4(), is_platform_admin=False)
         with pytest.raises(ToolError, match="github_connect") as excinfo:
             await _sync_impl(
                 _runtime(build_fake_anthropic(MARouter().dispatch), sessionmaker),
@@ -991,9 +962,7 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials(
     ):
         mock_fetch.side_effect = GitHubFetchError("HTTP 404", status_code=404)
 
-        auth = AuthIdentity(
-            account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(uuid.uuid4(), uuid.uuid4(), is_platform_admin=False)
         with pytest.raises(ToolError) as excinfo:
             await _sync_impl(
                 _runtime(build_fake_anthropic(MARouter().dispatch), sessionmaker),
@@ -1029,9 +998,7 @@ async def test_private_skill_import_posts_connect_button_without_grant(
         patch("daimon.core.skills.pipeline.fetch_repo") as fetch,
     ):
         fetch.side_effect = GitHubFetchError("HTTP 404", status_code=404)
-        auth = AuthIdentity(
-            account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(uuid.uuid4(), uuid.uuid4(), is_platform_admin=False)
         with pytest.raises(ToolError, match="Connect GitHub button was posted"):
             await _sync_impl(
                 _runtime(build_fake_anthropic(MARouter().dispatch), sessionmaker),
@@ -1132,9 +1099,7 @@ async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped
         router.add("POST", r"/v1/agents/ag_1$", on_agent_update)
         client = build_fake_anthropic(router.dispatch)
 
-        auth = AuthIdentity(
-            account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-        )
+        auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
         result = await _sync_impl(
             _runtime(client, sessionmaker),
             auth,

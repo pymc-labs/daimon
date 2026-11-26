@@ -29,7 +29,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy import text
@@ -40,6 +40,7 @@ _NOW = datetime(2026, 5, 1, tzinfo=UTC)
 
 def _runtime(client: AsyncAnthropic, session_factory: Any) -> McpRuntime:
     settings = MagicMock()
+    settings.features = {}  # monitoring reads the deployment feature map
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
     settings.github.fallback_pat = None
@@ -58,12 +59,7 @@ def _agents_router(
     """``listings`` collects one entry per GET /v1/agents page request when given."""
     router = MARouter()
     payload = [
-        ma_agent(
-            id=ma_id,
-            name=name,
-            system="Answers ops questions",
-            metadata={"daimon_tenant": str(tid), "daimon_name": name},
-        ).model_dump(mode="json")
+        ma_agent_payload(id=ma_id, name=name, system="Answers ops questions", tenant_id=tid)
         for tid, agents in agents_by_tenant.items()
         for ma_id, name in agents
     ]

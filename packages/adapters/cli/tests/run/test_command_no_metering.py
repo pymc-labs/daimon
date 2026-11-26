@@ -23,7 +23,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
-from daimon.adapters.cli.run.command import TurnPath, run_conversation
+from daimon.adapters.cli.run.command import run_conversation
 from daimon.core.stores import usage_events
 from daimon.core.turn.io import TurnIO
 from mux.testing.drivers.anthropic.ma import (
@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from packages.adapters.cli.tests.run.conftest import (
     RuntimeFactory,
-    assert_io_ran_on,
+    assert_io_ran,
     cli_principal_count,
 )
 
@@ -44,7 +44,6 @@ from packages.adapters.cli.tests.run.conftest import (
 async def test_cli_turn_writes_no_usage_events(
     db_session: AsyncSession,
     make_rt: RuntimeFactory,
-    leg_path: TurnPath,
     turn_ios: list[TurnIO],
 ) -> None:
     """CLI turn must produce zero usage_events rows.
@@ -94,14 +93,13 @@ async def test_cli_turn_writes_no_usage_events(
 
     with structlog.testing.capture_logs() as logs:
         exit_code = await run_conversation(
-            rt=rt, session_id="test-session-abc", user_message="hello", path=leg_path
+            rt=rt, session_id="test-session-abc", user_message="hello"
         )
 
     assert exit_code == 0
-    # Which I/O ran: the leg's own turn I/O consumed the fake stream, and only the
-    # mux bridge touched the identity tables.
-    assert_io_ran_on(leg_path, turn_ios)
-    assert await cli_principal_count(db_session) == (1 if leg_path == "mux" else 0)
+    # Mux turn I/O consumed the fake stream and the identity tables were touched.
+    assert_io_ran(turn_ios)
+    assert await cli_principal_count(db_session) == 1
 
     count = await usage_events.count_all(db_session)
     assert count == 0, "CLI turn must write zero usage_events rows"

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from daimon.core.pricing import AGENT_MODEL_PRICING, provider_prices
+from daimon.core.pricing import AGENT_MODEL_PRICING, SNAPSHOT_SUFFIX, provider_prices
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import PROVIDERS, ModelRef, Provider
 from mux.profiles import (
@@ -17,6 +17,7 @@ from mux.profiles import (
     runnable_selection,
     selectable_models,
 )
+from mux.profiles.gemini import OPT_IN_MODELS
 
 
 def model_name(model: ModelRef) -> str:
@@ -52,6 +53,49 @@ class AgentModel:
     output_usd: float = 0.0
 
 
+def catalog_order[T](
+    items: Sequence[T], model: Callable[[T], ModelRef], output_usd: Callable[[T], float | None]
+) -> list[T]:
+    """The one display order of models: provider, then family strength, then newest version.
+
+    Providers follow `PROVIDERS`. A family is the id's words that are not version numbers
+    ("opus", "astra"). A version is the id's purely numeric `-` words, dated snapshot
+    suffix aside (`claude-opus-4-7` is 4.7, `gpt-6.2-sol` is 6.2; the `480b` of a size is
+    not one), newest first; a fast preset follows its base model.
+
+    Families rank by `output_usd` (the item's list output price per million tokens) of
+    their newest model, highest first, so the strongest sits on top. Equal prices go to the
+    family with the newer model, then to the one first in `items`; an unpriced family
+    ranks last.
+    """
+    first: dict[tuple[str, str], int] = {}
+    newest: dict[tuple[str, str], tuple[tuple[int, ...], bool, T]] = {}
+    keys: list[tuple[tuple[str, str], tuple[int, ...], bool]] = []
+    for index, item in enumerate(items):
+        ref = model(item)
+        words = SNAPSHOT_SUFFIX.sub("", ref.id).split("-")
+        numbers = [w for w in words if re.fullmatch(r"\d+(\.\d+)*", w)]
+        family = " ".join(w for w in words if w not in numbers and w != "fast")
+        parts = [int(n) for number in numbers for n in number.split(".")]
+        version = tuple(-n for n in (*parts, 0, 0, 0)[:4])  # 5 sorts as 5.0, after 5.5
+        fast = "fast" in words
+        slot = (ref.provider, family)
+        first.setdefault(slot, index)
+        if slot not in newest or (version, fast) < newest[slot][:2]:
+            newest[slot] = (version, fast, item)
+        keys.append((slot, version, fast))
+    # Negated so the highest price sorts first; no price sorts after every price.
+    cost = {
+        slot: float("inf") if (usd := output_usd(found[2])) is None else -usd
+        for slot, found in newest.items()
+    }
+    ranked = [
+        (PROVIDERS.index(slot[0]), cost[slot], newest[slot][0], first[slot], version, fast)
+        for slot, version, fast in keys
+    ]
+    return [items[i] for i in sorted(range(len(items)), key=ranked.__getitem__)]
+
+
 def agent_catalog() -> tuple[AgentModel, ...]:
     """Derive availability from runtime selection AND current prices, including B2 additions."""
     entries = [
@@ -81,7 +125,7 @@ def agent_catalog() -> tuple[AgentModel, ...]:
                         float(rates.output),
                     )
                 )
-    return tuple(entries)
+    return tuple(catalog_order(entries, lambda e: e.model, lambda e: e.output_usd))
 
 
 def _key(value: str) -> str:
@@ -151,6 +195,7 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
         {"haiku"},
         {"flash"},
         {"flash", "lite"},
+        {"astra"},
     ):
         if "lite" not in family:
             matches = [model for model in matches if "lite" not in _key(model.id).split()]
@@ -183,7 +228,11 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
             + ", ".join(model_name(model) for model in matches)
             + ". Choose a model by name."
         )
-    known = {"astra", "argon", "sol", "gemini 4", "gemini 4 argon"}
+    known = {"astra", "sol", "gemini 4"} | {
+        word
+        for model in OPT_IN_MODELS
+        for word in (model.removeprefix("gemini-4-"), model.replace("-", " "))
+    }
     explanation = (
         "isn't available for agents here yet"
         if key in known

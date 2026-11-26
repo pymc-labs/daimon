@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 
+import structlog
 from daimon.core._models import (
     DirectMessageConversation,
     DirectMessagePolicy,
+    Tenant,
     ThreadAgentBinding,
 )
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.session_fence_retry import FenceUnavailable, try_fence
 from daimon.core.stores.thread_sessions import retire_dm_scope
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, select, text, union
@@ -18,13 +24,59 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 COLD_DM_ORIGIN = "Private conversation"
+#: A Private answer from a contained room (`audience_hold`): a cold conversation whose
+#: "no source" is a recorded fact, so the agent's budget channel never stands in for one.
+PRIVATE_ANSWER_ORIGIN = "Private answer"
 
 DM_SCOPE_PREFIX = "dm:"
 """Thread id prefix of a private conversation's scope."""
 
 
+def is_dm_thread(platform: str, thread_id: str) -> bool:
+    """A private conversation's scope, or a Teams personal chat (`a:…`), which is its own."""
+    return thread_id.startswith(DM_SCOPE_PREFIX) or (
+        platform == "teams" and thread_id.startswith("a:")
+    )
+
+
 class DirectMessageBusy(DaimonError):
     """A previous message still owns this private conversation."""
+
+
+def owner_dm_fence(platform: str, owner: str) -> str:
+    """The advisory fence each running DM turn of `owner` holds; it frees when the process dies."""
+    return f"owner_dm:{platform}:{owner}"
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerDmFence:
+    """The owner's fence as `owner_dm_turn` holds it, on connection `pid`.
+
+    `fence_held` checks the hold; one built without a `pid` proves none. `lost` is set
+    once the holder sees the fence gone. `db` is the holding session, which the holder
+    pings so an idle drop cannot end the hold unseen.
+    """
+
+    platform: str
+    owner: str
+    pid: int = 0
+    db: AsyncSession | None = field(default=None, compare=False, repr=False)
+    lost: asyncio.Event = field(default_factory=asyncio.Event, compare=False, repr=False)
+
+
+async def fence_held(session: AsyncSession, fence: OwnerDmFence) -> bool:
+    """Whether `fence`'s connection still holds the owner's fence; a dropped one frees it."""
+    # The bigint key `try_fence(schema_scoped=True)` locks, split into two 32-bit halves.
+    held = await session.scalar(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
+            " AND pid = :pid AND objsubid = 1"
+            " AND ((classid::bigint << 32) | objid::bigint)"
+            " = hashtextextended(current_schema() || ':' || :key, 0))"
+        ),
+        {"pid": fence.pid, "key": owner_dm_fence(fence.platform, fence.owner)},
+    )
+    return bool(held)
 
 
 class DirectMessageRow(BaseModel):
@@ -46,12 +98,20 @@ class DirectMessageRow(BaseModel):
     source_thread_keys: list[str] | None = None
     history: list[dict[str, str]]
     recent_message_ids: list[str]
-    active_until: datetime | None
+    claimed_at: datetime | None
 
     @property
     def is_cold(self) -> bool:
         """Source-free provenance, distinct from legacy moves with missing source fields."""
-        return self.source_url == COLD_DM_ORIGIN and self.source_channel_id is None
+        return (
+            self.source_url in (COLD_DM_ORIGIN, PRIVATE_ANSWER_ORIGIN)
+            and self.source_channel_id is None
+        )
+
+    @property
+    def private_answer(self) -> bool:
+        """A Private answer's conversation: it has no source by design, on every turn."""
+        return self.source_url == PRIVATE_ANSWER_ORIGIN and self.source_channel_id is None
 
 
 class DmOrigin(BaseModel):
@@ -90,6 +150,19 @@ async def get_conversation(
     return None if row is None else DirectMessageRow.model_validate(row)
 
 
+async def get_conversation_in_scope(
+    session: AsyncSession, *, tenant_id: uuid.UUID, scope_id: str
+) -> DirectMessageRow | None:
+    """The conversation holding `scope_id` in this tenant, whoever owns it."""
+    row = await session.scalar(
+        select(DirectMessageConversation).where(
+            DirectMessageConversation.tenant_id == tenant_id,
+            DirectMessageConversation.scope_id == scope_id,
+        )
+    )
+    return None if row is None else DirectMessageRow.model_validate(row)
+
+
 async def get_conversation_by_scope(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, scope_id: str
 ) -> DirectMessageRow | None:
@@ -104,9 +177,12 @@ async def get_conversation_by_scope(
     return None if row is None else DirectMessageRow.model_validate(row)
 
 
-async def start_conversation(
-    session: AsyncSession, *, conversation: DirectMessageRow, now: datetime
-) -> None:
+async def start_conversation(session: AsyncSession, *, conversation: DirectMessageRow) -> None:
+    """Open `conversation` in place of the route's current one.
+
+    A set claim is live while its owner's fence is held (see `claim_message`), so a held
+    fence is busy; one that is free is taken here, until commit, so nothing claims meanwhile.
+    """
     # Lock even an absent row, so concurrent first starts cannot both insert.
     await lock_route(
         session,
@@ -119,9 +195,16 @@ async def start_conversation(
         (conversation.platform, conversation.route_key, conversation.external_user_id),
         with_for_update=True,
     )
-    if row is not None and row.active_until is not None and row.active_until > now:
-        raise DirectMessageBusy("Wait for the current DM reply before starting a new conversation.")
-    values = {**conversation.model_dump(), "updated_at": now}
+    if row is not None and row.claimed_at is not None:
+        try:
+            await try_fence(
+                session, owner_dm_fence(row.platform, row.external_user_id), schema_scoped=True
+            )
+        except FenceUnavailable:
+            raise DirectMessageBusy(
+                "Wait for the current DM reply before starting a new conversation."
+            ) from None
+    values = {**conversation.model_dump(), "updated_at": func.now()}
     if row is None:
         session.add(DirectMessageConversation(**values))
     else:
@@ -133,16 +216,27 @@ async def start_conversation(
 async def claim_message(
     session: AsyncSession,
     *,
-    platform: str,
+    fence: OwnerDmFence,
     route_key: str,
-    external_user_id: str,
-    message_id: str,
+    message_ids: Sequence[str],
     expected_scope_id: str,
-    now: datetime,
-    active_until: datetime,
+    claimed_at: datetime,
 ) -> DirectMessageRow | None:
+    """Claim the conversation of `fence`'s owner for the turn that answers `message_ids`.
+
+    A merged turn answers several messages. None means every one was seen before (a
+    redelivery); otherwise the unseen ids are recorded and the turn runs.
+
+    `claimed_at` identifies the claim: finish and delivery check it is still the set one.
+    Each claim's turn holds the owner's fence until it finishes, and the fence frees when
+    its connection drops. So a claim still set here is taken over only while `fence` is
+    held, which proves the claim's own turn lost it; that turn then fails its claim checks.
+    Without that proof the claim is still live and this one is busy.
+    """
     row = await session.get(
-        DirectMessageConversation, (platform, route_key, external_user_id), with_for_update=True
+        DirectMessageConversation,
+        (fence.platform, route_key, fence.owner),
+        with_for_update=True,
     )
     if row is None:
         raise UserFacingError(
@@ -151,15 +245,21 @@ async def claim_message(
         )
     if row.scope_id != expected_scope_id:
         raise UserFacingError("That private conversation changed. Please send your message again.")
-    if message_id in row.recent_message_ids:
+    unseen = [i for i in dict.fromkeys(message_ids) if i not in row.recent_message_ids]
+    if not unseen:
         return None
-    if row.active_until is not None and row.active_until > now:
-        raise DirectMessageBusy(
-            "A reply is still running. Please send your message again after it finishes."
+    if row.claimed_at is not None:
+        if not await fence_held(session, fence):
+            raise DirectMessageBusy(
+                "Your previous message is still being answered.\n\n"
+                "Send this one again when the reply arrives."
+            )
+        structlog.get_logger(__name__).warning(
+            "dm.claim_taken_over", platform=fence.platform, claimed_at=row.claimed_at.isoformat()
         )
-    row.active_until = active_until
-    row.updated_at = now
-    row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]
+    row.claimed_at = claimed_at
+    row.updated_at = func.now()
+    row.recent_message_ids = [*row.recent_message_ids, *unseen][-50:]
     await session.flush()
     return DirectMessageRow.model_validate(row)
 
@@ -178,8 +278,8 @@ async def holds_claim(session: AsyncSession, *, conversation: DirectMessageRow) 
     return (
         row is not None
         and row.scope_id == conversation.scope_id
-        and row.active_until is not None
-        and row.active_until == conversation.active_until
+        and row.claimed_at is not None
+        and row.claimed_at == conversation.claimed_at
     )
 
 
@@ -188,7 +288,8 @@ async def finish_message(
     *,
     conversation: DirectMessageRow,
     history: list[dict[str, str]] | None,
-) -> None:
+) -> bool:
+    """Release `conversation`'s claim and keep `history`; False if the claim is no longer set."""
     row = (
         await session.execute(
             select(DirectMessageConversation)
@@ -201,13 +302,14 @@ async def finish_message(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if row is None or row.active_until != conversation.active_until:
-        return
-    row.active_until = None
+    if row is None or row.claimed_at is None or row.claimed_at != conversation.claimed_at:
+        return False
+    row.claimed_at = None
     row.updated_at = func.now()
     if history is not None:
         row.history = history
     await session.flush()
+    return True
 
 
 async def quarantine_conversation(
@@ -244,6 +346,17 @@ async def lock_route(
     )
 
 
+async def dm_turned_off(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether someone set `direct_messages` off for the workspace; the default off is not."""
+    from daimon.core.features.snapshot import FeaturePlace, feature_in
+
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        return False
+    found = await feature_in(session, None, FeaturePlace(tenant_id, platform), "direct_messages")
+    return not found.on and found.tier != "default"
+
+
 async def get_dm_agent_name(session: AsyncSession, *, tenant_id: uuid.UUID) -> str | None:
     return await session.scalar(
         select(DirectMessagePolicy.dm_agent_name).where(DirectMessagePolicy.tenant_id == tenant_id)
@@ -253,6 +366,8 @@ async def get_dm_agent_name(session: AsyncSession, *, tenant_id: uuid.UUID) -> s
 async def set_dm_agent_name(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str | None
 ) -> None:
+    """Store the DM default agent: the one value cold DMs and `daimon dm default` read. Only
+    `dm_settings.set_default` calls this outside tests, so a change is checked and audited."""
     if agent_name is not None and not agent_name.strip():
         raise UserFacingError("The DM agent name must not be empty.")
     await session.execute(
@@ -264,29 +379,42 @@ async def set_dm_agent_name(
 
 
 async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
-    """The `direct_messages` feature for a workspace. Discord and Slack share the one
-    setting, so the platform here only has to be one that offers it."""
+    """The `direct_messages` feature for a workspace, at its own platform's default
+    (Teams starts on); off for a workspace that does not exist."""
     # Imported here: the feature modules import the stores.
     from daimon.core.features.snapshot import FeaturePlace, feature_in
 
-    place = FeaturePlace(tenant_id, "discord")
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        return False
+    place = FeaturePlace(tenant_id, platform)
     return (await feature_in(session, None, place, "direct_messages")).on
 
 
-async def set_dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID, enabled: bool) -> None:
-    """Turn `direct_messages` on or off for a workspace, as a feature value. For the CLI and
-    fixtures; the settings surfaces go through `workspace_settings`."""
+async def set_dm_enabled(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    enabled: bool,
+    account_id: uuid.UUID | None = None,
+) -> None:
+    """Turn `direct_messages` on or off for a workspace through the features writer, at the
+    workspace's own platform and with its change record. For the policy import and fixtures;
+    admins go through `workspace_settings.set_dms` or `daimon features set`."""
     # Imported here: the feature service reads these stores.
     from daimon.core.features.service import set_workspace_feature
 
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        raise LookupError(f"no workspace {tenant_id}")
     await set_workspace_feature(
         session,
         None,
         tenant_id=tenant_id,
-        platform="discord",
+        platform=platform,
         key="direct_messages",
         value="on" if enabled else "off",
-        account_id=None,
+        account_id=account_id,
         surface="cli",
     )
 

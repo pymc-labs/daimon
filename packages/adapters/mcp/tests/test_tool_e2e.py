@@ -24,7 +24,7 @@ from daimon.core.config import (
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp import Client
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.middleware import MiddlewareContext
@@ -83,14 +83,7 @@ async def test_list_agents_end_to_end(
     router.add(
         "GET",
         r"/v1/agents",
-        lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
-        ),
+        lambda _req, _m: list_response([ma_agent_payload(name="demo", tenant_id=tenant_id)]),
     )
     fake_client = build_fake_anthropic(router.dispatch)
 
@@ -175,16 +168,8 @@ async def test_list_agents_isolates_tenants_end_to_end(
 
     # Both apps share a transport that returns all agents; each app filters to its tenant
     all_agents = [
-        ma_agent(
-            id="ag_a",
-            name="a-agent",
-            metadata={"daimon_tenant": str(tenant_a_id), "daimon_name": "a-agent"},
-        ).model_dump(mode="json"),
-        ma_agent(
-            id="ag_b",
-            name="b-agent",
-            metadata={"daimon_tenant": str(tenant_b_id), "daimon_name": "b-agent"},
-        ).model_dump(mode="json"),
+        ma_agent_payload(id="ag_a", name="a-agent", tenant_id=tenant_a_id),
+        ma_agent_payload(id="ag_b", name="b-agent", tenant_id=tenant_b_id),
     ]
 
     router = MARouter()

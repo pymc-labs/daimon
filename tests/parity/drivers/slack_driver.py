@@ -94,7 +94,8 @@ from daimon.core.purge import AccountPurgeResult
 from daimon.core.purge import purge_account as core_purge_account
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.credential_requests import peek_credential_request
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import FeatureTarget, Role
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
@@ -383,6 +384,26 @@ class SlackDriver:
             deployment_default=deployment_default,
         )
 
+    @staticmethod
+    async def set_no_request_channel(
+        sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+    ) -> None:
+        """Ask a person off for the workspace: these scenarios set no request channel.
+
+        The mock settings never reach the turn (`build_turn_deps` keeps real `Settings` only), so
+        the feature's channel requirement is not checked and only a stored value turns it off."""
+        async with sessionmaker() as session:
+            await set_feature_value(
+                session,
+                tenant_id=tenant_id,
+                target=FeatureTarget("workspace"),
+                key="support_escalation",
+                value="off",
+                set_by=None,
+                surface="cli",
+            )
+            await session.commit()
+
     async def dispatch_turn(
         self,
         *,
@@ -414,6 +435,7 @@ class SlackDriver:
             )
             await s.commit()
 
+        await self.set_no_request_channel(sessionmaker, tenant_id)
         runtime = self._make_runtime(
             sessionmaker, router, fernet_key=fernet_key, billing_config=billing_config
         )

@@ -25,7 +25,6 @@ from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_app_install_link_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.github_app_auth import build_app_install_url
-from daimon.core.platform_words import scrub_other_platforms
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -103,5 +102,5 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime,
             auth,
             channel_id=channel_id,
-            purpose=scrub_other_platforms(purpose, auth.platform),
+            purpose=purpose,
         )

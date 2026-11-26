@@ -7,6 +7,8 @@ from daimon.core.wizard.apply import apply, build_action
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import ActionKind, WizardAction, WizardState, WizardStatus
 
+from ..shared_fakes import _state
+
 _CHOICE_STEP = Step(
     key="color",
     question="Pick a color",
@@ -27,20 +29,6 @@ _MULTI_STEP = Step(
 _TEXT_STEP = Step(key="notes", question="Any notes?", kind=StepKind.TEXT, options=[])
 
 _SPEC = WizardSpec(prompt="Order form", steps=[_CHOICE_STEP, _MULTI_STEP, _TEXT_STEP])
-
-
-def _state(
-    *,
-    current_step: int = 0,
-    answers: dict[str, list[str]] | None = None,
-    status: WizardStatus = WizardStatus.OPEN,
-) -> WizardState:
-    return WizardState(
-        short_id="abcd1234",
-        current_step=current_step,
-        answers=answers if answers is not None else {},
-        status=status,
-    )
 
 
 def test_select_choice_records_option_value_and_advances() -> None:

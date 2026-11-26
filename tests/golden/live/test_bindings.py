@@ -69,7 +69,7 @@ def test_missing_duplicate_and_stale_scenarios_refuse(tmp_path: Path, corruption
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("status", "PASS"), ("turn_path", "mux"), ("model", "claude-sonnet-4-6")],
+    [("status", "PASS"), ("turn_path", "legacy"), ("model", "claude-sonnet-4-6")],
 )
 def test_a_recipe_cannot_claim_execution_or_change_path_model(key: str, value: str) -> None:
     content = data()

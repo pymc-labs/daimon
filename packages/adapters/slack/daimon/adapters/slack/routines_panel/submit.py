@@ -30,9 +30,11 @@ from daimon.adapters.slack.routines_panel.read import load_routines, routines_vi
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.web_button import web_links_at
 from daimon.core import routine_service
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.cron_words import schedule_words
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -47,7 +49,6 @@ from daimon.core.routine_service import (
     RoutineRefused,
     UnknownAgent,
 )
-from daimon.core.web_links import panel_links
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -313,7 +314,12 @@ async def run_routines_create_submission(
             ),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
-        log.error("slack.routines_create_failed", team_id=team_id, exc_info=exc)
+        log.error(
+            "slack.routines_create_failed",
+            team_id=team_id,
+            exc_info=exc,
+            causes=backend_refusal_causes(exc),
+        )
         capture_exception_with_scope(exc)
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -386,7 +392,7 @@ async def run_routines_delete_submission(
             rows=entries,
             over_cap_count=over_cap_count,
             agent_name_map=agent_name_map,
-            links=panel_links(runtime.settings.web, tenant_id, admin=False),
+            links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
         )
         if root_view_id:
             await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -401,7 +407,12 @@ async def run_routines_delete_submission(
             **notice_fields(":wastebasket: Routine deleted.", neutral=True),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
-        log.error("slack.routines_delete_failed", team_id=team_id, exc_info=exc)
+        log.error(
+            "slack.routines_delete_failed",
+            team_id=team_id,
+            exc_info=exc,
+            causes=backend_refusal_causes(exc),
+        )
         capture_exception_with_scope(exc)
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id or user_id,

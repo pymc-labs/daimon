@@ -5,20 +5,22 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useConfirm } from "@/lib/confirm"
-import { shortDate, usd } from "@/lib/format"
+import { channelLabel, shortDate, usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { Field } from "@/modules/admin/shared"
-import { useSave, type Outcome } from "./api"
+import { useChannels, useSave, type Outcome } from "./api"
 import { budgetStops, spentFor, WINDOWS } from "./lib"
 import { Notice } from "./shared"
-import type { BudgetWindow, ChannelBudget, ChannelDetail } from "./types"
+import type { BudgetOnLimit, BudgetWindow, ChannelBudget, ChannelDetail } from "./types"
 
 const WINDOW_NAMES = Object.keys(WINDOWS) as BudgetWindow[]
+const ON_LIMIT: Record<BudgetOnLimit, string> = { stop: "Stop replies", alert: "Only alert" }
+const SUPPORT = "support"
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "")
 
 function windowText(b: ChannelBudget) {
-  if (b.window === "fixed") return `${shortDate(b.starts_at)} to ${shortDate(b.ends_at)}`
-  return WINDOWS[b.window]
+  const window = b.window === "fixed" ? `${shortDate(b.starts_at)} to ${shortDate(b.ends_at)}` : WINDOWS[b.window]
+  return b.on_limit === "alert" ? `${window}, alert only` : window
 }
 
 /** The budget as one row: amount and period, with the form opening under it. */
@@ -47,7 +49,7 @@ export function Budget({ c }: { c: ChannelDetail }) {
           {editable && !open && <Button size="xs" variant="outline" onClick={() => setOpen(true)}>{b ? "Edit" : "Set"}</Button>}
         </div>
       </SettingRow>
-      {editable && open && <BudgetForm key={JSON.stringify(b && [b.limit_usd, b.window, b.starts_at, b.ends_at])} c={c} onDone={() => setOpen(false)} />}
+      {editable && open && <BudgetForm key={JSON.stringify(b && [b.limit_usd, b.window, b.starts_at, b.ends_at, b.on_limit, b.alert_channel_id])} c={c} onDone={() => setOpen(false)} />}
     </PanelSection>
   )
 }
@@ -62,24 +64,28 @@ function BudgetForm({ c, onDone }: { c: ChannelDetail; onDone: () => void }) {
   const [starts, setStarts] = useState(day(b?.starts_at ?? null))
   const [ends, setEnds] = useState(day(b?.ends_at ?? null))
   const [more, setMore] = useState("")
-  const expected = b && { limit_usd: b.limit_usd, window: b.window, starts_at: b.starts_at, ends_at: b.ends_at }
+  const [onLimit, setOnLimit] = useState<BudgetOnLimit>(b?.on_limit ?? "stop")
+  const [alertTo, setAlertTo] = useState(b?.alert_channel_id ?? SUPPORT)
+  const { data: list } = useChannels()
+  const channels = (list?.channels ?? []).filter((x) => x.kind === "channel" && x.platform === c.platform && x.id !== "web")
+  const expected = b && { limit_usd: b.limit_usd, window: b.window, starts_at: b.starts_at, ends_at: b.ends_at, on_limit: b.on_limit, alert_channel_id: b.alert_channel_id }
   // Keep the instant as read when its day is untouched.
   const instant = (v: string, was: string | null) => (!v ? null : v === day(was) ? was : v)
 
-  const stop = async (amount: number) => {
-    if (!budgetStops(amount, spentFor(c, window))) return true
+  const stop = async (amount: number, mode: BudgetOnLimit) => {
+    if (mode === "alert" || !budgetStops(amount, spentFor(c, window))) return true
     return confirm({ title: "Stop replies now?", body: `${usd(amount)} is at or below ${usd(spentFor(c, window))} spent.`, action: "Save", destructive: true })
   }
   const finish = (r: Outcome) => { setOut(r); if (!r.error) onDone() }
   const setIt = async () => {
-    if (!(await stop(Number(limit)))) return
+    if (!(await stop(Number(limit), onLimit))) return
     finish(await save.run("put", "budget", {
-      action: "set", limit_usd: limit, window, expected,
+      action: "set", limit_usd: limit, window, expected, on_limit: onLimit, alert_channel_id: onLimit === "alert" && alertTo !== SUPPORT ? alertTo : null,
       starts_at: window === "monthly" ? null : instant(starts, b?.starts_at ?? null), ends_at: window === "fixed" ? instant(ends, b?.ends_at ?? null) : null,
     }))
   }
   const raise = async () => {
-    if (!b || !(await stop(Number(b.limit_usd) + Number(more)))) return
+    if (!b || !(await stop(Number(b.limit_usd) + Number(more), b.on_limit))) return
     setOut(await save.run("put", "budget", { action: "raise", amount_usd: more, expected }))
     setMore("")
   }
@@ -87,7 +93,7 @@ function BudgetForm({ c, onDone }: { c: ChannelDetail; onDone: () => void }) {
     if (!(await confirm({ title: "Remove the budget?", action: "Remove", destructive: true }))) return
     finish(await save.run("put", "budget", { action: "clear", expected }))
   }
-  const changed = !b || limit !== b.limit_usd || window !== b.window || starts !== day(b.starts_at) || ends !== day(b.ends_at)
+  const changed = !b || limit !== b.limit_usd || window !== b.window || starts !== day(b.starts_at) || ends !== day(b.ends_at) || onLimit !== b.on_limit || (onLimit === "alert" && alertTo !== (b.alert_channel_id ?? SUPPORT))
 
   return (
     <div className="mt-4 space-y-3 border-t pt-4">
@@ -101,6 +107,23 @@ function BudgetForm({ c, onDone }: { c: ChannelDetail; onDone: () => void }) {
         </Field>
         {window !== "monthly" && <Field label={window === "fixed" ? "From" : "Counting from"}><Input type="date" value={starts} onChange={(e) => setStarts(e.target.value)} /></Field>}
         {window === "fixed" && <Field label="Until"><Input type="date" value={ends} onChange={(e) => setEnds(e.target.value)} /></Field>}
+        <Field label="At the limit">
+          <Select value={onLimit} onValueChange={(v) => setOnLimit(v as BudgetOnLimit)}>
+            <SelectTrigger className="w-full" aria-label="At the limit"><SelectValue /></SelectTrigger>
+            <SelectContent>{(Object.keys(ON_LIMIT) as BudgetOnLimit[]).map((m) => <SelectItem key={m} value={m}>{ON_LIMIT[m]}</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
+        {onLimit === "alert" && (
+          <Field label="Alert channel">
+            <Select value={alertTo} onValueChange={setAlertTo}>
+              <SelectTrigger className="w-full" aria-label="Alert channel"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SUPPORT}>Support channel</SelectItem>
+                {channels.map((x) => <SelectItem key={x.id} value={x.id}>{channelLabel(x.name, x.kind)}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={save.pending || !limit || !changed} onClick={() => void setIt()}>Save</Button>

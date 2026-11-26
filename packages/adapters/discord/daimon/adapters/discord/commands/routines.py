@@ -8,8 +8,9 @@ from typing import cast
 
 import anthropic
 import structlog
+from daimon.adapters.discord.billing_panel.read import invoking_channel_id, invoking_thread_id
 from daimon.adapters.discord.checks import (
-    require_manage_guild,
+    is_guild_admin,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
@@ -19,9 +20,11 @@ from daimon.adapters.discord.routines_panel.panel import RoutinesPanelView
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.web_links import panel_links
+from daimon.core.web_links import Assignment, links_at, panel_links
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -37,9 +40,8 @@ def _get_runtime(interaction: BotInteraction) -> DiscordRuntime:
 
 
 @app_commands.guild_only()
-@app_commands.default_permissions(manage_guild=True)
 class RoutinesCog(commands.Cog):
-    """Admin-only panel for scheduled routines (hidden from non-manage_guild users)."""
+    """Panel for scheduled routines: every member sees their own, an admin sees all."""
 
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__()
@@ -50,7 +52,6 @@ class RoutinesCog(commands.Cog):
         description=DESCRIPTIONS["routines"],
     )
     @require_registered_guild
-    @require_manage_guild
     async def routines(self, interaction: BotInteraction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         rid = generate_request_id()
@@ -59,18 +60,33 @@ class RoutinesCog(commands.Cog):
             assert interaction.guild_id is not None, "guild_only ensures guild context"
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
             assert tenant_id is not None, "require_registered_guild guarantees a tenant"
+            is_admin = await is_guild_admin(interaction, action=DelegatedAction.ROUTINES)
             async with runtime.sessionmaker() as session:
                 entries, over_cap_count, agent_name_map = await load_guild_routines(
                     session,
                     runtime.anthropic,
                     tenant_id=tenant_id,
                     viewer_user_id=str(interaction.user.id),
+                    only_own=not is_admin,
                 )
             state = RoutinesPanelState.initial(
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
-                links=panel_links(runtime.settings.web, tenant_id, admin=True),
+                links=await links_at(
+                    runtime.sessionmaker,
+                    runtime.settings,
+                    FeaturePlace.of(
+                        tenant_id,
+                        "discord",
+                        invoking_channel_id(interaction),
+                        invoking_thread_id(interaction),
+                    ),
+                    panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+                    Assignment(
+                        runtime.deployment_default, runtime.anthropic, runtime.resolver_cache
+                    ),
+                ),
             )
             view = RoutinesPanelView(
                 state,

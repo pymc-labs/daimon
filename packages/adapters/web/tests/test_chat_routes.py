@@ -10,14 +10,17 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+from anthropic import AsyncAnthropic
 from daimon.adapters.web import caller as caller_module
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.output_delivery import DeliverableFile
+from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import WebMessageBlocks
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, build_turn_router
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,6 +36,13 @@ from .chat_support import (
 from .conftest import PUBLIC_URL, WebClientFactory, web_settings
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
+
+
+_OUTPUTS = AnthropicOutputRuntime(
+    AsyncAnthropic(api_key="test-key"),
+    "sesn_web",
+    scope=Scope.legacy_host_authorized(call_site="test_web_outputs"),
+)
 
 
 async def _client(
@@ -195,7 +205,7 @@ async def test_deleting_a_chat_mid_turn_stops_the_turn_and_drops_its_files(
         stopped.append(True)
         # The turn ended on its own as the stop landed: its files are swept all the same.
         kw["cancel"].clear()
-        return SimpleNamespace(state=state, ma_session_id="sesn_web")
+        return SimpleNamespace(state=state, ma_session_id="sesn_web", outputs=_OUTPUTS)
 
     async def sweep(*_args: object, post: Any, **_kw: Any) -> int:
         file = DeliverableFile(
@@ -207,7 +217,7 @@ async def test_deleting_a_chat_mid_turn_stops_the_turn_and_drops_its_files(
     with (
         one_session(),
         patch("daimon.adapters.web.turns.run_prepared_turn", run_until_stopped),
-        patch("daimon.adapters.web.turns.sweep_session_outputs", sweep),
+        patch("daimon.adapters.web.turns.sweep_outputs", sweep),
     ):
         async with await _client(web_client, db_session_factory, ws, turns) as client:
             _sign(client, token)

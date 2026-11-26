@@ -159,17 +159,27 @@ skills and sandbox environments under **Agents** > **Skills** and
 private one needs an agent's grant, made in chat. Copying an agent that runs on
 another provider than the default is refused.
 
+The model editor and the chat header list every model with its provider and
+price. A pick on another provider shows what changes and asks once. Admins can
+pin a channel to such a model from its page, and **Switch back to Claude**
+appears on a refused reply. See [model providers](providers.md).
+
 ## Admin settings and audit
 
 Admins change the workspace's rules under **Admin** > **Settings**. The same
 checks apply as in chat, and each change is recorded.
 
 - **Access**: who may start turns, direct messages, read-only memory in DMs
-  and typed mentions. Direct messages show only on Discord and Slack.
+  and typed mentions. Direct messages show on Discord, Slack and Teams.
 - **Providers**: which model providers the workspace may use.
 - **Web chat agent**: the agent a new web chat opens with. It is not the
   workspace's default agent in chat.
 
+**Admin** > **Overview** shows the workspace's health: what needs attention, people,
+agents and recent activity. **Admin** > **Issues** lists failed answers, direct
+messages, routines, deliveries and watches, one row per kind of failure. Open one to see
+its events, a link to the conversation, and **Copy link**. Owners and admins can mark it
+resolved, muted or open again; a resolved one returns if it happens again. No message content is kept.
 **Admin** > **Audit** lists changes made in the web app together with chat
 tool calls and panel writes. Filter by source, person, action and date.
 

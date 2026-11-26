@@ -288,7 +288,6 @@ async def submit_mcp_token(
         turn_deps=replace(
             deps_for(client, sessionmaker),
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
-            turn_path=None,
         ),
         mcp_token_probe=probe,
     )

@@ -21,11 +21,13 @@ from daimon.core.long_job_models import LongJob, LongJobManifest, LongJobPolicy
 from daimon.core.long_jobs import LongJobExecutor, WorkerVanished, require_admission
 from daimon.core.long_jobs_ma import worker_prompt
 from daimon.core.stores import long_jobs as store
-from daimon.core.stores.domain import FeatureTarget, TaskContinuationRow
+from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from .shared_fakes import pending_wakes
 
 NOW = datetime(2026, 10, 23, 12, tzinfo=UTC)
 LIMITS = LongJobsSettings()
@@ -35,27 +37,6 @@ async def choose(db, tenant_id, target, key, value):
     await set_feature_value(
         db, tenant_id=tenant_id, target=target, key=key, value=value, set_by=None, surface="chat"
     )
-
-
-async def pending_wakes(db, *, tenant_id, platform, thread_id):
-    """Pending wakes for one thread, including any due after the database clock.
-
-    These tests run a fake clock ahead of the database, so a wake written at
-    that clock is not yet due for `list_pending_continuations`.
-    """
-    rows = (
-        await db.execute(
-            select(TaskContinuation)
-            .where(
-                TaskContinuation.tenant_id == tenant_id,
-                TaskContinuation.platform == platform,
-                TaskContinuation.thread_id == thread_id,
-                TaskContinuation.status == "pending",
-            )
-            .order_by(TaskContinuation.created_at, TaskContinuation.id)
-        )
-    ).scalars()
-    return [TaskContinuationRow.model_validate(row) for row in rows]
 
 
 async def seed(sm, *, policy=True):
@@ -904,7 +885,6 @@ async def test_real_driver_resume_replays_without_another_user_message():
                 account_id=str(uuid.uuid4()),
                 authorization_id="worker replay regression",
             ),
-            path="legacy",
             user_message="must never be sent",
             resume_existing=True,
             lifecycle=RecordingLifecycle(),
@@ -1157,3 +1137,26 @@ async def test_a_workspace_and_an_agent_can_only_lower_the_long_job_limits(db_se
     await choose(db_session, tenant.id, agent, "long_jobs_max_deadline", "60")
     assert await limits("a") == (Decimal("10"), 30), "an agent cannot raise what the workspace set"
     assert await limits("b") == (Decimal("20"), 30)
+
+
+async def test_worker_creation_refuses_daimon_owned_agents_and_environments(db_engine, db_clean):
+    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+    from daimon.core.long_jobs_ma import ManagedLongJobPort
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+    from pydantic import SecretStr
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    seeded = await seed(sm)
+    client = build_fake_anthropic(MARouter().dispatch)  # No routes: any provider call fails.
+    settings = Settings(
+        database=DatabaseSettings(url="postgresql+asyncpg://unused/db"),
+        anthropic=AnthropicSettings(api_key=SecretStr("fake")),
+        _env_file=None,
+    )
+    try:
+        port = ManagedLongJobPort(client, sm, settings)
+        for update in ({"agent_id": "dm_agent_1"}, {"environment_id": "sh_env_1"}):
+            with pytest.raises(WorkerVanished, match="not available for this agent"):
+                await port.create_or_find(seeded.model_copy(update=update))
+    finally:
+        await client.close()

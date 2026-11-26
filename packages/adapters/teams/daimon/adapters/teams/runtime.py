@@ -25,6 +25,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.native_admins import GroupMembers, GroupMembersCache
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
@@ -54,6 +55,9 @@ class TeamsRuntime:
     # Owners of the admin team by Entra group id; None (no Graph) admits nobody
     # by team. Production wires `fetch_team_owner_ids`.
     team_owners: GroupMembers | None = None
+    # Everyone in a team by Entra group id, for DM grants and rules naming it; None
+    # (no Graph) leaves such groups unknown. Production wires `fetch_team_member_ids`.
+    team_members: GroupMembers | None = None
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # This process's message admissions; `hold_owner_key` makes it read as alive.
     owner_key: int = field(default_factory=lambda: randbits(63))
@@ -204,6 +208,8 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
             )
         finally:
             await turn_deps.context_providers.aclose()
+            await turn_deps.provider_clients.aclose()
             await drain_outcomes()
+            await drain_ops_events()
             await drain_budget_notices()
             await engine.dispose()

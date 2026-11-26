@@ -35,6 +35,7 @@ from daimon.adapters.slack.privacy_panel.views import (
     build_post_delete_view,
 )
 from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.purge import AccountPurgeFailed, purge_account
 from slack_sdk.errors import SlackApiError
@@ -236,6 +237,7 @@ async def run_purge_and_update(
             "privacy.purge.failed",
             account_id=str(account_id),
             exc_info=exc,
+            causes=backend_refusal_causes(exc),
         )
         if isinstance(exc, AccountPurgeFailed):
             # The purge rolled back whole: say so, instead of leaving "Deleting…" up.

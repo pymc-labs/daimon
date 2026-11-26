@@ -122,9 +122,9 @@ _DETAILS_SECTIONS: Final[tuple[str, ...]] = (
 )
 
 
-# The provider picker rendered where channel backends are on. It is a control, not a Details
-# section, and Slack draws it outside `fields`; its label also starts with "Model".
-_BACKEND_PICKER: Final = "Model provider"
+# The model select. It is a control, not a Details section, and its label is the bare word
+# "Model" where the section's own line carries the value.
+_MODEL_SELECT: Final = "Model"
 
 
 def _section_headings(details: CapturedView) -> tuple[str, ...]:
@@ -137,7 +137,7 @@ def _section_headings(details: CapturedView) -> tuple[str, ...]:
     return tuple(
         heading
         for text in details.fields
-        if not text.startswith(_BACKEND_PICKER)
+        if text.strip("* ") != _MODEL_SELECT
         for heading in _DETAILS_SECTIONS
         if text.startswith(heading)
     )

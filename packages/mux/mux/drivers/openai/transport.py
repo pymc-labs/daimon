@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import re
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from typing import IO, Literal, Protocol, cast
 from urllib.parse import quote
@@ -20,7 +19,8 @@ from openai import (
 )
 from pydantic import JsonValue, TypeAdapter
 
-from mux.contracts.errors import ProviderErrorCategory
+from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after
+from mux.contracts.errors import redact_native_text as _redact
 from mux.errors import ProviderError
 
 Object = dict[str, JsonValue]
@@ -129,44 +129,38 @@ def _native_error_details(error: APIStatusError) -> dict[str, str | None]:
     except (RuntimeError, ValueError, httpx.RequestNotRead):
         pass
 
-    def safe(value: object, *, identifier: bool = False) -> str | None:
-        if not isinstance(value, str):
-            return None
-        for secret in sorted(secrets, key=len, reverse=True):
-            value = value.replace(secret, "[redacted]")
-        value = re.sub(
-            r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|Bearer\s+[^\s\"']+",
-            "[redacted]",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.sub(r"https?://[^\s\"']+", "[redacted URL]", value)
-        if identifier and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,128}", value) is None:
-            return None
-        return " ".join(value.split())[:512]
-
     return {
-        "native_message": safe(raw.get("message")),
-        "native_error_code": safe(raw.get("code"), identifier=True),
-        "native_param": safe(raw.get("param"), identifier=True),
+        "native_message": _redact(raw.get("message"), secrets),
+        "native_error_code": _redact(raw.get("code"), secrets, identifier=True),
+        "native_param": _redact(raw.get("param"), secrets, identifier=True),
     }
 
 
 @contextmanager
-def suppress_mcp_error_details(enabled: bool = True) -> Iterator[None]:
-    """MCP errors can echo credentials from an earlier vault request.
-
-    No pattern can safely identify an opaque bearer or partial credential. Keep
-    only the normalized category/status in this flow, including cleanup errors.
-    """
+def suppress_mcp_error_details(secrets: Collection[str] | None) -> Iterator[None]:
+    """MCP errors can echo credentials from an earlier vault request: mask this
+    flow's MCP secrets (and fragments) in the native fields. A flow on an existing
+    vault (rotation, turns, deletes) can't know every bearer it held: None keeps none."""
     try:
         yield
     except ProviderError as error:
-        if enabled:
-            error.native_message = None
-            error.native_error_code = None
-            error.native_param = None
+        if secrets is None:
+            error.native_message = error.native_error_code = error.native_param = None
+        else:
+            error.native_message = _redact(error.native_message, secrets)
+            error.native_error_code = _redact(error.native_error_code, secrets, identifier=True)
+            error.native_param = _redact(error.native_param, secrets, identifier=True)
         raise
+
+
+def _retry_after(error: APIStatusError) -> float | None:
+    """Seconds the 429 asks to wait: `retry-after-ms`, else `retry-after` in seconds."""
+    for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        try:
+            return float(error.response.headers[name]) * scale
+        except (KeyError, ValueError):
+            continue
+    return None
 
 
 def provider_error(error: APIError | httpx.HTTPError) -> ProviderError:
@@ -191,11 +185,16 @@ def provider_error(error: APIError | httpx.HTTPError) -> ProviderError:
     }
     category = categories.get(status, "upstream")
     # Keep only bounded/redacted diagnostic fields; never retain the raw body.
+    details = _native_error_details(error)
     return ProviderError(
         category,
         retryable=status in (408, 429) or status >= 500,
         native_code=str(status),
-        **_native_error_details(error),
+        # A spent billing quota never refills, so it names no wait.
+        retry_after_s=bounded_retry_after(_retry_after(error))
+        if status == 429 and details.get("native_error_code") != "insufficient_quota"
+        else None,
+        **details,
     )
 
 

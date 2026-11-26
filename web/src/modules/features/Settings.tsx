@@ -6,16 +6,37 @@ import { PanelSection, SettingRow } from "@/components/panel"
 import { QueryState } from "@/components/QueryState"
 import { SettingsList, type SettingsRow } from "@/components/settings"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { useFeatureSave, useFeatures, useFeatureSchema } from "./api"
 import type { FeaturePlace, FeatureSchema, FeatureView, Tier } from "./types"
 
 const DEFAULT = "default"
-const TIER_NAME: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread" }
+const TIER_NAME: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread", routine: "Routine" }
 
 type Group = { name: string; rows: { key: string; label: string; control: React.ReactNode }[] }
 
 /** The label of a value as people read it. */
 const labelOf = (s: FeatureSchema, value: string) => s.values.find((v) => v.value === value)?.label ?? value
+
+/** A value held by a level above: the value with a lock and who to ask; `note` replaces the default words. */
+export function Locked({ label, by, note }: { label: string; by: string; note?: string }) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+      <span className="inline-flex items-center gap-1.5"><Lock className="size-3.5 text-muted-foreground" />{label}</span>
+      <span className="text-xs text-muted-foreground">{note ?? `Locked by the ${by.toLowerCase()}. Ask an admin.`}</span>
+    </span>
+  )
+}
+
+/** A feature that cannot work here, with the reason. */
+export function Unavailable({ reason }: { reason: string }) {
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
+      <span className="inline-flex items-center gap-1.5"><Ban className="size-3.5" />Unavailable</span>
+      <span className="text-xs">{reason}</span>
+    </span>
+  )
+}
 
 /**
  * The controls for every feature that can be set at `tier`, grouped by category, from the schema.
@@ -23,7 +44,7 @@ const labelOf = (s: FeatureSchema, value: string) => s.values.find((v) => v.valu
  * A person who may not change it, or a lock above, sees the value in effect instead, with the level
  * that locked it; so does a value another level overrides, next to its control.
  */
-function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (error: string | null) => void, width?: string) {
+function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (error: string | null) => void, width?: string, hide: string[] = []) {
   const schema = useFeatureSchema()
   const doc = useFeatures(place)
   const save = useFeatureSave(place)
@@ -36,33 +57,29 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
   const control = (s: FeatureSchema, v: FeatureView) => {
     const own = v.tiers.find((t) => t.tier === tier)
     const ownValue = own && own.value !== DEFAULT ? own.value : null
-    if (v.unavailable) {
-      return (
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5"><Ban className="size-3.5" />Unavailable</span>
-          <span className="text-xs">{v.unavailable}</span>
-        </span>
-      )
-    }
-    if (v.locked && v.source !== tier) {
-      return (
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-          <span className="inline-flex items-center gap-1.5"><Lock className="size-3.5 text-muted-foreground" />{labelOf(s, v.value)}</span>
-          <span className="text-xs text-muted-foreground">Locked by the {(TIER_NAME[v.source] ?? "Workspace").toLowerCase()}. Ask an admin.</span>
-        </span>
-      )
-    }
+    if (v.unavailable) return <Unavailable reason={v.unavailable} />
+    if (v.locked && v.source !== tier) return <Locked label={labelOf(s, v.value)} by={TIER_NAME[v.source] ?? "Workspace"} />
     if (!edit) return <span>{v.summary}</span>
     const overridden = ownValue !== null && v.source !== tier && v.value !== ownValue
     const lockable = s.lockable.includes(tier) && ownValue !== null ? own : undefined
+    // What this tier falls back to: the nearest level above it with a value, else the built-in default.
+    const above = v.tiers.slice(0, Math.max(v.tiers.findIndex((t) => t.tier === tier), 0)).reverse().find((t) => t.value !== DEFAULT)
+    const base = own ? { value: above?.value ?? s.default, from: above ? (TIER_NAME[above.tier] ?? "Built-in") : "Built-in" } : { value: v.value, from: TIER_NAME[v.source] ?? "Built-in" }
     return (
       <>
-        <InheritedSelect
+        {s.maxLength ? (
+          <Input
+            aria-label={s.name} defaultValue={ownValue ?? ""} maxLength={s.maxLength} disabled={save.pending}
+            placeholder={labelOf(s, base.value)} className={width ?? "w-56"}
+            onBlur={(e) => { const next = e.target.value.trim() || DEFAULT; if (next !== (ownValue ?? DEFAULT)) void run(s, v, next, false) }}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur() }}
+          />
+        ) : <InheritedSelect
           bare label={s.name} value={ownValue} disabled={save.pending} className={width}
-          inherited={{ value: v.value, label: ownValue === null ? labelOf(s, v.value) : "", from: TIER_NAME[v.source] ?? "Built-in" }}
+          inherited={{ value: base.value, label: labelOf(s, base.value), from: base.from }}
           options={s.values.map((o) => ({ value: o.value, label: o.label }))}
           onChange={(next) => void run(s, v, next ?? DEFAULT, false)}
-        />
+        />}
         {overridden && <span className="text-xs text-muted-foreground">{v.summary}</span>}
         {lockable && (
           <Button
@@ -76,30 +93,38 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
     )
   }
 
+  const controls = new Map<string, React.ReactNode>()
   const groups: Group[] = []
   for (const s of schema.data ?? []) {
     const v = views.get(s.key)
+    if (v && s.tiers.includes(tier)) controls.set(s.key, control(s, v))
+    if (hide.includes(s.key)) continue
     if (!v || !s.tiers.includes(tier) || (v.unavailable && v.tiers.every((t) => t.value === DEFAULT))) continue
     let g = groups.find((x) => x.name === s.categoryName)
     if (!g) groups.push((g = { name: s.categoryName, rows: [] }))
-    g.rows.push({ key: s.key, label: s.name, control: control(s, v) })
+    g.rows.push({ key: s.key, label: s.name, control: controls.get(s.key) })
   }
-  return { groups, schema, doc }
+  return { groups, schema, doc, controls, pending: save.pending }
 }
 
-type Props = { place: FeaturePlace; tier: Tier; edit: boolean }
+type Props = { place: FeaturePlace; tier: Tier; edit: boolean; /** Keys another page owns. */ hide?: string[]; /** Extra lines under a feature's control, by key. */ notes?: Record<string, React.ReactNode> }
 
 /** A panel's Settings: one section per category, rows as `SettingRow`s. */
-export function FeatureSettings({ place, tier, edit }: Props) {
+export function FeatureSettings({ place, tier, edit, hide, notes }: Props) {
   const [error, setError] = useState<string | null>(null)
-  const { groups, schema, doc } = useGroups(place, tier, edit, setError)
+  const { groups, schema, doc } = useGroups(place, tier, edit, setError, undefined, hide)
   return (
     <QueryState query={schema.data ? doc : schema} className="px-5 py-4">{() => (
       <>
         {groups.map((g) => (
           <PanelSection key={g.name} title={g.name}>
             <div className="space-y-3">
-              {g.rows.map((r) => <SettingRow key={r.key} label={r.label}><div className="flex items-center gap-2">{r.control}</div></SettingRow>)}
+              {g.rows.map((r) => (
+                <SettingRow key={r.key} label={r.label}>
+                  <div className="flex items-center gap-2">{r.control}</div>
+                  {notes?.[r.key]}
+                </SettingRow>
+              ))}
             </div>
           </PanelSection>
         ))}
@@ -110,9 +135,9 @@ export function FeatureSettings({ place, tier, edit }: Props) {
 }
 
 /** A page's Settings: one bordered list per category. */
-export function FeatureList({ place, tier, edit }: Props) {
+export function FeatureList({ place, tier, edit, hide }: Props) {
   const [error, setError] = useState<string | null>(null)
-  const { groups, schema, doc } = useGroups(place, tier, edit, setError, "w-60")
+  const { groups, schema, doc } = useGroups(place, tier, edit, setError, "w-60", hide)
   return (
     <QueryState query={schema.data ? doc : schema} className="px-4 pt-6 lg:px-6">{() => (
       <div className="px-4 py-6 lg:px-6">
@@ -123,4 +148,12 @@ export function FeatureList({ place, tier, edit }: Props) {
       </div>
     )}</QueryState>
   )
+}
+
+/** One feature as the same select the settings lists use: the level above's value, On or Off. */
+export function FeatureToggle({ place, tier, name, edit = true }: { place: FeaturePlace; tier: Tier; name: string; edit?: boolean }) {
+  const [error, setError] = useState<string | null>(null)
+  const { controls, schema, doc } = useGroups(place, tier, edit, setError)
+  if (!schema.data || !doc.data) return <span className="h-8" />
+  return <div className="space-y-1"><div className="flex items-center gap-2">{controls.get(name)}</div>{error && <p role="alert" className="text-xs text-destructive">{error}</p>}</div>
 }

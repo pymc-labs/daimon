@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -27,12 +26,13 @@ from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.models_catalog import list_model_choices
+from daimon.core.models_catalog import claude_model_choices
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.shared_helpers import walk as _walk
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -58,7 +58,7 @@ def _runtime(anthropic: Any, *, sessionmaker: Any = None) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+        turn_deps=deps_for(),
     )
 
 
@@ -105,16 +105,6 @@ def _interaction() -> MagicMock:
     interaction.followup.send = AsyncMock()
     interaction.edit_original_response = AsyncMock()
     return interaction
-
-
-def _walk(item: Any) -> list[Any]:
-    found = [item]
-    for child in getattr(item, "children", []) or []:
-        found.extend(_walk(child))
-    accessory = getattr(item, "accessory", None)
-    if accessory is not None:
-        found.extend(_walk(accessory))
-    return found
 
 
 def _text(item: Any) -> str:
@@ -222,7 +212,7 @@ def test_new_agent_modal_model_select_options_match_catalog(account_id: uuid.UUI
     model_field = modal.model_label.component
     assert isinstance(model_field, discord.ui.Select), "Model field must be a Select"
 
-    expected = list_model_choices(default=DEFAULT_AGENT_MODEL)
+    expected = claude_model_choices(default=DEFAULT_AGENT_MODEL)
     assert len(model_field.options) == len(expected), (
         "the Select must offer exactly the catalog's choices"
     )

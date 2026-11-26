@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, cast
 
 import anthropic
@@ -18,7 +19,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 )
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.run import command as cmd_mod
-from daimon.adapters.cli.run.command import TurnPath, run_conversation
+from daimon.adapters.cli.run.command import run_conversation
 from daimon.core.config import Settings
 from daimon.core.errors import TurnError
 from daimon.core.turn.ceiling import CEILING_MESSAGE
@@ -30,9 +31,11 @@ from typer.testing import CliRunner
 
 from packages.adapters.cli.tests.run.conftest import (
     RuntimeFactory,
-    assert_io_ran_on,
+    assert_io_ran,
     cli_principal_count,
 )
+
+_run_conversation = partial(run_conversation, session_id="s1", user_message="hello")
 
 
 def _install_run_turn(
@@ -49,17 +52,11 @@ def _install_run_turn(
     monkeypatch.setattr(cmd_mod, "run_turn", fake_run_turn)
 
 
-async def _assert_bridge(db: AsyncSession, leg_path: TurnPath, captured: dict[str, Any]) -> None:
-    """Which I/O ran before the driver: the mux bridge read the database and minted
-    the operator's scope; the legacy path did neither."""
-    assert captured["path"] == leg_path
-    if leg_path == "mux":
-        assert captured["scope"] is not None
-        assert captured["scope"].authorization_id == "cli-operator-run"
-        assert await cli_principal_count(db) == 1
-    else:
-        assert captured["scope"] is None
-        assert await cli_principal_count(db) == 0
+async def _assert_bridge(db: AsyncSession, captured: dict[str, Any]) -> None:
+    """Before the driver, the command read the database and minted the operator's scope."""
+    assert captured["scope"] is not None
+    assert captured["scope"].authorization_id == "cli-operator-run"
+    assert await cli_principal_count(db) == 1
 
 
 def _invoke(args: list[str], **kwargs: Any) -> Any:
@@ -96,23 +93,19 @@ def test_run_new_turn_missing_message_exits_1(
 async def test_run_exits_0_on_end_turn(
     monkeypatch: pytest.MonkeyPatch,
     make_rt: RuntimeFactory,
-    leg_path: TurnPath,
     db_session: AsyncSession,
 ) -> None:
     captured: dict[str, Any] = {}
     _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
-    )
+    exit_code = await _run_conversation(rt=make_rt())
     assert exit_code == 0
-    await _assert_bridge(db_session, leg_path, captured)
+    await _assert_bridge(db_session, captured)
 
 
 @pytest.mark.asyncio
 async def test_run_exits_1_on_turn_error(
     monkeypatch: pytest.MonkeyPatch,
     make_rt: RuntimeFactory,
-    leg_path: TurnPath,
     db_session: AsyncSession,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -121,35 +114,29 @@ async def test_run_exits_1_on_turn_error(
         state=TurnState(error=TurnError(kind="upstream", message="boom")),
         captured=captured,
     )
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
-    )
+    exit_code = await _run_conversation(rt=make_rt())
     assert exit_code == 1
-    await _assert_bridge(db_session, leg_path, captured)
+    await _assert_bridge(db_session, captured)
 
 
 @pytest.mark.asyncio
 async def test_run_reads_message_from_stdin(
     monkeypatch: pytest.MonkeyPatch,
     make_rt: RuntimeFactory,
-    leg_path: TurnPath,
     db_session: AsyncSession,
 ) -> None:
     captured: dict[str, Any] = {}
     _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello from stdin", path=leg_path
-    )
+    exit_code = await _run_conversation(rt=make_rt(), user_message="hello from stdin")
     assert exit_code == 0
     assert captured["user_message"] == "hello from stdin"
-    await _assert_bridge(db_session, leg_path, captured)
+    await _assert_bridge(db_session, captured)
 
 
 @pytest.mark.asyncio
 async def test_run_api_error_emits_failed_terminal_and_exits_1(
     monkeypatch: pytest.MonkeyPatch,
     make_rt: RuntimeFactory,
-    leg_path: TurnPath,
     db_session: AsyncSession,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -165,11 +152,9 @@ async def test_run_api_error_emits_failed_terminal_and_exits_1(
 
     monkeypatch.setattr(cmd_mod, "run_turn", raising)
 
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
-    )
+    exit_code = await _run_conversation(rt=make_rt())
     assert exit_code == 1
-    await _assert_bridge(db_session, leg_path, seen)
+    await _assert_bridge(db_session, seen)
     terminals = [
         json.loads(line)
         for line in capsys.readouterr().out.splitlines()
@@ -183,7 +168,6 @@ async def test_run_api_error_emits_failed_terminal_and_exits_1(
 async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_terminal_event(
     capsys: pytest.CaptureFixture[str],
     make_rt: RuntimeFactory,
-    leg_path: TurnPath,
     turn_ios: list[TurnIO],
 ) -> None:
     """Exercises the REAL driver (not a monkeypatched run_turn) so this test
@@ -222,16 +206,14 @@ async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_termi
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
     client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
 
-    exit_code = await run_conversation(
+    exit_code = await _run_conversation(
         rt=make_rt(client),
         session_id="sess_ceiling",
-        user_message="hello",
-        path=leg_path,
         deadline=datetime.now(UTC) - timedelta(seconds=5),
     )
 
     assert exit_code == 1, "a ceiling breach must exit nonzero"
-    assert_io_ran_on(leg_path, turn_ios)
+    assert_io_ran(turn_ios)
 
     # structlog's own log lines share stdout with the NDJSON protocol lines;
     # only lines that parse as JSON objects belong to the protocol.
@@ -264,7 +246,6 @@ async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_termi
 async def test_run_conversation_passes_the_tool_posture_to_the_driver(
     monkeypatch: pytest.MonkeyPatch,
     make_rt: RuntimeFactory,
-    leg_path: TurnPath,
     db_session: AsyncSession,
 ) -> None:
     """The observing wrapper must forward the tool-safety posture to the turn."""
@@ -276,13 +257,7 @@ async def test_run_conversation_passes_the_tool_posture_to_the_driver(
     _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
     posture = PolicyApproval(decide=unattended_decider(ToolSafetyPolicy(enabled=True)))
 
-    await run_conversation(
-        rt=make_rt(),
-        session_id="s1",
-        user_message="hello",
-        path=leg_path,
-        tool_confirmation=posture,
-    )
+    await _run_conversation(rt=make_rt(), tool_confirmation=posture)
 
     assert captured["tool_confirmation"] is posture
-    await _assert_bridge(db_session, leg_path, captured)
+    await _assert_bridge(db_session, captured)

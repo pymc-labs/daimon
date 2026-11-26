@@ -483,7 +483,7 @@ def build_teams_runtime(
     if admins:
         settings.teams = settings.teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
     settings.turn_queue = TurnQueueSettings()
-    settings.features = {}
+    settings.features = {"dm_debounce_seconds": "0"}  # a test sets the wait it needs
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()
@@ -666,6 +666,15 @@ def no_delivery_poller() -> Iterator[AsyncMock]:
 
 
 @pytest.fixture(autouse=True)
+def routed_personal_chat() -> Iterator[AsyncMock]:
+    """Personal chats start already routed; `test_personal_chat.py` covers the routing."""
+    with patch(
+        "daimon.adapters.teams.app.route_personal_chat", new_callable=AsyncMock, return_value=True
+    ) as route:
+        yield route
+
+
+@pytest.fixture(autouse=True)
 def no_channel_listing() -> Iterator[AsyncMock]:
     """The channel listing round would share the test connection too."""
     with patch("daimon.adapters.teams.app.run_channel_listing", new_callable=AsyncMock) as loop:
@@ -712,26 +721,6 @@ def stub_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
         return "test-bot-token"
 
     monkeypatch.setattr(TokenManager, "get_app_token", _fake_token)
-
-
-@pytest.fixture(autouse=True)
-def isolate_card_edits() -> Iterator[None]:
-    """Card edits finish in the background; one test's stalled edit must not
-    hold the next test's edit to a card with the same id."""
-    from daimon.core.posted_controls.lifecycle import cancel_pending_card_edits
-
-    yield
-    cancel_pending_card_edits()
-
-
-@pytest.fixture(autouse=True)
-def isolate_agent_faces() -> Iterator[None]:
-    """Creating an agent starts its face render in the background; one test's
-    render must not write into the next test's database or back-off state."""
-    from daimon.core.agent_identity import cancel_pending_agent_faces
-
-    yield
-    cancel_pending_agent_faces()
 
 
 @pytest.fixture

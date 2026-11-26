@@ -34,16 +34,17 @@ import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.teams import card
 from daimon.adapters.teams.image_preview import MAX_PREVIEWS
-from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post, relabel_turn_post
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.message_split import split_fenced
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.stores.agent_posts import PostRole
 from daimon.core.teams_markdown import has_math
 from daimon.core.teams_threads import conversation_of
@@ -195,7 +196,6 @@ class TeamsTurnLifecycle(OutputGate):
         markup: Decimal = Decimal(1),
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         budget_channel_id: str | None = None,
-        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         acknowledge: Callable[[Acknowledgment], None] | None = None,
         hold_controls: bool = False,
         ma_agent_id: str | None = None,
@@ -210,6 +210,12 @@ class TeamsTurnLifecycle(OutputGate):
         # so they land below every file it posts; only for a turn that may have outputs.
         self._hold_controls = hold_controls
         self._held_controls: MessageActivityInput | None = None
+        # The summary line's name rule and clock, and how the controls card is drawn and where.
+        self._summary_at: tuple[bool, float] | None = None
+        self._controls: tuple[Callable[[str | None], MessageActivityInput | None], str | None] = (
+            lambda _: None,
+            None,
+        )
         # When the turn's last tool call ended: every output was written before it.
         self._finished_tools = 0
         self._tool_done_at: float | None = None
@@ -229,7 +235,6 @@ class TeamsTurnLifecycle(OutputGate):
         self._markup = markup
         self._sessionmaker = sessionmaker
         self._budget_channel_id = budget_channel_id
-        self._on_initial_progress = on_initial_progress
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
         self._requester_user_id = requester_user_id
@@ -363,19 +368,8 @@ class TeamsTurnLifecycle(OutputGate):
         if self._unprompted:
             return
         activity = self._status()
-        operation = "edit" if self._message_id is not None else "send"
         self._message_id = await self._send(activity, message_id=self._message_id, role="status")
         self._last_flush = self._clock()
-        if self._on_initial_progress is not None:
-            self._on_initial_progress(
-                InitialProgressReceipt(
-                    operation=operation,
-                    destination_id=self._conversation_id,
-                    message_id=self._message_id,
-                    rendered_json=activity.model_dump_json(by_alias=True, exclude_none=True),
-                    observed_s=self._clock(),
-                )
-            )
 
     @property
     def stopping(self) -> bool:
@@ -544,20 +538,12 @@ class TeamsTurnLifecycle(OutputGate):
         `named_above`: agent identity's bold name leads the answer just above it.
         None when an admin hid the footer.
         """
-        if (
-            self._sessionmaker is not None
-            and self._tenant_id is not None
-            and not await cost_footer_shown(
-                self._sessionmaker,
-                tenant_id=self._tenant_id,
-                platform="teams",
-                channel_id=self._budget_channel_id,
-            )
-        ):
+        if not await self._footer_shown():
             return None
         t = state.usage_totals
-        cost = None
-        if self._provider_draft is None and not isinstance(t, ProviderUsageTotals):
+        if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
+            cost = LATE_TURN_COSTS.turn_debit(t, markup=self._markup, show=self._show_late_debit)
+        else:
             cost = (
                 cost_of_totals(
                     state.usage_totals,
@@ -570,14 +556,55 @@ class TeamsTurnLifecycle(OutputGate):
             if cost is not None:
                 # What the tenant is debited, markup included, so `used` matches `left`.
                 cost = float(debit_amount(cost, markup=self._markup))
+        self._summary_at = (named_above, self._clock() - self._state.started_at)
         return format_summary(
             agent_name=None if named_above else self._agent_name,
-            elapsed_seconds=self._clock() - self._state.started_at,
-            cost=None
-            if self._provider_draft is not None or isinstance(t, ProviderUsageTotals)
-            else format_cost(cost),
+            elapsed_seconds=self._summary_at[1],
+            cost=format_cost(cost),
             left=await self._balance(),
         )
+
+    async def _footer_shown(self) -> bool:
+        return (
+            self._sessionmaker is None
+            or self._tenant_id is None
+            or await cost_footer_shown(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="teams",
+                channel_id=self._budget_channel_id,
+            )
+        )
+
+    async def _show_late_debit(self, debit: float) -> bool:
+        """Edit a debit priced after the turn ended into each summary line the turn posted."""
+        if self._summary_at is None or not await self._footer_shown():
+            return False
+        named_above, elapsed = self._summary_at
+        summary = format_summary(
+            agent_name=None if named_above else self._agent_name,
+            elapsed_seconds=elapsed,
+            cost=format_cost(debit),
+            left=await self._balance(),
+        )
+        applied = False
+        for message_id, (actions, shown, error) in list(self._notices.items()):
+            if shown is not None:
+                self._notices[message_id] = (actions, summary, error)
+                # A refused edit (a 429) leaves it False, so the debit is shown again later.
+                applied = (
+                    await self._amend(message_id, lambda text: text, _SUFFIX_EVENTS) or applied
+                )
+        draw, controls_id = self._controls
+        if (controls := draw(summary)) is None:
+            return applied
+        if self._held_controls is not None:
+            self._held_controls = controls
+        elif controls_id is not None:
+            await self._edit(controls, controls_id)
+        else:
+            return applied
+        return True
 
     async def _balance(self) -> str | None:
         if self._sessionmaker is None or self._tenant_id is None:
@@ -719,11 +746,15 @@ class TeamsTurnLifecycle(OutputGate):
         """
         named = self._agent_name_prefix is not None
         summary = await self._summary(state, named_above=named)
-        controls = (
-            card.notice_card(card.CANCELLED_NOTICE, summary=summary)
-            if cancelled
-            else card.controls_card(summary, ask_human=self._ask_human, votes=self._vote_buttons)
-        )
+
+        def draw(summary: str | None) -> MessageActivityInput | None:
+            if cancelled:
+                return card.notice_card(card.CANCELLED_NOTICE, summary=summary)
+            return card.controls_card(summary, ask_human=self._ask_human, votes=self._vote_buttons)
+
+        controls = draw(summary)
+        if summary is not None:
+            self._controls = (draw, None)
         if controls is None:
             return
         if hold:
@@ -739,7 +770,8 @@ class TeamsTurnLifecycle(OutputGate):
 
     async def _send_controls(self, controls: MessageActivityInput) -> None:
         try:
-            await self._send(controls, message_id=None, role="controls")
+            posted = await self._send(controls, message_id=None, role="controls")
+            self._controls = (self._controls[0], posted)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.controls_failed", exc_info=True)
 
@@ -860,6 +892,10 @@ class TeamsTurnLifecycle(OutputGate):
         if phase == "done" and not self._answered:
             return
         self._acknowledge(phase)
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
+        """Tell the person, in a card apart from the reply, that admins can read this."""
+        await self._send(card.notice_card(notice.text, error=False), message_id=None, role="notice")
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         return None

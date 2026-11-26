@@ -139,9 +139,9 @@ the server's own read-only and destructive hints decide instead.
 A rule on a publish tool makes it ask in every channel and refuse in routines,
 even where the rule does not name the channel.
 
-> **Warning:** Gemini and OpenAI cannot pause for a card. A turn for an agent
-> on one of them is refused when the agent has an `ask` rule or a
-> channel-scoped `deny` on a Daimon tool. Agent-wide `deny` rules still work.
+> **Warning:** OpenAI, Gemini and self-hosted agents cannot ask first on
+> Daimon's tools. Their turn is refused when the agent has an `ask` rule or a
+> channel-scoped `deny` on one. Agent-wide `deny` rules still work.
 > The operator log records `turn.backend_unsupported`.
 
 ## Approval overrides
@@ -276,12 +276,13 @@ people outside the organisation can view a channel whose readers are not
 `own`. Admins can press **Make confidential** to set readers to `own`.
 
 On Discord, admins name the organisation's internal roles with **Name your
-internal roles** on the Permissions screen. Any other role that can view the
-channel triggers the warning. Without internal roles the check is not made.
-Operators can set them too:
+internal roles** on the Permissions screen. The warning shows when a person
+with none of them can view the channel; without them it is not made. **Name
+your team roles** picks the team. Operators can set them:
 
 ```bash
 daimon tenants access-policy set discord GUILD_ID --internal-role ROLE_ID
+daimon tenants access-policy set discord GUILD_ID --team-role ROLE_ID
 daimon tenants access-policy set discord GUILD_ID --clear-internal-roles
 ```
 

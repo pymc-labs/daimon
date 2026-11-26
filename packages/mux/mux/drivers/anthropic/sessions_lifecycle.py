@@ -79,10 +79,16 @@ class CatalogSkill(NativeConfig):
     version: str | None = None
 
 
+class ModelConfig(NativeConfig):
+    id: str
+    speed: str | None = None
+    effort: str | None = None
+
+
 class AgentOverrides(NativeConfig):
     type: Literal["agent_with_overrides"]
     id: str
-    model: str | None = None
+    model: str | ModelConfig | None = None
     system: str | None = None
     mcp_servers: list[MCPServer] | None = None
     tools: list[AgentTool] | None = None
@@ -186,6 +192,7 @@ class SessionArchive(Protocol):
 
 class SessionWalk(Protocol):
     def walk(self, scope: Scope) -> AsyncIterator[Session]: ...
+    def live_vault_ids(self, scope: Scope) -> AsyncIterator[str]: ...
 
 
 SESSION_READS_NAMESPACE = "anthropic.session_reads"
@@ -291,6 +298,9 @@ class AnthropicSessions:
             raise ValueError("Anthropic sessions require an environment")
         self._check(scope, spec.environment, "environment")
         check_record(scope, spec.agent.id, spec.metadata)
+        if spec.skills:
+            # Its sessions take skills through the agent; never drop a session's own.
+            raise UnsupportedCapability(("session_skills",), "anthropic.managed_agents")
         config = SessionCreateConfig()
         for namespace, extension in spec.extensions.items():
             if namespace != "anthropic.session_create":
@@ -441,6 +451,22 @@ class AnthropicSessions:
                 self._authorization, scope, "session", item.id
             ):
                 yield self._session(scope, item)
+
+    async def live_vault_ids(self, scope: Scope) -> AsyncIterator[str]:
+        """Vault ids mounted by unarchived sessions, without converting each session.
+
+        A large fleet made the per-session record conversion hold the event loop.
+        """
+        authorize(self._authorization, scope, "session")
+        pages = self._client.beta.sessions.list(include_archived=False, limit=100)
+        async for item in provider_iter(pages):
+            if (
+                item.archived_at is None
+                and visible(scope, item.metadata)
+                and visible_grant(self._authorization, scope, "session", item.id)
+            ):
+                for vault_id in item.vault_ids or ():
+                    yield vault_id
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
         self._check(scope, ref, "session")

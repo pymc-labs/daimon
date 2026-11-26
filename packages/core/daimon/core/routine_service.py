@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.access_policy import (
+    OPEN_ACCESS_POLICY,
+    TenantAccessPolicy,
+    agent_invoker_roles,
+)
 from daimon.core.agent_pins import agent_aliases
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
@@ -64,6 +68,17 @@ class RoutineNotFound(RoutineRefused):
 class RoutineNotOwned(RoutineNotFound):
     """Someone else's routine. Reads as `RoutineNotFound` to anyone probing; a panel that
     already lists the routine to the caller may word it differently."""
+
+
+ROLES_REQUIRED_REFUSAL = (
+    "This agent is limited to certain roles, so only someone who holds all of them "
+    "right now can schedule it. Nothing was saved."
+)
+ROLES_UNCHECKABLE_REFUSAL = (
+    "This agent is limited to certain roles, which cannot be checked here, so its "
+    "routines cannot be scheduled from here. Nothing was saved."
+)
+"""For a surface that cannot read roles live (`RoutineCaller.fresh_subject` unset)."""
 
 
 @dataclass(frozen=True)
@@ -134,6 +149,9 @@ class RoutineCaller:
     """The agents (as `derive_agent_uuid`) the caller is talking to or may chat with; a
     member may schedule these."""
     admin_noun: str = "an admin"
+    fresh_subject: Callable[[], Awaitable[Subject]] | None = None
+    """Reads the caller's roles from the platform right now; called only when the agent
+    being saved is limited to roles, once the earlier checks have passed."""
 
     @property
     def user_id(self) -> str | None:
@@ -267,7 +285,7 @@ def isolation_view_loader(
             policy = await _load_policy(session, tenant_id)
         if not any_own_readers(policy):
             return CallView(viewer=RuleViewer(policy=policy))
-        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=sessionmaker)
         return CallView(
             viewer=RuleViewer(
                 policy,
@@ -444,7 +462,7 @@ def _check_agent_pin(
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
     if decision.reason == "invoker_not_allowed":
         raise RoutineRefused(
-            "This agent requires a human invocation, so it cannot run routines. Nothing was saved."
+            ROLES_REQUIRED_REFUSAL if caller.fresh_subject else ROLES_UNCHECKABLE_REFUSAL
         )
     if decision.reason == "own_agents_only":
         if origin is not None and home_of(policy, origin.channel_id, origin.parent_channel_id):
@@ -500,6 +518,15 @@ async def _require_agent_in_scope(
     )
 
 
+async def _with_fresh_subject(
+    caller: RoutineCaller, policy: TenantAccessPolicy, agent: AgentRef
+) -> RoutineCaller:
+    """The caller with live roles, read only when `agent` is limited to roles."""
+    if caller.fresh_subject is None or not agent_invoker_roles(policy, agent.names):
+        return caller
+    return replace(caller, subject=await caller.fresh_subject())
+
+
 def _store_refusal(err: StoreError) -> RoutineRefused:
     return RoutineRefused(str(err))
 
@@ -539,15 +566,17 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
             budget_channel_id = source.channel_id
     view = await _view(env)
     match = await find_agent_by_daimon_tag(
-        env.anthropic, tenant_id=caller.tenant_id, name=new.agent_name
+        env.anthropic, tenant_id=caller.tenant_id, name=new.agent_name, records=env.sessionmaker
     )
     if match is None or not view.viewer.sees_agent(match):
         raise UnknownAgent(f"no agent named {new.agent_name!r} found here")
+    agent = build_agent_ref(match.name, match.metadata, new.agent_name)
+    caller = await _with_fresh_subject(caller, policy, agent)
     _check_agent_pin(
         policy,
         caller,
         agent_name=new.agent_name,
-        agent=build_agent_ref(match.name, match.metadata, new.agent_name),
+        agent=agent,
         kind=new.destination_kind,
         destination_id=destination_id,
         destination_channel_id=destination_channel_id,
@@ -695,7 +724,7 @@ async def update_routine(
         new_agent_id: str | None = None
         if change.agent_name is not None and change.agent_name != row.agent_name:
             match = await find_agent_by_daimon_tag(
-                env.anthropic, tenant_id=tenant_id, name=change.agent_name
+                env.anthropic, tenant_id=tenant_id, name=change.agent_name, records=env.sessionmaker
             )
             if match is None:
                 raise UnknownAgent(f"no agent named {change.agent_name!r} found here")
@@ -706,7 +735,9 @@ async def update_routine(
             effective_agent = next(
                 (
                     agent
-                    for agent in await list_agents_by_tenant(env.anthropic, tenant_id=tenant_id)
+                    for agent in await list_agents_by_tenant(
+                        env.anthropic, tenant_id=tenant_id, records=env.sessionmaker
+                    )
                     if agent.id == effective_ma_id
                 ),
                 None,
@@ -714,13 +745,15 @@ async def update_routine(
             if effective_agent is None:
                 raise RoutineRefused("the routine's agent no longer exists. Nothing was saved.")
             effective_name = change.agent_name if new_agent_id is not None else row.agent_name
+            effective_ref = build_agent_ref(
+                effective_agent.name, effective_agent.metadata, effective_name
+            )
+            caller = await _with_fresh_subject(caller, policy, effective_ref)
             _check_agent_pin(
                 policy,
                 caller,
                 agent_name=effective_name or effective_agent.name,
-                agent=build_agent_ref(
-                    effective_agent.name, effective_agent.metadata, effective_name
-                ),
+                agent=effective_ref,
                 kind=effective_kind,
                 destination_id=effective_id,
                 destination_channel_id=destination_channel_id,

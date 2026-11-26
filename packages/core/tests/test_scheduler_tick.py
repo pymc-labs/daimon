@@ -12,17 +12,24 @@ the (eventual) fire transaction.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 import structlog
 from daimon.core.scheduler import run_one_tick
 from daimon.core.stores.domain import FeatureTarget, RoutineRow
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.routines import create_routine, get_routine, record_result
+from daimon.core.stores.routines import get_routine, record_result
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+_run_one_tick = partial(
+    run_one_tick, max_age=timedelta(minutes=15), max_concurrent_fires=10, wait_for_completion=True
+)
 
 
 @pytest.fixture
@@ -45,14 +52,10 @@ async def _seed_due_routine(
     created_by_user_id: str | None = None,
 ) -> RoutineRow:
     tenant = await make_tenant(session)
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id=created_by_user_id,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
         trigger_message=trigger,
         next_fire_at=now - timedelta(minutes=1),
     )
@@ -73,15 +76,7 @@ async def test_run_one_tick_dispatches_due_routine(
         async with db_session_factory() as s, s.begin():
             await record_result(s, r.id, tail="ok", error=None)
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=fake_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=fake_fire, dispatch_timeout_s=5.0)
 
     assert fired == [row.id], "fire must be called exactly once for the due routine"
     async with db_session_factory() as s:
@@ -101,15 +96,7 @@ async def test_run_one_tick_records_fire_error_via_gather(
     async def boom_fire(_r: RoutineRow) -> None:
         raise ValueError("boom")
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=boom_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=boom_fire, dispatch_timeout_s=5.0)
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
@@ -131,15 +118,7 @@ async def test_run_one_tick_truncates_long_error_at_500_chars(
     async def long_boom_fire(_r: RoutineRow) -> None:
         raise ValueError("x" * 1000)
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=long_boom_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=long_boom_fire, dispatch_timeout_s=5.0)
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
@@ -167,23 +146,22 @@ async def test_run_one_tick_dispatches_all_concurrently_up_to_cap(
     peak = 0
     fired: list[uuid.UUID] = []
 
+    all_in = asyncio.Event()
+
     async def counting_fire(r: RoutineRow) -> None:
         nonlocal concurrent, peak
         concurrent += 1
         peak = max(peak, concurrent)
-        await asyncio.sleep(0.05)  # DB-free window — do NOT open a session here
+        if concurrent == 10:
+            all_in.set()
+        # DB-free window — do NOT open a session here. Waiting for all ten, not a fixed
+        # sleep, keeps a slow feature read from ending one fire before the last starts.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(all_in.wait(), timeout=2.0)
         concurrent -= 1
         fired.append(r.id)
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=counting_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=counting_fire, dispatch_timeout_s=5.0)
     assert peak == 10, "all 10 due routines must dispatch concurrently when cap >= 10"
     assert len(fired) == 10, "all 10 routines must fire"
 
@@ -212,14 +190,12 @@ async def test_run_one_tick_bounds_concurrency_to_semaphore(
         concurrent -= 1
         fired.append(r.id)
 
-    await run_one_tick(
+    await _run_one_tick(
         now=now,
         sm=db_session_factory,
         fire=counting_fire,
-        max_age=timedelta(minutes=15),
         max_concurrent_fires=5,
         dispatch_timeout_s=5.0,
-        wait_for_completion=True,
     )
     assert peak == 5, "semaphore must bound peak concurrency to max_concurrent_fires=5"
     assert len(fired) == 20, "all 20 routines must eventually fire despite the semaphore bound"
@@ -244,15 +220,7 @@ async def test_run_one_tick_isolates_timed_out_fire_from_sibling(
             async with db_session_factory() as s, s.begin():
                 await record_result(s, r.id, tail="ok", error=None)
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=maybe_hang,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=0.05,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=maybe_hang, dispatch_timeout_s=0.05)
 
     async with db_session_factory() as s:
         hung_row = await get_routine(s, hung.id, tenant_id=hung.tenant_id)
@@ -292,15 +260,7 @@ async def test_fire_exception_is_captured_to_sentry_and_still_swallowed(
         raise ValueError("kaboom")
 
     # Must not raise (swallow preserved).
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=boom_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=boom_fire, dispatch_timeout_s=5.0)
 
     assert len(captured) == 1, "the broad except site must capture exactly the fire's exception"
     assert isinstance(captured[0], ValueError), "captured exception must be the raised ValueError"
@@ -335,15 +295,7 @@ async def test_timed_out_fire_is_captured_to_sentry_and_still_swallowed(
     async def hang_fire(_r: RoutineRow) -> None:
         await asyncio.sleep(10)
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=hang_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=0.05,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=hang_fire, dispatch_timeout_s=0.05)
 
     assert len(captured) == 1, "the timeout except site must capture exactly once"
     assert isinstance(captured[0], TimeoutError), (
@@ -375,14 +327,8 @@ async def test_fire_binds_rid_and_tenant_id_into_log_context(
     async def snapshotting_fire(_r: RoutineRow) -> None:
         seen.append(dict(structlog.contextvars.get_contextvars()))
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=snapshotting_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
+    await _run_one_tick(
+        now=now, sm=db_session_factory, fire=snapshotting_fire, dispatch_timeout_s=5.0
     )
 
     assert len(seen) == 1, "fire must run exactly once for the due routine"
@@ -416,14 +362,8 @@ async def test_concurrent_fires_get_isolated_rids(
         rid_second = structlog.contextvars.get_contextvars().get("rid", "")
         rids_by_routine[str(r.id)] = [str(rid_first), str(rid_second)]
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=interleaving_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
+    await _run_one_tick(
+        now=now, sm=db_session_factory, fire=interleaving_fire, dispatch_timeout_s=5.0
     )
 
     assert len(rids_by_routine) == 2, "both fires must run"
@@ -454,14 +394,8 @@ async def test_fire_timeout_records_exact_error_string(
         await asyncio.sleep(10)
 
     # Must complete without raising (gather settles).
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=hang_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=dispatch_timeout_s,
-        wait_for_completion=True,
+    await _run_one_tick(
+        now=now, sm=db_session_factory, fire=hang_fire, dispatch_timeout_s=dispatch_timeout_s
     )
 
     async with db_session_factory() as s:
@@ -490,15 +424,7 @@ async def test_timed_out_fire_reschedules_to_next_cron_slot(
     async def hang_fire(_r: RoutineRow) -> None:
         await asyncio.sleep(10)
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=hang_fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=0.05,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=hang_fire, dispatch_timeout_s=0.05)
 
     from daimon.core.cron import next_slot_at_or_after
 
@@ -530,14 +456,8 @@ async def test_checks_after_claim_record_failure_completion(
         scheduler, "configured_routines", AsyncMock(side_effect=RuntimeError("unavailable"))
     )
     fire = AsyncMock()
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=1,
-        dispatch_timeout_s=30,
-        wait_for_completion=True,
+    await _run_one_tick(
+        now=now, sm=db_session_factory, fire=fire, max_concurrent_fires=1, dispatch_timeout_s=30
     )
     fire.assert_not_awaited()
     async with db_session_factory() as session:
@@ -568,15 +488,7 @@ async def test_run_one_tick_skips_a_routine_its_workspace_turned_off(
     async def fire(_r: RoutineRow) -> None:
         raise AssertionError("a routine its workspace turned off must not run")
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=fire, dispatch_timeout_s=5.0)
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
@@ -602,15 +514,7 @@ async def test_run_one_tick_skips_a_routine_whose_feature_cannot_be_read(
     async def fire(_r: RoutineRow) -> None:
         raise AssertionError("a routine whose feature is unreadable must not run")
 
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=fire, dispatch_timeout_s=5.0)
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
@@ -624,14 +528,11 @@ async def test_run_one_tick_skips_a_routine_whose_feature_cannot_be_read(
     async def fire_now(r: RoutineRow) -> None:
         fired.append(r)
 
-    await run_one_tick(
+    await _run_one_tick(
         now=now + timedelta(seconds=30),
         sm=db_session_factory,
         fire=fire_now,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
         dispatch_timeout_s=5.0,
-        wait_for_completion=True,
     )
     assert [r.id for r in fired] == [row.id], "once the feature reads, the lost slot runs"
 
@@ -661,15 +562,7 @@ async def test_run_one_tick_skips_an_intake_routine_when_lead_intake_is_off(
         scheduler, "configured_routines", AsyncMock(return_value={(row.tenant_id, row.id)})
     )
     fire = AsyncMock()
-    await run_one_tick(
-        now=now,
-        sm=db_session_factory,
-        fire=fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=10,
-        dispatch_timeout_s=5.0,
-        wait_for_completion=True,
-    )
+    await _run_one_tick(now=now, sm=db_session_factory, fire=fire, dispatch_timeout_s=5.0)
     fire.assert_not_awaited()
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)

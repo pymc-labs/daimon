@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionRetriesExhausted
 from daimon.core.turn import driver
 from daimon.core.turn.gemini import GeminiTurnIO
+from daimon.core.turn.hosted_codec import OPENAI, display_event
 from daimon.core.turn.io import TurnEvent
-from daimon.core.turn.openai_codec import display_event
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.termination import (
     ProviderTerminalFailure,
@@ -25,6 +24,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from ..shared_fakes import terminal
 from . import test_gemini_codec as gemini_native
 from .conftest import make_agent_message, make_status_idle
 from .test_provider_dispatch import ACCOUNT, TENANT
@@ -45,22 +45,6 @@ def session(provider: str, id_: str = "session") -> ResourceRef:
     )
 
 
-def terminal(provider: str, outcome: str) -> Event:
-    return Event.model_validate(
-        {
-            "id": "ended:" + outcome,
-            "session_id": "session",
-            "sequence": 0,
-            "type": "session.turn_ended",
-            "authority": "record",
-            "observed_at": datetime.now(UTC),
-            "turn_id": "root",
-            "payload": {"root_turn_id": "root", "outcome": outcome},
-            "native": NativeProvenance(provider=provider, api_revision="offline"),
-        }
-    )
-
-
 class OfflineIO:
     """Script normalized input; use production display codecs and the host pump."""
 
@@ -76,7 +60,9 @@ class OfflineIO:
                 event,
             )
         elif event.native.provider == "openai":
-            self.frame = TurnEvent(display_event(event, session_id=event.session_id), event)
+            self.frame = TurnEvent(
+                display_event(event, session_id=event.session_id, codec=OPENAI), event
+            )
         else:
             backend = SimpleNamespace(
                 capabilities=lambda: SimpleNamespace(profile_id="gemini.inline_reuse")
@@ -124,7 +110,6 @@ async def run_host(monkeypatch, event, leading=()):
             lifecycle=lifecycle,
             cancel=asyncio.Event(),
             billing=BillingExempt(reason="headless-unrecorded"),
-            path="mux",
             scope=SCOPE,
             render_interval_s=3600,
         )
@@ -198,7 +183,6 @@ async def test_actual_gemini_stream_terminal_reason_is_committed(
                 lifecycle=lifecycle,
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="headless-unrecorded"),
-                path="mux",
                 scope=SCOPE,
                 render_interval_s=3600,
             )

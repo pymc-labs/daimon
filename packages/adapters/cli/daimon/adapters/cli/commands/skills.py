@@ -562,7 +562,7 @@ async def _skill_add_refusal(
         )
 
     async def admin() -> Subject:
-        return Subject(is_admin=True)
+        return Subject(is_admin=True, operator=True)
 
     async def this_agent() -> BetaManagedAgentsAgent:
         return agent
@@ -618,7 +618,9 @@ async def add_skill(
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent_name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {agent_name!r} in {tenant_label}.")
 
@@ -658,7 +660,3 @@ async def add_skill(
         "unchanged": f"{agent_name!r} already had this {preview.name!r}",
     }[added.action]
     console.print(f"[green]✓ {done}[/green]")
-
-
-# Register backfill command on skills_app (defined above, so no circular import).
-import daimon.adapters.cli.commands.skills_backfill as _reg  # noqa: E402, F401  # pyright: ignore[reportUnusedImport]

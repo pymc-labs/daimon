@@ -7,9 +7,9 @@ the platform-user-scoped erasure helpers.
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import cast, get_args
 
 import pytest
@@ -24,6 +24,18 @@ from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from ..shared_fakes import concurrency_dsn as _concurrency_dsn
+
+_credential_request = partial(
+    store.create_credential_request,
+    mcp_server_url=None,
+    channel_id="chan-1",
+    target_ma_agent_id="ag_test",
+    target_name="tester",
+    requested_work=None,
+    requester_platform_user_id="requester-1",
+)
+
 
 async def _seed_request(
     session: AsyncSession,
@@ -37,7 +49,7 @@ async def _seed_request(
     origin_thread_id: str | None = None,
     platform: str | None = None,
 ) -> CredentialRequestRow:
-    return await store.create_credential_request(
+    return await _credential_request(
         session,
         token=token or mint_request_token(),
         kind="env",
@@ -45,14 +57,9 @@ async def _seed_request(
         agent_id=agent_id or uuid.uuid4(),
         account_id=account_id,
         target="OPENAI_API_KEY",
-        mcp_server_url=None,
         requester_platform_user_id=requester_platform_user_id,
-        channel_id="chan-1",
         expires_at=expires_at or (datetime.now(tz=UTC) + timedelta(minutes=30)),
         idempotency_key=uuid.uuid4(),
-        target_ma_agent_id="ag_test",
-        target_name="tester",
-        requested_work=None,
         origin_thread_id=origin_thread_id,
         platform=platform,
     )
@@ -252,20 +259,6 @@ async def test_count_credential_requests_for_platform_user_matches_delete_rowcou
     assert count_before == deleted == 3
 
 
-def _concurrency_dsn() -> str:
-    """Read the real test DSN.
-
-    The single-use guarantee rests on Postgres row locks serializing two
-    *separate* connections, so this needs two independent engines rather than
-    the shared single-connection ``db_session`` fixture the rest of this file
-    uses.
-    """
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    if not url:
-        pytest.skip("DAIMON_DATABASE__TEST_URL must be set for the concurrency test")
-    return url
-
-
 async def test_concurrent_consume_of_one_token_succeeds_exactly_once() -> None:
     """Two connections racing the same token: one wins, one gets None.
 
@@ -325,7 +318,7 @@ async def test_credential_requests_rejects_unknown_kind(db_session: AsyncSession
     account = await make_account(db_session, tenant=tenant)
 
     with pytest.raises(IntegrityError):
-        await store.create_credential_request(
+        await _credential_request(
             db_session,
             token=mint_request_token(),
             kind=cast(CredentialRequestKind, "telepathy"),
@@ -333,14 +326,8 @@ async def test_credential_requests_rejects_unknown_kind(db_session: AsyncSession
             agent_id=uuid.uuid4(),
             account_id=account.id,
             target="OPENAI_API_KEY",
-            mcp_server_url=None,
-            requester_platform_user_id="requester-1",
-            channel_id="chan-1",
             expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
             idempotency_key=uuid.uuid4(),
-            target_ma_agent_id="ag_test",
-            target_name="tester",
-            requested_work=None,
         )
     await db_session.rollback()
 
@@ -353,7 +340,7 @@ async def test_credential_requests_accepts_every_declared_kind(db_session: Async
     kinds = get_args(CredentialRequestKind)
     assert kinds, "CredentialRequestKind must declare at least one kind"
     for kind in kinds:
-        row = await store.create_credential_request(
+        row = await _credential_request(
             db_session,
             token=mint_request_token(),
             kind=kind,
@@ -361,14 +348,8 @@ async def test_credential_requests_accepts_every_declared_kind(db_session: Async
             agent_id=uuid.uuid4(),
             account_id=account.id,
             target=ENV_FILE_TARGET if kind == "env_file" else "TARGET",
-            mcp_server_url=None,
-            requester_platform_user_id="requester-1",
-            channel_id="chan-1",
             expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
             idempotency_key=uuid.uuid4(),
-            target_ma_agent_id="ag_test",
-            target_name="tester",
-            requested_work=None,
         )
         assert row.kind == kind, f"kind {kind} must round-trip through the store"
 
@@ -380,7 +361,7 @@ async def test_credential_requests_idempotency_key_is_unique(db_session: AsyncSe
     shared_key = uuid.uuid4()
 
     await _seed_request(db_session, tenant_id=tenant.id, account_id=account.id)
-    await store.create_credential_request(
+    await _credential_request(
         db_session,
         token=mint_request_token(),
         kind="env",
@@ -388,18 +369,12 @@ async def test_credential_requests_idempotency_key_is_unique(db_session: AsyncSe
         agent_id=uuid.uuid4(),
         account_id=account.id,
         target="A",
-        mcp_server_url=None,
-        requester_platform_user_id="requester-1",
-        channel_id="chan-1",
         expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
         idempotency_key=shared_key,
-        target_ma_agent_id="ag_test",
-        target_name="tester",
-        requested_work=None,
     )
 
     with pytest.raises(IntegrityError):
-        await store.create_credential_request(
+        await _credential_request(
             db_session,
             token=mint_request_token(),
             kind="env",
@@ -407,14 +382,8 @@ async def test_credential_requests_idempotency_key_is_unique(db_session: AsyncSe
             agent_id=uuid.uuid4(),
             account_id=account.id,
             target="B",
-            mcp_server_url=None,
-            requester_platform_user_id="requester-1",
-            channel_id="chan-1",
             expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
             idempotency_key=shared_key,
-            target_ma_agent_id="ag_test",
-            target_name="tester",
-            requested_work=None,
         )
     await db_session.rollback()
 
@@ -428,7 +397,7 @@ async def test_create_credential_request_round_trips_its_provenance(
     replaces = datetime.now(tz=UTC) - timedelta(minutes=5)
     key = uuid.uuid4()
 
-    row = await store.create_credential_request(
+    row = await _credential_request(
         db_session,
         token=mint_request_token(),
         kind="env",
@@ -436,9 +405,6 @@ async def test_create_credential_request_round_trips_its_provenance(
         agent_id=uuid.uuid4(),
         account_id=account.id,
         target="OPENAI_API_KEY",
-        mcp_server_url=None,
-        requester_platform_user_id="requester-1",
-        channel_id="chan-1",
         expires_at=datetime.now(tz=UTC) + timedelta(minutes=30),
         idempotency_key=key,
         target_ma_agent_id="ag_target",

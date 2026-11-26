@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -33,6 +32,7 @@ from daimon.core.permissions import (
     ChannelWriters,
     agent_permissions,
 )
+from daimon.core.stores import audience_facts as audience_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores import tenant_retirement as tenant_retirement_store
 from daimon.core.stores.access_policy import (
@@ -89,7 +89,10 @@ def tenants_backend_policy_command(
         str | None,
         typer.Option(
             "--backends",
-            help="Comma-separated providers, or 'default' to follow the keyed providers.",
+            help=(
+                "Comma-separated providers, or 'default' for the deployment default "
+                "(Anthropic and the keyed providers)."
+            ),
         ),
     ] = None,
     expected_revision: Annotated[str | None, typer.Option("--expected-revision")] = None,
@@ -169,7 +172,9 @@ async def tenants_backend_policy(
             external_id,
         ):
             raise typer.BadParameter("policy snapshot belongs to another tenant or workspace")
-    service = channel_backend.make_backend_service(rt.sessionmaker, rt.settings.turn)
+    service = channel_backend.make_backend_service(
+        rt.sessionmaker, rt.settings.turn, capture_source=channel_backend.NO_CAPTURE
+    )
 
     async def actor() -> channel_backend.BackendActor:
         return await verify_backend_actor(
@@ -200,7 +205,7 @@ async def tenants_backend_policy(
     assert revision is not None
     try:
         # `--backends default` and a snapshot taken while defaulted both go back to
-        # following the deployment's keyed providers.
+        # following the deployment default.
         if operation == "apply":
             proposed: tuple[Provider, ...] | None = (
                 None
@@ -683,11 +688,107 @@ def _print_policy(
         return
     console.print(f"{label} access policy:")
     console.print(f"  internal_role_ids: {', '.join(policy.internal_role_ids) or '-'}")
+    console.print(f"  team_role_ids: {', '.join(policy.team_role_ids) or '-'}")
     console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
     console.print(f"  invoker_admin_bypass: {str(policy.invoker_admin_bypass).lower()}")
     rules = len(policy.channel_rules) + len(policy.category_rules) + len(policy.agent_rules)
     console.print(f"  rules: {rules or '-'} (see access-policy rules)")
+
+
+@tenants_app.command("audience-report")
+def tenants_audience_report_command(
+    platform: str,
+    external_id: str,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Show a Discord server's stored room facts: counts and a table of rooms.
+
+    Contained rooms are ones a person with no internal role can see (or "client" is in
+    the name); narrow rooms shut out three team members or more. Facts that are missing,
+    incomplete or past their freshness are unknown, and unknown counts as both.
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_audience_report(
+                rt=rt, console=console, platform=platform, external_id=external_id, as_json=as_json
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_audience_report(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    external_id: str,
+    as_json: bool,
+    now: datetime | None = None,
+) -> None:
+    if _validate_platform(platform) != "discord":
+        raise typer.BadParameter("room facts exist only for Discord")
+    tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
+    async with rt.sessionmaker() as session:
+        status = await audience_store.read_status(
+            session, tenant_id=tenant_id, now=now or datetime.now(UTC)
+        )
+        rooms = (
+            await audience_store.list_channel_facts(session, tenant_id=tenant_id)
+            if status is not None and status.usable
+            else []
+        )
+    counts = {
+        "contained": sum(room.contained for room in rooms),
+        "narrow_only": sum(room.narrow and not room.contained for room in rooms),
+        "open": sum(not room.contained and not room.narrow for room in rooms),
+    }
+    state = (
+        "no facts"
+        if status is None
+        else "unknown (reload in progress, gateway lost or expired)"
+        if not status.usable
+        else "complete"
+    )
+    if as_json:
+        console.print_json(
+            data={
+                "state": state,
+                "generation": None if status is None else status.generation,
+                **counts,
+                "unknown": not (status and status.usable),
+                "rooms": [
+                    {
+                        "channel_id": room.channel_id,
+                        "parent_id": room.parent_id,
+                        "contained": room.contained,
+                        "narrow": room.narrow,
+                    }
+                    for room in rooms
+                ],
+            }
+        )
+        return
+    console.print(f"{platform}:{external_id} room facts: {state}")
+    if status is None or not status.usable:
+        console.print("  every room is unknown: contained and narrow")
+        return
+    console.print(f"  generation: {status.generation}, fresh until {status.fresh_until}")
+    console.print(f"  contained: {counts['contained']}")
+    console.print(f"  narrow only: {counts['narrow_only']}")
+    console.print(f"  open: {counts['open']}")
+    table = Table("channel", "parent", "contained", "narrow")
+    for room in rooms:
+        table.add_row(
+            room.channel_id,
+            room.parent_id or "-",
+            "yes" if room.contained else "no",
+            "yes" if room.narrow else "no",
+        )
+    console.print(table)
 
 
 @access_policy_app.command("get")
@@ -854,6 +955,18 @@ def tenants_access_policy_set_command(
             help="Operator-only: clear internal roles; outsider checks then ask you to name them."
         ),
     ] = False,
+    team_role: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "Operator-only: team Discord role id (repeatable), each also an internal role. "
+                "Replaces team roles. A room that shuts out three team members is narrow."
+            )
+        ),
+    ] = None,
+    clear_team_roles: Annotated[
+        bool, typer.Option(help="Operator-only: clear team roles.")
+    ] = False,
     clear_invoker_roles: Annotated[
         bool, typer.Option("--clear-invoker-roles", help="Clear the Discord invoker role list.")
     ] = False,
@@ -905,6 +1018,8 @@ def tenants_access_policy_set_command(
                 invoker_role=invoker_role,
                 internal_role=internal_role,
                 clear_internal_roles=clear_internal_roles,
+                team_role=team_role,
+                clear_team_roles=clear_team_roles,
                 clear_invoker_roles=clear_invoker_roles,
                 invoker_admin_bypass=invoker_admin_bypass,
                 drop_agent_rules=drop_agent_rules,
@@ -935,6 +1050,8 @@ async def tenants_access_policy_set(
     clear_invoker_roles: bool = False,
     internal_role: list[str] | None = None,
     clear_internal_roles: bool = False,
+    team_role: list[str] | None = None,
+    clear_team_roles: bool = False,
     invoker_admin_bypass: bool | None = None,
     drop_agent_rules: bool = False,
     clear: bool = False,
@@ -953,6 +1070,17 @@ async def tenants_access_policy_set(
                 "internal_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
             )
         changes["internal_role_ids"] = tuple(dict.fromkeys(roles))
+    if team_role is not None and clear_team_roles:
+        raise typer.BadParameter("--team-role cannot be combined with --clear-team-roles")
+    if team_role is not None or clear_team_roles:
+        if validated_platform != "discord":
+            raise typer.BadParameter("team_role_ids are supported only for Discord")
+        team = tuple(value.strip() for value in (team_role or []))
+        if any(not is_discord_snowflake(value) or value == external_id for value in team):
+            raise typer.BadParameter(
+                "team_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
+            )
+        changes["team_role_ids"] = tuple(dict.fromkeys(team))
     if invoker_role is not None and clear_invoker_roles:
         raise typer.BadParameter("--invoker-role cannot be combined with --clear-invoker-roles")
     if invoker_role is not None:
@@ -987,13 +1115,16 @@ async def tenants_access_policy_set(
         if clear:
             try:
                 current = await load_access_policy(session, tenant_id=tenant_id)
-                if current.approvals != "inherit" or any(
-                    rule.approvals != "inherit" for rule in current.channel_rules.values()
+                if (
+                    current.approvals != "inherit"
+                    or current.agent_approvals
+                    or any(rule.approvals != "inherit" for rule in current.channel_rules.values())
                 ):
                     raise typer.BadParameter(
-                        "clear approval overrides from the native /here admin control "
-                        "first; each change requires a native admin and an audit event. "
-                        "Nothing was changed."
+                        "clear approval overrides first with `daimon features set approvals "
+                        "default --reason ...` (add --agent NAME, --channel ID or --thread ID "
+                        "for those levels; a deleted agent is cleared by its id); each change "
+                        "is audited. Nothing was changed."
                     )
                 dropped = sorted(current.agent_rules)
             except AccessPolicyUnreadable:
@@ -1036,70 +1167,3 @@ async def tenants_access_policy_set(
             )
         for name in dropped:
             console.print(f"  {name} has no rule now (runs anywhere)")
-
-
-@tenants_app.command("dm-policy")
-def tenants_dm_policy_command(
-    platform: str,
-    external_id: str,
-    agent: Annotated[
-        str | None, typer.Option("--agent", help="Tenant-owned cold DM agent name.")
-    ] = None,
-    clear_agent: Annotated[
-        bool, typer.Option("--clear-agent", help="Disable cold DM discovery.")
-    ] = False,
-    enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
-    json_output: Annotated[bool, JSON_OPTION] = False,
-) -> None:
-    """Inspect or update tenant DMs; an unset agent leaves /dm-me moves available."""
-
-    console = Console()
-
-    async def run() -> None:
-        async with build_runtime(load_settings()) as runtime:
-            result = await tenants_dm_policy(
-                rt=runtime,
-                platform=platform,
-                external_id=external_id,
-                agent=agent,
-                clear_agent=clear_agent,
-                enabled=enabled,
-            )
-        console.print(json.dumps(result) if json_output else result, markup=False)
-
-    run_cli(run(), console=console)
-
-
-async def tenants_dm_policy(
-    *,
-    rt: CliRuntime,
-    platform: str,
-    external_id: str,
-    agent: str | None = None,
-    clear_agent: bool = False,
-    enabled: bool | None = None,
-) -> dict[str, str | bool | None]:
-    from daimon.core.stores.direct_messages import (
-        dm_enabled,
-        get_dm_agent_name,
-        set_dm_agent_name,
-        set_dm_enabled,
-    )
-
-    if agent is not None and clear_agent:
-        raise typer.BadParameter("--agent and --clear-agent are mutually exclusive")
-    tenant_id = derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=external_id)
-    async with rt.sessionmaker.begin() as session:
-        tenant = await get_tenant(session, tenant_id)
-        if tenant is None:
-            raise typer.BadParameter("tenant not found")
-        if agent is not None and tenant.platform != "discord":
-            raise typer.BadParameter("cold DMs currently require Discord")
-        if agent is not None or clear_agent:
-            await set_dm_agent_name(session, tenant_id=tenant_id, agent_name=agent)
-        if enabled is not None:
-            await set_dm_enabled(session, tenant_id=tenant_id, enabled=enabled)
-        return {
-            "enabled": await dm_enabled(session, tenant_id=tenant_id),
-            "dm_agent_name": await get_dm_agent_name(session, tenant_id=tenant_id),
-        }

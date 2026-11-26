@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import httpx
@@ -25,7 +26,7 @@ from daimon.core.continuity.wakes import (
     WAKE_RUN_LEASE,
     abandon_interrupted_wakes,
 )
-from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.turn.errors import SessionBusyError
@@ -35,6 +36,11 @@ from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import shown_text
+
+_dispatch_pending_continuations = partial(
+    dispatch_pending_continuations, channel="C_CONT_DISPATCH", active_turn=False
+)
+
 
 _TARGET_AGENT_ID = "agent_continuation_target"
 
@@ -112,14 +118,12 @@ async def test_dispatch_runs_the_follow_up_exactly_once_and_settles_delivered(
     anthropic = build_fake_anthropic(_fake_target_agent_handler(str(tenant.id)))
     calls, run_follow_up = _recorder()
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=tenant.id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=run_follow_up,
         now=lambda: datetime.now(UTC),
     )
@@ -136,14 +140,12 @@ async def test_dispatch_runs_the_follow_up_exactly_once_and_settles_delivered(
 
     # A second dispatch call (e.g. the next turn's completion path, or a race)
     # must not run the follow-up again: the row is no longer pending.
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=tenant.id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=run_follow_up,
         now=lambda: datetime.now(UTC),
     )
@@ -185,14 +187,13 @@ async def test_dispatch_skips_silently_when_no_work_was_requested(
     anthropic = build_fake_anthropic(_fake_target_agent_handler(str(tenant.id)))
     calls, run_follow_up = _recorder()
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=tenant.id,
         channel="C_CONT_DISPATCH_2",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=run_follow_up,
         now=lambda: datetime.now(UTC),
     )
@@ -218,6 +219,7 @@ async def _seed_request(
     *,
     workspace_id: str,
     thread_id: str,
+    reason: ContinuationReason = "task_handoff",
 ) -> ContinuationRequest:
     tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
     requester = await get_or_create_platform_principal(
@@ -234,7 +236,7 @@ async def _seed_request(
         target_ma_agent_id=_TARGET_AGENT_ID,
         target_name="receiving-agent",
         requested_work="please pick up the migration",
-        reason="task_handoff",
+        reason=reason,
         idempotency_key=uuid.uuid4(),
     )
     await record_continuation(db_session_factory, request)
@@ -286,14 +288,12 @@ async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
 
     for tail in range(6):
         at = now + timedelta(minutes=tail)
-        await dispatch_pending_continuations(
+        await _dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
             tenant_id=request.tenant_id,
-            channel="C_CONT_DISPATCH",
             thread_id=thread_id,
-            active_turn=False,
             run_follow_up=_busy_five_times,
             now=lambda at=at: at,
         )
@@ -334,14 +334,12 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
     def _dispatch(
         run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]], at: datetime
     ) -> Any:
-        return dispatch_pending_continuations(
+        return _dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
             tenant_id=request.tenant_id,
-            channel="C_CONT_DISPATCH",
             thread_id=thread_id,
-            active_turn=False,
             run_follow_up=run_follow_up,
             now=lambda: at,
         )
@@ -398,14 +396,12 @@ async def test_process_death_after_the_fence_settles_interrupted_and_never_rerun
     def _dispatch(
         run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]], at: datetime
     ) -> Any:
-        return dispatch_pending_continuations(
+        return _dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
             tenant_id=request.tenant_id,
-            channel="C_CONT_DISPATCH",
             thread_id=thread_id,
-            active_turn=False,
             run_follow_up=run_follow_up,
             now=lambda: at,
         )
@@ -448,14 +444,12 @@ async def test_a_timer_refused_for_a_changed_responder_posts_why_and_settles_ski
     async def _rerouted(row: TaskContinuationRow, seed: str) -> None:
         raise ResponderChanged(target_name="receiving-agent", current_name="other-agent")
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=request.tenant_id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=_rerouted,
     )
 
@@ -514,12 +508,11 @@ async def test_skip_copy_reaches_only_a_thread_the_agent_may_post_in(
     async def _rerouted(row: TaskContinuationRow, seed: str) -> None:
         raise ResponderChanged(target_name="receiving-agent", current_name="other-agent")
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=request.tenant_id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
         active_turn=path == "turn_running",
         run_follow_up=_rerouted,
@@ -534,3 +527,41 @@ async def test_skip_copy_reaches_only_a_thread_the_agent_may_post_in(
         assert posts, "an open thread still gets the skip copy"
     else:
         assert posts == [], f"{target} thread must receive nothing"
+
+
+async def test_a_timer_wake_runs_without_reading_the_threads_history(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wake Daimon scheduled answers no message, so a later one cannot supersede it (as on Discord)."""
+    thread_id = "9200000006.000001"
+    request = await _seed_request(
+        db_session,
+        db_session_factory,
+        workspace_id="T_TIMER_HISTORY",
+        thread_id=thread_id,
+        reason="timer",
+    )
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
+
+    async def _no_history(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a timer wake must not read the thread's history")
+
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_history)
+    calls, run_follow_up = _recorder()
+
+    await _dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        fake_slack_web_client.client,
+        tenant_id=request.tenant_id,
+        thread_id=thread_id,
+        run_follow_up=run_follow_up,
+    )
+
+    assert len(calls) == 1, "the wake ran without a history read"
+    assert {"timer", "confirmed_call"} <= continuation_dispatch._NO_HISTORY, (  # pyright: ignore[reportPrivateUsage]
+        "a press-approved wake is exempt too"
+    )

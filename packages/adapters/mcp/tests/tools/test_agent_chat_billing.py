@@ -26,7 +26,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionStatusIdleEvent,
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
+from daimon.adapters.mcp.auth.resolver import Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agent_chat import (
     _ask_impl,
@@ -66,6 +66,8 @@ from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG, ma_model
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _MA_AGENT_ID = "ag_billing001"
 _ENV_NAME = "production"
@@ -153,11 +155,7 @@ def _directory(tenant_id: uuid.UUID) -> MARouter:
         "created_at": "2026-06-23T00:00:00Z",
         "updated_at": "2026-06-23T00:00:00Z",
     }
-    agent = ma_agent(
-        id=_MA_AGENT_ID,
-        name="test-agent",
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "test-agent"},
-    )
+    agent = ma_agent(id=_MA_AGENT_ID, name="test-agent", tenant_id=tenant_id)
     router = MARouter()
     router.add_agent(agent)
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
@@ -195,9 +193,9 @@ class _World:
             settings=settings,  # type: ignore[arg-type]
             deployment_default=DeploymentDefault(environment_name=_ENV_NAME),
         )
-        self.auth = AuthIdentity(
-            account_id=account_id,
-            tenant_id=tenant_id,
+        self.auth = auth_identity(
+            account_id,
+            tenant_id,
             role=Role.USER,
             agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_MA_AGENT_ID),
             platform="discord",
@@ -419,9 +417,17 @@ async def test_a_send_whose_turn_could_not_be_named_is_still_billed(
 
 @pytest.mark.parametrize(("status", "kept"), [(400, False), (503, True)])
 async def test_a_failed_send_withdraws_its_request_only_when_rejected(
-    world: _World, db_session: AsyncSession, status: int, kept: bool
+    db_session: AsyncSession,
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
+    status: int,
+    kept: bool,
 ) -> None:
-    """A 4xx was not accepted; a 5xx may hide an accepted send, so its request stays."""
+    """A 4xx was not accepted; a 5xx may hide an accepted send, so its request stays.
+
+    On independent connections, as in production: the send runs inside the session's
+    fence, whose own transaction must not take the committed request with it.
+    """
+    world = await _world(db_session, pooled_sessionmaker)
     world.agent.reject = status
 
     with pytest.raises(anthropic.APIStatusError):

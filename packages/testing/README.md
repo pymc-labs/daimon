@@ -590,7 +590,7 @@ The explicit `python -m daimon.testing.a7_anthropic --mode live` and
 financial authorization, a separate pinned lead GO, clean merged source,
 installed config/ledger receipts, reviewed recipe and authorized disposable
 bindings. Missing admission facts produce PENDING before credentials or a hold.
-A7 runs one legacy and one mux turn in two fresh sessions sequentially. F2
+A7 runs one mux turn in a fresh session. F2
 uses the public default-capability flow with twelve authored skills, builtins
 and an explicitly bound provider-reachable MCP endpoint; loopback fixtures
 cannot supply live MCP evidence. Each session has one attempt, SDK retries zero,
@@ -969,8 +969,7 @@ are offline actual SDK HTTP requests with owned Postgres readback.
 
 `mux.testing.conformance` owns the backend-neutral conformance runner,
 normalized recorder and live-probe BudgetGuard. Provider SDK/script adapters live
-under `mux.testing.drivers`; platform conformance callbacks live under
-`daimon.testing.adapters`. These are test-only dependencies and are never
+under `mux.testing.drivers`. These are test-only dependencies and are never
 imported by runtime packages. The former `mux.conformance` namespace is removed.
 
 The conformance kit, its tests, saved receipts, replay tapes and reference docs

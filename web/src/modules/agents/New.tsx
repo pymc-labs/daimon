@@ -12,15 +12,15 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Skeleton } from "@/components/ui/skeleton"
 import { api } from "@/lib/api"
 import { useCan } from "@/lib/hooks"
+import { byProvider } from "@/lib/providers"
 import { cn } from "@/lib/utils"
 import { NotFound } from "@/pages/Status"
-import { useCatalog, useTemplates } from "./api"
+import { modelValue, useCatalog, useTemplates } from "./api"
 import type { Agent } from "./types"
 
 const ICON: Record<string, React.ReactNode> = {
   "square-dashed": <SquareDashed />, "chart-line": <ChartLine />, "git-pull-request": <GitPullRequest />, briefcase: <Briefcase />, inbox: <Inbox />,
 }
-const PROVIDERS = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google", selfhosted: "Self-hosted" }
 
 export function NewAgent() {
   const can = useCan()
@@ -33,7 +33,7 @@ export function NewAgent() {
   const [model, setModel] = useState<string>("")
   const t = templates?.find((x) => x.id === tpl)
   const create = useMutation({
-    mutationFn: () => api.post<Agent>("/api/agents", { name: name.trim(), template: tpl, model: model || undefined }),
+    mutationFn: () => api.post<Agent>("/api/agents", { name: name.trim(), template: tpl, model: sent }),
     onSuccess: (a) => {
       void qc.invalidateQueries({ queryKey: ["agents"], exact: true })
       void qc.invalidateQueries({ queryKey: ["chat", "agents"] })
@@ -43,7 +43,10 @@ export function NewAgent() {
     onError: (e) => toast.error(e.message),
   })
   if (!can("agents.create")) return <NotFound />
-  const defaultModel = catalog?.models.find((m) => m.label === t?.model)?.id
+  const defaultModel = catalog?.models.find((m) => m.label === t?.model)
+  const picked = catalog?.models.find((m) => modelValue(m) === model) ?? defaultModel
+  // Claude models go by their plain id, the others as `provider:id`.
+  const sent = model ? (picked?.backend === "anthropic" ? picked.id : model) : undefined
   return (
     <Page crumbs={[{ label: "Agents", to: "/agents" }, { label: "New agent" }]}>
       <form className="mx-auto max-w-3xl space-y-8 pb-10" onSubmit={(e) => { e.preventDefault(); if (name.trim()) create.mutate() }}>
@@ -79,18 +82,22 @@ export function NewAgent() {
           </div>
           <div className="space-y-1.5">
             <Label>Model</Label>
-            <Select value={model || defaultModel || ""} onValueChange={setModel}>
-              <SelectTrigger className="h-8 w-full"><SelectValue /></SelectTrigger>
+            <Select value={picked ? modelValue(picked) : ""} onValueChange={setModel}>
+              <SelectTrigger className="h-8 w-full"><SelectValue>{picked?.label}</SelectValue></SelectTrigger>
               <SelectContent>
-                {Object.entries(PROVIDERS).map(([b, l]) => {
-                  const ms = catalog?.models.filter((m) => m.backend === b) ?? []
-                  return ms.length > 0 && (
-                    <SelectGroup key={b}>
-                      <SelectLabel>{l}</SelectLabel>
-                      {ms.map((m) => <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>)}
-                    </SelectGroup>
-                  )
-                })}
+                {byProvider(catalog?.models ?? [], (m) => m.backend).map((g) => (
+                  <SelectGroup key={g.provider}>
+                    <SelectLabel>{g.name}</SelectLabel>
+                    {g.models.map((m) => (
+                      <SelectItem key={modelValue(m)} value={modelValue(m)}>
+                        <span className="flex w-full items-center gap-2">
+                          {m.label}
+                          <span className="ml-auto pl-4 text-xs text-muted-foreground tabular">${m.in_usd} / ${m.out_usd} per M</span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
               </SelectContent>
             </Select>
           </div>

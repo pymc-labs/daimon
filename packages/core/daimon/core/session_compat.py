@@ -60,6 +60,8 @@ type ChangeReason = Literal[
     "mcp_servers",
     "env_file",
     "repo_token_age",
+    # A Gemini session whose last interaction the provider can no longer read.
+    "history_unreadable",
 ]
 
 
@@ -172,7 +174,9 @@ def identity_change_reasons(
     checks: tuple[tuple[bool, ChangeReason], ...] = (
         (recorded.ma_agent_id != desired.ma_agent_id, "agent_identity"),
         (
-            recorded.model_id != desired.model_id or recorded.model_speed != desired.model_speed,
+            recorded.model_id != desired.model_id
+            or recorded.model_speed != desired.model_speed
+            or recorded.model_effort != desired.model_effort,
             "model",
         ),
         (recorded.system_sha256 != desired.system_sha256, "system_prompt"),

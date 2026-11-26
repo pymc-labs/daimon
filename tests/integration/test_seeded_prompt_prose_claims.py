@@ -96,7 +96,7 @@ def _normalize(text: str) -> str:
 
 def _load_seeded_prompt() -> str:
     specs = load_agent_specs(DEFAULTS / "agents")
-    daimon = next(s for s in specs if s.name == "daimon")
+    daimon = next(s for s in specs if s.name == "default")
     return daimon.system or ""
 
 
@@ -111,7 +111,7 @@ def _load_workspace_setup_body() -> str:
 def test_seeded_prompt_carries_no_behavior_asserting_routing_prose() -> None:
     """Regression coverage note (verified manually, not asserted here — the
     check needs a live edit to prove it isn't vacuous): temporarily adding
-    one of the forbidden phrases above to `defaults/agents/daimon.yaml`'s
+    one of the forbidden phrases above to `defaults/agents/default.yaml`'s
     system block makes this test fail and names the offending phrase and its
     reason in the failure message. Confirmed during development, then
     reverted before this file was committed."""

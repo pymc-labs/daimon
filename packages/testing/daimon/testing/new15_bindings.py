@@ -101,7 +101,6 @@ class New15Bindings:
             or self.deps.deployment_default != self.admin.default
             or self.deps.public_url is not None
             or not self.deps.channel_backends
-            or self.deps.turn_path != "mux"
             or self.scope.is_platform
             or self.scope.is_legacy_host_authorized
             or self.scope.tenant_id != self.admin.scope.tenant_id

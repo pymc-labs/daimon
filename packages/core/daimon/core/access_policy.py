@@ -10,7 +10,8 @@ object and conversation ids) for the tenant's own platform. Channels are named b
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+import json
+from typing import Any, Final, Literal, cast
 
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -47,6 +48,15 @@ class ChannelRule(BaseModel):
 
 
 OPEN_RULE = ChannelRule()
+
+
+class AgentApprovals(BaseModel):
+    """One agent's own Approvals choice; an agent without one inherits."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    approvals: Literal["off", "on"]
+    approvals_set_by: str
 
 
 class AgentRule(BaseModel):
@@ -137,6 +147,9 @@ class TenantAccessPolicy(BaseModel):
     invoker_role_ids: tuple[str, ...] = ()
     # Discord organisation membership for visibility warnings, independent of invoker access.
     internal_role_ids: tuple[str, ...] = ()
+    # The part of `internal_role_ids` that counts as the team: a room that shuts out
+    # several of them is narrow. Always a subset of the internal roles.
+    team_role_ids: tuple[str, ...] = ()
     invoker_admin_bypass: bool = True
     approvals: Approvals = Field(default="inherit", exclude_if=lambda value: value == "inherit")
     approvals_set_by: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -147,10 +160,42 @@ class TenantAccessPolicy(BaseModel):
     category_rules: dict[str, ChannelRule] = Field(default_factory=dict)
     # Agent name -> its rule. An agent not named here runs wherever the cascade sends it.
     agent_rules: dict[str, AgentRule] = Field(default_factory=dict)
+    # Agent id -> its own Approvals; it sits between the workspace and the channel rules.
+    agent_approvals: dict[str, AgentApprovals] = Field(default_factory=dict)
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
     # Whether an admin chose `enabled_backends`. False: the tenant follows the
     # deployment default (`daimon.core.provider_keys`), resolved when it is loaded.
     backends_explicit: bool = False
+    # Computed from the stored Discord room facts when a policy is loaded, never stored
+    # and never dumped (`attach_automatic_rules`). A narrow room reads `inside`; a room
+    # known open is `OPEN_RULE`. Read only through `daimon.core.permissions`.
+    automatic_channel_rules: dict[str, ChannelRule] = Field(
+        default_factory=dict, exclude=True, repr=False
+    )
+    # Whether a Discord room with no entry above is narrow: its facts are unknown.
+    automatic_unknown_narrow: bool = Field(default=False, exclude=True, repr=False)
+    # Whether the room facts are missing, incomplete or expired: no room is known.
+    automatic_facts_missing: bool = Field(default=False, exclude=True, repr=False)
+
+    def __eq__(self, other: object) -> bool:
+        """Equal when the stored fields are: a policy rebuilt from a dump carries no
+        automatic rules, so a no-op edit must not read as a change."""
+        if not isinstance(other, TenantAccessPolicy):
+            return NotImplemented
+        return self.model_dump() == other.model_dump()
+
+    def __hash__(self) -> int:
+        return hash(json.dumps(self.model_dump(mode="json"), sort_keys=True))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _automatic_rules_are_never_stored(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        fields = cast("dict[str, Any]", data)
+        if _AUTOMATIC_KEYS & fields.keys():
+            raise ValueError("automatic channel rules are computed, never stored")
+        return fields
 
     @model_validator(mode="before")
     @classmethod
@@ -165,12 +210,18 @@ class TenantAccessPolicy(BaseModel):
             return {**fields, "backends_explicit": True}
         return fields
 
-    @field_validator("invoker_role_ids", "internal_role_ids")
+    @field_validator("invoker_role_ids", "internal_role_ids", "team_role_ids")
     @classmethod
     def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
         if not all(is_discord_snowflake(value) for value in ids):
             raise ValueError("role ids must contain numeric role IDs")
         return tuple(dict.fromkeys(ids))
+
+    @model_validator(mode="after")
+    def _team_roles_are_internal(self) -> TenantAccessPolicy:
+        if not set(self.team_role_ids) <= set(self.internal_role_ids):
+            raise ValueError("team roles must also be internal roles")
+        return self
 
     @field_validator("enabled_backends")
     @classmethod
@@ -201,6 +252,45 @@ class TenantAccessPolicy(BaseModel):
             for name, rule in rules.items()
             if rule.runs_in is not None or rule.invoker_role_ids
         }
+
+
+_AUTOMATIC_KEYS: Final = frozenset(
+    {"automatic_channel_rules", "automatic_unknown_narrow", "automatic_facts_missing"}
+)
+
+
+def attach_automatic_rules(
+    policy: TenantAccessPolicy,
+    rules: dict[str, ChannelRule],
+    *,
+    unknown_narrow: bool,
+    facts_missing: bool = False,
+) -> TenantAccessPolicy:
+    """The policy with computed rules. The one way to set them: they never pass validation,
+    so a stored payload cannot carry them, and a rebuilt policy starts without them."""
+    return policy.model_copy(
+        update={
+            "automatic_channel_rules": dict(rules),
+            "automatic_unknown_narrow": unknown_narrow,
+            "automatic_facts_missing": facts_missing,
+        }
+    )
+
+
+def with_public_thread_room(
+    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
+) -> TenantAccessPolicy:
+    """The policy with a public thread that has no room fact of its own judged by its parent.
+
+    Only for a thread the platform says is public: the next reconcile writes its parent's
+    rule for it. A parent with no fact leaves the thread unknown, so nothing changes then.
+    """
+    rules = policy.automatic_channel_rules
+    if thread_id is None or thread_id in rules or channel_id not in rules:
+        return policy
+    return policy.model_copy(
+        update={"automatic_channel_rules": {**rules, thread_id: rules[channel_id]}}
+    )
 
 
 def agent_invoker_roles(
@@ -248,3 +338,16 @@ def is_invoker_allowed(
 
 
 DM_SCOPE_PREFIX = "dm:"
+# An unattended channel turn's queue scope; the real channel is the origin's parent.
+CHANNEL_SCOPE_PREFIX = "ch:"
+# The conversation of a cloud computer an agent-chat session uses, after its credential's
+# grant. Only compute reads it (`compute_sessions.ComputePlace`): it is no channel, thread
+# or DM, and no origin, seal or audience check ever sees it.
+AGENT_CHAT_SCOPE_PREFIX = "agentchat:"
+
+
+def place_thread_id(thread_id: str | None) -> str | None:
+    """The thread a turn origin stands in: none for a channel timer's queue scope."""
+    if thread_id is not None and thread_id.startswith(CHANNEL_SCOPE_PREFIX):
+        return None
+    return thread_id

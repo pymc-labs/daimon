@@ -133,7 +133,6 @@ async def test_owned_counterpart_reads_actual_native_resources_and_returns_retai
         "origin",
         "unset_origin",
         "disabled",
-        "legacy",
         "catalog_id",
         "catalog_revision",
         "native_id",
@@ -196,13 +195,8 @@ async def test_source_bounds_and_catalog_mismatches_refuse_before_native_io(
         damaged = replace(request.admission)
         object.__setattr__(damaged, "backend_revision_origin", None)
         request = replace(request, admission=damaged)
-    elif defect in ("disabled", "legacy"):
-        request = replace(
-            request,
-            deps=replace(request.deps, channel_backends=False)
-            if defect == "disabled"
-            else replace(request.deps, turn_path="legacy"),
-        )
+    elif defect == "disabled":
+        request = replace(request, deps=replace(request.deps, channel_backends=False))
     elif defect == "scope":
         request = replace(
             request, scope=SCOPE.model_copy(update={"authorization_id": "other-authority"})

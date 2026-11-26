@@ -11,11 +11,16 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._card import NEEDS_CARD, require_card
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.agent_editing import AgentActor, AgentEditDeps
+from daimon.core.agent_target import agent_names_loader
+from daimon.core.authz import Surface
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import StaleChannelValue
 from daimon.core.features.registry import Tier
@@ -27,7 +32,7 @@ from daimon.core.features.service import (
     read_features,
 )
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import change_note, listed, view_json
+from daimon.core.features.surface import agent_listed, change_note, view_json
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -48,12 +53,13 @@ class SettingChanged:
     note: str
 
 
-def settings_actor(auth: AuthIdentity) -> FeatureActor:
+def settings_actor(auth: AuthIdentity, runtime: McpRuntime) -> FeatureActor:
     """The token's own person, never an argument."""
 
     async def admin_for(action: DelegatedAction | None) -> bool:
         return auth.admin_for(action)
 
+    subject = mcp_subject(auth)
     return FeatureActor(
         auth.tenant_id,
         auth.account_id,
@@ -61,6 +67,12 @@ def settings_actor(auth: AuthIdentity) -> FeatureActor:
         auth.platform_user_id,
         admin_for,
         via_agent_key=auth.is_external_agent,
+        inside=subject.origin_channel_ids,
+        operator=subject.operator,
+        agent_names=agent_names_loader(
+            AgentEditDeps(runtime.client, runtime.session_factory, None),
+            AgentActor(auth.tenant_id, auth.account_id, subject, Surface.AGENT_CHAT),
+        ),
     )
 
 
@@ -76,7 +88,7 @@ async def _place(
         or auth.execution_id is not None
         or auth.hold is not None
         or auth.client
-        or auth.no_confirmation_surface
+        or (auth.no_confirmation_surface and not card_satisfied(auth))
         or auth.platform_user_id is None
     ):
         raise ToolError(NEEDS_CARD)
@@ -97,7 +109,9 @@ async def _get_settings_impl(
 ) -> SettingsResult:
     place = await _place(runtime, auth, origin_context_id, change=False)
     views = await read_features(runtime.session_factory, runtime.settings, place)
-    return SettingsResult([view_json(view, place.platform) for view in listed(views)])
+    return SettingsResult(
+        [view_json(view, place.platform) for view in agent_listed(views, runtime.settings, place)]
+    )
 
 
 async def _change_setting_impl(
@@ -112,7 +126,7 @@ async def _change_setting_impl(
 ) -> SettingChanged:
     """Every check before the card, in order; the writer re-checks the key's rule after it."""
     place = await _place(runtime, auth, origin_context_id, change=True)
-    actor = settings_actor(auth)
+    actor = settings_actor(auth, runtime)
     refusal = feature_refusal(
         key, tier, value, locked=locked, place=place, settings=runtime.settings
     ) or await change_refusal(
@@ -157,7 +171,7 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         you are, what is in effect, which level decided it (``source``: ``default``,
         ``deployment`` for everywhere, ``workspace``, ``agent``, ``channel`` or ``thread``)
         and whether it is locked. Anyone may read them; read each ``summary`` back. People
-        change them with ``/settings``, the web app's Settings section or ``change_setting``.
+        change them with ``/settings`` or ``change_setting``.
         """
         return await _get_settings_impl(runtime, await _auth(ctx), origin_context_id)
 
@@ -176,9 +190,9 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``default`` to clear the level's own value. ``tier`` is the ``workspace``,
         ``agent``, ``channel`` or ``thread`` level of this conversation; other places cannot be
         named. ``locked`` (an admin's, not at the thread tier) makes the value final
-        below. Approvals need a live admin of the chat platform; a thread's participation
-        or progress plans are anyone's; the rest an admin's. Read the returned ``note``
-        back.
+        below. Approvals, and approvals in direct messages, need a live admin of the chat
+        platform; a thread's participation or progress plans are anyone's; the rest an
+        admin's. Read the returned ``note`` back.
         """
         return await _change_setting_impl(
             runtime,

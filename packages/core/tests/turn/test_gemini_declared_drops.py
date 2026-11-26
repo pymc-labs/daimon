@@ -30,22 +30,20 @@ from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.drivers.gemini.transport import NO_TOOLS_TOOL
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_codec import interaction
 from .test_gemini_runtime_transport import clients_for
 
 
 @pytest.fixture
-async def ordinary(consent_request, monkeypatch, tmp_path):
-    request, service, source, actor, old, router, source_reads, *_ = consent_request
-    quote = await service.preview(source, "gemini")
+async def ordinary(switched_request, monkeypatch, tmp_path):
+    request, service, source, actor, old, router, source_reads, *_ = switched_request
+    await service.preview(source, "gemini")
     accepted = await service.set_backend(
         source,
         "gemini",
         old.local,
         actor,
-        accepted_drops=quote.declared_drops,
-        expected_preview_digest=quote.digest,
     )
     revision = ConfigRevision.create(
         request.admission.backend_revision.channel,
@@ -163,6 +161,7 @@ async def ordinary(consent_request, monkeypatch, tmp_path):
         actor,
         accepted,
     )
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed for client in clients)
 
 
@@ -174,18 +173,24 @@ async def test_ordinary_confirmed_target_native_readback_and_two_real_host_turns
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             "backend": "gemini",
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
     ],
     indirect=True,
 )
 async def test_portable_caller_mcp_and_model_losses_reach_native_gemini_preparation(ordinary):
-    assert ordinary[2].target_spec.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    assert ordinary[2].target_spec.declared_drops == (
+        "effort_setting",
+        "fast_mode",
+        "mcp",
+        "memory",
+        "sandbox",
+    )
     await assert_ordinary_native_preparation_and_turns(ordinary)
 
 
@@ -368,9 +373,8 @@ async def test_unconfirmed_or_foreign_source_refuses_before_factory(ordinary, mo
         router.routes = [
             row for row in router.routes if not (row[0] == "GET" and row[1].fullmatch(path))
         ]
-        router.add_agent(
-            request.admission.agent.model_copy(update={"system": "Changed source instructions"})
-        )
+        # A new version mid-turn (a prompt edit alone keeps a confirmed switch).
+        router.add_agent(request.admission.agent.model_copy(update={"version": 2}))
     elif defect == "tenant":
         from uuid import uuid4
 
@@ -612,20 +616,24 @@ async def test_an_entry_holding_another_agents_spec_refuses(ordinary, tmp_path, 
         await read_preparation_counterpart(again)
 
 
-@pytest.mark.parametrize("consent", ["valid", "missing", "stale"])
-async def test_missing_or_stale_consent_refuses_before_publication(
+@pytest.mark.parametrize("consent", ["matching", "missing", "stale"])
+async def test_an_old_consent_column_of_any_shape_is_ignored(
     ordinary, tmp_path, monkeypatch, consent
 ):
+    """Rows from before switches applied at once keep a consent column; a turn ignores it."""
+    from daimon.core._models import AgentBackendRevisionRecord
     from daimon.core.stores import agent_backends
+    from sqlalchemy import update
 
     request, plan, canonical, native, calls, *_ = ordinary
     service, source, actor, accepted = ordinary[8:]
     _as_template(plan, tmp_path, monkeypatch)
-    drop = None
-    if consent == "valid":
-        drop = accepted.drop_consent.model_dump(mode="json")
+    drops = list(canonical.target_spec.declared_drops)
+    drop = {"declared_drops": drops, "source_pin": "a" * 64, "target_digest": "b" * 64}
+    if consent == "missing":
+        drop = None
     if consent == "stale":
-        drop = {**accepted.drop_consent.model_dump(mode="json"), "source_pin": "0" * 64}
+        drop = {**drop, "declared_drops": [*drops, "skill:not-confirmed"]}
     current = request.admission.backend_revision
     linked = ConfigRevision.create(current.channel, current.local + 1, current)
     async with request.deps.sessionmaker.begin() as db:
@@ -639,20 +647,22 @@ async def test_missing_or_stale_consent_refuses_before_publication(
             previous_local=accepted.local,
             digest="test-" + consent,
             preview_digest=accepted.preview_digest,
-            drop_consent=drop,
         )
-        # The turn's agent-origin revision binds the bad consent, as a real switch would.
+        await db.execute(
+            update(AgentBackendRevisionRecord)
+            .where(
+                AgentBackendRevisionRecord.agent_id == accepted.agent_id,
+                AgentBackendRevisionRecord.local == bad.local,
+            )
+            .values(drop_consent=drop)
+        )
         await mux_state.put_config_revision(db, linked, origin="agent", agent_revision=bad)
     request = replace(request, admission=replace(request.admission, backend_revision=linked))
     calls.clear()
     scoped, _ = scope_channel_runtimes(request)
-    if consent == "valid":
-        # The same construction with the confirmed consent publishes: the refusals are consent's.
-        assert (await read_preparation_counterpart(scoped)).verified_counterpart is not None
-        return
-    with pytest.raises(AdmissionDenied):
-        await read_preparation_counterpart(scoped)
-    assert not [c for c in calls if c.method == "POST"], "nothing published without consent"
+    prepared = await read_preparation_counterpart(scoped)
+    assert prepared.verified_counterpart is not None, f"a {consent} old consent never refuses"
+    assert prepared.target_spec.declared_drops == tuple(drops), "losses come from the source"
 
 
 def _dropped_mcp(canonical):

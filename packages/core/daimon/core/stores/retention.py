@@ -463,8 +463,8 @@ async def delete_idle_dm_conversations(
         DirectMessageConversation.tenant_id == tenant_id,
         DirectMessageConversation.updated_at < before,
         or_(
-            DirectMessageConversation.active_until.is_(None),
-            DirectMessageConversation.active_until < before,
+            DirectMessageConversation.claimed_at.is_(None),
+            DirectMessageConversation.claimed_at < before,
         ),
     )
     return await _delete_batch(

@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from daimon.adapters.teams.channel_subscriptions import NOTIFICATIONS_PATH, ChannelSubscriptions
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
+from daimon.testing.builders import provision_workspace
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
@@ -69,11 +69,8 @@ async def test_graph_private_channel_persona_matrix(
     db_session_factory: async_sessionmaker[AsyncSession], actor: Persona | None
 ) -> None:
     """Mocked permission tests pass Graph senders through the real notification route."""
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
+    await provision_workspace(
+        db_session_factory, ENTRA_TENANT_ID, platform="teams", signup_credit=Decimal("100")
     )
     async with db_session_factory.begin() as db:
         await set_feature_value(

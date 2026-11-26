@@ -109,7 +109,6 @@ async def drive(
                 lifecycle=lifecycle,
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="headless-unrecorded"),
-                path="mux",
                 scope=SCOPE,
                 render_interval_s=3600,
                 interrupt_timeout_s=1.0,

@@ -39,7 +39,7 @@ from daimon.adapters.slack.credential_requests import (
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core import credential_submit
+from daimon.core import credential_flow, credential_submit
 from daimon.core.credential_requests import (
     ENV_FILE_TARGET,
     mint_request_token,
@@ -2135,7 +2135,7 @@ async def test_env_file_submission_that_fails_to_save_replies_instead_of_raising
     async def _broken_apply(*args: object, **kwargs: object) -> Any:
         raise RuntimeError("database went away")
 
-    monkeypatch.setattr(credential_submissions_mod, "_apply_env_file_entries", _broken_apply)
+    monkeypatch.setattr(credential_flow, "apply_env_file_submit", _broken_apply)
     runtime = _build_runtime(
         fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
     )

@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 import pytest
-from daimon.core import channel_backend
+from daimon.core import channel_backend, usage_recording
 from daimon.core.turn import openai_host
 from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai, runtime_for
+from daimon.core.turn.openai_late_usage import LateUsage
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -24,13 +26,16 @@ from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
+from mux.contracts.usage import UsageObservation
+from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ContinuityLost, OperationConflict, ScopeViolation, UnsupportedCapability
-from mux.state.lease import Slot
+from mux.state.lease import Lease, Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.operations import request_digest
 from openai import AsyncOpenAI
+from structlog.testing import capture_logs
 
 from .test_provider_dispatch import (
     ACCOUNT,
@@ -113,6 +118,9 @@ class Wire:
         self.saved_delegation = False
         self.session_delegation = False
         self.expected_spend_limit = 4
+        # Uploaded files (`/files`) by id, holding the size each upload reports.
+        self.files: dict[str, int] = {}
+        self.upload_size = 0
 
     def session(self):
         return {
@@ -133,10 +141,26 @@ class Wire:
             "created_at": 0,
         }
 
+    def file(self, req: httpx.Request, path: str) -> httpx.Response:
+        if req.method == "POST":
+            file_id = f"file-{len(self.files) + 1}"
+            self.files[file_id] = self.upload_size
+        else:
+            file_id = path.removeprefix("/files/")
+            if file_id not in self.files:
+                return httpx.Response(404, json={"error": {"message": "no file"}})
+            if req.method == "DELETE":
+                del self.files[file_id]
+                return httpx.Response(200, json={"id": file_id, "deleted": True})
+        raw = {"id": file_id, "filename": ".env", "bytes": self.files[file_id], "created_at": 0}
+        return httpx.Response(200, json=raw)
+
     def handle(self, req: httpx.Request) -> httpx.Response:
         self.requests.append(req)
         assert req.headers["OpenAI-Beta"] == "agents=v1"
         path = req.url.path.removeprefix("/v1")
+        if path.startswith("/files"):
+            return self.file(req, path)
         if path == "/agents/sessions/" + self.session_id:
             if req.method == "DELETE":
                 self.deleted = True
@@ -256,6 +280,9 @@ class Wire:
         return httpx.Response(200, json=self.session())
 
 
+_RECORD_PROVIDER_USAGE = usage_recording.record_provider_usage
+
+
 @pytest.fixture(params=["memory", "postgres"])
 async def composed(request, db_session_factory, db_clean, monkeypatch):
     wire = Wire()
@@ -274,6 +301,8 @@ async def composed(request, db_session_factory, db_clean, monkeypatch):
         return False  # durable pending, never a known free turn
 
     monkeypatch.setattr(openai_host, "record_provider_usage", record)
+    # The late re-read (`reread_turn`) records through the same recorder.
+    monkeypatch.setattr(usage_recording, "record_provider_usage", record)
 
     async def plan(request):
         return SessionSpec(
@@ -441,10 +470,12 @@ async def test_two_host_turns_persist_usage_and_root_isolation(composed):
     from daimon.core.turn.prepare import bind_session_impl
     from daimon.core.turn.run import run_prepared_turn
 
+    # The thread's channel differs from the one whose budget its spend counts against.
+    budgeted = replace(request.admission, budget_channel_id="C-budget")
     for index in (1, 2):
         prepared = await bind_session_impl(
             request.deps,
-            request.admission,
+            budgeted,
             tenant_id=TENANT,
             platform="slack",
             external_user_id="caller",
@@ -481,6 +512,7 @@ async def test_two_host_turns_persist_usage_and_root_isolation(composed):
     assert {x["observation"].turn_id for x in observations} == {"turn-1", "turn-2"}
     assert all(x["infrastructure_usd"] is None for x in observations)
     assert all(x["model_id"] == "gpt-6-luna" for x in observations)
+    assert {x["channel_id"] for x in observations} == {"C-budget"}, "debits the budget channel"
     rows = await store.read_events(SESSION_ID)
     assert sum(e.type == "session.turn_ended" for e in rows) == 2
     assert sum(r.method == "POST" and r.url.path.endswith("/events") for r in wire.requests) == 2
@@ -494,9 +526,10 @@ async def test_actual_postgres_pending_then_measured_settlement(composed, monkey
 
     from daimon.core.pricing import ProviderPrice
     from daimon.core.stores.tenant_ledger import get_balance
-    from daimon.core.usage_recording import record_provider_usage
 
+    record_provider_usage = _RECORD_PROVIDER_USAGE  # the real recorder, unpatched
     monkeypatch.setattr(openai_host, "record_provider_usage", record_provider_usage)
+    monkeypatch.setattr(usage_recording, "record_provider_usage", record_provider_usage)
     request, wire, store, _, runtime = composed
     first = await prepare_openai(request)
     binding = await store.get_binding(
@@ -563,7 +596,8 @@ async def test_actual_postgres_pending_then_measured_settlement(composed, monkey
     assert await store.pending_outbox() == []
 
 
-async def test_foreign_plan_and_changed_plan_refuse_before_new_session(composed):
+async def test_changed_plan_replaces_and_foreign_plan_refuses(composed):
+    """A changed plan replaces the bound session; a foreign plan sends nothing."""
     request, wire, store, _, runtime = composed
     await prepare_openai(request)
 
@@ -575,10 +609,12 @@ async def test_foreign_plan_and_changed_plan_refuse_before_new_session(composed)
         request,
         deps=replace(request.deps, turn_runtimes={PROFILE: replace(runtime, session_plan=changed)}),
     )
+    replaced = await prepare_openai(next_request)
+    assert replaced.continuity.state in ("replaced", "replaced_after_loss"), (
+        "a changed plan replaces the session instead of losing the thread"
+    )
+    assert replaced.continuity.state == "replaced", "the old conversation was readable"
     count = len(wire.requests)
-    with pytest.raises(ContinuityLost):
-        await prepare_openai(next_request)
-    assert len(wire.requests) == count
 
     async def foreign(req):
         spec = await runtime.session_plan(req)
@@ -593,6 +629,34 @@ async def test_foreign_plan_and_changed_plan_refuse_before_new_session(composed)
     with pytest.raises(ScopeViolation):
         await prepare_openai(next_request)
     assert len(wire.requests) == count
+
+
+async def test_keys_file_mounts_and_lives_until_its_session_is_replaced(composed, monkeypatch):
+    """The real preparation mounts the keys file, keeps it past the turn, deletes it on replace."""
+    from daimon.core.turn.provider_env import PATH, EnvFile
+
+    request, wire, store, _, runtime = composed
+    env = [EnvFile(body=b"API_KEY=one\n", sha256="h1")]
+    wire.upload_size = len(env[0].body)
+
+    async def keys(_request):
+        return env[-1]
+
+    monkeypatch.setattr(openai_host, "turn_env_file", keys)
+    prepared = await prepare_openai(request)
+    (create,) = [r for r in wire.requests if r.url.path.endswith("/agents/sessions")]
+    mount = {"type": "file_id", "file_id": "file-1", "path": PATH}
+    assert mount in json.loads(create.content)["environment"]["files"]
+    assert prepared.env_sha256 == "h1"
+    finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+    if finalize is not None:
+        await finalize()
+    assert "file-1" in wire.files, "the turn's end leaves the session's file in place"
+
+    env.append(EnvFile(body=b"API_KEY=two\n", sha256="h2"))
+    replaced = await prepare_openai(request)
+    assert replaced.continuity.state == "replaced" and replaced.env_sha256 == "h2"
+    assert list(wire.files) == ["file-2"], "the replaced session's file went with it"
 
 
 async def test_restart_replays_same_claim_without_second_post(composed):
@@ -615,7 +679,6 @@ async def test_restart_replays_same_claim_without_second_post(composed):
         return turn_io(
             request.deps.anthropic,
             SESSION_ID,
-            path="mux",
             scope=SCOPE,
             profile=PROFILE,
             backend_request=TurnBackendRequest(
@@ -680,7 +743,6 @@ async def test_actual_cancel_ack_waits_and_completes_claim(composed):
         io = turn_io(
             request.deps.anthropic,
             SESSION_ID,
-            path="mux",
             scope=SCOPE,
             profile=PROFILE,
             backend_request=TurnBackendRequest(
@@ -757,6 +819,265 @@ async def test_durable_usage_revision_survives_runtime_restart(composed):
     assert await allocate({"usage": {"input_tokens": 3}, "subagent_id": None}) == 2
     with pytest.raises(ScopeViolation):
         await OpenAIUsageRevisions().revise(prepared.session_ref, "root", {})
+    reading = TurnPersistence(store, binding, SCOPE, operation_key="revision")
+
+    async def newest():
+        return await OpenAIUsageRevisions().latest(prepared.session_ref, "openai:turn:root")
+
+    with reading.activate():
+        meter = await reading.run(newest)
+    assert meter == {"usage": {"input_tokens": 3}, "subagent_id": None}, meter
+
+
+SLOT = Slot(
+    thread=ThreadRef(channel=REVISION.channel, thread_id="thread"), account_id=SCOPE.account_id
+)
+FINAL_USAGE = {"input_tokens": 100, "output_tokens": 20}
+
+
+def _root(usage: dict | None) -> dict:
+    return {
+        "id": "root",
+        "session_id": SESSION_ID,
+        "agent_id": "native-agent",
+        "subagent_id": None,
+        "status": "completed",
+        "created_at": 0,
+        "usage": usage,
+    }
+
+
+class LateTurn:
+    """An ended root turn prepared with a late-usage scheduler, readable like the host reads it."""
+
+    def __init__(self, composed, prepared, recorder) -> None:
+        _, self.wire, self.store, self.observations, _ = composed
+        self.prepared, self._recorder, self._reads = prepared, recorder, 0
+
+    async def read(self) -> UsageObservation:
+        """The root turn's observation as a turn in progress reads it."""
+        self._reads += 1
+        binding = await self.store.get_binding(SLOT)
+        active = TurnPersistence(self.store, binding, SCOPE, operation_key=f"read-{self._reads}")
+
+        async def reading():
+            driver = cast(OpenAIDriver, self.prepared.backend)
+            (value,) = await driver.usage.reconcile_turn(SCOPE, self.prepared.session_ref, "root")
+            return value
+
+        with active.activate():
+            return await active.run(reading)
+
+    async def record(self, value: UsageObservation) -> None:
+        await self._recorder(observation=value)
+
+    async def hold(self) -> Lease:
+        """Another holder of the thread's lease, as a running turn would be."""
+        return await self.store.acquire_lease(
+            SLOT,
+            holder="turn",
+            turn_id="other",
+            now=datetime.now(UTC),
+            ttl=timedelta(minutes=5),
+        )
+
+
+@contextlib.asynccontextmanager
+async def _late_turn(composed, late, *, serve=None, **changes) -> AsyncIterator[LateTurn]:
+    request, wire, _, _, runtime = composed
+    async with AsyncOpenAI(
+        api_key="offline",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(serve or wire.handle)),
+    ) as sdk:
+        runtime = replace(
+            runtime,
+            late_usage=late,
+            transport_factory=lambda revision, scope: SDKTransport(sdk),
+            **changes,
+        )
+        prepared = await prepare_openai(
+            replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
+        )
+        recorder = cast(ObservationRecorder, prepared._record)
+        yield LateTurn(composed, prepared, recorder)
+
+
+async def test_an_unknown_turn_is_reread_after_it_and_recorded_measured(composed):
+    """The recorder never waits on late usage; the deferred re-read records the priced revision."""
+    wire = composed[1]
+    gate = asyncio.Event()
+
+    async def held(delay: float) -> None:
+        await gate.wait()
+
+    late = LateUsage(delays_s=(1.0, 2.0), sleep=held)
+    async with _late_turn(composed, late) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        assert unknown.completeness == "unknown", unknown
+        await turn.record(unknown)
+        assert len(turn.observations) == 1, "the recorder returns before any re-read"
+        wire.turns[0]["usage"] = FINAL_USAGE
+        gate.set()
+        await late.wait()
+    later = [x["observation"] for x in turn.observations]
+    assert [x.completeness for x in later] == ["unknown", "measured"], later
+    assert (later[1].revision, later[1].input_tokens) == (unknown.revision + 1, 100), later
+
+
+async def test_a_late_reread_charges_the_runtimes_own_price_and_infrastructure(composed):
+    """The process's re-read prices the turn as the turn itself did."""
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+
+    wire, gate = composed[1], asyncio.Event()
+    price = ProviderPrice(
+        provider="openai",
+        model="gpt-6-luna",
+        checked_on=date(2020, 1, 1),
+        input=Decimal("7"),
+        output=Decimal("9"),
+        cache_read=Decimal("1"),
+    )
+
+    async def held(delay: float) -> None:
+        await gate.wait()
+
+    async def infrastructure(observation: UsageObservation) -> Decimal:
+        return Decimal("0.0053")
+
+    late = LateUsage(delays_s=(1.0,), sleep=held)
+    async with _late_turn(composed, late, price=price, infrastructure=infrastructure) as turn:
+        wire.turns = [_root(None)]
+        await turn.record(await turn.read())
+        wire.turns[0]["usage"] = FINAL_USAGE
+        gate.set()
+        await late.wait()
+    reread = turn.observations[-1]
+    assert reread["observation"].final, "the re-read recorded the final usage"
+    assert (reread["provider_price"], reread["infrastructure_usd"]) == (
+        price,
+        Decimal("0.0053"),
+    ), "the re-read must charge the runtime's tariff and infrastructure"
+
+
+async def test_a_fallback_usage_when_the_resource_still_lacks_it_then_is_reread_to_the_final(
+    composed,
+):
+    """A mid-turn snapshot kept as the fallback is billed, but never ends the re-reads."""
+    wire, waits = composed[1], list[float]()
+
+    async def sleep(delay: float) -> None:
+        waits.append(delay)
+        if len(waits) == 2:
+            wire.turns[0]["usage"] = FINAL_USAGE
+
+    running = True
+
+    async def serve(req: httpx.Request) -> httpx.Response:
+        if running and "/turns/" in req.url.path:
+            return httpx.Response(200, json={**wire.turns[-1], "status": "in_progress"})
+        return wire.handle(req)
+
+    late = LateUsage(delays_s=(1.0, 2.0, 4.0), sleep=sleep)
+    async with _late_turn(composed, late, serve=serve) as turn:
+        wire.turns = [_root({"input_tokens": 50, "output_tokens": 5})]
+        await turn.read()  # the spend guard stores a mid-turn snapshot
+        running, wire.turns[0]["usage"] = False, None
+        fallback = await turn.read()
+        assert (fallback.completeness, fallback.input_tokens) == ("measured", 50), fallback
+        assert not fallback.final, "a fallback is never final"
+        await turn.record(fallback)
+        await late.wait()
+    assert waits == [1.0, 2.0], "the first re-read found only the fallback and went on"
+    final = turn.observations[-1]["observation"]
+    assert (final.input_tokens, final.output_tokens, final.final) == (100, 20, True), final
+
+
+async def test_reread_when_the_thread_is_busy_then_retries_after_the_lease_frees(composed):
+    """A running turn holding the lease makes the late read wait for its next attempt."""
+    wire, waits = composed[1], list[float]()
+    held = []
+
+    async def sleep(delay: float) -> None:
+        waits.append(delay)
+        if len(waits) == 2:
+            await turn.store.release_lease(held[0])
+
+    late = LateUsage(delays_s=(1.0, 2.0, 4.0), sleep=sleep)
+    async with _late_turn(composed, late) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        wire.turns[0]["usage"] = FINAL_USAGE
+        held.append(await turn.hold())
+        await turn.record(unknown)
+        await late.wait()
+    assert waits == [1.0, 2.0], "the busy read retried once, then the read went through"
+    assert turn.observations[-1]["observation"].final, turn.observations
+
+
+@pytest.mark.parametrize("failure", ["error", "hang"])
+async def test_reread_when_the_read_fails_or_hangs_then_the_lease_is_released(composed, failure):
+    """A failed or timed-out read leaves the thread free for its turns."""
+    wire = composed[1]
+    down = False
+
+    async def serve(req: httpx.Request) -> httpx.Response:
+        if down and "/turns/" in req.url.path:
+            if failure == "hang":
+                await asyncio.Event().wait()
+            raise httpx.ReadError("provider down")
+        return wire.handle(req)
+
+    async def never(delay: float) -> None:
+        return None
+
+    late = LateUsage(delays_s=(1.0,), sleep=never)
+    async with _late_turn(composed, late, serve=serve, late_read_timeout_s=0.05) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        down = True
+        await turn.record(unknown)
+        await late.wait()
+        lease = await turn.hold()  # LeaseBusy here means the failed read kept the lease
+        await turn.store.release_lease(lease)
+    assert len(turn.observations) == 1, "nothing was read, so nothing more was recorded"
+
+
+async def test_reread_when_the_thread_moved_to_another_session_then_logs_and_stops(composed):
+    """A re-read of a turn whose thread is bound elsewhere is dropped, with a warning."""
+    wire, waits = composed[1], list[float]()
+
+    async def sleep(delay: float) -> None:
+        waits.append(delay)
+
+    late = LateUsage(delays_s=(1.0, 2.0), sleep=sleep)
+    async with _late_turn(composed, late) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        binding = await turn.store.get_binding(SLOT)
+        moved = binding.model_copy(
+            update={
+                "native_refs": {**binding.native_refs, "session": "sess-other"},
+                "generation": binding.generation + 1,
+            }
+        )
+        await turn.store.put_binding(moved, expected_generation=binding.generation)
+        with capture_logs() as logs:
+            await turn.record(unknown)
+            await late.wait()
+    (event,) = [entry for entry in logs if entry["event"] == "late_usage.rebound"]
+    assert (event["log_level"], event["turn_id"], event["session_id"]) == (
+        "warning",
+        "root",
+        SESSION_ID,
+    ), event
+    assert event["bound_session_id"] == "sess-other", event
+    assert waits == [1.0], "the re-reads stopped at the rebind"
+    assert len(turn.observations) == 1, "the other session's turn was never read"
 
 
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)
@@ -815,7 +1136,6 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
             io = turn_io(
                 request.deps.anthropic,
                 SESSION_ID,
-                path="mux",
                 scope=SCOPE,
                 profile=PROFILE,
                 backend_request=TurnBackendRequest(
@@ -873,51 +1193,32 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
     ("policy", "value"),
     [
         ("memory_read_only", True),
-        ("source_sealed", True),
-        ("asks_before_publishing", True),
-        ("daimon_rules_need_driver", True),
         ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
+        ("source_sealed", True),
+        ("origin_seal_ids", frozenset({"C-SYN-1"})),
+        ("slack_turn_context_id", UUID("00000000-0000-4000-8000-000000000001")),
+        ("daimon_rule_tools", frozenset({"get_session"})),
     ],
 )
-async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
-    from daimon.core.turn.errors import AdmissionDenied
-    from mux.errors import UnsupportedCapability
-
-    request, wire, _, _, _ = composed
+async def test_held_and_read_only_turns_prepare(composed, policy, value):
+    """Held, sealed, Slack-context and tool-rule turns run on a per-turn credential;
+    the MCP server's host call gate applies the rules (`needs_host_gate`)."""
+    request, *_ = composed
     request = replace(request, admission=replace(request.admission, **{policy: value}))
-    with pytest.raises(AdmissionDenied) as refused:
-        await prepare_openai(request)
-    assert refused.value.reason == "backend_unsupported"
-    if policy == "daimon_rules_need_driver":
-        assert isinstance(refused.value.__cause__, UnsupportedCapability)
-        assert refused.value.__cause__.missing == ("daimon_tool_rules",)
-    assert wire.requests == []
+    prepared = await prepare_openai(request)
+    assert prepared.session_ref is not None, f"a {policy} turn prepares its session"
 
 
-@pytest.mark.parametrize("missing_runtime", [True, False])
-async def test_configured_channel_refuses_unavailable_runtime_before_io(composed, missing_runtime):
+async def test_configured_channel_refuses_unavailable_runtime_before_io(composed):
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import bind_session_impl
 
-    request, wire, _, _, runtime = composed
-
-    def forbidden_transport(revision, scope):
-        raise AssertionError("a refused channel must not access a key or transport")
-
-    async def forbidden_plan(request):
-        raise AssertionError("a refused channel must not resolve native resources")
-
-    runtime = replace(runtime, transport_factory=forbidden_transport, session_plan=forbidden_plan)
-    deps = replace(request.deps, turn_runtimes={} if missing_runtime else {PROFILE: runtime})
-    admission = (
-        request.admission
-        if missing_runtime
-        else replace(request.admission, asks_before_publishing=True)
-    )
+    request, wire, *_ = composed
+    deps = replace(request.deps, turn_runtimes={})
     with pytest.raises(AdmissionDenied) as refused:
         await bind_session_impl(
             deps,
-            admission,
+            request.admission,
             tenant_id=TENANT,
             platform="slack",
             external_user_id="caller",
@@ -1149,8 +1450,8 @@ async def test_final_host_outcome_preserves_observed_root(
 
 @pytest.mark.parametrize("append_mode", ["record", "record_many"])
 async def test_native_command_pair_survives_live_and_recovery_journal(composed, append_mode):
+    from daimon.core.turn.hosted_io import OpenAITurnIO
     from daimon.core.turn.openai_host import driver
-    from daimon.core.turn.openai_io import OpenAITurnIO
     from mux.drivers.openai.normalize import EventNormalizer
 
     request, _, store, _, runtime = composed
@@ -1226,8 +1527,8 @@ async def test_host_runtime_allows_omitted_optional_spend_control(composed):
 
 @pytest.mark.parametrize("recorded_id", ["native-answer-event", "openai:item:retained-answer"])
 async def test_recovery_after_upgrade_keeps_recorded_message_identity(composed, recorded_id):
+    from daimon.core.turn.hosted_io import OpenAITurnIO
     from daimon.core.turn.openai_host import driver
-    from daimon.core.turn.openai_io import OpenAITurnIO
     from mux.drivers.openai.normalize import EventNormalizer
 
     request, wire, store, _, runtime = composed
@@ -1322,7 +1623,9 @@ async def prechange_controls(composed, request):
         "container_size": "small",
         "spend_limit_usd_cents": cap,
     }
-    digest = request_digest({"spec": spec.model_dump(mode="json"), "controls": controls})
+    # The spec as persisted then, too: per-session `skills` came later as an additive field.
+    persisted_spec = spec.model_dump(mode="json", exclude={"skills"})
+    digest = request_digest({"spec": persisted_spec, "controls": controls})
     key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json()))
     await store.put_config_revision(REVISION)
     return application, wire, store, runtime, spec, slot, digest, key
@@ -1427,3 +1730,61 @@ async def test_existing_positional_runtime_constructor_keeps_billing_arguments(c
     assert retained.price is runtime.price
     assert retained.infrastructure is runtime.infrastructure
     assert retained.mcp_secrets is None
+
+
+async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(composed):
+    request, wire, store, _, runtime = composed
+    owner = uuid5(NAMESPACE_URL, "shared-owner-fixture")
+    other = uuid5(NAMESPACE_URL, "second-caller")
+
+    async def plan(prepared):
+        return SessionSpec(
+            agent=ResourceRef(
+                id="native-agent",
+                kind="agent",
+                provider="openai",
+                account_scope_id="project",
+                tenant_id=prepared.scope.tenant_id,
+                account_id=prepared.scope.account_id,
+            ),
+            agent_revision=Revision(local=0),
+            config_revision=REVISION.local,
+        )
+
+    shared_runtime = replace(
+        runtime,
+        session_plan=plan,
+        authorization=lambda scope, kind, id_: scope.tenant_id == SCOPE.tenant_id,
+        controls=runtime.controls.model_copy(update={"mcp_enabled": False}),
+    )
+    deps = replace(request.deps, turn_runtimes={PROFILE: shared_runtime})
+
+    def caller(account):
+        return replace(
+            request,
+            deps=deps,
+            admission=replace(request.admission, account_id=account, shared_owner=owner),
+            scope=SCOPE.model_copy(update={"account_id": str(account)}),
+            session_account_id=owner,
+        )
+
+    first = await prepare_openai(caller(ACCOUNT))
+    second = await prepare_openai(caller(other))
+    assert first.session_ref.id == second.session_ref.id and second.reused
+    assert second.session_ref.account_id == str(other)
+    thread = ThreadRef(channel=REVISION.channel, thread_id="thread")
+    binding = await store.get_binding(Slot(thread=thread, account_id=None))
+    assert binding.id == str(owner) and binding.legacy_account_id is None
+    assert "daimon_chat_session_id" not in binding.native_refs
+    assert await store.get_binding(Slot(thread=thread, account_id=SCOPE.account_id)) is None
+    assert len([r for r in wire.requests if r.method == "POST"]) == 1
+    # A shared turn mints no per-caller credential. An agent copy runs as the
+    # thread owner: a caller's own scope never reaches the owner's session.
+    assert first._finalize is None
+    agent_origin = caller(other)
+    agent_origin = replace(
+        agent_origin,
+        admission=replace(agent_origin.admission, backend_revision_origin="agent"),
+    )
+    with pytest.raises(ScopeViolation):
+        await prepare_openai(agent_origin)

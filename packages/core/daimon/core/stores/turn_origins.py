@@ -37,10 +37,14 @@ async def create_origin(
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
     helper_of: uuid.UUID | None = None,
+    helper_key: str | None = None,
+    own_dm_reach: bool = False,
+    origin_id: uuid.UUID | None = None,
 ) -> TurnOriginRow:
+    """``origin_id`` is given only for a wake's turn (`daimon.core.turn_origin.wake_turn`)."""
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
-        id=uuid.uuid4(),
+        id=origin_id or uuid.uuid4(),
         is_setup=is_setup,
         attended=attended,
         chat_session_id=chat_session_id,
@@ -61,6 +65,8 @@ async def create_origin(
         platform_channel_id=platform_channel_id,
         platform_message_id=platform_message_id,
         helper_of=helper_of,
+        helper_key=helper_key,
+        own_dm_reach=own_dm_reach,
     )
     session.add(origin)
     await session.flush()
@@ -87,6 +93,26 @@ async def get_active_origin(
     if for_update:
         statement = statement.with_for_update()
     origin = await session.scalar(statement)
+    return TurnOriginRow.model_validate(origin) if origin is not None else None
+
+
+async def get_live_origin(
+    session: AsyncSession,
+    *,
+    origin_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    platform: str,
+    now: datetime,
+) -> TurnOriginRow | None:
+    """A live origin by its server-side id alone; callers take the account from the row."""
+    origin = await session.scalar(
+        select(TurnOrigin).where(
+            TurnOrigin.id == origin_id,
+            TurnOrigin.tenant_id == tenant_id,
+            TurnOrigin.platform == platform,
+            TurnOrigin.expires_at > now,
+        )
+    )
     return TurnOriginRow.model_validate(origin) if origin is not None else None
 
 
@@ -181,9 +207,13 @@ async def update_origin_target(
     return TurnOriginRow.model_validate(origin)
 
 
-async def mark_serving_helpers(session: AsyncSession, *, origin_id: uuid.UUID) -> None:
+async def mark_serving_helpers(
+    session: AsyncSession, *, origin_id: uuid.UUID, self_helpers: bool = False
+) -> None:
     await session.execute(
-        update(TurnOrigin).where(TurnOrigin.id == origin_id).values(serves_helpers=True)
+        update(TurnOrigin)
+        .where(TurnOrigin.id == origin_id)
+        .values(serves_helpers=True, self_helpers=self_helpers)
     )
 
 
@@ -223,6 +253,17 @@ async def bind_origin_session(
     if human_invocation is not None:
         values["human_invocation"] = human_invocation
     await session.execute(update(TurnOrigin).where(TurnOrigin.id == origin_id).values(**values))
+
+
+async def mark_reach_read(session: AsyncSession, *, origin_id: uuid.UUID) -> bool:
+    """Record that this turn read a limited room through own-DM reach.
+
+    False when the origin is gone. The mark is never cleared while the origin lives.
+    """
+    result = await session.execute(
+        update(TurnOrigin).where(TurnOrigin.id == origin_id).values(reach_read=True)
+    )
+    return cast(CursorResult[Any], result).rowcount == 1
 
 
 async def delete_origin(

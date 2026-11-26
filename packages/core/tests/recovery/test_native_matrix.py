@@ -1,7 +1,6 @@
-"""An OpenAI-hosted chat turn (mux only: legacy cannot run it) interrupted and retried.
+"""An OpenAI-hosted chat turn interrupted and retried.
 
-Legacy refuses a non-Anthropic profile, so there is no legacy cell to compare
-with. These cells show what the mux contract itself does across a restart:
+These cells show what the mux contract does across a restart:
 an uncertain send is never repeated by the interrupted turn, the retry is a new
 input on a new key, and the interrupted turn's own usage is whatever its
 process managed to record.
@@ -22,11 +21,10 @@ from daimon.core.turn.openai_host import OpenAIHostRuntime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
-from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import extract_final_response
 from daimon.testing.factories import make_tenant
 from daimon.testing.recovery import KillableSessionmaker, ledger, record
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 from mux.contracts.ids import ResourceRef, Revision
 from mux.contracts.resources import SessionSpec
 from mux.drivers.openai.session_controls import SessionControls
@@ -153,7 +151,7 @@ class NativeProcess:
             async def reseed() -> str:
                 return text_
 
-            return await run_prepared_turn(
+            return await run_prepared(
                 deps,
                 prepared,
                 tenant_id=TENANT,
@@ -162,7 +160,6 @@ class NativeProcess:
                 external_user_id="caller",
                 user_message=text_,
                 lifecycle=lifecycle,
-                cancel=asyncio.Event(),
                 reseed_user_message=reseed,
                 recovery_lifecycle=lambda cancel: RecordingLifecycle(),
                 render_interval_s=0.01,
@@ -255,7 +252,6 @@ async def run_case(
         "chat-openai",
         point,
         mode,
-        "mux",
         provider_inputs_accepted=texts,
         leases_held_after_death=before.live_leases,
         operations_after_death=before.operations_by_status,

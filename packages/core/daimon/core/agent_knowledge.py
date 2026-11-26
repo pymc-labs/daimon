@@ -11,6 +11,8 @@ from __future__ import annotations
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_target import AgentTarget, load_target, require_setup
 from daimon.core.memory_view import get_memory_content, list_memory_paths
+from daimon.core.permissions import SEALED_REFUSAL, sealed_outside
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_memory_stores import (
     get_channel_memory_store_id,
     get_memory_store_id,
@@ -54,6 +56,16 @@ async def _store_id(deps: AgentEditDeps, target: AgentTarget, actor: AgentActor,
                 raise AgentEditError("No such memory.", kind="not_found")
             if not actor.subject.is_admin:
                 raise AgentEditError("Channel memory is for admins.", kind="forbidden")
+            # The channel the store belongs to, not the agent used to reach it: a shared
+            # agent serves a private channel too.
+            policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+            if sealed_outside(
+                policy,
+                actor.subject.inside,
+                channel_ids=(channel_id,),
+                operator=actor.subject.operator,
+            ):
+                raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
             found = await get_channel_memory_store_id(
                 session,
                 tenant_id=actor.tenant_id,
@@ -71,7 +83,7 @@ async def list_stores(
 ) -> KnowledgeStores:
     """Which memory the agent has: its shared store, and (admins) each channel's."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
-    require_setup(target, "Memory")
+    require_setup(target, "Memory", read_only=True)  # names only; the text is `read`
     channels: list[MemoryPlace] = []
     async with deps.session_factory() as session:
         shared = (

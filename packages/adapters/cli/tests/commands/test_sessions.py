@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from functools import partial
 from io import StringIO
 from typing import Any
 
@@ -40,6 +41,10 @@ from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..harness import build_cli_runtime
+
+_sessions_create = partial(
+    sessions_create, agent_flag="agent-sys", environment_flag="env-sys", as_json=False
+)
 
 
 def _fake_settings(mcp: McpSettings | None = None) -> Settings:
@@ -179,13 +184,7 @@ async def test_sessions_create_json_prints_session_id_agent_env(
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
-    await sessions_create(
-        rt=rt,
-        console=console,
-        agent_flag="agent-sys",
-        environment_flag="env-sys",
-        as_json=True,
-    )
+    await _sessions_create(rt=rt, console=console, as_json=True)
 
     out = capsys.readouterr().out.strip()
     payload = json.loads(out)
@@ -210,13 +209,7 @@ async def test_sessions_create_bare_prints_session_id(
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
-    await sessions_create(
-        rt=rt,
-        console=console,
-        agent_flag="agent-sys",
-        environment_flag="env-sys",
-        as_json=False,
-    )
+    await _sessions_create(rt=rt, console=console)
 
     out = capsys.readouterr().out.strip()
     assert out == "sess_bare_42"
@@ -232,13 +225,7 @@ async def test_sessions_create_without_defaults_exits_one_with_apply_hint(
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
     with pytest.raises(SessionBootstrapError) as exc_info:
-        await sessions_create(
-            rt=rt,
-            console=console,
-            agent_flag=None,
-            environment_flag=None,
-            as_json=False,
-        )
+        await _sessions_create(rt=rt, console=console, agent_flag=None, environment_flag=None)
     assert exc_info.value.kind == "defaults_missing"
     assert "daimon defaults apply" in exc_info.value.message
 
@@ -402,13 +389,7 @@ async def test_cli_sessions_create_lands_vault_credential_with_cli_local_scope(
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
-    await sessions_create(
-        rt=rt,
-        console=console,
-        agent_flag="agent-sys",
-        environment_flag="env-sys",
-        as_json=False,
-    )
+    await _sessions_create(rt=rt, console=console)
 
     assert len(captured) == 1, "exactly one credential POST"
     token = captured[0]["auth"]["token"]
@@ -440,13 +421,7 @@ async def test_cli_sessions_create_back_compat_when_mcp_settings_unset(
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
-    await sessions_create(
-        rt=rt,
-        console=console,
-        agent_flag="agent-sys",
-        environment_flag="env-sys",
-        as_json=False,
-    )
+    await _sessions_create(rt=rt, console=console)
 
     out = capsys.readouterr().out.strip()
     assert out == "sess_cli_nomcp_01", "bare-id printed; no vault path taken"
@@ -521,13 +496,7 @@ async def test_sessions_create_threads_agent_uuid(
     )
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
 
-    await sessions_create(
-        rt=rt,
-        console=console,
-        agent_flag="agent-sys",
-        environment_flag="env-sys",
-        as_json=False,
-    )
+    await _sessions_create(rt=rt, console=console)
 
     assert len(vault_display_names_created) == 1, (
         "exactly one vault must be created (cold path — empty vault list)"

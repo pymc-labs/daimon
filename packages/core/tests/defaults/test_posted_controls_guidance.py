@@ -21,7 +21,7 @@ FORBIDDEN_CARD_FACTS = (
 
 def _daimon_system() -> str:
     specs = load_agent_specs(DEFAULTS / "agents")
-    daimon = next(s for s in specs if s.name == "daimon")
+    daimon = next(s for s in specs if s.name == "default")
     system = daimon.system or ""
     assert system, "seeded daimon agent must have a system prompt"
     return system
@@ -47,7 +47,7 @@ def test_daimon_key_only_reply_shape_does_not_duplicate_card_facts() -> None:
     reply_shape = _section(system, "Key-only request:", "\n\n")
     for phrase in FORBIDDEN_CARD_FACTS:
         assert phrase not in reply_shape, (
-            f"daimon.yaml key-only reply shape restates card fact {phrase!r}; "
+            f"default.yaml key-only reply shape restates card fact {phrase!r}; "
             "the posted card already carries it"
         )
 
@@ -73,20 +73,6 @@ def test_guidance_names_pending_task_and_github_connect() -> None:
     assert "github_connect" in combined
 
 
-def test_skill_repo_guidance_no_longer_claims_a_working_repo_change() -> None:
-    """Skill-repo separation landed: importing skills must not claim to touch the working repo."""
-    body = _workspace_setup_body()
-    skills_section = _section(body, "3. **Skills.**", "4. **MCP servers.**")
-    for phrase in ("also binds the target's working repo", "working-repo binding"):
-        assert phrase not in skills_section, (
-            f"skill-repo guidance still claims {phrase!r}; a skill-repo token no longer "
-            "rewrites the working repo binding"
-        )
-    assert "never changes the working repo" in skills_section, (
-        "skill-repo guidance must say importing skills never changes the working repo"
-    )
-
-
 def test_after_confirmed_save_notes_next_message_availability_and_card_result() -> None:
     """The after-save paragraph must not claim a saved key works immediately or need paraphrasing."""
     body = _workspace_setup_body()
@@ -103,7 +89,7 @@ def _reply_shape_sections() -> list[tuple[str, str]]:
     """The two places that tell the model what to say after posting a card."""
     return [
         (
-            "daimon.yaml key-only reply shape",
+            "default.yaml key-only reply shape",
             _section(_daimon_system(), "Key-only request:", "\n\n"),
         ),
         (
@@ -147,7 +133,7 @@ def test_reply_shape_covers_the_waiting_task_path() -> None:
 def test_guidance_states_the_mention_handle_is_the_answering_agent() -> None:
     """D24-QA-01: a bot display name differing from the agent name is not ambiguity."""
     for label, text in (
-        ("daimon.yaml", _daimon_system()),
+        ("default.yaml", _daimon_system()),
         ("workspace-setup", _workspace_setup_body()),
     ):
         assert "responder.handle" in text, (
@@ -198,25 +184,12 @@ def test_reply_shape_keeps_tool_names_out_of_the_reply() -> None:
         )
 
 
-def test_guidance_drops_editor_era_and_duplicate_routing_phrases() -> None:
-    """Setup-orientation repetition audit (PR 4).
-
-    The read-only panel's New agent form lands on Details — there is no
-    separate success screen to name — and a newly created or forked agent's
-    routing state is relayed from the tool's own ``answering`` field rather
-    than restated in independently worded prose.
-    """
-    combined = _daimon_system() + "\n" + _workspace_setup_body()
-    for phrase in ("new-agent success control", "Creation alone does not route mentions"):
-        assert phrase not in combined, f"guidance still contains the removed phrase {phrase!r}"
-
-
 def test_daimon_system_skips_orientation_after_the_setup_opener() -> None:
     """The setup thread's opener already asks what to configure; the
     general unconfigured-workspace orientation must not repeat it."""
     system = _daimon_system()
     assert "setup opener already asked what to configure" in system, (
-        "daimon.yaml must tell the model to skip the general orientation when "
+        "default.yaml must tell the model to skip the general orientation when "
         "the setup conversation opener already covered it"
     )
 
@@ -239,14 +212,14 @@ def test_guidance_says_to_post_the_answering_and_applies_sentences_word_for_word
     channel-specific routing step no tool had supplied."""
     system = _daimon_system()
     assert "`answering` or `applies`" in system, (
-        "daimon.yaml must name both tool-result sentences the reply carries unchanged"
+        "default.yaml must name both tool-result sentences the reply carries unchanged"
     )
     assert "word for word" in system, (
-        "daimon.yaml must tell the model to post those sentences word for word, "
+        "default.yaml must tell the model to post those sentences word for word, "
         "not to paraphrase them"
     )
     assert "no routing step the tool did not give" in system, (
-        "daimon.yaml must forbid adding a routing step the tool result did not supply"
+        "default.yaml must forbid adding a routing step the tool result did not supply"
     )
 
 

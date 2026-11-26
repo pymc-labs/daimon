@@ -9,8 +9,9 @@ routine can mention people but never broadcast (`<!channel>`, `<!here>`).
 
 When the destination cannot be used — protected, or Slack refuses the post —
 the result goes to the routine's creator by direct message instead, if the
-tenant's direct-message policy allows them and they are still an active human
-member of the workspace (the same rule as the direct-message tool). The creator
+tenant's direct-message policy and the routine agent's DM grant allow them and
+they are still an active human member of the workspace (the same rule as the
+direct-message tool). The creator
 is checked before any of this: an unreadable policy or a creator no longer
 allowed to invoke the agent gets nothing — no post and no direct message.
 """
@@ -24,15 +25,19 @@ from typing import Any, cast
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.adapters.slack.blockkit import error_title_block
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, build_output_poster
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import DirectMessagePolicy, env_dm_policy
+from daimon.core.dm_access import sender_admits
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
+from daimon.core.owner_notices import OwnerDm, OwnerNotice
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
@@ -42,11 +47,13 @@ from daimon.core.routine_delivery import (
     render_fallback_dm,
     render_fallback_post,
     resolve_routine_identity,
+    routine_agent_name,
     routine_requester_name,
     tenant_dm_still_open,
 )
 from daimon.core.routine_destinations import slack_may_deliver
 from daimon.core.routine_files import deliver_routine_files, payload_for
+from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
@@ -56,7 +63,7 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["make_slack_routine_poster"]
+__all__ = ["make_slack_owner_dm", "make_slack_routine_poster"]
 
 log = structlog.get_logger(__name__)
 
@@ -65,6 +72,8 @@ log = structlog.get_logger(__name__)
 _UNUSABLE_DESTINATION = frozenset(
     {"channel_not_found", "not_in_channel", "is_archived", "thread_not_found"}
 )
+#: Slack errors that mean the creator cannot get a DM at all, on every run alike.
+_UNREACHABLE = frozenset({"user_not_found", "user_disabled", "account_inactive", "cannot_dm_bot"})
 
 
 async def _dm_fallback(
@@ -76,7 +85,7 @@ async def _dm_fallback(
     policy: DirectMessagePolicy,
     output_client: AsyncAnthropic,
     may_post: Callable[[], Awaitable[bool]],
-    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DeliveryOutcome:
     creator = row.created_by_user_id
     if creator is None or not policy.allows(creator):
@@ -100,7 +109,7 @@ async def _dm_fallback(
                 sessionmaker,
                 tenant_id=row.tenant_id,
                 platform="slack",
-                text=render_fallback_dm(row, reason, platform="slack"),
+                text=render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row)),
             )
         )
         for chunk in split_fenced(text, 11800, word_boundary=True):
@@ -118,12 +127,20 @@ async def _dm_fallback(
             post=build_output_poster(client, channel_id=channel, thread_ts=None),
             notice=notice,
             may_post=may_post,
+            sessions=sessionmaker,
+            tenant_id=row.tenant_id,
         )
     except SlackApiError as err:
-        log.info(
-            "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+        log.warning(
+            "routine.delivery_fallback_failed",
+            routine_id=str(row.id),
+            error_type=type(err).__name__,
         )
-        return DeliveryOutcome(status="skipped", note=reason)
+        # A person gone or a DM Slack never allows repeats on every run: a skip, not a page.
+        closed = str(err.response.get("error", "")) in _UNREACHABLE  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
+        return DeliveryOutcome(
+            status="skipped", note=reason, failed=None if closed else type(err).__name__
+        )
     return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
 
@@ -198,6 +215,58 @@ async def _destination_refusal(
     return None
 
 
+def make_slack_owner_dm(runtime: SlackRuntime) -> OwnerDm:
+    """DM a routine's owner its failure notice, under the rules of the result fallback DM."""
+
+    async def send(row: RoutineRow, notice: OwnerNotice) -> str | None:
+        async with runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, row.tenant_id)
+        client = (
+            await resolve_web_client(runtime, team_id=tenant.external_id)
+            if tenant is not None and tenant.archived_at is None
+            else None
+        )
+        if tenant is None or client is None:
+            return "tenant_archived"
+        owner = row.created_by_user_id
+        policy = env_dm_policy(runtime.settings.direct_message_policies, row.tenant_id)
+        if owner is None or not policy.allows(owner):
+            return "dm_policy_denies"
+        if not await tenant_dm_still_open(runtime.sessionmaker, row, tenant.external_id):
+            return "dms_off"
+        if not await sender_admits(
+            runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            agent_name=row.agent_name,
+            user_id=owner,
+            groups=user_group_lookup(runtime, client, team_id=tenant.external_id),
+        ):
+            return "agent_closed"
+        info = await client.users_info(user=owner)  # pyright: ignore[reportUnknownMemberType]
+        user = cast("dict[str, object]", info["user"])
+        if (
+            user.get("team_id") != tenant.external_id
+            or user.get("deleted")
+            or user.get("is_bot")
+            or user.get("is_stranger")
+        ):
+            return "person_unreachable"
+        opened = await client.conversations_open(users=owner)  # pyright: ignore[reportUnknownMemberType]
+        channel = cast("dict[str, str]", opened["channel"])["id"]
+        if notice.text is not None:
+            await client.chat_postMessage(channel=channel, text=notice.text)  # pyright: ignore[reportUnknownMemberType]
+        else:
+            # The body is unescaped: it carries Slack's own date markup.
+            blocks = [
+                error_title_block(notice.title),
+                {"type": "section", "text": {"type": "mrkdwn", "text": notice.body}},
+            ]
+            await client.chat_postMessage(channel=channel, text=notice.title, blocks=blocks)  # pyright: ignore[reportUnknownMemberType]
+        return None
+
+    return send
+
+
 def make_slack_routine_poster(
     runtime: SlackRuntime,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
@@ -211,9 +280,7 @@ def make_slack_routine_poster(
         client = await resolve_web_client(runtime, team_id=tenant.external_id)
         if client is None:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
-        dm_policy = runtime.settings.direct_message_policies.get(
-            row.tenant_id, DirectMessagePolicy()
-        )
+        dm_policy = env_dm_policy(runtime.settings.direct_message_policies, row.tenant_id)
         # Creator first, before resolving or sending anything: a creator who
         # may no longer invoke the agent, or an unreadable policy, gets
         # nothing — no destination post and no direct message.
@@ -246,10 +313,19 @@ def make_slack_routine_poster(
             if not await tenant_dm_still_open(runtime.sessionmaker, row, tenant.external_id):
                 return False
             creator = row.created_by_user_id
-            current_dm_policy = runtime.settings.direct_message_policies.get(
-                row.tenant_id, DirectMessagePolicy()
+            current_dm_policy = env_dm_policy(
+                runtime.settings.direct_message_policies, row.tenant_id
             )
             if creator is None or not current_dm_policy.allows(creator):
+                return False
+            # The routine's agent grant must admit the creator; locks don't apply.
+            if not await sender_admits(
+                runtime.sessionmaker,
+                tenant_id=row.tenant_id,
+                agent_name=row.agent_name,
+                user_id=creator,
+                groups=user_group_lookup(runtime, client, team_id=tenant.external_id),
+            ):
                 return False
             current_policy = await clear_creator(runtime.sessionmaker, row, platform="slack")
             if not isinstance(current_policy, TenantAccessPolicy) or keeps_routine_inside(
@@ -324,6 +400,10 @@ def make_slack_routine_poster(
                         requester_name=await routine_requester_name(
                             runtime.sessionmaker, row, "slack"
                         ),
+                        agent_name=await routine_agent_name(runtime.sessionmaker, row),
+                        header=await routine_header_shown(
+                            runtime.sessionmaker, row, "slack", runtime.settings
+                        ),
                     ),
                 )
             )
@@ -365,6 +445,8 @@ def make_slack_routine_poster(
             ),
             notice=notice,
             may_post=may_post,
+            sessions=runtime.sessionmaker,
+            tenant_id=row.tenant_id,
         )
         return DeliveryOutcome(status="delivered")
 

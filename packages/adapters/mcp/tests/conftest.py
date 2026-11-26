@@ -11,13 +11,15 @@ must observe real COMMIT visibility.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
 from daimon.testing.db import (  # noqa: F401
+    add_background_drain,
     db_clean,
+    db_committing_engine,
+    db_committing_pool,
     db_engine,
     db_nullpool_engine,
     db_schema,
@@ -30,29 +32,45 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from .harness import stop_confirmation_workers
+
+# A worker reads through the test's connection; stopping it only in the autouse
+# fixture below, which tears down after the database, races the rollback.
+add_background_drain(stop_confirmation_workers)
+
+
+@pytest.fixture(autouse=True)
+def org_proof_on_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect page proves the signer may hand over a whole org before offering to follow
+    it (GitHub membership, else the installation's listing). The scripted GitHubs of the route
+    tests serve neither; the follow tests set their own."""
+    from daimon.adapters.mcp import oauth_github
+
+    async def proved(*_args: object, **_kwargs: object) -> str:
+        return "org_admin"
+
+    monkeypatch.setattr(oauth_github, "_org_proof", proved)
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def isolate_confirmation_workers() -> AsyncIterator[None]:
     """An agent-chat send starts its turn's confirmation worker; one test's
     worker must not outlive it into the next test's fakes."""
-    from daimon.adapters.mcp.tools import _agent_chat_safety
-
     yield
-    workers = [w.task for w in _agent_chat_safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
-    _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
-    for worker in workers:
-        worker.cancel()
-    await asyncio.gather(*workers, return_exceptions=True)
+    await stop_confirmation_workers()
 
 
 @pytest.fixture(autouse=True)
-def isolate_agent_faces() -> Iterator[None]:
-    """Creating an agent starts its face render in the background; one test's
-    render must not write into the next test's database or back-off state."""
-    from daimon.core.agent_identity import cancel_pending_agent_faces
+def isolate_skill_reads() -> Iterator[None]:
+    """Skill sizes are measured in the background and latest versions are remembered
+    process-wide; neither may carry one test's fakes into the next."""
+    from daimon.core.skills.latest_versions import LATEST_VERSIONS
+    from daimon.core.turn.session_skills import cancel_pending_measures
 
+    LATEST_VERSIONS.clear()
     yield
-    cancel_pending_agent_faces()
+    cancel_pending_measures()
+    LATEST_VERSIONS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +106,19 @@ async def committing_sessionmaker(
     schema mapping is needed here.
     """
     return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+@pytest_asyncio.fixture
+async def pooled_sessionmaker(
+    db_committing_engine: AsyncEngine,  # noqa: F811
+    db_clean: None,  # noqa: F811
+) -> async_sessionmaker[AsyncSession]:
+    """Like `committing_sessionmaker` on the production-sized pool.
+
+    For code that opens a second session while one is open (a records read inside
+    a transaction): the two-connection engine behind `db_session` has no room.
+    """
+    return async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)

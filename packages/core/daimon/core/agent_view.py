@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -43,14 +44,20 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import internal_token_label, mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import (
+    internal_token_label,
+    mint_agent_mcp_token,
+    mint_chat_mcp_token,
+    token_jti,
+)
+from daimon.core.mcp_identity import RelayBinding, relay_server_name
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.mcp_tool_listing import ListedTool, McpToolLister, McpToolListingError
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.permissions import WEB_PLACE_ID, channel_rule
+from daimon.core.permissions import WEB_PLACE_ID, channel_rule, is_barred_from_web_chat
 from daimon.core.platform_names import UNNAMED_CHANNEL, ChannelLookup, lookup_channel_names
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores import (
@@ -95,8 +102,8 @@ PlaceKind = Literal["channel", "dm", "web"]
 
 _DEFAULT_EFFORT: Effort = "high"
 _EFFORTS: dict[str, Effort] = {e: e for e in ("low", "medium", "high", "xhigh", "max")}
-RunsIn = Literal["discord", "slack", "teams", "dm", "web"]
-_RUNS_IN: tuple[RunsIn, ...] = ("discord", "slack", "teams", "dm", "web")
+RunsIn = Literal["discord", "slack", "teams", "web"]
+_RUNS_IN: tuple[RunsIn, ...] = ("discord", "slack", "teams", "web")
 
 
 def _omit_none(value: object) -> bool:
@@ -111,7 +118,8 @@ class ModelChoice(_Doc):
     id: str
     backend: Backend
     speed: Literal["standard", "fast"]
-    effort: Effort
+    #: None runs the model's own default; any level shown was chosen and is stored.
+    effort: Effort | None
 
 
 class BuiltinTool(_Doc):
@@ -291,7 +299,7 @@ def _model(agent: BetaManagedAgentsAgent, backend: AgentBackendRevision | None) 
             id=backend.model or backend_selection(backend.backend).model or "",
             backend=backend.backend,
             speed="standard",
-            effort=_DEFAULT_EFFORT,
+            effort=backend.effort,
         )
     choice = model_choice_id(agent.model)
     effort = (agent.model.model_extra or {}).get("effort")
@@ -526,7 +534,7 @@ def places_of(
     channel_names: Mapping[str, str],
 ) -> list[PlaceDoc]:
     """Where the agent answers: the channels it is the default of, the ones its rule lets it
-    run in, and the web chat unless its rule keeps it off. Pure.
+    run in, and the web chat unless its rules keep it off or it is a channel's own. Pure.
 
     A channel kept to its own agents is confidential. A workspace-wide default and
     direct messages are not places a rule names, so they are not listed.
@@ -553,7 +561,7 @@ def places_of(
         )
         for channel_id in ids
     ]
-    if allowed is None or WEB_PLACE_ID in allowed:
+    if (allowed is None or WEB_PLACE_ID in allowed) and not is_barred_from_web_chat(policy, names):
         places.append(PlaceDoc(id=WEB_PLACE_ID, kind="web", platform="web", name="Web chat"))
     return places
 
@@ -575,6 +583,8 @@ class OwnMcpServer:
     url: str
     secret: bytes
     now: Callable[[], datetime]
+    # The signed-identity servers its relay forwards to: only these get a relay credential.
+    relay_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -753,13 +763,16 @@ async def _own_server_tools(
     lister: McpToolLister,
     *,
     name: str,
+    url: str,
+    relayed: bool,
     tenant_id: uuid.UUID,
     agent: BetaManagedAgentsAgent,
     account_id: uuid.UUID,
 ) -> tuple[ListedTool, ...] | None:
-    """The deployment's own server's tools as ``account_id`` sees them on ``agent``."""
+    """The tools of the deployment's own server, or of a server behind its signed-identity
+    relay (`daimon.core.mcp_identity`), as ``account_id`` sees them on ``agent``."""
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
-    key = (canonical_mcp_url(own.url), f"viewer:{account_id}:{agent_uuid}")
+    key = (canonical_mcp_url(url), f"viewer:{account_id}:{agent_uuid}")
     known = lister.cache.recall(key)
     if known is not None:
         return known
@@ -767,26 +780,44 @@ async def _own_server_tools(
         return None  # no token is minted to ask again at once
     jti = uuid.uuid4()
     async with deps.session_factory.begin() as db:
-        token = await mint_agent_mcp_token(
-            db,
-            account_id=account_id,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
-            label=internal_token_label(jti),
-            secret=own.secret,
-            now=own.now(),
-            ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
-            chat_execution=True,
-            surface="provider_turn",
-            jti=jti,
-        )
+        if relayed:
+            # The relay takes only a session's chat credential; this one names no
+            # session, so the server is told the agent and workspace and no person.
+            token, _, _ = await mint_chat_mcp_token(
+                db,
+                account_id=account_id,
+                agent_id=agent_uuid,
+                secret=own.secret,
+                now=own.now(),
+                relay=RelayBinding(agent_name=agent.name),
+                ttl=timedelta(seconds=120),
+            )
+        else:
+            token = await mint_agent_mcp_token(
+                db,
+                account_id=account_id,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                label=internal_token_label(jti),
+                secret=own.secret,
+                now=own.now(),
+                ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
+                chat_execution=True,
+                surface="provider_turn",
+                jti=jti,
+            )
     try:
         return await _tools_of(
-            lister, ContextServer(name, own.url, token), agent_id=agent.id, cache_as=key
+            lister, ContextServer(name, url, token), agent_id=agent.id, cache_as=key
         )
     finally:
-        async with deps.session_factory.begin() as db:
-            await revoke_mcp_token(db, jti=token_jti(token), now=own.now())
+        # A cancelled page load still revokes the credential it minted.
+        await asyncio.shield(_revoke(deps, own, token))
+
+
+async def _revoke(deps: AgentViewDeps, own: OwnMcpServer, token: str) -> None:
+    async with deps.session_factory.begin() as db:
+        await revoke_mcp_token(db, jti=token_jti(token), now=own.now())
 
 
 async def _listed_tools(
@@ -817,18 +848,20 @@ async def _listed_tools(
             listed[server.name] = tools
     own = deps.own_server
     for server in agent.mcp_servers:
-        # Only the configured URL gets a minted token, whatever the server is named.
-        if (
-            own is None
-            or server.name in listed
-            or canonical_mcp_url(server.url) != canonical_mcp_url(own.url)
-        ):
+        if own is None or server.name in listed:
+            continue
+        # Only the configured URL, or its relay's for a configured server, gets a minted
+        # token, whatever the name.
+        relayed = relay_server_name(server.url, own.url) in own.relay_names
+        if not relayed and canonical_mcp_url(server.url) != canonical_mcp_url(own.url):
             continue
         tools = await _own_server_tools(
             deps,
             own,
             lister,
             name=server.name,
+            url=server.url,
+            relayed=relayed,
             tenant_id=tenant_id,
             agent=agent,
             account_id=account_id,
@@ -1020,7 +1053,10 @@ async def fetch_tenant_agent(
     """The tenant's live agent ``ma_agent_id``; None when it is missing, archived or foreign."""
     try:
         agent = await retrieve_agent(
-            deps.client, ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+            deps.client,
+            ma_agent_id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=deps.session_factory,
         )
     except (anthropic.NotFoundError, ScopeViolation):
         return None

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from secrets import randbits
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,13 +14,10 @@ import pytest
 from daimon.adapters.discord.__main__ import connect_gateway, start_when_leased
 from daimon.adapters.discord.runtime import DiscordRuntime, hold_worker_owner
 from daimon.core.config import McpSettings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.discord_gateway_lease import GatewayLease
 from daimon.core.stores.worker_ownership import OWNER_LOSS_GRACE_S
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
-from daimon.testing.turn_fakes import deps_for
+from daimon.testing.discord_builders import discord_runtime
 from discord.ext import commands
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionmaker
@@ -292,15 +288,10 @@ def _runtime(lease: GatewayLease) -> DiscordRuntime:
     settings.defaults_root = MagicMock()
     settings.discord.max_concurrent_turns_per_tenant = 3
     settings.discord.thread_open_notice_after_s = 3.0
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=AsyncMock(),
         sessionmaker=MagicMock(spec=async_sessionmaker),
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
         gateway_lease=lease,
     )
 

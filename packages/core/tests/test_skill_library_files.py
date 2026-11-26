@@ -12,7 +12,6 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core import skill_library, skill_library_files
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
@@ -22,6 +21,7 @@ from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import parse_entry
 from daimon.core.server_skills.mirror import add_server_skill
 from daimon.core.stores import server_skills, web_audit
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant, make_web_person
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -70,14 +70,12 @@ class _Library:
 
     def _listed(self) -> list[dict[str, Any]]:
         return [
-            SkillListResponse(
+            skill_listed(
                 id="sk_1",
-                type="custom",
                 display_title=self.title,
                 latest_version=max(self.versions),
                 created_at=_TS,
                 updated_at=_TS,
-                source="custom",
             ).model_dump(mode="json")
         ]
 
@@ -110,15 +108,7 @@ class _Library:
 
     def _create(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         self.created.append(request.content.decode("latin-1"))
-        body = SkillListResponse(
-            id="sk_new",
-            type="custom",
-            display_title="x",
-            latest_version="1",
-            created_at=_TS,
-            updated_at=_TS,
-            source="custom",
-        )
+        body = skill_listed(id="sk_new", display_title="x", created_at=_TS, updated_at=_TS)
         return httpx.Response(200, json=body.model_dump(mode="json"))
 
     def _content(self, _r: httpx.Request, match: re.Match[str]) -> httpx.Response:

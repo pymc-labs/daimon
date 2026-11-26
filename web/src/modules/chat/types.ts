@@ -14,7 +14,7 @@ export type FileOut = { id: string; name: string; size: number; kind: "csv" | "x
 export type Card =
   | { id: string; kind: "approval"; state: "pending" | "approved" | "always" | "denied"; title: string; consequence?: string; details: string[]; footer?: string; always_allowed: boolean }
   | { id: string; kind: "credential"; state: "pending" | "saved" | "skipped"; headline: string; fact: string; key: string }
-  | { id: string; kind: "refusal"; title: string; body: string; help?: string }
+  | { id: string; kind: "refusal"; title: string; body: string; help?: string; action?: "switch_back_to_claude" | null }
 
 export type CardAnswer = { answer: "approve" | "always" | "deny" | "save" | "skip"; value?: string }
 
@@ -38,7 +38,10 @@ export type Msg = {
  * The newest messages, oldest first. `next` is the `before` of the page of earlier ones, absent when none.
  * While a turn runs, the last message is its live reply as of event `resume_from`; re-attach from there.
  */
-export type SessionDetail = { session: ChatSession; messages: Msg[]; next?: number; resume_from?: string }
+export type SessionDetail = { session: ChatSession; messages: Msg[]; next?: number; resume_from?: string; monitoring?: Notice }
+
+/** Told to someone whose chat admins can read: what is happening, then who can help. */
+export type Notice = { line: string; help: string }
 
 export type StreamEvent =
   | { type: "step"; step: Step }
@@ -47,3 +50,7 @@ export type StreamEvent =
   | { type: "card"; card: Card }
   | { type: "done"; message: Msg }
   | { type: "settled"; message: Msg | null }
+  | { type: "monitoring"; notice: Notice }
+
+/** What a chat can pick its model from; `current` is the pick it runs on, null for the agent's own. */
+export type ThreadModels = { current: string | null; choices: { value: string; label: string; price: string; provider: string }[] }

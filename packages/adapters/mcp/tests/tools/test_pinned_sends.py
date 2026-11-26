@@ -30,6 +30,8 @@ from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _AGENT = "ag_acme"
 
 # (platform, pinned channel, in-pin target, in-pin parent, outside target, outside parent)
@@ -64,11 +66,7 @@ async def _runtime(
         name="Acme Display",
         metadata={"daimon_tenant": str(tenant.id), "daimon_name": "acme-project"},
     )
-    other = ma_agent(
-        id="ag_other",
-        name="other",
-        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "other"},
-    )
+    other = ma_agent(id="ag_other", name="other", tenant_id=tenant.id)
     router.add_agent(agent)
     router.add_agent_list(agent, other)
     settings = MagicMock()
@@ -129,24 +127,20 @@ async def test_unpinned_agents_and_the_operator_post_anywhere_unknown_agents_fai
     runtime, tenant_id = await _runtime(
         db_session, db_session_factory, platform="discord", pin="111"
     )
-    operator = AuthIdentity(account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN)
+    operator = auth_identity(uuid.uuid4(), tenant_id, is_admin=False, is_platform_admin=False)
     await require_channel_writable(runtime, operator, channel_id="999")
 
-    unpinned = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
+    unpinned = auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         role=Role.USER,
         platform="discord",
         chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_other"),
     )
     await require_channel_writable(runtime, unpinned, channel_id="999")
 
-    other_agent = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        platform="discord",
-        chat_agent_id=uuid.uuid4(),
+    other_agent = auth_identity(
+        uuid.uuid4(), tenant_id, role=Role.USER, platform="discord", chat_agent_id=uuid.uuid4()
     )
     with pytest.raises(ToolError, match="runs it only in certain channels"):
         # An agent that can't be resolved while pins exist fails closed.
@@ -196,9 +190,9 @@ async def test_direct_messages_from_unpinned_agents_pass_and_unknown_agents_fail
     runtime, tenant_id = await _runtime(
         db_session, db_session_factory, platform="slack", pin="C111"
     )
-    unpinned = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
+    unpinned = auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         role=Role.USER,
         platform="slack",
         platform_user_id="u1",
@@ -206,9 +200,9 @@ async def test_direct_messages_from_unpinned_agents_pass_and_unknown_agents_fail
     )
     await require_dm_recipient_allowed(runtime, unpinned, recipient_id="u2")
 
-    unknown = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
+    unknown = auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         role=Role.USER,
         platform="slack",
         platform_user_id="u1",

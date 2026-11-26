@@ -51,6 +51,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 #: "1:1" as the chat, not inside a time such as "21:15".
 _ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
 
@@ -137,9 +139,9 @@ async def _person(sm: async_sessionmaker[AsyncSession]) -> tuple[TenantRow, Auth
     async with sm.begin() as session:
         tenant = await make_tenant(session, platform="teams", workspace_id=ENTRA)
         account = await make_account(session, tenant=tenant)
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="teams",
         external_id=ENTRA,

@@ -257,7 +257,7 @@ async def test_explicit_execution_setting_reaches_real_dependencies_without_allo
     )
     assert deps.agent_backends is enabled
     # The other turn flags keep their own (on) defaults: each one is a separate stop.
-    assert deps.turn_path == "mux" and deps.channel_backends is True
+    assert deps.channel_backends is True
     assert deps.turn_runtimes == {} and deps.state_store is None
 
 
@@ -485,18 +485,29 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
     assert owned.wire.requests == [] and wire.requests == [] and posts == []
 
 
-async def test_opaque_caller_resource_is_an_unproved_source_definition(native_request, owned):
+async def test_a_private_caller_context_adds_no_obligation_on_a_provider_target(
+    native_request, owned
+):
+    """The provider host signs a private DM onto its turn credential, so it is no
+    opaque source resource: the refusal names the same gaps as without it."""
     from mux.errors import UnsupportedCapability
 
     request, _, wire, posts = native_request
-    request = replace(
-        request, admission=replace(request.admission, private_dm_id="caller-private-context")
+
+    async def refused_missing(admission):
+        with pytest.raises(AdmissionDenied) as refused:
+            await read_preparation_counterpart(replace(request, admission=admission))
+        detail = refused.value.__cause__
+        assert isinstance(detail, UnsupportedCapability), "the refusal names its capabilities"
+        return set(detail.missing)
+
+    plain = await refused_missing(request.admission)
+    private = await refused_missing(
+        replace(request.admission, private_dm_id="caller-private-context")
     )
-    with pytest.raises(AdmissionDenied) as refused:
-        await read_preparation_counterpart(request)
-    detail = refused.value.__cause__
-    assert isinstance(detail, UnsupportedCapability)
-    assert {"source_definition", "memory", "environment"} <= set(detail.missing)
+    assert private == plain, "the private context rides the credential, not the source"
+    assert "source_definition" not in private, "a carried context is no unproved definition"
+    assert {"memory", "environment"} <= private, "the source's own gaps still refuse"
     assert owned.wire.requests == [] and wire.requests == [] and posts == []
 
 

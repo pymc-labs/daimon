@@ -8,8 +8,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import (
     _set_agent_builtin_tool_impl,  # pyright: ignore[reportPrivateUsage]
@@ -21,6 +21,8 @@ from daimon.core.authz import Subject, Surface
 from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.scope import DeploymentDefault
 from daimon.testing.ma_models import ma_agent
+from fastmcp.exceptions import ToolError
+from mux.contracts.ids import ModelRef
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
@@ -28,6 +30,8 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _ALLOW: dict[str, Any] = {"type": "always_allow"}
 _TOOLSET: dict[str, Any] = {
@@ -88,13 +92,7 @@ async def test_update_agent_tool_and_service_make_the_same_ma_write(
     servers: list[Any] = [{"name": "docs", "type": "url", "url": "https://docs.example.com/mcp"}]
 
     via_tool: list[dict[str, Any]] = []
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(_recording_client(tenant_id, via_tool), db_session_factory),
         auth,
@@ -136,7 +134,7 @@ async def test_set_builtin_tool_and_service_make_the_same_ma_write(
 ) -> None:
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     via_tool: list[dict[str, Any]] = []
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     await _set_agent_builtin_tool_impl(
         _runtime(_recording_client(tenant_id, via_tool), db_session_factory),
         auth,
@@ -161,3 +159,51 @@ async def test_set_builtin_tool_and_service_make_the_same_ma_write(
 
     assert len(via_tool) == 1, "the tool writes once"
     assert via_tool == via_service, "the tool and the service send the same toolset"
+
+
+async def test_update_agent_moves_to_another_provider_through_change_model(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside chat another provider's model is core's one model write; the record stays."""
+    from daimon.adapters.mcp.tools import agents as mcp_agents
+
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    moves: list[ModelRef] = []
+
+    async def change_model(_agent: Any, model: ModelRef, **_: Any) -> None:
+        moves.append(model)
+
+    monkeypatch.setattr(mcp_agents, "change_model", change_model)
+    writes: list[dict[str, Any]] = []
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
+    runtime = _runtime(_recording_client(tenant_id, writes), db_session_factory)
+    await _update_agent_impl(
+        runtime,
+        auth,
+        name="a",
+        model="gpt-6-luna",
+        description=None,
+        system=None,
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+    )
+    assert moves == [ModelRef(provider="openai", id="gpt-6-luna")], "change_model writes it"
+    assert writes == [], "the Claude record is untouched"
+
+    in_chat = auth_identity(
+        account_id, tenant_id, is_platform_admin=False, chat_agent_id=uuid.uuid4()
+    )
+    with pytest.raises(ToolError, match="request_agent_backend_switch"):
+        await _update_agent_impl(
+            runtime,
+            in_chat,
+            name="a",
+            model="gpt-6-luna",
+            description=None,
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+        )
+    assert len(moves) == 1, "in chat the switch card confirms the move"

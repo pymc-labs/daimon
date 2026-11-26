@@ -27,6 +27,7 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.permissions import (
     agent_permissions,
     any_agent_rules,
@@ -171,6 +172,36 @@ class RoutineOrigin:
     thread_id: str | None
     seal_ids: frozenset[str]
     private_dm_id: str
+    # Whether the run reads inside the room it fires into, as a chat turn there does:
+    # only a Discord channel or thread destination. A run with no destination, one that
+    # reports to a DM, or one on another platform, stays outside though it is stamped
+    # with a place.
+    reads_inside: bool = False
+
+
+def _routine_channel_thread(row: RoutineRow, *, platform: str) -> tuple[str, str | None] | None:
+    channel_id = routine_destination_channel(row) or row.channel_id
+    if channel_id is None:
+        return None
+    thread_id: str | None = None
+    if row.destination_kind == "thread" and row.destination_id is not None:
+        # Slack names a thread by its ts under the channel; Discord and Teams by its own id.
+        target = delivery_target(row, platform=platform)
+        thread_id = (
+            (target.thread_ts if target is not None else None)
+            if platform == "slack"
+            else row.destination_id
+        )
+    if thread_id == channel_id:
+        thread_id = None
+    return channel_id, thread_id
+
+
+def routine_feature_place(row: RoutineRow, *, platform: str) -> FeaturePlace:
+    """Where a routine's features resolve: where it fires (`routine_origin`), with its agent,
+    as its session's toolset reads them."""
+    channel_id, thread_id = _routine_channel_thread(row, platform=platform) or (None, None)
+    return FeaturePlace.of(row.tenant_id, platform, channel_id, thread_id, agent_id=row.agent_id)
 
 
 def routine_origin(
@@ -186,25 +217,18 @@ def routine_origin(
     credentials, so no admin reads it from the hub, as
     before it carried a channel.
     """
-    channel_id = routine_destination_channel(row) or row.channel_id
-    if channel_id is None:
+    found = _routine_channel_thread(row, platform=platform)
+    if found is None:
         return None
-    thread_id: str | None = None
-    if row.destination_kind == "thread" and row.destination_id is not None:
-        # Slack names a thread by its ts under the channel; Discord and Teams by its own id.
-        target = delivery_target(row, platform=platform)
-        thread_id = (
-            (target.thread_ts if target is not None else None)
-            if platform == "slack"
-            else row.destination_id
-        )
-    if thread_id == channel_id:
-        thread_id = None
+    channel_id, thread_id = found
     return RoutineOrigin(
         channel_id=channel_id,
         thread_id=thread_id,
         seal_ids=limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id),
         private_dm_id=private_routine_stamp(row.id),
+        reads_inside=platform == "discord"
+        and row.destination_kind in ("channel", "thread")
+        and row.destination_id is not None,
     )
 
 
@@ -331,6 +355,7 @@ async def load_rule_viewer(
     platform: str | None = None,
     thread_id: str | None = None,
     default: DeploymentDefault | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> RuleViewer | None:
     """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
 
@@ -345,7 +370,7 @@ async def load_rule_viewer(
     agents = (
         await list_live_agent_facts(session, tenant_id=tenant_id)
         if anthropic_disabled()
-        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
     return RuleViewer(
         policy,
@@ -437,7 +462,7 @@ async def is_thread_turn_refused(
     names: tuple[str | None, ...] = (config.agent_name,)
     if home_of(policy, thread_id, channel_id) is not None:
         agent = await find_agent_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=config.agent_name
+            anthropic, tenant_id=tenant_id, name=config.agent_name, records=sessionmaker
         )
         if agent is not None:
             names = (config.agent_name, *agent_pin_names(agent.name, agent.metadata))

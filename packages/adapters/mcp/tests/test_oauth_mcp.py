@@ -36,10 +36,16 @@ from daimon.core.credential_requests import mint_request_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth import begin_mcp_oauth_flow
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow, Role
+from daimon.core.stores.domain import (
+    ConnectorTokenRow,
+    CredentialRequestRow,
+    McpOAuthFlowRow,
+    Role,
+)
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -156,7 +162,7 @@ def _fake_ma(
     account_id: uuid.UUID,
     agent_id: uuid.UUID,
     agent_present: bool = True,
-    vault_write_status: int = 200,
+    update_status: int = 200,
 ) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
     created: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
@@ -164,7 +170,7 @@ def _fake_ma(
     agent = ma_agent(
         id="ag_oauth",
         name="daimon",
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "daimon"},
+        tenant_id=tenant_id,
         tools=[
             {
                 "type": "agent_toolset_20260401",
@@ -217,8 +223,6 @@ def _fake_ma(
     router.add("POST", rf"/v1/vaults/{vault_id}/credentials/vcrd_jwt", on_refresh)
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        if vault_write_status != 200:
-            return httpx.Response(vault_write_status, json={"error": {"type": "api_error"}})
         created.append(json_body(req))
         return httpx.Response(
             200,
@@ -243,7 +247,10 @@ def _fake_ma(
         router.add_agent_list()
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        # Every attach attempt, refused or not.
         updates.append(json_body(req))
+        if update_status != 200:
+            return httpx.Response(update_status, json={"error": {"type": "api_error"}})
         return httpx.Response(200, json=agent.model_dump(mode="json"))
 
     router.add("POST", r"/v1/agents/ag_oauth", on_update)
@@ -286,6 +293,16 @@ async def _seed_flow(
         session, request=request, app_root_url=_ROOT, now=_NOW, state="st_" + uuid.uuid4().hex
     )
     return flow, tenant.id
+
+
+async def _grants(
+    sessionmaker: async_sessionmaker[AsyncSession], flow: McpOAuthFlowRow
+) -> tuple[ConnectorTokenRow, ...]:
+    """The requester's grants Daimon holds: a sign-in stores none in a vault."""
+    async with sessionmaker() as session:
+        return await connector_tokens_store.list_connector_tokens(
+            session, tenant_id=flow.tenant_id, agent_id=flow.agent_id, account_id=flow.account_id
+        )
 
 
 def _app(
@@ -384,7 +401,8 @@ async def test_callback_stores_the_grant_attaches_the_server_and_is_single_use(
 
     assert done.status_code == 200 and "Connected notion" in done.text, done.text
     assert token_forms[0]["code"] == ["code123"], "the callback's code is exchanged"
-    assert created[0]["auth"]["type"] == "mcp_oauth", "the grant is an mcp_oauth credential"
+    (grant,) = await _grants(db_session_factory, flow)
+    assert grant.server_url == _MCP_URL and created == [], "Daimon holds the grant, no vault"
     assert [s["name"] for s in updates[0]["mcp_servers"]] == ["notion"], "the server is attached"
     assert replay.status_code == 400, "a replayed callback finds the flow already spent"
     async with db_session_factory() as session:
@@ -408,7 +426,9 @@ async def test_callback_with_a_provider_error_declines_without_touching_ma(
         r = await client.get(f"/oauth/mcp/callback?error=access_denied&state={flow.state}")
 
     assert r.status_code == 200 and "cancelled" in r.text
-    assert created == [] and updates == [], "a declined sign-in stores and attaches nothing"
+    assert not await _grants(db_session_factory, flow) and created == [] and updates == [], (
+        "a declined sign-in stores and attaches nothing"
+    )
     body = json.dumps({"created": created})
     assert "mcp_oauth" not in body
     async with db_session_factory() as session:
@@ -421,7 +441,7 @@ async def test_callback_for_a_deleted_agent_stores_the_grant_but_says_nothing_wa
 ) -> None:
     flow, tenant_id = await _seed_flow(db_session)
     await db_session.commit()
-    anthropic, created, updates = _fake_ma(
+    anthropic, _created, updates = _fake_ma(
         tenant_id, account_id=flow.account_id, agent_id=flow.agent_id, agent_present=False
     )
     app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]))
@@ -434,7 +454,9 @@ async def test_callback_for_a_deleted_agent_stores_the_grant_but_says_nothing_wa
 
     assert r.status_code == 200 and "agent is gone" in r.text, r.text
     assert "Connected notion" not in r.text, "no success page for a server nothing uses"
-    assert len(created) == 1 and updates == [], "the grant is kept; there is no agent to attach"
+    assert len(await _grants(db_session_factory, flow)) == 1 and updates == [], (
+        "the grant is kept; there is no agent to attach"
+    )
     async with db_session_factory() as session:
         request = await requests_store.peek_credential_request(session, token=flow.request_token)
     assert request is not None and request.outcome == "write_failed"
@@ -509,7 +531,9 @@ async def test_callback_with_an_unusable_token_body_settles_the_card_instead_of_
 ) -> None:
     flow, tenant_id = await _seed_flow(db_session)
     await db_session.commit()
-    anthropic, created, _u = _fake_ma(tenant_id, account_id=flow.account_id, agent_id=flow.agent_id)
+    anthropic, _created, _u = _fake_ma(
+        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
+    )
     app = _app(
         db_session_factory,
         anthropic=anthropic,
@@ -523,20 +547,20 @@ async def test_callback_with_an_unusable_token_body_settles_the_card_instead_of_
         r = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
 
     assert r.status_code == 502 and "did not complete" in r.text, r.text
-    assert created == [], "nothing is stored without an access token"
+    assert not await _grants(db_session_factory, flow), "nothing is stored without an access token"
     async with db_session_factory() as session:
         request = await requests_store.peek_credential_request(session, token=flow.request_token)
     assert request is not None and request.outcome == "write_failed", "the card is not left pending"
 
 
-async def test_callback_settles_the_card_when_managed_agents_refuses_the_vault_write(
+async def test_callback_settles_the_card_when_managed_agents_refuses_the_attach(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     """An MA blip after the exchange is the exchange_failed page, not a traceback."""
-    flow, tenant_id = await _seed_flow(db_session)
+    flow, tenant_id = await _seed_flow(db_session, admin=True)
     await db_session.commit()
     anthropic, created, updates = _fake_ma(
-        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id, vault_write_status=503
+        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id, update_status=503
     )
     app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]))
 
@@ -547,7 +571,8 @@ async def test_callback_settles_the_card_when_managed_agents_refuses_the_vault_w
         r = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
 
     assert r.status_code == 502 and "did not complete" in r.text, r.text
-    assert created == [] and updates == [], "nothing was stored or attached"
+    assert created == [], "nothing was written to a vault"
+    assert updates, "the attach was tried (and refused), not skipped"
     async with db_session_factory() as session:
         request = await requests_store.peek_credential_request(session, token=flow.request_token)
     assert request is not None and request.outcome == "write_failed", "the card is not left pending"
@@ -568,7 +593,7 @@ async def test_a_pin_added_between_the_click_and_the_callback_stops_the_connecti
 
     flow, tenant_id = await _seed_flow(db_session)
     await db_session.commit()
-    anthropic, created, updates = _fake_ma(
+    anthropic, _created, updates = _fake_ma(
         tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
     )
     app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]))
@@ -589,10 +614,10 @@ async def test_a_pin_added_between_the_click_and_the_callback_stops_the_connecti
 
     if requester_is_admin:
         assert done.status_code == 200 and "Connected notion" in done.text, done.text
-        assert created and updates
+        assert await _grants(db_session_factory, flow) and updates
     else:
         assert done.status_code == 403 and "runs only in certain channels" in done.text, done.text
-        assert created == [], "no grant is stored"
+        assert not await _grants(db_session_factory, flow), "no grant is stored"
         assert updates == [], "nothing is attached"
 
 
@@ -607,7 +632,7 @@ async def test_a_pin_added_during_the_code_exchange_stores_no_grant(
 
     flow, tenant_id = await _seed_flow(db_session)
     await db_session.commit()
-    anthropic, created, updates = _fake_ma(
+    anthropic, _created, updates = _fake_ma(
         tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
     )
     inner = _notion([])
@@ -633,7 +658,7 @@ async def test_a_pin_added_during_the_code_exchange_stores_no_grant(
         done = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
 
     assert done.status_code == 403 and "runs only in certain channels" in done.text, done.text
-    assert created == [], "no grant is stored"
+    assert not await _grants(db_session_factory, flow), "no grant is stored"
     assert updates == [], "nothing is attached"
 
 
@@ -650,7 +675,9 @@ async def test_only_a_configured_client_keeps_offline_access_in_the_refresh_scop
 ) -> None:
     flow, tenant_id = await _seed_flow(db_session, admin=True)
     await db_session.commit()
-    anthropic, created, _u = _fake_ma(tenant_id, account_id=flow.account_id, agent_id=flow.agent_id)
+    anthropic, _created, _u = _fake_ma(
+        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
+    )
     transport = _notion(
         [],
         token_body={"access_token": "at", "refresh_token": "rt", "scope": "read"},
@@ -669,7 +696,8 @@ async def test_only_a_configured_client_keeps_offline_access_in_the_refresh_scop
         done = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
 
     assert done.status_code == 200, done.text
-    assert created[0]["auth"]["refresh"]["scope"] == kept, (
+    (grant,) = await _grants(db_session_factory, flow)
+    assert grant.scope == kept, (
         "a registered client stores the scope the server granted, byte for byte; only a "
         "configured client keeps the offline_access its sign-in asked for"
     )
@@ -680,7 +708,7 @@ async def test_a_configured_client_with_a_wrong_secret_sends_the_person_to_the_o
 ) -> None:
     flow, tenant_id = await _seed_flow(db_session)
     await db_session.commit()
-    anthropic, created, updates = _fake_ma(
+    anthropic, _created, updates = _fake_ma(
         tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
     )
     transport = _notion(
@@ -700,7 +728,9 @@ async def test_a_configured_client_with_a_wrong_secret_sends_the_person_to_the_o
 
     assert r.status_code == 502 and "not set up correctly" in r.text, r.text
     assert "Ask the operator" in r.text, "retrying cannot fix a wrong secret"
-    assert created == [] and updates == [], "a refused client stores and attaches nothing"
+    assert not await _grants(db_session_factory, flow) and updates == [], (
+        "a refused client stores and attaches nothing"
+    )
     async with db_session_factory() as session:
         request = await requests_store.peek_credential_request(session, token=flow.request_token)
     assert request is not None and request.outcome == "write_failed", "the card is not left pending"
@@ -719,7 +749,9 @@ async def test_an_authorization_server_error_names_the_configuration_only_for_a_
 ) -> None:
     flow, tenant_id = await _seed_flow(db_session)
     await db_session.commit()
-    anthropic, created, _u = _fake_ma(tenant_id, account_id=flow.account_id, agent_id=flow.agent_id)
+    anthropic, _created, _u = _fake_ma(
+        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
+    )
     app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]), clients=clients)
 
     async with httpx.AsyncClient(
@@ -729,7 +761,9 @@ async def test_an_authorization_server_error_names_the_configuration_only_for_a_
         r = await client.get(f"/oauth/mcp/callback?error=invalid_request&state={flow.state}")
 
     assert page in r.text, f"expected the {page!r} page; got {r.text}"
-    assert created == [], "nothing is stored when the authorization server refuses"
+    assert not await _grants(db_session_factory, flow), (
+        "nothing is stored when the authorization server refuses"
+    )
 
 
 async def test_start_names_the_configuration_when_a_configured_client_does_not_fit(

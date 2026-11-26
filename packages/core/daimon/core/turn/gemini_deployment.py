@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from datetime import datetime, timedelta
@@ -18,8 +19,11 @@ from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
-from daimon.core.mux_backend import TurnRuntime, register_turn_backend
+from daimon.core.mux_backend import TurnRuntime
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.provider_key_gate import ProviderKey
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
+from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -32,21 +36,23 @@ from daimon.core.turn.gemini import (
     compose_gemini_backend,
     compose_gemini_codec,
     gemini_backend,
+    gemini_turn_scope,
 )
-from daimon.core.turn.gemini_prepare import prepare_gemini_turn
+from daimon.core.turn.gemini_prepare import old_gemini_session, prepare_gemini_turn
 from daimon.core.turn.gemini_state import (
     PostgresFlashAccounting,
     PostgresGeminiStorage,
     SQLiteFlashAccounting,
     SQLiteGeminiStorage,
 )
-from daimon.core.turn.io import register_turn_codec
-from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
+from daimon.core.turn.host_spend_cap import SpendGuard, spend_cap_notifier
+from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
     SourceCapabilities,
     fixed_plan_origin_allowed,
+    host_memory_represented,
     materialize_root_counterpart,
     read_counterpart,
     represented_source,
@@ -54,8 +60,10 @@ from daimon.core.turn.runtime_manifest import (
     validate_counterpart_pins,
     validate_counterpart_request,
 )
+from daimon.core.turn.runtimes import HostedBackend
+from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.ids import ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini import (
     FlashAccounting,
@@ -68,8 +76,9 @@ from mux.drivers.gemini import (
     verify_retained_deployments,
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
-from mux.profiles import selectable_models
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from mux.profiles import selectable_models, tariff_gated
+from mux.profiles.gemini import INLINE_REUSE, InlineReuseId
+from mux.state.lease import Slot
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
@@ -97,7 +106,7 @@ def _private_storage_credential(
 class GeminiPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    profile: Literal["gemini.inline_reuse"]
+    profile: InlineReuseId
     tenant_id: Nonblank
     platform: Nonblank
     channel_id: Nonblank
@@ -113,6 +122,10 @@ class GeminiPlan(BaseModel):
     holds_path: Path | None = Field(default=None, exclude_if=lambda value: value is None)
     hold_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
     cap_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
+    # Most one turn may spend, enforced host-side while it streams (`host_spend_cap`).
+    spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     agent_name: Nonblank
     system: str | None = None
     # REQUIRED: [] means no tools. Never use the provider's implicit paid tools.
@@ -130,7 +143,7 @@ class GeminiPlan(BaseModel):
         default=False, strict=True, exclude_if=lambda value: not value
     )
     # A template's capability: "mcp" represents the source's Daimon MCP toolset
-    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    # (its live catalogue) with a per-turn caller credential; skills attach per session.
     template_capabilities: Literal["mcp"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -259,7 +272,10 @@ class GeminiPlan(BaseModel):
                 self.source_capabilities is not None
                 and self.source_capabilities.model.id != revision.model
             )
-            or "memory" not in target.declared_drops
+            or (
+                "memory" not in target.declared_drops
+                and not (represented is not None and host_memory_represented(target))
+            )
             or target.name != source.effective_spec.name
             or not source_instructions_preserved(source.effective_spec.system, target.system)
             or (full and represented is None)
@@ -290,15 +306,23 @@ class GeminiPlan(BaseModel):
             or (full and tuple(pin.id for pin in target.skills or ()) != self.skill_ids)
         ):
             raise AdmissionDenied(reason="backend_unsupported")
+        # A template's sandbox is set up as the source's environment, as the preview
+        # declared (`finer_drops.kept_environment`); the row's own stays bare.
+        environment = (
+            represented.environment.model_copy(update={"name": self.environment.name})
+            if represented is not None
+            and represented.provider_execution
+            and represented.environment is not None
+            else self.environment
+        )
         try:
             compile_agent(target, authenticated_mcp=full or mcp)
             if compile_environment(self.environment) != {"type": "remote", "sources": []}:
                 raise AdmissionDenied(reason="backend_unsupported")
+            compile_environment(environment)
         except UnsupportedCapability as error:
             raise AdmissionDenied(reason="backend_unsupported") from error
-        return GeminiDeployment(
-            revision.digest, revision.local, self.project, target, self.environment
-        )
+        return GeminiDeployment(revision.digest, revision.local, self.project, target, environment)
 
     async def read_counterpart(
         self,
@@ -368,14 +392,24 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
 
 
 def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
-    revision, scope = request.admission.backend_revision, request.scope
+    revision = request.admission.backend_revision
+    shared = request.admission.shared_owner
+    # A shared thread's state is keyed by its derived owner, verified against the thread.
+    shared_slot = (
+        Slot(thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id))
+        if shared is not None and revision is not None
+        else None
+    )
+    if shared_slot is not None and shared_owner(shared_slot) != shared:
+        raise ScopeViolation(request.thread_id, "shared Gemini thread differs from its owner")
+    scope = gemini_turn_scope(request.scope, shared)
     if (
         revision is None
         or revision.model not in selectable_models(INLINE_REUSE.provider)
-        # Argon has no checked-in price after its intro tariff; never run it unpriced.
+        # A tariff-gated model without a checked-in price is never run unpriced.
         or (
-            revision.model == ARGON_MODEL
-            and (INLINE_REUSE.provider, ARGON_MODEL) not in pricing.provider_prices(PROFILE)
+            tariff_gated(revision)
+            and (INLINE_REUSE.provider, revision.model) not in pricing.provider_prices(PROFILE)
         )
         or request.deps.state_store is None
     ):
@@ -394,7 +428,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         raise AdmissionDenied(reason="backend_unsupported")
     agent = AgentSpec(
         name=plan.agent_name,
-        model=ModelRef(provider="gemini", id=revision.model),
+        model=ModelRef(provider=INLINE_REUSE.provider, id=revision.model),
         system=plan.system,
         tools=plan.tools,
     )
@@ -404,7 +438,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         deployment = plan.deployment(request)
     else:
         try:
-            compile_agent(agent, max_output_tokens=plan.max_output_tokens)
+            compile_agent(
+                agent,
+                max_output_tokens=plan.max_output_tokens,
+                thinking_level=None
+                if revision.effort is None
+                else INLINE_REUSE.effort_map[revision.effort],
+            )
             compile_environment(plan.environment, model_only=plan.max_output_tokens is not None)
         except UnsupportedCapability as error:
             if plan.max_output_tokens is None:
@@ -468,7 +508,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             raise ScopeViolation("skill-deployment", "storage credential unavailable")
         return token
 
+    # The token resolved for Daimon's own server, reused for its relay URLs in the same
+    # request: mux resolves Daimon's destination first, then each relayed connector.
+    daimon_token: list[str] = []
+
     async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
+        from daimon.core.connector_relay import daimon_destination
+
         expected = f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{plan.source_agent_id}"
         public_url = request.deps.mcp.public_url
         if (
@@ -476,12 +522,15 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             or authorized != scope
             or reference != expected
             or public_url is None
-            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or (own := daimon_destination(destination, str(public_url))) is None
             or plan.mcp_credential_file is None
             or request.deps.mcp.jwt_secret is None
             or plan.source_agent_id is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        if own.rstrip("/") != destination.rstrip("/") and daimon_token:
+            return daimon_token[-1]
+        admission = request.admission
         try:
             assert plan.source_capabilities is not None
             token = await resolve_agent_mcp_credential(
@@ -490,22 +539,34 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
                 scope=scope,
                 agent_id=plan.source_agent_id,
-                destination=destination,
+                destination=own,
                 tools=plan.source_capabilities.mcp_tools,
                 chat_execution=True,
                 # A pinned OpenAI/Gemini turn has no confirmation card: its credential
                 # must be one the server refuses gated and publishing tools for.
                 surface="provider_turn",
                 now=request.now(),
+                memory_read_only=origin_read_only(admission),
             )
+            if needs_turn_credential(admission) or unattended_turn():
+                # The pinned file cannot carry this turn's hold, seals, Slack context or
+                # built-in leave: once proven, the turn runs on its own minted credential.
+                template_mcp.catalogue = frozenset(plan.source_capabilities.mcp_tools)
+                token = await template_mcp.mint(own, agent_id=plan.source_agent_id)
             await verify_storage()
+            daimon_token[:] = [token]
             return token
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
 
     mcp_template = plan.template_capabilities == "mcp"
     from daimon.core.mcp_auth import NO_CONFIRMATION_LABEL
-    from daimon.core.turn.template_mcp import TemplateMCPCredential
+    from daimon.core.turn.template_mcp import (
+        TemplateMCPCredential,
+        needs_turn_credential,
+        origin_read_only,
+        unattended_turn,
+    )
 
     template_mcp = TemplateMCPCredential(request, scope, label=NO_CONFIRMATION_LABEL)
 
@@ -517,14 +578,18 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             raise AdmissionDenied(reason="backend_unsupported")
         from mux.drivers.gemini import configured_catalog_transport, configured_transport
 
+        clients = request.deps.provider_clients.gemini
         return GeminiTransportRuntime(
-            configured_transport(api_key=secret, protect_storage_credentials=True)
+            configured_transport(api_key=secret, protect_storage_credentials=True, clients=clients)
             if plan.source_capabilities is not None
-            else configured_transport(api_key=secret),
-            configured_catalog_transport(api_key=secret)
+            else configured_transport(api_key=secret, clients=clients),
+            configured_catalog_transport(api_key=secret, clients=clients)
             if request.admission.backend_revision_origin == "agent"
             else None,
-            mcp_secrets=resolve_mcp
+            # A shared thread has no caller to mint for: its session carries no MCP.
+            mcp_secrets=None
+            if shared is not None
+            else resolve_mcp
             if plan.source_capabilities is not None
             else template_mcp.resolve
             if mcp_template
@@ -594,7 +659,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     accounting: FlashAccounting
     if plan.storage_backend == "postgres":
         records = PostgresGeminiStorage(
-            request.deps.sessionmaker, scope=scope, project=plan.project
+            request.deps.sessionmaker, scope=scope, project=plan.project, shared_slot=shared_slot
         )
         accounting = PostgresFlashAccounting(
             request.deps.sessionmaker,
@@ -602,6 +667,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             project=plan.project,
             hold_usd=plan.hold_usd,
             cap_usd=plan.cap_usd,
+            shared_slot=shared_slot,
         )
     else:
         assert plan.records_path is not None and plan.holds_path is not None
@@ -616,37 +682,60 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     from daimon.core.turn.daily_model_cap import CappedFlashAccounting
 
     # Every attempt (the Flash chain may fall back to other models) checks the cap.
+    provider_key = functools.partial(ProviderKey.from_env, INLINE_REUSE.provider, plan.api_key_env)
     accounting = CappedFlashAccounting(
-        accounting, request, prices, request.deps.gemini_daily_model_cap_usd
+        accounting,
+        request,
+        prices,
+        request.deps.gemini_daily_model_cap_usd,
+        key=provider_key,
     )
     runtime = TurnRuntime(
         transport_factory=transport,
+        provider_key=provider_key,
         read_agent_counterpart=read,
         materialize_root=materialize_root if plan.root_materialization else None,
-        end_of_turn=template_mcp.finalize if mcp_template else None,
+        # Revokes whatever the turn minted; nothing when it ran on the pinned file.
+        end_of_turn=template_mcp.finalize if shared is None else None,
         journal=GeminiJournal(
             records,
             request.deps.state_store,
             deployment,
         ),
         # Inline reuse runs no sandbox or container: its usage settles at infrastructure
-        # $0 (infrastructure_cost.NO_INFRASTRUCTURE_PROFILES), never pending forever.
-        usage_store=GeminiUsageRuntime(accounting, prices, known_infrastructure_usd(PROFILE)),
+        # $0 (infrastructure_cost.ZERO_INFRASTRUCTURE_PROFILES), never pending forever.
+        usage_store=GeminiUsageRuntime(
+            accounting,
+            prices,
+            known_infrastructure_usd(PROFILE),
+            spend_guard=None
+            if plan.spend_limit_usd_cents is None or (price := prices.get(revision.model)) is None
+            else SpendGuard(
+                limit_cents=plan.spend_limit_usd_cents,
+                price=price,
+                notify=spend_cap_notifier(request),
+                provider=INLINE_REUSE.provider,
+            ),
+        ),
     )
 
     return runtime
 
 
-def register_runtime() -> None:
-    """Install the provider's host callbacks without transports or credential access."""
-    from daimon.core.turn.runtimes import register_channel_runtime
+def _side_call_completions() -> Completions:
+    from mux.drivers.gemini import configured_completions
 
-    register_turn_backend(PROFILE, compose_gemini_backend, fallback=True)
-    register_turn_codec(PROFILE, compose_gemini_codec, fallback=True)
-    register_turn_preparation(PROFILE, prepare_gemini_turn, fallback=True)
-    register_channel_runtime(
-        PROFILE,
-        build_gemini_runtime,
-        tariffs=partial(pricing.provider_prices, PROFILE),
-        fallback=True,
+    return configured_completions(
+        api_key=os.environ.get(DEFAULT_KEY_ENV[INLINE_REUSE.provider]) or ""
     )
+
+
+BACKEND = HostedBackend(
+    runtime=build_gemini_runtime,
+    backend=compose_gemini_backend,
+    codec=compose_gemini_codec,
+    prepare=prepare_gemini_turn,
+    reader=old_gemini_session,
+    tariffs=partial(pricing.provider_prices, PROFILE),
+    completions=_side_call_completions,
+)

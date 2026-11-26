@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import watches as tools
 from daimon.adapters.mcp.tools.watches import (
     ADMIN_ONLY,
@@ -32,6 +31,8 @@ from daimon.testing.watch_fixtures import install_poll_ports
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy import text
+
+from .harness import auth_identity
 
 pytestmark = pytest.mark.fresh_schema
 
@@ -159,13 +160,13 @@ async def owner(db_session_factory, monkeypatch):
         AsyncMock(return_value=_session(GATED)),
     )
     monkeypatch.setattr(tools, "fresh_admin", AsyncMock(return_value=False))
-    auth = AuthIdentity(
-        account_id=watch.owner_account_id,
-        tenant_id=watch.tenant_id,
+    auth = auth_identity(
+        watch.owner_account_id,
+        watch.tenant_id,
+        role=Role.USER,
         platform="discord",
         platform_user_id="123",
         external_id=tenant.external_id,
-        role=Role.USER,
         chat_session_id="attended-session",
     )
     async with turn_origin(

@@ -40,14 +40,16 @@ from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import UserFacingError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.model_switch import panel_edit_deps, read_picker
 from daimon.core.roster import RosterAgent, load_roster
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.scope import ChannelConfigRow
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
-from daimon.core.web_links import panel_links
+from daimon.core.web_links import links_at, panel_links
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -331,7 +333,9 @@ async def load_roster_state(
                 platform="discord",
                 thread_id=thread_id,
                 default=runtime.deployment_default,
+                records=runtime.sessionmaker,
             ),
+            records=runtime.sessionmaker,
         )
         cascade = await list_guild_propagations(session, tenant_id=tenant_id)
         overwrite_guild = _overwrite_check_guild(runtime, interaction, is_admin=is_admin)
@@ -422,7 +426,19 @@ async def load_details_for(
             public_mcp_url=public_mcp_url(runtime),
             is_admin=state.is_admin,
             channel_label=_channel_label(state),
-            web=panel_links(runtime.settings.web, _tenant_id(state), admin=state.is_admin),
+            web=await links_at(
+                runtime.sessionmaker,
+                runtime.settings,
+                FeaturePlace.of(
+                    _tenant_id(state),
+                    "discord",
+                    str(state.channel_id),
+                    state.thread_id,
+                    agent_id=agent.ma_agent_id,
+                ),
+                panel_links(runtime.settings.web, _tenant_id(state), admin=state.is_admin),
+            ),
+            records=runtime.sessionmaker,
         )
         state.avatar_urls[agent.name] = None
         if not state.is_admin:
@@ -444,18 +460,24 @@ async def load_details_for(
                 background_sessionmaker=runtime.sessionmaker,
             )
             state.avatar_urls[agent.name] = identity.avatar_url
-    if state.is_admin and channel_backend.backend_selection_enabled(runtime.settings.turn):
-        service = channel_backend.make_backend_service(runtime.sessionmaker, runtime.settings.turn)
-        state.backend_options = ()
-        state.backend_selection = None
-        selection = await service.read_selection(
-            runtime.anthropic, tenant_id=_tenant_id(state), agent_name=agent.name
+    state.model_picker = None
+    if state.is_admin or agent.ma_agent_id in state.owned_agent_ids:
+        state.model_picker = await read_picker(
+            channel_backend.make_backend_service(
+                runtime.sessionmaker,
+                runtime.settings.turn,
+                capture_source=channel_backend.NO_CAPTURE,
+            ),
+            panel_edit_deps(
+                runtime.settings,
+                client=runtime.anthropic,
+                session_factory=runtime.sessionmaker,
+                resolver_cache=runtime.resolver_cache,
+                deployment_default=runtime.deployment_default,
+            ),
+            tenant_id=_tenant_id(state),
+            agent_name=agent.name,
         )
-        if selection is not None:
-            state.backend_options = selection.policy.enabled_backends
-            state.backend_selection = (
-                selection.revision.backend if selection.revision is not None else None
-            )
     return details
 
 
@@ -505,6 +527,7 @@ async def panel_viewer(
         platform="discord",
         thread_id=str(state.thread_id) if state.thread_id else None,
         default=runtime.deployment_default,
+        records=runtime.sessionmaker,
     )
 
 

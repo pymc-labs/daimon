@@ -6,27 +6,34 @@ The chat adapters write it (a full reload, then events); the web app and sign-in
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
+from typing import cast
 
 from daimon.core._models import PlatformPrincipal, Tenant, WorkspaceMember, WorkspaceMemberSync
+from daimon.core.member_reloads import MemberState, MemberValue
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatStandingRow
-from sqlalchemy import delete, select, tuple_, update
+from sqlalchemy import bindparam, delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.schema import Table
 
 _BATCH = 1000
+
+
+def _state(value: MemberValue) -> MemberState:
+    return value if isinstance(value, MemberState) else MemberState(is_admin=value)
 
 
 async def replace_members(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    members: Mapping[str, bool],
+    members: Mapping[str, MemberValue],
     workspace_name: str,
     now: datetime,
 ) -> None:
-    """Make `members` (platform user id to admin flag) the workspace's whole list.
+    """Make `members` (platform user id to admin flag, or full state) the workspace's whole list.
 
     Atomic in the caller's transaction, which also marks the list as loaded in full.
     """
@@ -35,10 +42,11 @@ async def replace_members(
         {
             "tenant_id": tenant_id,
             "platform_user_id": user_id,
-            "is_admin": is_admin,
+            "is_admin": state.is_admin,
+            "role_ids": None if state.role_ids is None else list(state.role_ids),
             "updated_at": now,
         }
-        for user_id, is_admin in members.items()
+        for user_id, state in ((user_id, _state(v)) for user_id, v in members.items())
     ]
     for start in range(0, len(rows), _BATCH):
         await session.execute(insert(WorkspaceMember), rows[start : start + _BATCH])
@@ -60,15 +68,24 @@ async def upsert_member(
     platform_user_id: str,
     is_admin: bool,
     now: datetime,
+    role_ids: Sequence[str] | None = None,
 ) -> None:
-    """Add a member who joined, or record their admin flag."""
+    """Add a member who joined, or record their admin flag and, when given, their role ids."""
+    role_list = None if role_ids is None else list(role_ids)
     new = insert(WorkspaceMember).values(
-        tenant_id=tenant_id, platform_user_id=platform_user_id, is_admin=is_admin, updated_at=now
+        tenant_id=tenant_id,
+        platform_user_id=platform_user_id,
+        is_admin=is_admin,
+        role_ids=role_list,
+        updated_at=now,
     )
+    changed: dict[str, object] = {"is_admin": is_admin, "updated_at": now}
+    if role_list is not None:
+        changed["role_ids"] = role_list
     await session.execute(
         new.on_conflict_do_update(
             index_elements=[WorkspaceMember.tenant_id, WorkspaceMember.platform_user_id],
-            set_={"is_admin": is_admin, "updated_at": now},
+            set_=changed,
         )
     )
 
@@ -89,10 +106,12 @@ async def apply_changes(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    changes: Mapping[str, bool | None],
+    changes: Mapping[str, MemberValue | None],
     now: datetime,
 ) -> None:
-    """Write member changes again: an admin flag lists the user with it, None removes them."""
+    """Write member changes again: a flag or state lists the user with it, None removes them.
+
+    A change with no role ids leaves a stored list alone."""
     gone = [user_id for user_id, change in changes.items() if change is None]
     for start in range(0, len(gone), _BATCH):
         await session.execute(
@@ -102,16 +121,25 @@ async def apply_changes(
             )
         )
     listed = [
-        {"tenant_id": tenant_id, "platform_user_id": user_id, "is_admin": change, "updated_at": now}
-        for user_id, change in changes.items()
-        if change is not None
+        {
+            "tenant_id": tenant_id,
+            "platform_user_id": user_id,
+            "is_admin": state.is_admin,
+            "role_ids": None if state.role_ids is None else list(state.role_ids),
+            "updated_at": now,
+        }
+        for user_id, state in ((u, _state(c)) for u, c in changes.items() if c is not None)
     ]
     for start in range(0, len(listed), _BATCH):
         new = insert(WorkspaceMember).values(listed[start : start + _BATCH])
         await session.execute(
             new.on_conflict_do_update(
                 index_elements=[WorkspaceMember.tenant_id, WorkspaceMember.platform_user_id],
-                set_={"is_admin": new.excluded.is_admin, "updated_at": now},
+                set_={
+                    "is_admin": new.excluded.is_admin,
+                    "role_ids": func.coalesce(new.excluded.role_ids, WorkspaceMember.role_ids),
+                    "updated_at": now,
+                },
             )
         )
 
@@ -134,6 +162,61 @@ async def update_admin_flags(
                 )
                 .values(is_admin=is_admin, updated_at=now)
             )
+
+
+async def update_member_states(
+    session: AsyncSession, *, tenant_id: uuid.UUID, states: Mapping[str, MemberState], now: datetime
+) -> None:
+    """Set the admin flag and role ids of members already listed; ids not listed are left out."""
+    if not states:
+        return
+    table = cast("Table", WorkspaceMember.__table__)
+    statement = (
+        update(table)
+        .where(table.c.tenant_id == tenant_id, table.c.platform_user_id == bindparam("b_user"))
+        .values(is_admin=bindparam("b_admin"), role_ids=bindparam("b_roles"), updated_at=now)
+    )
+    rows = [
+        {
+            "b_user": user_id,
+            "b_admin": state.is_admin,
+            "b_roles": None if state.role_ids is None else list(state.role_ids),
+        }
+        for user_id, state in states.items()
+    ]
+    for start in range(0, len(rows), _BATCH):
+        await session.execute(statement, rows[start : start + _BATCH])
+
+
+async def member_role_ids(
+    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
+) -> tuple[str, ...] | None:
+    """The roles the mirror says `user_id` holds now.
+
+    None when the mirror cannot say: the person is not listed (the list is not loaded, or
+    they joined since), or their row has no role ids yet.
+    """
+    row = (
+        await session.execute(
+            select(WorkspaceMember.role_ids).where(
+                WorkspaceMember.tenant_id == tenant_id,
+                WorkspaceMember.platform_user_id == user_id,
+            )
+        )
+    ).one_or_none()
+    return None if row is None or row[0] is None else tuple(row[0])
+
+
+async def member_is_internal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    internal_role_ids: Collection[str],
+) -> bool | None:
+    """Whether the mirror says `user_id` holds an internal role; None when it cannot say."""
+    roles = await member_role_ids(session, tenant_id=tenant_id, user_id=user_id)
+    return None if roles is None else bool(set(roles) & set(internal_role_ids))
 
 
 async def clear_members(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:

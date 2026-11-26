@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from daimon.adapters.teams import app as app_module
@@ -32,6 +32,7 @@ from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch, SessionBusyError
 from daimon.core.turn.notices import admission_refusal_text
 from daimon.core.turn.slots import release_turn_slot
+from daimon.testing.builders import provision_workspace
 from daimon.testing.factories import make_account
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
@@ -319,9 +320,7 @@ async def test_the_poller_opens_a_due_timer_and_runs_it_once(
         requester_account_id=account_id,
     )
     assert await teams._open_wake_thread(gone) is False, "a missing tenant is pushed back"
-    other = await provision_tenant(
-        db_session_factory, platform="teams", workspace_id=str(uuid.uuid4())
-    )
+    other = await provision_workspace(db_session_factory, str(uuid.uuid4()), platform="teams")
     foreign = gone.model_copy(update={"tenant_id": other.tenant_id})
     assert await teams._open_wake_thread(foreign) is False, "another organisation's rows wait"
 
@@ -527,15 +526,10 @@ async def test_a_handoff_refused_at_re_admission_is_not_marked_delivered(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-async def test_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_turn_admin_cards_read_no_agent_source(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An ordinary turn's Confirm card reads the switched agent's source as that
-    turn's own admitted caller, exactly like a Discord mention/Slack mention
-    turn's card. Built without the admission, every backend-switch card on this
-    call site (shared by mention and continuation turns) refuses
-    `source_unavailable`.
-    """
+    """An ordinary turn builds its admin cards once, and they read no agent source."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
     from daimon.core.turn.admission import Admission
@@ -575,7 +569,7 @@ async def test_turn_backend_switch_card_captures_through_its_own_admission(
         commands={},
         bot_token=bot_token,
     )
-    teams.runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    teams.runtime.settings.turn = TurnSettings(channel_backends=True)
 
     services: list[Any] = []
     real_callbacks = confirmation.backend_switch_callbacks
@@ -585,9 +579,6 @@ async def test_turn_backend_switch_card_captures_through_its_own_admission(
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
-    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
         patched_admission(),
@@ -610,14 +601,9 @@ async def test_turn_backend_switch_card_captures_through_its_own_admission(
         )
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert context.platform == "teams"
+    read_only = service._read_only  # pyright: ignore[reportPrivateUsage]
+    assert read_only, "an allowlist or pin card changes no agent"
+    assert service._capture_source is None, "and reads no agent source"  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("attended", [False, True])
@@ -664,3 +650,57 @@ async def test_job_completion_fails_closed_without_output(db_session_factory):
             await teams._run_continuation(row, "read job", TENANT, SERVICE_URL)
         bind.assert_not_awaited()
     assert not sender.sent
+
+
+async def test_queued_work_never_keeps_its_seed_as_the_persons_question(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A message asks under its activity id; queued work asks nothing and carries its row,
+    so its answer goes with the question it was queued under, never its seed."""
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+
+    async def _record_noop(*, event: Any) -> None:
+        return None
+
+    async def _bind(deps: Any, admission: Admission, **_kw: Any) -> PreparedTurn:
+        return PreparedTurn(
+            admission=admission,
+            ma_session_id="sess_teams_seed",
+            mapping_id=None,
+            watermark=None,
+            reused=True,
+            session_account_id=admission.account_id,
+            _record=_record_noop,
+            continuity=ContinuityOutcome(),
+        )
+
+    teams, account_id = await _app(db_session_factory, FakeSender())
+    key = await _hand_off(db_session_factory, account_id)
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    row = row.model_copy(update={"target_ma_agent_id": "agent_test_id"})
+    done = RunOutcome(
+        state=TurnState(), ma_session_id="sess_teams_seed", mapping_id=None, recovered=False
+    )
+    run = AsyncMock(return_value=done)
+    asked = make_inbound("is the deploy green?")
+    with (
+        patched_admission(),
+        patch.object(app_module, "bind_session", AsyncMock(side_effect=_bind)),
+        patch.object(app_module, "run_prepared_turn", run),
+    ):
+        await teams._run_turn(asked, TENANT, reraise=True)  # pyright: ignore[reportPrivateUsage]
+        await teams._run_turn(  # pyright: ignore[reportPrivateUsage]
+            make_inbound("finish the writeup"), TENANT, continuation=row, reraise=True
+        )
+    ask, work = (call.kwargs for call in run.await_args_list)
+    assert (ask["request_text"], ask["request_ref"], ask["continues"]) == (
+        "is the deploy green?",
+        asked.activity_id,
+        None,
+    )
+    assert (work["request_text"], work["request_ref"], work["continues"]) == (None, None, row)

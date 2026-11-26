@@ -3,7 +3,7 @@
 `resolve_hidden_mcp_server_names` is the OAuth counterpart of the credential
 mirror: it answers which of an agent's servers this caller has no way to
 authenticate, so `create_session` can leave them off. The classification
-itself is unit-tested in `test_mcp_personal_servers.py`.
+itself is classified in `daimon.core.mcp_personal_servers`.
 """
 
 from __future__ import annotations

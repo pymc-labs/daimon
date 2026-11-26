@@ -14,18 +14,20 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
-from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, agent_converted_from
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
 from daimon.adapters.mcp.hub.app import mount_hub_apps
+from daimon.adapters.mcp.middleware.call_origin import CallOriginMiddleware
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -50,8 +52,8 @@ from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
+    compute,
     environments,
-    fly,
     long_jobs,
     routines,
     self_edit,
@@ -63,6 +65,7 @@ from daimon.adapters.mcp.tools import (
 from daimon.adapters.mcp.tools.admins import register_admin_tools
 from daimon.adapters.mcp.tools.agent_coding_keys import register_agent_coding_key_tools
 from daimon.adapters.mcp.tools.agent_edits import register_agent_edit_tools
+from daimon.adapters.mcp.tools.agent_memory import register_agent_memory_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.allowances import register_allowance_tools
@@ -83,14 +86,17 @@ from daimon.adapters.mcp.tools.github_requests import register_github_request_to
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.helpers import register_helper_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
+from daimon.adapters.mcp.tools.host_web_fetch import register_host_web_fetch_tool
 from daimon.adapters.mcp.tools.lead_intake import register_lead_intake_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
 from daimon.adapters.mcp.tools.models import register_model_tools
+from daimon.adapters.mcp.tools.monitored_activity import register_monitored_activity_tools
 from daimon.adapters.mcp.tools.my_data import register_my_data_tools
 from daimon.adapters.mcp.tools.never_tag import register_never_tag_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
+from daimon.adapters.mcp.tools.ops_issues import register_ops_issues_tools
 from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
@@ -99,10 +105,12 @@ from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
 from daimon.adapters.mcp.tools.routine_run import register_routine_run_tool
 from daimon.adapters.mcp.tools.scope_settings import register_scope_settings_tools
+from daimon.adapters.mcp.tools.secret_shares import register_secret_share_tools
 from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
+from daimon.adapters.mcp.tools.support import register_support_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
@@ -127,11 +135,15 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.host_memory import HOST_MEMORY_TAG
+from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG, PINNED_HOST_TOOLS
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
+from daimon.core.mcp_tool_call import pinned_http_client
 from daimon.core.node_exchange import node_identity_key
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
 from daimon.core.operator_tokens import scope_tag
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.agent_avatars import get_avatar_by_token
@@ -183,10 +195,19 @@ def _validate_settings(
             "DAIMON_MCP__PUBLIC_URL is required — use the URL MA will dial, "
             "e.g. https://daimon-mcp.example.com/mcp"
         )
-    if settings.mcp_identity.servers and settings.mcp_identity.signing_key is None:
+    if settings.mcp_identity.needs_signing_key and settings.mcp_identity.signing_key is None:
         raise BootstrapError(
             "DAIMON_MCP_IDENTITY__SIGNING_KEY is required on the MCP service "
-            "when DAIMON_MCP_IDENTITY__SERVERS is set"
+            "when DAIMON_MCP_IDENTITY__SERVERS has a signed server"
+        )
+    missing = [
+        server.name
+        for server in settings.mcp_identity.servers
+        if server.auth == "bearer" and server.name not in settings.mcp_identity.bearers
+    ]
+    if missing:
+        raise BootstrapError(
+            f"DAIMON_MCP_IDENTITY__BEARERS needs a key for bearer servers: {', '.join(missing)}"
         )
 
 
@@ -290,6 +311,9 @@ def create_mcp_app(
     validation is skipped; PUBLIC_URL is still enforced because
     `ensure_mcp_vault` needs it on the session-create side.
     """
+    # A switch preview's first use imports the OpenAI SDK: seconds of CPU on the
+    # event loop, stalling every request. Paid here, at startup, instead.
+    import_module("mux.drivers.openai")
     effective_settings = settings or load_settings()
     # The JSON chain and stdlib redaction before the first log line (uvicorn
     # has configured its loggers by the time it calls this factory); without
@@ -349,20 +373,6 @@ def create_mcp_app(
         else None
     )
 
-    effective_auth = auth
-    if effective_auth is None:
-        secret_value = effective_settings.mcp.jwt_secret
-        if secret_value is None:
-            # _validate_settings enforced this above; assert was stripped by
-            # `python -O`. Use an explicit raise so the failure mode is real.
-            raise BootstrapError("DAIMON_MCP__JWT_SECRET missing after validation")
-        effective_auth = DaimonJWTVerifier(
-            legacy_token_cutoff=effective_settings.mcp.legacy_token_cutoff,
-            allow_legacy_tokens=effective_settings.mcp.allow_legacy_tokens,
-            secret=secret_value.get_secret_value().encode(),
-            sessionmaker=effective_sessionmaker,
-        )
-
     effective_resolver = subject_resolver or production_subject_resolver
     effective_tenant_resolver = tenant_resolver or production_tenant_resolver
     effective_role_resolver = role_resolver or production_role_resolver
@@ -384,6 +394,21 @@ def create_mcp_app(
                     effective_settings.anthropic.skills_requests_per_minute
                 )
             ),
+        )
+
+    effective_auth = auth
+    if effective_auth is None:
+        secret_value = effective_settings.mcp.jwt_secret
+        if secret_value is None:
+            # _validate_settings enforced this above; assert was stripped by
+            # `python -O`. Use an explicit raise so the failure mode is real.
+            raise BootstrapError("DAIMON_MCP__JWT_SECRET missing after validation")
+        effective_auth = DaimonJWTVerifier(
+            legacy_token_cutoff=effective_settings.mcp.legacy_token_cutoff,
+            allow_legacy_tokens=effective_settings.mcp.allow_legacy_tokens,
+            secret=secret_value.get_secret_value().encode(),
+            sessionmaker=effective_sessionmaker,
+            converted_from=agent_converted_from(effective_anthropic, effective_sessionmaker),
         )
 
     effective_billing_config = billing_config
@@ -451,6 +476,7 @@ def create_mcp_app(
                 pass
             finally:
                 await identity_middleware.drain_audit()
+                await drain_ops_events()
                 await slack_http.close()
                 for client in relay_clients.values():
                     await client.aclose()
@@ -474,13 +500,16 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"slack"}))
     mcp.add_transform(Visibility(False, tags={"teams"}))
     mcp.add_transform(Visibility(False, tags={"web"}))
+    # Memory for backends without their own stores: provider turns only.
+    mcp.add_transform(Visibility(False, tags={HOST_MEMORY_TAG}))
+    mcp.add_transform(Visibility(False, tags={HOST_WEB_FETCH_TAG}))
     # Deployment-wide promo issuing: only an operator token holding the scope
     # re-enables these (middleware/mcp_identity.py); admins never see them.
     mcp.add_transform(Visibility(False, tags={scope_tag("promo:create")}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
-            always_visible=["get_long_job"],
+            always_visible=["get_long_job", *PINNED_HOST_TOOLS],
             search_result_serializer=serialize_tools_for_output_markdown,
         )
     )
@@ -527,12 +556,19 @@ def create_mcp_app(
         microsoft=microsoft,
         identity_key=node_identity_key(effective_settings),
     )
+    from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
+
+    identity_middleware.attach_host_call_gate(
+        HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
+    )
+    mcp.add_middleware(CallOriginMiddleware(runtime))  # where the call's turn started
     mcp.add_middleware(CapabilityGateMiddleware(runtime))  # innermost: reads the identity
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
     environments.register_environment_tools(mcp, runtime)
     vault.register_vault_tools(mcp, runtime)
     register_credential_request_tools(mcp, runtime)
+    register_secret_share_tools(mcp, runtime)
     register_setup_target_tools(mcp, runtime)
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
     register_helper_tools(mcp, runtime)  # ask helper agents inside this turn
@@ -547,6 +583,8 @@ def create_mcp_app(
     register_github_request_tools(mcp, runtime)
     register_github_working_repo_tools(mcp, runtime)
     register_repo_memory_tools(mcp, runtime)
+    register_agent_memory_tools(mcp, runtime)
+    register_host_web_fetch_tool(mcp, runtime)
     register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
@@ -557,7 +595,7 @@ def create_mcp_app(
     register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
     long_jobs.register_long_job_tools(mcp, runtime)
-    fly.register_fly_tools(mcp, runtime)
+    compute.register_compute_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 
@@ -591,16 +629,19 @@ def create_mcp_app(
     register_web_workspace_settings_tool(mcp, runtime)
     register_allowance_tools(mcp, runtime)
     register_audit_log_tools(mcp, runtime)
+    register_monitored_activity_tools(mcp, runtime)
     register_agent_edit_tools(mcp, runtime)  # agent revert, owners, skill files
     register_skill_library_edit_tools(mcp, runtime)  # library skill files and versions
     register_server_skill_tools(mcp, runtime)  # the data server node's skills
     register_credit_report_tools(mcp, runtime)  # own credits, overview, spend, feedback
     register_never_tag_tools(mcp, runtime)  # a person opts out of being tagged
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
+    register_support_tools(mcp, runtime)  # support limits for Ask a person
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_agent_tool_rule_tools(mcp, runtime)
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
     register_promo_issuing_tools(mcp, runtime)  # operator-token promo issuing
+    register_ops_issues_tools(mcp, runtime)  # failures and warnings
 
     register_upload_tool(mcp, runtime=runtime)
 
@@ -681,7 +722,6 @@ def create_mcp_app(
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     if relay_clients:
-        assert identity.signing_key is not None
         from daimon.adapters.mcp.identity_relay import (
             RELAY_METHODS,
             RELAY_ROUTE,
@@ -695,11 +735,20 @@ def create_mcp_app(
                 servers={server.name: server for server in identity.servers},
                 auth=effective_auth,
                 sessionmaker=effective_sessionmaker,
-                tokens=IdentityTokenCache(
-                    load_signing_key(identity.signing_key.get_secret_value())
+                tokens=(
+                    IdentityTokenCache(load_signing_key(identity.signing_key.get_secret_value()))
+                    if identity.signing_key is not None
+                    else None
                 ),
+                bearers=identity.bearers,
+                anthropic=effective_anthropic,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
+                public_url=(
+                    str(effective_settings.mcp.public_url)
+                    if effective_settings.mcp.public_url is not None
+                    else None
+                ),
             ),
             methods=RELAY_METHODS,
         )
@@ -726,6 +775,15 @@ def create_mcp_app(
             ),
             methods=GITHUB_ROUTER_METHODS,
         )
+    if effective_settings.mcp.public_url is not None:
+        from daimon.adapters.mcp.connector_relay import CONNECTOR_ROUTE, build_connector_relay
+
+        # Registered always; the deployment feature is read per request, so off is a 404.
+        public_url = str(effective_settings.mcp.public_url)
+        relay = build_connector_relay(runtime, effective_auth, public_url)
+        # Served where relay_url points: under the public URL's path (/mcp/connectors/...).
+        prefix = urlsplit(public_url).path.rstrip("/")
+        app.add_route(prefix + CONNECTOR_ROUTE, relay.handle, methods=["GET", "POST", "DELETE"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(
         "/avatars/{token}/{sha12}.png",
@@ -805,7 +863,9 @@ def create_mcp_app(
         mcp_oauth_start, mcp_oauth_callback = build_oauth_mcp_routes(
             runtime=runtime,
             fernet=fernet,
-            http_client_factory=lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False),
+            # Discovery, registration and the code exchange reach URLs a remote
+            # server names: pinned to a public address, no redirects, no proxies.
+            http_client_factory=lambda: pinned_http_client(timeout=20.0),
         )
         app.add_route("/oauth/mcp/start", mcp_oauth_start, methods=["GET"])
         app.add_route("/oauth/mcp/callback", mcp_oauth_callback, methods=["GET"])

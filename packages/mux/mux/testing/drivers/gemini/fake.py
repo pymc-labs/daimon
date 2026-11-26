@@ -1,35 +1,59 @@
 """Offline scripted transport and storage, explicitly test-only; never SDK discovery."""
 
 import asyncio
+import io
+import tarfile
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
 
 from pydantic import JsonValue
 
-from mux.drivers.gemini.storage import Records
+from mux.drivers.gemini.storage import (
+    ALL,
+    Keys,
+    Records,
+    changes,
+    records_of,
+    rows_of,
+    scoped,
+    view,
+)
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ProviderError
 
 
 class MemoryStorage:
-    """Test-only transactional storage; retained data survives a driver restart."""
+    """Test-only transactional storage; retained data survives a driver restart.
+
+    One blob, seen through the same strict `view` as row storage, so a driver test
+    catches a transaction that touches a row its keys do not name.
+    """
 
     def __init__(self) -> None:
         self._records = Records()
         self._lock = asyncio.Lock()
 
     @asynccontextmanager
-    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:
+    async def transaction(
+        self, keys: Keys = ALL, *, after_dispatch: bool = False
+    ) -> AsyncIterator[Records]:
         async with self._lock:
-            snapshot = deepcopy(self._records)
-            yield snapshot
-            self._records = snapshot
+            rows = rows_of(self._records)
+            loaded, resolved = scoped(rows, keys)
+            records = view(loaded, resolved)
+            yield records
+            written = changes(records, loaded, resolved)
+            for key in written.deletes:
+                del rows[key]
+            rows.update(written.upserts)
+            self._records = records_of(rows)
 
     @asynccontextmanager
-    async def read(self) -> AsyncIterator[Records]:
+    async def read(self, keys: Keys = ALL) -> AsyncIterator[Records]:
         """The last committed records, without waiting for a writer; never saved."""
-        yield deepcopy(self._records)
+        loaded, resolved = scoped(rows_of(deepcopy(self._records)), keys)
+        yield view(loaded, resolved, copy_rows=False)
 
 
 class FakeTransport:
@@ -44,6 +68,44 @@ class FakeTransport:
         self.stream_closed = False
         self.snapshots: dict[str, bytes | ProviderError] = {}
         self.snapshot_reads: list[str] = []
+        # Environments made before any interaction: config and files (path -> size).
+        self.environments: dict[str, Object] = {}
+        self.environment_files: dict[str, dict[str, int]] = {}
+        self.uploads: list[tuple[str, str, bool]] = []
+        self.upload_errors: list[ProviderError] = []
+        self.deleted_environments: list[str] = []
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        id_ = f"environment-{len(self.environments) + 1}"
+        self.environments[id_] = deepcopy(dict(config))
+        self.environment_files[id_] = {}
+        return id_
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        self.uploads.append((environment_id, path, overwrite))
+        if self.upload_errors:
+            raise self.upload_errors.pop(0)
+        files = self.environment_files.get(environment_id)
+        if files is None:
+            raise ProviderError("not_found", retryable=False)
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            new = {f"{path}/{m.name}": m.size for m in tar.getmembers() if m.isfile()}
+        if not overwrite and set(new) & set(files):
+            raise ProviderError("conflict", retryable=False, native_error_code="http_409")
+        files.update(new)
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        files = self.environment_files.get(environment_id)
+        if files is None:
+            raise ProviderError("not_found", retryable=False)
+        return {k.removeprefix(path + "/"): v for k, v in files.items() if k.startswith(path + "/")}
+
+    async def delete_environment(self, environment_id: str) -> None:
+        self.deleted_environments.append(environment_id)
+        if self.environment_files.pop(environment_id, None) is None:
+            raise ProviderError("not_found", retryable=False)
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         self.snapshot_reads.append(environment_id)

@@ -1,5 +1,7 @@
-"""View + container tests for BillingPanelView (LayoutView), build_billing_container,
-build_member_lookup_container, and estimate_turns."""
+"""BillingPanelView: its controls, their click-time gates, and Discord's names.
+
+The panel's words are `billing_screen`'s (core) and its drawing `ui_render`'s.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +9,7 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,15 +22,9 @@ from daimon.adapters.discord.billing_panel.panel import (
     build_billing_container,
     build_expiry_container,
     build_member_lookup_container,
-    estimate_turns,
-)
-from daimon.adapters.discord.billing_panel.state import (
-    COLOR_OVER_CAP,
-    COLOR_WARNING,
-    BillingPanelState,
-    MemberRow,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.billing_panel import BillingPanelState, MemberRow
 from daimon.core.channel_budget import ChannelBudgetStatus
 from daimon.core.promo_credit import ActiveTimedCredit
 from daimon.core.stores.domain import ChannelBudgetRow
@@ -155,18 +152,14 @@ NOW = datetime(2026, 5, 14, 12, 0, tzinfo=UTC)
 
 _TEST_ACCOUNT_ID = uuid.UUID("00000000-0000-0000-0000-000000000042")
 
+_billing_panel_view = partial(
+    BillingPanelView, allowed_user_id=42, account_id=_TEST_ACCOUNT_ID, now=NOW, since=SINCE
+)
+
 
 def test_member_view_has_refresh_and_done_buttons_only() -> None:
     """Member (non-admin) view must have Refresh + Done buttons and no UserSelect."""
-    view = BillingPanelView(
-        _make_state(is_admin=False),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=False,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=False), runtime=_make_runtime(), is_admin=False)
     labels = [c.label for c in view.walk_children() if isinstance(c, discord.ui.Button)]
     assert labels == ["Refresh", "Done"], f"no timed credit, no admin actions: {labels}"
 
@@ -176,15 +169,7 @@ def test_member_view_has_refresh_and_done_buttons_only() -> None:
 
 def test_admin_view_has_topup_select_with_4_options() -> None:
     """Admin view must have a string Select with exactly 4 options [$10/$25/$50/$100]."""
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=_make_runtime(), is_admin=True)
     # Find the string Select (not UserSelect)
     topup_select: discord.ui.Select[Any] | None = None
     for item in view.walk_children():
@@ -219,15 +204,7 @@ def _button_rows(view: discord.ui.LayoutView) -> list[list[str | None]]:
 
 def _panel(**overrides: Any) -> BillingPanelView:
     state = _make_state(**overrides)
-    return BillingPanelView(
-        state,
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=state.is_admin,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    return _billing_panel_view(state, runtime=_make_runtime(), is_admin=state.is_admin)
 
 
 def test_buttons_follow_the_viewer_and_the_credit() -> None:
@@ -271,15 +248,7 @@ async def test_expiry_dates_replies_privately_with_each_credit_soonest_first() -
 
 @pytest.mark.asyncio
 async def test_interaction_check_rejects_non_invoker() -> None:
-    view = BillingPanelView(
-        _make_state(),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=False,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(), runtime=_make_runtime(), is_admin=False)
     interaction = MagicMock()
     interaction.user.id = 999  # different from allowed_user_id=42
     interaction.response.send_message = AsyncMock()
@@ -292,15 +261,7 @@ async def test_interaction_check_rejects_non_invoker() -> None:
 
 @pytest.mark.asyncio
 async def test_interaction_check_accepts_invoker() -> None:
-    view = BillingPanelView(
-        _make_state(),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=False,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(), runtime=_make_runtime(), is_admin=False)
     interaction = MagicMock()
     interaction.user.id = 42
     ok = await view.interaction_check(interaction)
@@ -357,15 +318,7 @@ async def test_topup_select_callback_posts_to_mcp_checkout_and_sends_ephemeral_u
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
 
     topup_select: _TopUpSelect | None = None
     for item in view.walk_children():
@@ -448,15 +401,7 @@ async def test_topup_checkout_token_carries_no_admin_or_internal_claim(
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     topup_select = next(item for item in view.walk_children() if isinstance(item, _TopUpSelect))
     interaction = _admin_interaction(guild_id=888000000000000001)
     topup_select._values = ["10"]  # pyright: ignore[reportAttributeAccessIssue]
@@ -517,15 +462,7 @@ async def test_topup_select_renders_an_error_when_the_checkout_call_returns_a_no
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     topup_select = next(item for item in view.walk_children() if isinstance(item, _TopUpSelect))
     interaction = _admin_interaction(guild_id=888000000000000001)
     topup_select._values = ["10"]  # pyright: ignore[reportAttributeAccessIssue]
@@ -564,15 +501,7 @@ async def test_topup_select_refuses_a_demoted_admin_without_creating_a_checkout(
 
     monkeypatch.setattr(panel_module, "_create_checkout", _explode)
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=_make_runtime(), is_admin=True)
     topup_select = next(item for item in view.walk_children() if isinstance(item, _TopUpSelect))
     interaction = _non_admin_interaction(guild_id=888000000000000001)
     topup_select._values = ["10"]  # pyright: ignore[reportAttributeAccessIssue]
@@ -614,15 +543,7 @@ async def test_member_lookup_select_refuses_a_demoted_admin_without_reading_usag
         side_effect=AssertionError("a refused lookup must not open a session")
     )
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     lookup_select = next(
         item for item in view.walk_children() if isinstance(item, _MemberLookupSelect)
     )
@@ -660,15 +581,7 @@ async def test_member_lookup_select_still_renders_spend_for_a_live_admin(
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     lookup_select = next(
         item for item in view.walk_children() if isinstance(item, _MemberLookupSelect)
     )
@@ -739,63 +652,6 @@ def _credit(remaining: str, day: int) -> ActiveTimedCredit:
     return ActiveTimedCredit(Decimal(remaining), datetime(2026, 5, day, 18, 0, tzinfo=UTC))
 
 
-def test_the_admin_panel_is_header_credit_channel_and_spenders_apart() -> None:
-    state = _make_state(
-        is_admin=True,
-        guild_balance_usd=Decimal("62.4"),
-        guild_spend=48.17,
-        guild_distinct_members=9,
-        timed_credit=(_credit("20", 30), _credit("5", 31)),
-        channel_budget=_this_channel_budget(),
-        member_rows=(_make_member_row(display_name="Maya Chen", cost_usd=14.02),),
-        channel_budgets=(_budget_status("100", "4.1"),),
-    )
-    assert _blocks(build_billing_container(state, now=NOW, since=SINCE)) == [
-        "## Billing\n-# May 2026\n-# $48.17 spent by 9 people",
-        "---",
-        "### $62.40\ntotal credit left\n-# Includes $25.00 that expires. It's used first.",
-        "---",
-        "**This channel**\n$1.20 of $5.00 used this month",
-        "---",
-        "**Top spenders**\n1. Maya Chen  $14.02",
-        "---",
-        "**Channel budgets**\n<#100>  $4.10 of $10.00 used this month",
-    ]
-
-
-def test_the_member_panel_adds_your_use_and_asks_an_admin_for_credit() -> None:
-    state = _make_state(
-        caller_spend=11.5, caller_turns=71, caller_cap=Decimal("25"), guild_balance_usd=Decimal("9")
-    )
-    assert _blocks(build_billing_container(state, now=NOW, since=SINCE)) == [
-        "## Billing\n-# May 2026",
-        "---",
-        "**You**\n$11.50 of your $25.00 this month",
-        "---",
-        "### $9.00\ntotal credit left\n-# Ask an admin to add credit.",
-    ]
-
-
-def test_the_member_panel_shows_own_use_in_plain_words() -> None:
-    def you(**overrides: Any) -> str:
-        text = _text(build_billing_container(_make_state(**overrides), now=NOW, since=SINCE))
-        return text.split("**You**\n", 1)[1].splitlines()[0]
-
-    assert you(caller_spend=11.5, caller_turns=71) == "$11.50 used this month"
-    assert you() == "Nothing used this month"
-
-
-def test_a_negative_balance_says_no_credit_left_and_still_shows_timed_credit() -> None:
-    state = _make_state(
-        is_admin=True, guild_balance_usd=Decimal("-3.1"), timed_credit=(_credit("5", 20),)
-    )
-    blocks = _blocks(build_billing_container(state, now=NOW, since=SINCE))
-    assert blocks[2] == (
-        "### No credit left\n$3.10 spent beyond it\n"
-        "-# Includes $5.00 that expires. It's used first."
-    )
-
-
 def test_controls_sit_last_and_done_drops_them() -> None:
     view = _panel(is_admin=True)
     container = next(c for c in view.children if isinstance(c, discord.ui.Container))
@@ -804,56 +660,9 @@ def test_controls_sit_last_and_done_drops_them() -> None:
     assert not any(isinstance(c, discord.ui.ActionRow) for c in plain.children)
 
 
-def test_the_accent_shows_state() -> None:
-    def accent(**overrides: Any) -> object:
-        state = _make_state(**({"guild_balance_usd": Decimal("10")} | overrides))
-        return build_billing_container(state, now=NOW, since=SINCE).accent_colour
-
-    assert accent() is None, "nothing to flag"
-    assert accent(guild_balance_usd=Decimal("0")) == COLOR_OVER_CAP, "no credit left"
-    assert accent(caller_spend=200.0, caller_turns=1, caller_cap=Decimal("100")) == COLOR_OVER_CAP
-    assert accent(timed_credit=(_credit("5", 20),)) == COLOR_WARNING, "expires within a week"
-    assert accent(timed_credit=(_credit("5", 31),)) is None, "expires later"
-
-
 def _section(state: BillingPanelState, title: str) -> str:
     blocks = _blocks(build_billing_container(state, now=NOW, since=SINCE))
     return next(block for block in blocks if block.startswith(title))
-
-
-def test_top_spenders_names_five_and_counts_the_rest() -> None:
-    rows = tuple(
-        _make_member_row(
-            platform_user_id=f"u{i}",
-            display_name=f"user{i}",
-            cost_usd=float(8 - i),
-            is_caller=i == 1,
-        )
-        for i in range(8)
-    )
-    state = _make_state(is_admin=True, member_rows=rows, over_cap_count=2)
-    assert _section(state, "**Top spenders**") == (
-        "**Top spenders**\n1. user0  $8.00\n2. user1 (you)  $7.00\n3. user2  $6.00\n"
-        "4. user3  $5.00\n5. user4  $4.00\n-# + 5 more. Look one up below."
-    ), "overflow is (8-5) rows plus over_cap_count=2"
-
-
-def test_top_spenders_without_usage_and_no_channel_budgets_section() -> None:
-    state = _make_state(is_admin=True)
-    assert _section(state, "**Top spenders**") == "**Top spenders**\nNothing used this month"
-    blocks = _blocks(build_billing_container(state, now=NOW, since=SINCE))
-    assert not any(block.startswith("**Channel budgets**") for block in blocks)
-
-
-def test_channel_budgets_lists_five_and_counts_the_rest_for_admins_only() -> None:
-    budgets = tuple(_budget_status(str(100 + i), str(9 - i)) for i in range(7))
-    section = _section(_make_state(is_admin=True, channel_budgets=budgets), "**Channel budgets**")
-    assert section.splitlines()[1] == "<#100>  $9.00 of $10.00 used this month"
-    assert "<#104>" in section and "<#105>" not in section and section.endswith("-# + 2 more")
-    member = _blocks(
-        build_billing_container(_make_state(channel_budgets=budgets), now=NOW, since=SINCE)
-    )
-    assert not any("Channel budgets" in block or "Top spenders" in block for block in member)
 
 
 def test_top_spender_names_are_escaped() -> None:
@@ -909,7 +718,7 @@ def test_no_rendered_panel_has_a_dot_separator_or_a_user_label() -> None:
 def test_member_lookup_reply_is_the_name_and_the_month() -> None:
     def lookup(spend: float, turns: int) -> list[str]:
         container = build_member_lookup_container(
-            display_name="@everyone **x**", spend_usd=spend, turns=turns, since=SINCE, now=NOW
+            display_name="@everyone **x**", spend_usd=spend, turns=turns
         )
         return _blocks(container)
 
@@ -939,46 +748,12 @@ def test_admin_container_budget_content_length_under_4000() -> None:
     assert _panel(**fields).content_length() <= 4000
 
 
-# ---- estimate_turns unit tests ----
-
-
-def test_estimate_turns_uses_guild_average_when_history_available() -> None:
-    """estimate_turns uses guild average: $5/100 turns = $0.05/turn → $10 buys 200 turns."""
-    result = estimate_turns(10.0, guild_spend=5.0, guild_turns=100)
-    assert result == 200, "average path: $10 / ($5/100 turns) = 200 turns"
-
-
-def test_estimate_turns_uses_fallback_when_no_history() -> None:
-    """estimate_turns falls back to $0.10/turn when guild has no history."""
-    result = estimate_turns(10.0, guild_spend=0.0, guild_turns=0)
-    assert result == 100, "fallback path: $10 / $0.10 = 100 turns"
-
-
-def test_estimate_turns_fallback_when_guild_turns_zero_but_spend_nonzero() -> None:
-    """estimate_turns falls back when guild_turns==0 even if guild_spend>0."""
-    result = estimate_turns(10.0, guild_spend=5.0, guild_turns=0)
-    assert result == 100, "zero turns means fallback applies even if spend is nonzero"
-
-
-def test_estimate_turns_fallback_when_guild_spend_zero_but_turns_nonzero() -> None:
-    """estimate_turns falls back when guild_spend==0 even if guild_turns>0."""
-    result = estimate_turns(10.0, guild_spend=0.0, guild_turns=50)
-    assert result == 100, "zero spend means fallback applies even if turns is nonzero"
-
-
 def test_open_in_web_link_button_follows_the_web_url() -> None:
     """A web link adds one link button; with none the panel is as before."""
 
     def buttons(web_url: str | None) -> list[discord.ui.Button[Any]]:
-        view = BillingPanelView(
-            _make_state(is_admin=False),
-            runtime=_make_runtime(),
-            allowed_user_id=42,
-            is_admin=False,
-            account_id=_TEST_ACCOUNT_ID,
-            now=NOW,
-            since=SINCE,
-            web_url=web_url,
+        view = _billing_panel_view(
+            _make_state(is_admin=False), runtime=_make_runtime(), is_admin=False, web_url=web_url
         )
         return [c for c in view.walk_children() if isinstance(c, discord.ui.Button)]
 

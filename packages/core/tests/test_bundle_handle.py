@@ -5,23 +5,25 @@ from __future__ import annotations
 import base64
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 from daimon.core.bundle_handle import mint, verify
+
+_mint = partial(mint, file_id="file_abc", ttl_days=90)
 
 
 def test_round_trip_returns_claims_equal_to_what_was_minted() -> None:
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    handle = mint(
+    handle = _mint(
         "secret",
         file_id="file_abc123",
         tenant_id=tenant_id,
         agent_id=agent_id,
         sha256="a" * 64,
         now=now,
-        ttl_days=90,
     )
     claims = verify("secret", handle, tenant_id=tenant_id, agent_id=agent_id, now=now)
     assert claims is not None, "a freshly minted handle should verify"
@@ -36,15 +38,7 @@ def test_verify_returns_none_when_signed_with_a_different_secret() -> None:
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    handle = mint(
-        "secret-one",
-        file_id="file_abc",
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        sha256="b" * 64,
-        now=now,
-        ttl_days=90,
-    )
+    handle = _mint("secret-one", tenant_id=tenant_id, agent_id=agent_id, sha256="b" * 64, now=now)
     claims = verify("secret-two", handle, tenant_id=tenant_id, agent_id=agent_id, now=now)
     assert claims is None, "a handle signed with a different secret must not verify"
 
@@ -53,15 +47,7 @@ def test_verify_returns_none_when_payload_half_is_tampered() -> None:
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    handle = mint(
-        "secret",
-        file_id="file_abc",
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        sha256="c" * 64,
-        now=now,
-        ttl_days=90,
-    )
+    handle = _mint("secret", tenant_id=tenant_id, agent_id=agent_id, sha256="c" * 64, now=now)
     payload_b64, sig_b64 = handle.split(".", 1)
     flipped_char = "A" if payload_b64[0] != "A" else "B"
     tampered = flipped_char + payload_b64[1:] + "." + sig_b64
@@ -73,15 +59,7 @@ def test_verify_returns_none_when_signature_half_is_tampered() -> None:
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    handle = mint(
-        "secret",
-        file_id="file_abc",
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        sha256="d" * 64,
-        now=now,
-        ttl_days=90,
-    )
+    handle = _mint("secret", tenant_id=tenant_id, agent_id=agent_id, sha256="d" * 64, now=now)
     payload_b64, sig_b64 = handle.split(".", 1)
     flipped_char = "A" if sig_b64[0] != "A" else "B"
     tampered = payload_b64 + "." + flipped_char + sig_b64[1:]
@@ -93,14 +71,8 @@ def test_verify_returns_none_when_exp_has_passed() -> None:
     mint_time = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
-    handle = mint(
-        "secret",
-        file_id="file_abc",
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        sha256="e" * 64,
-        now=mint_time,
-        ttl_days=1,
+    handle = _mint(
+        "secret", tenant_id=tenant_id, agent_id=agent_id, sha256="e" * 64, now=mint_time, ttl_days=1
     )
     later = mint_time + timedelta(days=2)
     claims = verify("secret", handle, tenant_id=tenant_id, agent_id=agent_id, now=later)
@@ -112,15 +84,7 @@ def test_verify_returns_none_when_checked_against_the_wrong_tenant() -> None:
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
     agent_id = uuid.uuid4()
-    handle = mint(
-        "secret",
-        file_id="file_abc",
-        tenant_id=tenant_a,
-        agent_id=agent_id,
-        sha256="f" * 64,
-        now=now,
-        ttl_days=90,
-    )
+    handle = _mint("secret", tenant_id=tenant_a, agent_id=agent_id, sha256="f" * 64, now=now)
     claims = verify("secret", handle, tenant_id=tenant_b, agent_id=agent_id, now=now)
     assert claims is None, "a handle minted for tenant A must not verify against tenant B"
 
@@ -130,15 +94,7 @@ def test_verify_returns_none_when_checked_against_the_wrong_agent() -> None:
     tenant_id = uuid.uuid4()
     agent_a = uuid.uuid4()
     agent_b = uuid.uuid4()
-    handle = mint(
-        "secret",
-        file_id="file_abc",
-        tenant_id=tenant_id,
-        agent_id=agent_a,
-        sha256="0" * 64,
-        now=now,
-        ttl_days=90,
-    )
+    handle = _mint("secret", tenant_id=tenant_id, agent_id=agent_a, sha256="0" * 64, now=now)
     claims = verify("secret", handle, tenant_id=tenant_id, agent_id=agent_b, now=now)
     assert claims is None, "a handle minted for agent A must not verify against agent B"
 
@@ -160,15 +116,7 @@ def test_verify_returns_none_when_payload_has_four_fields() -> None:
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     # Build a handle whose payload is missing the sha256 field (4 parts, not 5).
-    handle = mint(
-        "secret",
-        file_id="file_abc",
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        sha256="1" * 64,
-        now=now,
-        ttl_days=90,
-    )
+    handle = _mint("secret", tenant_id=tenant_id, agent_id=agent_id, sha256="1" * 64, now=now)
     payload_b64, _ = handle.split(".", 1)
     raw = base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)).decode()
     fields = raw.split("|")
@@ -188,26 +136,17 @@ def test_verify_returns_none_when_payload_has_four_fields() -> None:
 def test_mint_rejects_naive_now() -> None:
     naive = datetime(2026, 6, 9, 12, 0, 0)  # no tzinfo
     with pytest.raises(ValueError, match="timezone-aware"):
-        mint(
-            "secret",
-            file_id="file_abc",
-            tenant_id=uuid.uuid4(),
-            agent_id=uuid.uuid4(),
-            sha256="2" * 64,
-            now=naive,
-            ttl_days=90,
-        )
+        _mint("secret", tenant_id=uuid.uuid4(), agent_id=uuid.uuid4(), sha256="2" * 64, now=naive)
 
 
 def test_mint_rejects_file_id_containing_pipe() -> None:
     now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
     with pytest.raises(ValueError, match=r"must not contain '\|'"):
-        mint(
+        _mint(
             "secret",
             file_id="file|abc",
             tenant_id=uuid.uuid4(),
             agent_id=uuid.uuid4(),
             sha256="3" * 64,
             now=now,
-            ttl_days=90,
         )

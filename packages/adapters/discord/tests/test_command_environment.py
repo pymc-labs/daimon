@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -16,9 +15,7 @@ from daimon.core.config import (
     EnvironmentSettings,
     Settings,
 )
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.scope import DeploymentDefault
+from daimon.testing.discord_builders import discord_runtime
 from discord import app_commands
 from discord.ext import commands
 from pydantic import PostgresDsn, SecretStr
@@ -27,7 +24,7 @@ from .harness import make_bot
 
 
 async def _ready_bot(
-    name: str, guild_ids: list[int], *, dm_only: bool = False
+    name: str, guild_ids: list[int], *, dm_only: bool = False, dm_and_guild: bool = False
 ) -> tuple[DaimonBot, AsyncMock, AsyncMock, MagicMock]:
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]  # BaseSettings accepts this
@@ -36,15 +33,8 @@ async def _ready_bot(
         environment=EnvironmentSettings(name=name),
         discord=DiscordSettings(bot_token=SecretStr("test"), command_guild_ids=guild_ids),
     )
-    runtime = DiscordRuntime(
-        settings=settings,
-        anthropic=AsyncMock(),
-        sessionmaker=MagicMock(),
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),
+    runtime = discord_runtime(
+        settings=settings, anthropic=AsyncMock(), sessionmaker=MagicMock(), turn_deps=MagicMock()
     )
     bot = make_bot(runtime)
     bot._connection.application_id = 99  # pyright: ignore[reportPrivateUsage]
@@ -61,6 +51,13 @@ async def _ready_bot(
         async def dm_only_command(interaction: discord.Interaction) -> None: ...
 
         bot.tree.add_command(dm_only_command)
+    if dm_and_guild:
+
+        @app_commands.command(name="both", description="b")
+        @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
+        async def both_command(interaction: discord.Interaction) -> None: ...
+
+        bot.tree.add_command(both_command)
     bot.tree.remove_command = MagicMock()  # type: ignore[method-assign]
     bot.tree.sync = AsyncMock()  # type: ignore[method-assign]
     bot.tree.clear_commands = MagicMock()  # type: ignore[method-assign]
@@ -192,4 +189,34 @@ async def test_non_production_registers_dm_only_commands_globally_and_not_in_gui
         "a DM-only command is dropped from the allowlisted guild's copy"
     )
     copy.assert_called_once()
+    await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_syncs_a_dm_and_guild_command_globally_only() -> None:
+    bot, _, global_overwrite, _ = await _ready_bot("lane-preview", [111], dm_and_guild=True)
+    payload = global_overwrite.await_args.kwargs["payload"]
+    assert [command["name"] for command in payload] == ["both"], "/model-like commands reach DMs"
+    removed = bot.tree.remove_command.call_args_list  # type: ignore[attr-defined]
+    assert [(call.args[0], call.kwargs["guild"].id) for call in removed] == [("both", 111)], (
+        "the guild copy leaves it out, so it shows once"
+    )
+    await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_joining_a_guild_leaves_dm_capable_commands_out_of_its_copy() -> None:
+    bot, _, _, copy = await _ready_bot("lane-preview", [111], dm_and_guild=True)
+    bot.tree.remove_command.reset_mock()  # type: ignore[attr-defined]
+    copy.reset_mock()
+    bot._provision_joined_guild = AsyncMock(return_value="tenant")  # type: ignore[method-assign]
+    bot._post_welcome = AsyncMock()  # type: ignore[method-assign]
+    bot._seed_tenant_defaults = MagicMock()  # type: ignore[method-assign]
+    bot._spawn = MagicMock()  # type: ignore[method-assign]
+    await bot.on_guild_join(_guild(111))
+    copy.assert_called_once()
+    removed = bot.tree.remove_command.call_args_list  # type: ignore[attr-defined]
+    assert [(call.args[0], call.kwargs["guild"].id) for call in removed] == [("both", 111)], (
+        "the joined guild's copy leaves it out, so it shows once"
+    )
     await bot.close()  # type: ignore[attr-defined]

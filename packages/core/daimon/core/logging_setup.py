@@ -54,6 +54,10 @@ def mark_shutting_down() -> None:
     _shutting_down = True
 
 
+def is_shutting_down() -> bool:
+    return _shutting_down
+
+
 def clear_shutting_down() -> None:
     """Undo `mark_shutting_down`; only test isolation needs this."""
     global _shutting_down

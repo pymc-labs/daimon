@@ -5,25 +5,37 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import cast
 
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.admins import granted
 from daimon.core.config import WebSettings
-from daimon.core.stores.domain import Role
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.scope import DeploymentDefault
 from daimon.testing.factories import (
     make_account,
     make_platform_principal,
     make_tenant,
     make_web_person,
 )
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-arg]
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession], web: WebSettings | None) -> McpRuntime:
+    settings = mock_settings()
+    settings.web = web
     return cast(
-        McpRuntime, SimpleNamespace(session_factory=sessionmaker, settings=SimpleNamespace(web=web))
+        McpRuntime,
+        SimpleNamespace(
+            session_factory=sessionmaker,
+            settings=settings,
+            deployment_default=DeploymentDefault(),
+            client=None,
+            resolver_cache=new_resolver_cache(),
+        ),
     )
 
 
@@ -40,20 +52,15 @@ async def test_a_granted_user_with_a_web_person_links_to_their_admin_page(
             session, platform="discord", external_id="U42", tenant=tenant, account=account
         )
         person = await make_web_person(session, tenant=tenant, account=account)
-    auth = AuthIdentity(
-        account_id=admin.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        platform="discord",
-        platform_user_id="U1",
-        is_admin=True,
+    auth = auth_identity(
+        admin.id, tenant.id, is_platform_admin=False, platform="discord", platform_user_id="U1"
     )
     runtime = _runtime(committing_sessionmaker, _WEB)
 
     result = await granted(runtime, auth, subject_id="U42", subject_kind="user")
-    assert result.web_url == (f"https://app.example.com/w/{tenant.id}/admin?person={person.id}"), (
-        "the person's own page"
-    )
+    assert result.web_url == (
+        f"https://app.example.com/w/{tenant.id}/admin/people?person={person.id}"
+    ), "the person's own page"
     stranger = await granted(runtime, auth, subject_id="U99", subject_kind="user")
     assert stranger.web_url is None, "no person on the web, no link"
     role = await granted(runtime, auth, subject_id="U42", subject_kind="role")

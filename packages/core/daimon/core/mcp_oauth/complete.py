@@ -3,7 +3,7 @@
 Runs on the mcp process when the authorization server redirects back. The
 flow row is already spent by the caller (the atomic consume is the replay
 gate), so everything here is the write side: tokens from the code, the
-`mcp_oauth` credential into the requester's per-agent vault, the completion
+grant Daimon holds and refreshes (`connector_tokens`), the completion
 stamp that marks this person — and only this person — as connected to the
 server, and the server on the agent so the toolset exists. Failures raise; the route decides what
 the browser sees.
@@ -12,12 +12,11 @@ the browser sees.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-import anthropic as anthropic_pkg
 import httpx
-import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
@@ -30,21 +29,17 @@ from daimon.core.mcp_attach import (
     attach_mcp_server_to_agent,
     decide_mcp_connect,
 )
+from daimon.core.mcp_oauth.connector_tokens import store_connector_grant
 from daimon.core.mcp_oauth.flow import exchange_authorization_code, refresh_scope
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenEndpointAuthMethod
-from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
-from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import delete_credential
 from daimon.core.native_admins import AdminCaller
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
-from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-_log = structlog.get_logger(__name__)
 
 
 class McpOAuthWriteRefusedError(DaimonError):
@@ -57,10 +52,9 @@ class McpOAuthIncompleteFlowError(DaimonError):
 
 @dataclass(frozen=True, slots=True)
 class McpOAuthCompletion:
-    vault_id: str
-    credential_id: str
     ma_agent_id: str | None
     """None when the agent no longer exists; the grant is stored regardless."""
+    connector_token_id: uuid.UUID
 
 
 def registered_client(flow: McpOAuthFlowRow, *, fernet: MultiFernet) -> ClientRegistration:
@@ -98,16 +92,19 @@ async def complete_mcp_oauth_flow(
     may_write: Callable[[], Awaitable[bool]] | None = None,
     configured_client: bool = False,
 ) -> McpOAuthCompletion:
-    """Exchange, store in the requester's vault, attach the server to the agent.
+    """Exchange, store the requester's grant, attach the server to the agent.
 
-    ``may_write`` is the caller's access decision. It is asked before the
-    first vault call (after the code exchange), again inside the vault lock
-    immediately before the grant is written, and again inside the agent's MCP
-    lock immediately before the attach: each step before it awaits the
-    network or a lock, and a pin landing in any of those waits must stop the
-    grant and the attach. A refusal raises `McpOAuthWriteRefusedError`; no
-    grant is written and nothing is attached (at most the person's own empty
-    vault exists, as it would after a declined sign-in).
+    The grant goes to `connector_tokens` on every backend: Daimon is its one
+    refresh owner, and each Managed Agents turn mirrors the fresh access token
+    into the caller's vault (`agent_mcp_credentials.mirror_stored_credentials`),
+    so a backend switch keeps it working.
+
+    ``may_write`` is the caller's access decision. It is asked after the code
+    exchange, again inside the grant's transaction, and again inside the
+    agent's MCP lock immediately before the attach: each step before it awaits
+    the network or a lock, and a pin landing in any of those waits must stop
+    the grant and the attach. A refusal raises `McpOAuthWriteRefusedError`; no
+    grant is left and nothing is attached.
 
     The grant is personal, but the attach is not: repointing a server name the
     agent already declares at another URL redirects every caller. That is
@@ -139,46 +136,29 @@ async def complete_mcp_oauth_flow(
         if may_write is not None and not await may_write():
             raise McpOAuthWriteRefusedError
 
+    grant_scope = resource_scope(tenant_id=str(flow.tenant_id), account_id=str(flow.account_id))
     await still_allowed()
-    vault_id = await ensure_agent_mcp_vault(
-        anthropic,
-        account_id=flow.account_id,
-        agent_id=flow.agent_id,
-        jwt_secret=jwt_secret,
-        public_url=public_url,
-        now=now,
-        session_factory=session_factory,
-        scope=resource_scope(tenant_id=str(flow.tenant_id), account_id=str(flow.account_id)),
-    )
-    # Locked like the mirror, the Copilot PAT and the pasted-token writers
-    # (see hold_agent_vault_lock for the two that are not), so a turn
-    # mirroring the agent's shared token cannot recreate it between the
-    # delete and the create.
-    async with hold_agent_vault_lock(
-        session_factory, account_id=flow.account_id, agent_id=flow.agent_id
-    ):
+    async with session_factory() as session, session.begin():
         await still_allowed()
-        credential_id = await put_mcp_oauth_credential(
-            anthropic,
-            vault_id=vault_id,
-            mcp_server_url=flow.mcp_server_url,
-            tokens=tokens,
-            client=client,
-            token_endpoint=flow.token_endpoint,
-            resource=flow.resource,
-            now=now,
-            before_write=still_allowed,
-            scope=resource_scope(tenant_id=str(flow.tenant_id), account_id=str(flow.account_id)),
+        row = await store_connector_grant(
+            session, flow=flow, tokens=tokens, client=client, fernet=fernet, now=now
         )
+
+    async def withdraw() -> None:
+        async with session_factory() as session, session.begin():
+            await connector_tokens_store.delete_connector_token(
+                session, tenant_id=row.tenant_id, token_id=row.id, read_at=row.updated_at
+            )
+
     # Do not advertise a completed grant until the spec mutation is authorized:
     # grant records also determine which servers other people's sessions hide.
     agent = await find_agent_by_derived_uuid(
-        anthropic, tenant_id=flow.tenant_id, agent_id=flow.agent_id
+        anthropic, tenant_id=flow.tenant_id, agent_id=flow.agent_id, records=session_factory
     )
     if agent is None:
         async with session_factory() as session, session.begin():
             await flows_store.mark_flow_completed(session, state=flow.state, now=now)
-        return McpOAuthCompletion(vault_id=vault_id, credential_id=credential_id, ma_agent_id=None)
+        return McpOAuthCompletion(ma_agent_id=None, connector_token_id=row.id)
     async with session_factory() as session:
         requester = await get_account_with_tenant(session, account_id=flow.account_id)
         # The person the grant belongs to; their ownership is read, never claimed.
@@ -198,14 +178,7 @@ async def complete_mcp_oauth_flow(
         session_factory, tenant_id=flow.tenant_id, agent_id=flow.agent_id
     ):
         if may_write is not None and not await may_write():
-            await _withdraw_grant(
-                anthropic,
-                credential_id=credential_id,
-                vault_id=vault_id,
-                scope=resource_scope(
-                    tenant_id=str(flow.tenant_id), account_id=str(flow.account_id)
-                ),
-            )
+            await withdraw()
             raise McpOAuthWriteRefusedError
         decision = await decide_mcp_connect(
             session_factory,
@@ -221,14 +194,7 @@ async def complete_mcp_oauth_flow(
             owned=owned,
         )
         if decision.refused:
-            await _withdraw_grant(
-                anthropic,
-                credential_id=credential_id,
-                vault_id=vault_id,
-                scope=resource_scope(
-                    tenant_id=str(flow.tenant_id), account_id=str(flow.account_id)
-                ),
-            )
+            await withdraw()
             if decision.replaces:
                 raise McpServerReplaceRefusedError(server_name=flow.server_name)
             raise McpOAuthWriteRefusedError
@@ -242,57 +208,15 @@ async def complete_mcp_oauth_flow(
                     url=flow.mcp_server_url,
                     replace_allowed=decision.replace_allowed,
                     before_update=still_allowed,
-                    scope=resource_scope(
-                        tenant_id=str(flow.tenant_id), account_id=str(flow.account_id)
-                    ),
+                    scope=grant_scope,
+                    records=session_factory,
                 )
             except (McpOAuthWriteRefusedError, McpServerReplaceRefusedError):
-                await _withdraw_grant(
-                    anthropic,
-                    credential_id=credential_id,
-                    vault_id=vault_id,
-                    scope=resource_scope(
-                        tenant_id=str(flow.tenant_id), account_id=str(flow.account_id)
-                    ),
-                )
+                await withdraw()
                 raise
     async with session_factory() as session, session.begin():
         await flows_store.mark_flow_completed(session, state=flow.state, now=now)
-    return McpOAuthCompletion(
-        vault_id=vault_id, credential_id=credential_id, ma_agent_id=attached.id
-    )
-
-
-async def _withdraw_grant(
-    anthropic: AsyncAnthropic,
-    *,
-    credential_id: str,
-    vault_id: str,
-    scope: Scope | None = None,
-) -> None:
-    """Remove a grant written before the sign-in was refused; retry once, log a failure.
-
-    A pin landed after the grant was written, so a refused sign-in must leave
-    no grant behind as well as no attach. A failed delete is logged by id
-    (never the credential) so an operator can remove it.
-    """
-    scope = scope or Scope.legacy_host_authorized(
-        call_site="daimon.core.mcp_oauth.complete:_withdraw_grant"
-    )
-    for attempt in (1, 2):
-        try:
-            await delete_credential(anthropic, vault_id, credential_id, scope=scope)
-            return
-        except anthropic_pkg.NotFoundError:
-            return
-        except anthropic_pkg.APIError as exc:
-            if attempt == 2:
-                _log.error(
-                    "mcp_oauth.refused_grant_withdraw_failed",
-                    credential_id=credential_id,
-                    vault_id=vault_id,
-                    error_type=type(exc).__name__,
-                )
+    return McpOAuthCompletion(ma_agent_id=attached.id, connector_token_id=row.id)
 
 
 __all__ = [

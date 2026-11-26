@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 import structlog.testing
-from daimon.core.access_policy import Approvals, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentApprovals, Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate, set_approval_gate
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.confirmation import ServerSkillUpdateCard
 from daimon.core.errors import DaimonError
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.service import place_tiers
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tool_safety import (
@@ -21,7 +26,12 @@ from daimon.core.tool_safety import (
     ToolCall,
     ToolSafetyPolicy,
 )
+from daimon.core.turn.admission import (  # pyright: ignore[reportPrivateUsage]
+    AdmissionGrant,
+    _approval_gate_for,
+)
 from daimon.core.turn.approvals import chat_tool_confirmation, interactive_decider
+from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.posture import PolicyApproval
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,15 +44,14 @@ WRITE = ToolCall(tool_use_id="t1", server_name="third-party", tool_name="create_
 
 ADMIN_INPUTS: dict[str, dict[str, object]] = {
     "approve_reach": {"threads": 2, "places": 0, "people": 0, "where": "#general"},
-    "request_agent_backend_switch": {
-        "agent_name": "agent",
-        "target_backend": "anthropic",
-        "expected_revision": 1,
-        "preview_digest": "a" * 64,
-    },
     "request_provider_allowlist": {
         "providers": ["anthropic"],
         "expected_revision": "policy-revision",
+        "preview_digest": "a" * 64,
+    },
+    "request_channel_pin": {
+        "model": "openai:gpt-6",
+        "expected_revision": 0,
         "preview_digest": "a" * 64,
     },
     "request_channel_pin_clear": {
@@ -111,20 +120,15 @@ async def test_admin_prompt_still_asks() -> None:
         requester_platform_user_id="requester",
         confirm=card,
         trusted_servers=TRUSTED,
-        confirmed_tools=frozenset({"request_agent_backend_switch"}),
+        confirmed_tools=frozenset({"request_provider_allowlist"}),
         approval_gate_for=AsyncMock(return_value=OFF),
         server_urls={"third-party": "https://third.example/mcp"},
     )(
         ToolCall(
             tool_use_id="t1",
             server_name="daimon-mcp",
-            tool_name="request_agent_backend_switch",
-            input={
-                "agent_name": "agent",
-                "target_backend": "anthropic",
-                "expected_revision": 1,
-                "preview_digest": "a" * 64,
-            },
+            tool_name="request_provider_allowlist",
+            input=ADMIN_INPUTS["request_provider_allowlist"],
         )
     )
     assert not result.allow
@@ -272,6 +276,27 @@ def test_most_specific_wins_in_both_directions(
     )
 
 
+def test_agent_sits_between_workspace_and_channel() -> None:
+    policy = TenantAccessPolicy(
+        approvals="on",
+        approvals_set_by="server-admin",
+        agent_approvals={"a1": AgentApprovals(approvals="off", approvals_set_by="agent-admin")},
+    )
+
+    def gate(agent_id: str, channel_id: str = "C1") -> ApprovalGate:
+        return resolve_approval_gate(
+            policy, platform="discord", channel_id=channel_id, thread_id=None, agent_id=agent_id
+        )
+
+    assert gate("a1") == ApprovalGate("off", "agent:a1", "agent-admin")
+    assert gate("a2") == ApprovalGate("on", "server", "server-admin")
+    policy = policy.model_copy(
+        update={"channel_rules": {"C1": ChannelRule(approvals="on", approvals_set_by="ch")}}
+    )
+    assert gate("a1") == ApprovalGate("on", "channel:C1", "ch")
+    assert gate("a1", "C2").value == "off"
+
+
 @pytest.mark.parametrize(
     "subject",
     [Subject(), Subject(platform_user_id="requester"), Subject(is_admin=True, via_agent_key=True)],
@@ -392,7 +417,7 @@ async def test_missing_or_unreadable_live_gate_never_uses_cached_off(read_failur
 
 @pytest.mark.parametrize("own_endpoint", [False, True])
 @pytest.mark.parametrize(
-    "tool", ["microsoft_write", "publish_report", "request_agent_backend_switch"]
+    "tool", ["microsoft_write", "publish_report", "request_provider_allowlist"]
 )
 async def test_fixed_gate_names_ask_on_own_endpoint_aliases_and_unrelated_servers(
     own_endpoint: bool,
@@ -613,3 +638,62 @@ async def test_recorded_change_lands_in_channel_changes_with_the_thread_key(
         "approvals": "off",
         "thread_approvals": {"thread": "T1", "mode": "off"},
     }
+
+
+async def test_agent_setting_is_audited_and_cleared(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    admin = Subject(is_admin=True, platform_user_id="admin")
+    for value in ("off", "inherit"):
+        gate = await set_approval_gate(
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            target=None,
+            value=value,
+            subject=admin,
+            note="why",
+            agent_id="a1",
+        )
+        async with db_session_factory() as session:
+            policy = await load_access_policy(session, tenant_id=tenant.id)
+        assert gate.scope == "agent:a1"
+        assert policy.approvals == "inherit" and not policy.channel_rules
+        assert ("a1" in policy.agent_approvals) == (value == "off")
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=tenant.id)
+    assert sorted(event.reason for event in events) == [
+        "agent:a1:inherit->off (why)",
+        "agent:a1:off->inherit (why)",
+    ]
+
+
+def test_a_blank_agent_id_is_no_agent_tier() -> None:
+    """`?agent=` arrives as an empty string; it must not read as an agent tier, since the
+    write path treats it as the workspace."""
+    place = FeaturePlace.of(uuid.uuid4(), "discord", "c1", agent_id="")
+    assert place.agent_id is None, "a blank id is no agent"
+    assert "agent" not in place_tiers(FEATURES["approvals"], place), "no agent tier offered"
+
+
+def test_a_coordinators_value_decides_what_its_callees_write() -> None:
+    """The gate is read once per turn for the turn's own agent, which is the coordinator in
+    a session where agents call other agents; a callee's own value is never consulted."""
+    own = {
+        "coordinator": AgentApprovals(approvals="off", approvals_set_by="admin-1"),
+        "callee": AgentApprovals(approvals="on", approvals_set_by="admin-1"),
+    }
+    grant = SimpleNamespace(
+        is_dm=False, platform="discord", channel_id="c1", thread_id=None, tenant_id=uuid.uuid4()
+    )
+    deps = SimpleNamespace(tool_safety=ON)
+    gate = _approval_gate_for(
+        cast(TurnDeps, deps),
+        TenantAccessPolicy(agent_approvals=own),
+        cast(AdmissionGrant, grant),
+        "coordinator",
+    )
+    assert gate is not None
+    assert (gate.value, gate.scope) == ("off", "agent:coordinator"), gate

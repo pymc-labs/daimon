@@ -7,7 +7,8 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from io import StringIO
-from typing import Any
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -20,12 +21,17 @@ from daimon.adapters.cli.commands.features import (
 )
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.adapters.cli.tenant import TenantSelector
+from daimon.core.access_policy import AgentApprovals, TenantAccessPolicy
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.errors import StoreError
 from daimon.core.features.registry import FEATURES
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.security_audit import list_events
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_routine, make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -148,6 +154,42 @@ async def test_set_writes_the_tier_the_place_names_and_default_clears_it(
     assert cleared["source"] != "channel"
 
 
+async def test_set_with_a_routine_writes_its_own_tier_and_refuses_another_place(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    kw: dict[str, Any] = {"rt": rt, "console": console, "selector": selector}
+    async with db_session_factory.begin() as session:
+        routine = await make_routine(
+            session, tenant=await get_tenant(session, uuid.UUID(selector.tenant_id or ""))
+        )
+    place: dict[str, Any] = {"agent": None, "channel": None, "thread": None}
+
+    await features_set(
+        **kw, key="routine_result_header", value="off", tier=None, routine=routine.id, **place
+    )
+
+    console, out = _console()
+    await features_list(
+        rt=rt, console=console, selector=selector, agent=None, channel=None, thread=None,
+        routine=routine.id, keys=["routine_result_header"], as_json=True,
+    )  # fmt: skip
+    (view,) = json.loads(out.getvalue())
+    assert [t["text"] for t in view["tiers"] if t["tier"] == "routine"] == ["off"]
+    assert (view["value"], view["source"]) == ("off", "routine")
+    with pytest.raises(StoreError, match="--routine takes no"):
+        await features_set(
+            **kw, key="routine_result_header", value="off", tier=None, routine=routine.id,
+            agent=None, channel="c1", thread=None,
+        )  # fmt: skip
+    with pytest.raises(StoreError, match="no routine"):
+        await features_set(
+            **kw, key="routine_result_header", value="off", tier=None, routine=uuid.uuid4(), **place
+        )
+
+
 async def test_a_thread_needs_its_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -185,6 +227,30 @@ async def test_an_agent_tool_is_written_to_the_agents_own_tool_config(
     assert row["value"] in ("off", False)
 
 
+async def test_an_agents_own_name_is_not_taken_for_its_cli_change(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selector = await _tenant(db_session_factory)
+    tenant_id = uuid.UUID(str(selector.tenant_id))
+    agents = [_agent_json(agent_id="ag_helper", name="helper", tenant_id=tenant_id)]
+    change = AsyncMock(side_effect=ChannelChangeRefused("stop", kind="invalid"))
+    monkeypatch.setattr(features_cmd, "change_feature", change)
+    console, _ = _console()
+    with pytest.raises(StoreError, match="stop"):
+        await features_set(
+            rt=_runtime(db_session_factory, agents),
+            console=console,
+            selector=selector,
+            key="display_name",
+            value="Helper",
+            tier=None,
+            agent="helper",
+            channel=None,
+            thread=None,
+        )
+    assert change.await_args.args[2].agent_names is not None, "its own slug is not another's"
+
+
 async def test_diff_lists_only_the_features_two_agents_differ_on(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -206,25 +272,104 @@ async def test_diff_lists_only_the_features_two_agents_differ_on(
     assert keys == ["tool.bash"]
 
 
-async def test_the_cli_has_no_approvals_setter(
+@pytest.mark.parametrize(
+    ("key", "reason", "operator", "refusal"),
+    [
+        ("approvals", None, "ops", "only with --reason"),
+        ("approvals", "   ", "ops", "only with --reason"),
+        ("approvals", "integration", "  ", "needs cli.local_user"),
+        ("progress_plans", "why", "ops", "--reason is only for approvals"),
+    ],
+)
+async def test_a_set_the_audit_could_not_explain_is_refused_before_any_write(
     db_session_factory: async_sessionmaker[AsyncSession],
+    key: str,
+    reason: str | None,
+    operator: str,
+    refusal: str,
 ) -> None:
-    """Approvals need a live chat admin; the CLI has none, so the core refuses."""
+    """Approvals need a reason and an operator name; a reason anywhere else would be dropped."""
     rt = _runtime(db_session_factory, [])
+    rt.settings.cli.local_user = operator
     selector = await _tenant(db_session_factory)
     console, _ = _console()
-    with pytest.raises(StoreError):
+    before = _row(await _rows(rt, selector), key)
+    with pytest.raises(StoreError, match=refusal):
         await features_set(
             rt=rt,
             console=console,
             selector=selector,
-            key="approvals",
-            value="native",
+            key=key,
+            value="off",
+            reason=reason,
             tier=None,
             agent=None,
             channel=None,
             thread=None,
         )
+    assert _row(await _rows(rt, selector), key) == before, "a refused set writes nothing"
+
+
+async def test_the_operator_sets_approvals_and_the_change_is_audited(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    await features_set(
+        rt=rt,
+        console=console,
+        selector=selector,
+        key="approvals",
+        value="off",
+        reason="integration writes run unattended",
+        tier=None,
+        agent=None,
+        channel=None,
+        thread=None,
+    )
+    assert _row(await _rows(rt, selector), "approvals")["value"] == "off", "the set takes effect"
+    async with db_session_factory() as session:
+        events = await list_events(session, tenant_id=uuid.UUID(cast(str, selector.tenant_id)))
+    (event,) = [e for e in events if e.tool_name == "approval_gate"]
+    assert event.platform_user_id == f"operator:{rt.settings.cli.local_user}", "operator named"
+    assert event.reason == "server:inherit->off (integration writes run unattended)", event.reason
+    assert event.outcome == "allowed", "the change is recorded as allowed"
+
+
+async def test_a_deleted_agents_approvals_value_is_cleared_by_its_id(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No live agent answers to the id, yet its stored value stays clearable: an id that
+    holds no value is still refused as an unknown agent."""
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    tenant_id = uuid.UUID(cast(str, selector.tenant_id))
+    gone = AgentApprovals(approvals="off", approvals_set_by="admin-1")
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(agent_approvals={"ag_gone": gone}),
+        )
+    console, _ = _console()
+    kw: dict[str, Any] = {
+        "rt": rt,
+        "console": console,
+        "selector": selector,
+        "key": "approvals",
+        "value": "default",
+        "reason": "agent deleted",
+        "tier": None,
+        "channel": None,
+        "thread": None,
+    }
+    with pytest.raises(StoreError, match="no agent named"):
+        await features_set(**kw, agent="ag_never_set")
+    await features_set(**kw, agent="ag_gone")
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    assert policy.agent_approvals == {}, "the deleted agent's value is gone"
 
 
 async def test_set_refuses_a_stale_expected_value(

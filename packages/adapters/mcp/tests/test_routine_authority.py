@@ -10,15 +10,6 @@ from unittest.mock import MagicMock
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._ctx import _require_platform_admin
 from daimon.adapters.mcp.tools.admins import change_admin
@@ -35,6 +26,10 @@ from daimon.adapters.mcp.tools.promo_issuing import (
     _revoke_promo_code_impl,
 )
 from daimon.adapters.mcp.tools.routines import _caller  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.support import (
+    _list_limits_impl,
+    _settle_request_impl,
+)
 from daimon.adapters.mcp.tools.tenant_summary import _get_tenant_summary_impl
 from daimon.core.config import DiscordSettings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
@@ -50,6 +45,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import production_identity_middleware
+
 SECRET = b"chat-integration-secret-at-least-32-bytes"
 OWNER = "111111111111111111"  # live platform admin
 DELEGATE = "222222222222222222"  # explicit Daimon admin grant only
@@ -58,18 +55,7 @@ TARGET = "333333333333333333"  # what the delegate wants promoted
 
 def _mcp(verifier: DaimonJWTVerifier, sessions, settings) -> FastMCP:
     mcp = FastMCP(name="repro", auth=verifier)
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=sessions,
-            settings=settings,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(sessions, settings=settings))
     return mcp
 
 
@@ -203,6 +189,10 @@ async def test_routine_runs_as_editor_and_execution_never_has_human_money_author
             _list_promo_codes_impl(runtime, auth),
             _revoke_promo_code_impl(runtime, auth, str(uuid.uuid4())),
             _get_tenant_summary_impl(runtime, auth),
+            _list_limits_impl(runtime, auth),
+            _settle_request_impl(
+                runtime, auth, request_id=str(uuid.uuid4()), charge=None, expected_charge=None
+            ),
         ]
         for call in calls:
             with pytest.raises(ToolError, match="personal user credential"):

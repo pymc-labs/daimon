@@ -1,8 +1,13 @@
+export type Problem = { loc: (string | number)[]; msg: string }
+
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /** A 422's list of problems, each at a `loc` path. */
+  problems: Problem[]
+  constructor(status: number, message: string, problems: Problem[] = []) {
     super(message)
     this.status = status
+    this.problems = problems
   }
 }
 
@@ -30,11 +35,16 @@ const CSRF = { "X-Daimon-Web": "1" }
 /** The server's refusal text: the JSON `detail` when there is one, else the status line (empty under HTTP/2). */
 async function errorOf(res: Response): Promise<ApiError> {
   let detail = res.statusText
+  let problems: Problem[] = []
   try {
     const j = await res.json()
     if (typeof j.detail === "string") detail = j.detail
+    else if (Array.isArray(j.detail)) {
+      problems = j.detail.filter((p: Problem) => Array.isArray(p?.loc) && typeof p.msg === "string")
+      if (problems.length) detail = problems.map((p) => p.msg).join(". ")
+    }
   } catch { /* not json */ }
-  return new ApiError(res.status, detail)
+  return new ApiError(res.status, detail, problems)
 }
 
 async function send(method: string, path: string, body: unknown, retry: boolean): Promise<Response> {
@@ -58,9 +68,9 @@ export type Page<T> = { rows: T[]; next: string | null }
 
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
-  /** `path` carries no query string. */
+  /** `path` may carry filters; the cursor joins them. */
   page: async <T>(path: string, cursor?: string | null): Promise<Page<T>> => {
-    const res = await send("GET", path + qs({ cursor }), undefined, true)
+    const res = await send("GET", path + (cursor && path.includes("?") ? `&${qs({ cursor }).slice(1)}` : qs({ cursor })), undefined, true)
     return { rows: (await res.json()) as T[], next: res.headers.get("X-Next-Cursor") }
   },
   post: <T>(path: string, body: unknown = {}, retry = false) => request<T>("POST", path, body, retry),
@@ -72,7 +82,7 @@ export const api = {
 /** Read a server-sent event stream: calls onEvent per `data:` frame and returns the last `id:` seen. `retry` only for idempotent requests. */
 export async function stream(
   path: string, onEvent: (e: any) => void,
-  { body, signal, retry = false, lastEventId }: { body?: unknown; signal?: AbortSignal; retry?: boolean; lastEventId?: string } = {},
+  { body, signal, retry = false, lastEventId, onOpen }: { body?: unknown; signal?: AbortSignal; retry?: boolean; lastEventId?: string; onOpen?: () => void } = {},
 ): Promise<string | undefined> {
   const headers: Record<string, string> = { ...CSRF }
   if (body !== undefined) headers["Content-Type"] = "application/json"
@@ -83,6 +93,7 @@ export async function stream(
   }, retry)
   if (!res.ok) throw await errorOf(res)
   if (!res.body) throw new ApiError(res.status, "")
+  onOpen?.()
   // An answer that starts no turn is one JSON event, not a stream.
   if (res.headers.get("content-type")?.includes("application/json")) { onEvent(await res.json()); return lastEventId }
   const reader = res.body.getReader()

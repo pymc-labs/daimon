@@ -16,8 +16,17 @@ from daimon.adapters.discord.checks import is_platform_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
+from daimon.core.github_panel import safe_github_error
 from daimon.core.github_request_cards import admin_card
+from daimon.core.github_request_decisions import (
+    DECLINED,
+    WAITING,
+    ConnectOrigin,
+    approve_connected,
+    approve_with_connect,
+    approved_update,
+    decline,
+)
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.github_access import AuthorizedRepo, list_authorized_repos
 from daimon.core.stores.github_access_requests import (
@@ -26,13 +35,6 @@ from daimon.core.stores.github_access_requests import (
     dismiss_delivery,
     list_asker_requests,
     list_waiting,
-    set_status,
-)
-from daimon.core.stores.github_links import account_link_status
-from daimon.core.stores.github_personal_links import mint_link
-from daimon.core.stores.github_request_actions import (
-    approve_connected_request,
-    approve_connection_request,
 )
 
 import discord
@@ -50,7 +52,10 @@ async def _may_manage_request(
     if not is_admin:
         return False
     live_agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        runtime.anthropic,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        records=runtime.sessionmaker,
     )
     return live_agent is not None and live_agent.id == row.ma_agent_id
 
@@ -358,43 +363,33 @@ class GitHubWaitingView(PanelViewBase):
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
         connected = {repo.repo_full_name.casefold() for repo in self._repos}
         try:
-            async with self.runtime.sessionmaker.begin() as session:
-                if all(name.casefold() in connected for name in request.repo_names):
-                    changed = await approve_connected_request(
-                        session,
-                        tenant_id=tenant_id,
-                        request_id=request.id,
-                        account_id=self.state.account_id,
-                    )
-                    url = None
-                else:
-                    await sync_connect_admin(
-                        session,
-                        tenant_id=tenant_id,
-                        platform="discord",
-                        platform_user_id=str(interaction.user.id),
-                        is_platform_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
-                    )
-                    url = await connect_link(
-                        session,
-                        settings=self.runtime.settings,
-                        tenant_id=tenant_id,
-                        platform="discord",
-                        platform_user_id=str(interaction.user.id),
-                        verified_tenant_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
+            if all(name.casefold() in connected for name in request.repo_names):
+                changed = await approve_connected(
+                    self.runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    request_id=request.id,
+                    account_id=self.state.account_id,
+                )
+                url = None
+            else:
+                url, changed = await approve_with_connect(
+                    self.runtime.sessionmaker,
+                    settings=self.runtime.settings,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    admin_user_id=str(interaction.user.id),
+                    is_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
+                    request_id=request.id,
+                    account_id=self.state.account_id,
+                    origin=ConnectOrigin(
                         workspace_label=interaction.guild.name if interaction.guild else None,
                         requester_label=interaction.user.display_name,
-                        origin_parent_channel_id=str(interaction.channel_id),
-                        origin_thread_id=str(interaction.channel_id),
-                        origin_followup_token=f"{interaction.application_id}:{interaction.token}",
-                        origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
-                    )
-                    changed = await approve_connection_request(
-                        session,
-                        tenant_id=tenant_id,
-                        request_id=request.id,
-                        account_id=self.state.account_id,
-                    )
+                        parent_channel_id=str(interaction.channel_id),
+                        thread_id=str(interaction.channel_id),
+                        followup_token=f"{interaction.application_id}:{interaction.token}",
+                        followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
+                    ),
+                )
         except ValueError as error:
             await interaction.response.send_message(
                 embed=build_notice_embed(safe_github_error(error)), ephemeral=True
@@ -403,38 +398,24 @@ class GitHubWaitingView(PanelViewBase):
         if changed:
             from daimon.adapters.discord.agent_setup.github_requests import update_requester_card
 
-            personal_url: str | None = None
-            if url is None and self.runtime.settings.mcp.app_root_url is not None:
-                async with self.runtime.sessionmaker() as session:
-                    linked = await account_link_status(
-                        session, account_id=request.requester_account_id
-                    )
-                if not linked:
-                    async with self.runtime.sessionmaker.begin() as session:
-                        personal_url = await mint_link(
-                            session,
-                            tenant_id=tenant_id,
-                            account_id=request.requester_account_id,
-                            platform="discord",
-                            platform_user_id=request.requester_platform_user_id,
-                            root_url=str(self.runtime.settings.mcp.app_root_url),
-                        )
+            update = (
+                WAITING
+                if url is not None
+                else await approved_update(
+                    self.runtime.sessionmaker,
+                    self.runtime.settings,
+                    request,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                )
+            )
             await update_requester_card(
                 interaction.client,
                 self.runtime,
                 request.id,
-                text=(
-                    "Waiting for GitHub confirmation."
-                    if url is not None
-                    else (
-                        "Link GitHub so Daimon can check that you have access to "
-                        "what this request needs."
-                    )
-                    if personal_url is not None
-                    else f"✓ Added. {request.agent_name} is continuing."
-                ),
-                can_cancel=url is not None or personal_url is not None,
-                link_url=personal_url,
+                text=update.text,
+                can_cancel=update.can_cancel,
+                link_url=update.link_url,
             )
         refreshed = await load_waiting_view(
             self.state, runtime=self.runtime, user_id=self.allowed_user_id, interaction=interaction
@@ -453,6 +434,7 @@ class GitHubWaitingView(PanelViewBase):
                 platform="discord",
                 workspace_id=str(self.state.guild_id),
                 agent_name=request.agent_name,
+                agent_id=request.ma_agent_id,
             )
             await interaction.followup.send(
                 embed=connect_embed(card), view=link_view, ephemeral=True
@@ -465,23 +447,15 @@ class GitHubWaitingView(PanelViewBase):
         if request is None:
             return
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
-        async with self.runtime.sessionmaker.begin() as session:
-            changed = await set_status(
-                session,
-                tenant_id=tenant_id,
-                request_id=request.id,
-                expected=request.status,
-                status="declined",
-            )
-        if changed:
+        if await decline(self.runtime.sessionmaker, tenant_id=tenant_id, request=request):
             from daimon.adapters.discord.agent_setup.github_requests import update_requester_card
 
             await update_requester_card(
                 interaction.client,
                 self.runtime,
                 request.id,
-                text="An admin declined GitHub access for this request.",
-                can_cancel=True,
+                text=DECLINED.text,
+                can_cancel=DECLINED.can_cancel,
             )
         refreshed = await load_waiting_view(
             self.state, runtime=self.runtime, user_id=self.allowed_user_id, interaction=interaction

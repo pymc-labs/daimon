@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -47,6 +48,9 @@ from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
+
+_choose_channel_skill = partial(choose_channel_skill, channel_id="C1", current=(), platform="slack")
+
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _DEFAULTS = Path(__file__).resolve().parents[3] / "defaults"
@@ -95,15 +99,12 @@ async def test_a_library_skill_is_chosen_by_name_at_its_latest_version(
     title = tenant_scoped_display_title(tenant_id=tenant.id, name="pdf-tools")
     client = _client([_skill("skill_lib", title)])
 
-    choice = await choose_channel_skill(
+    choice = await _choose_channel_skill(
         db_session,
         client,
         tenant_id=tenant.id,
-        channel_id="C1",
         skill="pdf-tools",
         agent=ma_agent(name="shared"),
-        current=(),
-        platform="slack",
         platform_skills={},
     )
 
@@ -125,15 +126,12 @@ async def test_another_agents_upload_and_another_tenants_skill_are_refused(
     client = _client([_skill("skill_other", other_agent), _skill("skill_foreign", foreign)])
 
     async def choose(skill: str) -> ChannelSkillChoice | str:
-        return await choose_channel_skill(
+        return await _choose_channel_skill(
             db_session,
             client,
             tenant_id=tenant.id,
-            channel_id="C1",
             skill=skill,
             agent=ma_agent(name="shared"),
-            current=(),
-            platform="slack",
             platform_skills={},
         )
 
@@ -152,16 +150,8 @@ async def test_the_answering_agents_own_upload_is_usable_unless_isolated_elsewhe
     agent = ma_agent(name="rx")
 
     async def choose() -> ChannelSkillChoice | str:
-        return await choose_channel_skill(
-            db_session,
-            client,
-            tenant_id=tenant.id,
-            channel_id="C1",
-            skill="rx/x",
-            agent=agent,
-            current=(),
-            platform="slack",
-            platform_skills={},
+        return await _choose_channel_skill(
+            db_session, client, tenant_id=tenant.id, skill="rx/x", agent=agent, platform_skills={}
         )
 
     usable = await choose()
@@ -185,17 +175,14 @@ async def test_a_clashing_mount_and_a_full_agent_are_refused(db_session: AsyncSe
     own = tenant_scoped_display_title(tenant_id=tenant.id, name="report", agent_name="shared")
     client = _client([_skill("skill_lib", lib), _skill("skill_own", own)])
 
-    clash = await choose_channel_skill(
+    clash = await _choose_channel_skill(
         db_session,
         client,
         tenant_id=tenant.id,
-        channel_id="C1",
         skill="report",
         agent=ma_agent(
             name="shared", skills=[{"type": "custom", "skill_id": "skill_own", "version": "1"}]
         ),
-        current=(),
-        platform="slack",
         platform_skills={},
     )
     assert clash == "mount_clash"
@@ -207,16 +194,8 @@ async def test_a_clashing_mount_and_a_full_agent_are_refused(db_session: AsyncSe
             for i in range(AGENT_SKILL_CAP)
         ],
     )
-    too_many = await choose_channel_skill(
-        db_session,
-        client,
-        tenant_id=tenant.id,
-        channel_id="C1",
-        skill="report",
-        agent=full,
-        current=(),
-        platform="slack",
-        platform_skills={},
+    too_many = await _choose_channel_skill(
+        db_session, client, tenant_id=tenant.id, skill="report", agent=full, platform_skills={}
     )
     assert too_many == "too_many"
 
@@ -333,7 +312,7 @@ async def test_a_shared_listing_missing_a_skill_the_agent_now_holds_is_read_agai
 def _default_agent(*, managed: bool = True) -> BetaManagedAgentsAgent:
     """The seeded default agent as the provider holds it: its 11 custom skills, no built-ins."""
     return ma_agent(
-        name="daimon",
+        name="default",
         tenant_id=uuid.uuid4(),
         metadata={MA_METADATA_KEY_MANAGED: "true"} if managed else None,
         skills=[
@@ -368,7 +347,7 @@ def test_the_default_agents_office_skills_are_added_on_teams_only(
 async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The default agent's 11 skills leave room for 9 channel skills, 5 on Teams.
+    """The default agent's 11 skills leave room for the rest of the cap, 4 fewer on Teams.
 
     The provider's limit counts the whole session `skills` list, so the Office
     built-ins and `microsoft-365` added on Teams count first; a channel that
@@ -399,9 +378,11 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
         platform_skills=load_platform_skills(_DEFAULTS, features=frozenset()),
         now=_NOW,
     )
-    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 14 == 6, (
+    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 14, (
         "without Microsoft accounts, Teams keeps the room microsoft-365 would take"
     )
+
+    room, room_slack = AGENT_SKILL_CAP - 15, AGENT_SKILL_CAP - 11
 
     async def turn(count: int, platform_skills: Sequence[MaSkill] = office) -> list[str]:
         picked = await turn_channel_skills(
@@ -411,24 +392,26 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
             platform="teams",
             channel_id="C1",
             agent=agent,
-            agent_names=("daimon",),
+            agent_names=("default",),
             rows=[_row(f"skill_{i}", f"s{i}") for i in range(count)],
             platform_skills=platform_skills,
         )
         return [s.skill_id for s in picked]
 
     with capture_logs() as logs:
-        first, second = await turn(9), await turn(9)
-        await turn(10)
-    assert first == second == [f"skill_{i}" for i in range(5)], (
-        "the five added first run on every turn, the same five each time"
+        first, second = await turn(room + 4), await turn(room + 4)
+        await turn(room + 5)
+    assert first == second == [f"skill_{i}" for i in range(room)], (
+        "the channel skills that fit run on every turn, the same ones each time"
     )
     warnings = [log["dropped"] for log in logs if log["event"] == "channel_skills.over_cap"]
     assert warnings == [
-        [f"skill_{i}" for i in range(5, 9)],
-        [f"skill_{i}" for i in range(5, 10)],
+        [f"skill_{i}" for i in range(room, room + 4)],
+        [f"skill_{i}" for i in range(room, room + 5)],
     ], "the dropped skills are named once, not on every turn, and again only when they change"
-    assert await turn(9, ()) == [f"skill_{i}" for i in range(9)], "without them, nine fit"
+    assert await turn(room_slack, ()) == [f"skill_{i}" for i in range(room_slack)], (
+        "without them, the Slack and Discord room fits"
+    )
 
 
 async def test_a_custom_platform_skill_keeps_its_last_id_through_a_failed_read() -> None:
@@ -440,7 +423,7 @@ async def test_a_custom_platform_skill_keeps_its_last_id_through_a_failed_read()
     """
     tenant_id = uuid.uuid4()
     agent = _default_agent()
-    limited = {"daimon": (SkillRef(type="custom", skill_id="m365", platforms=("teams",)),)}
+    limited = {"default": (SkillRef(type="custom", skill_id="m365", platforms=("teams",)),)}
     title = tenant_scoped_display_title(tenant_id=tenant_id, name="m365")
     memory = PlatformSkillMemory()
 
@@ -478,9 +461,9 @@ async def test_a_custom_platform_skill_keeps_its_last_id_through_a_failed_read()
 
 
 async def test_platform_skills_fill_only_the_room_the_agents_own_skills_leave() -> None:
-    """An agent holding 19 skills gets one Office skill on Teams rather than a failing session."""
+    """An agent one skill under the cap gets one Office skill on Teams rather than a failing session."""
     agent = ma_agent(
-        name="daimon",
+        name="default",
         tenant_id=uuid.uuid4(),
         metadata={MA_METADATA_KEY_MANAGED: "true"},
         skills=[
@@ -536,7 +519,7 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
     """On Teams the default agent's built-ins count toward the cap and keep their names.
 
     The default agent holds 11 skills and Teams adds 4, so a Teams channel may
-    add 5, a Slack one 9; a custom skill named like a built-in would clash with it.
+    add 4 fewer than a Slack one; a custom skill named like a built-in would clash with it.
     """
     tenant = await make_tenant(db_session)
     titles = {
@@ -544,14 +527,13 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
         for name in ("report", "docx", "microsoft-365")
     }
     client = _client([_skill(f"skill_{name}", title) for name, title in titles.items()])
-    current = [_row(f"skill_{i}", f"s{i}") for i in range(5)]
+    current = [_row(f"skill_{i}", f"s{i}") for i in range(AGENT_SKILL_CAP - 15)]
 
     async def choose(skill: str, platform: str) -> ChannelSkillChoice | str:
-        return await choose_channel_skill(
+        return await _choose_channel_skill(
             db_session,
             client,
             tenant_id=tenant.id,
-            channel_id="C1",
             skill=skill,
             agent=_default_agent(),
             current=current if skill == "report" else (),
@@ -559,7 +541,7 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
             platform_skills=load_platform_skills(_DEFAULTS),
         )
 
-    assert await choose("report", "teams") == "too_many", "a sixth is refused on Teams"
+    assert await choose("report", "teams") == "too_many", "one more is refused on Teams"
     assert not isinstance(await choose("report", "slack"), str), "Slack has room for it"
     assert await choose("docx", "teams") == "mount_clash", "docx is the built-in's name on Teams"
     assert not isinstance(await choose("docx", "slack"), str), "Slack has no docx built-in"
@@ -583,8 +565,9 @@ def test_a_channel_skill_named_like_a_built_in_is_left_out() -> None:
 
 
 def test_only_a_server_admin_may_set_a_channels_skills() -> None:
+    policy = TenantAccessPolicy()
     admin = build_subject(is_admin=True, platform_user_id="U1")
     member = build_subject(is_admin=False, platform_user_id="U2")
-    assert may_set_channel_skills(admin, "C1")
-    refused = may_set_channel_skills(member, "C1")
+    assert may_set_channel_skills(policy, admin, "C1")
+    refused = may_set_channel_skills(policy, member, "C1")
     assert not refused and refused.reason == "admin_required"

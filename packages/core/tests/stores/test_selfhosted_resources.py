@@ -746,3 +746,78 @@ async def test_shared_agent_skill_attachments_keep_uploader_provenance(
         key="unowned-pin",
     )
     assert await catalog.get_agent_skill(bob_scope, unrelated, unpinned) is None
+
+
+def owned_agent_spec(provider: str, name: str = "researcher") -> AgentSpec:
+    return AgentSpec(
+        name=name,
+        model=ModelRef(provider=provider, id="model-a"),  # pyright: ignore[reportArgumentType]
+        system="Research carefully.",
+        skills=(SkillRef(id="analysis", version="3"),),
+    )
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_owned_agents_keep_every_revision_per_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    provider: str,
+) -> None:
+    """OpenAI and Gemini definitions get `dm_` ids and a readable version history."""
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    stranger = await make_account(db_session, tenant=other)
+    await db_session.commit()
+    owner = scope(str(tenant.id), str(account.id))
+    agents = SelfHostedAgents(db_session_factory)
+    created = await agents.create(owner, owned_agent_spec(provider), key="create")
+    assert created.ref.id.startswith("dm_agent_"), f"owned agent id {created.ref.id}"
+    updated = await agents.update(
+        owner, created.ref, AgentPatch(system="Be brief."), expected=created.revision, key="u"
+    )
+    await agents.archive(owner, created.ref, key="archive")
+    first = await agents.retrieve_version(owner, created.ref, 1)
+    assert first.spec.system == "Research carefully.", f"version 1 spec {first.spec}"
+    assert updated.revision.local == 2, f"update revision {updated.revision}"
+    page = await agents.list_versions(owner, created.ref, page=PageRequest(limit=2))
+    assert [item.revision.local for item in page.data] == [3, 2], f"newest first {page}"
+    assert page.data[0].lifecycle == "archived", f"archive revision {page.data[0]}"
+    rest = await agents.list_versions(
+        owner, created.ref, page=PageRequest(limit=2, cursor=page.next_cursor)
+    )
+    assert [item.revision.local for item in rest.data] == [1], f"second page {rest}"
+    assert await agents.owns(owner, created.ref.id), "archived records stay owned"
+    foreign = scope(str(other.id), str(stranger.id))
+    assert not await agents.owns(foreign, created.ref.id), "another tenant never owns it"
+    with pytest.raises(ScopeViolation):
+        await agents.retrieve_version(foreign, created.ref, 1)
+    with pytest.raises(ProviderError) as missing:
+        await agents.retrieve_version(owner, created.ref, 9)
+    assert missing.value.category == "not_found", f"unknown version {missing.value}"
+
+
+async def test_owned_environments_and_id_shaped_names(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Hosted environments need no harness; names may not look like record ids."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    owner = scope(str(tenant.id), str(account.id))
+    environments = SelfHostedEnvironments(db_session_factory)
+    hosted = await environments.create(
+        owner, EnvironmentSpec(name="cloud", execution="hosted"), key="env"
+    )
+    assert hosted.ref.id.startswith("dm_env_"), f"hosted environment id {hosted.ref.id}"
+    resolved = await environments.resolve(owner, hosted.ref.id)
+    assert resolved.ref == hosted.ref, "dm_ ids resolve as ids, never names"
+    with pytest.raises(ProviderError):
+        await environments.create(
+            owner, EnvironmentSpec(name="dm_env_fake", execution="hosted"), key="bad"
+        )
+    with pytest.raises(ProviderError):
+        await SelfHostedAgents(db_session_factory).create(
+            owner, owned_agent_spec("anthropic"), key="ma"
+        )

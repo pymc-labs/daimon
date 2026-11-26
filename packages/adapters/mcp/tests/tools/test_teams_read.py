@@ -35,6 +35,8 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
 _TEAM = "19:team@thread.tacv2"
@@ -217,9 +219,9 @@ async def _setup(db_session: AsyncSession) -> AuthIdentity:
     await record_teams_installation(
         db_session, tenant_id=tenant.id, team_id=_TEAM, group_id=_GROUP, name="Lab"
     )
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
+    return auth_identity(
+        uuid.uuid4(),
+        tenant.id,
         role=Role.USER,
         platform="teams",
         platform_user_id=_CALLER,
@@ -628,12 +630,8 @@ async def test_channel_reads_are_refused_from_a_group_chat_turn(
         return ChannelReadPolicy(policy=OPEN_ACCESS_POLICY, origin=origin)
 
     monkeypatch.setattr(channels, "load_read_policy", from_a_group_chat)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        platform="teams",
-        chat_session_id="test-session",
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="teams", chat_session_id="test-session"
     )
     with pytest.raises(ToolError, match="group chats"):
         await channels._read_policy(MagicMock(), auth, "origin")  # pyright: ignore[reportPrivateUsage]
@@ -671,9 +669,9 @@ async def test_reads_naming_no_origin_are_refused_while_a_group_chat_turn_runs(
         chat_session_id="test-session",
     )
     await db_session.commit()
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="teams",
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_chat"),

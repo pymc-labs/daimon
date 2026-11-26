@@ -30,6 +30,7 @@ from daimon.core.access_policy import (
     ChannelRule,
     ChannelWriters,
     TenantAccessPolicy,
+    is_discord_snowflake,
 )
 from daimon.core.errors import DaimonError
 
@@ -58,6 +59,31 @@ class RuleRefused(DaimonError, ValueError):
 def channel_rule(policy: TenantAccessPolicy, channel_id: str) -> ChannelRule:
     """The rule stored on exactly this id; a thread's channel is not consulted."""
     return policy.channel_rules.get(channel_id, OPEN_RULE)
+
+
+def _automatic_readers(policy: TenantAccessPolicy, channel_id: str) -> ChannelReaders:
+    """The readers the room facts give a channel: `inside` for a narrow room, and for a
+    Discord room with no fact (unknown counts as narrow) when the policy says so."""
+    automatic = policy.automatic_channel_rules.get(channel_id)
+    if automatic is not None:
+        return automatic.readers
+    if policy.automatic_unknown_narrow and is_discord_snowflake(channel_id):
+        return "inside"
+    return "any"
+
+
+def effective_channel_rule(policy: TenantAccessPolicy, channel_id: str) -> ChannelRule:
+    """The rule that is enforced on exactly this id: the stored rule, with `inside`
+    readers where it leaves readers open and the room facts say the room is narrow.
+
+    Order: a rule set by hand for the readers, then the automatic `inside`, then `any`.
+    For enforcement and display only. Never write it back: a writer reads
+    `channel_rule`, so an automatic rule is not saved as a hand-set one.
+    """
+    stored = channel_rule(policy, channel_id)
+    if stored.readers == "any" and _automatic_readers(policy, channel_id) == "inside":
+        return stored.model_copy(update={"readers": "inside"})
+    return stored
 
 
 def _rebuilt(policy: TenantAccessPolicy, **changes: object) -> TenantAccessPolicy:
@@ -187,8 +213,51 @@ class ChannelPermissions:
         return self.readers == "own" or self.home_unknown
 
 
-def _limited(policy: TenantAccessPolicy) -> frozenset[str]:
-    return frozenset(i for i, rule in policy.channel_rules.items() if rule.readers != "any")
+class LimitedRooms:
+    """The ids whose readers are limited. Not a set: with unknown room facts a Discord id
+    with no fact is a member too, and a set operation or a loop would drop it.
+
+    Test membership with `in` and emptiness with `bool`. `listed` holds the known ids only.
+    """
+
+    def __init__(
+        self,
+        listed: Iterable[str],
+        *,
+        unknown_narrow: bool = False,
+        known: frozenset[str] = frozenset(),
+    ) -> None:
+        self.listed: frozenset[str] = frozenset(listed)
+        self._unknown_narrow = unknown_narrow
+        self._known = known
+
+    def __contains__(self, item: object) -> bool:
+        if item in self.listed:
+            return True
+        return (
+            self._unknown_narrow
+            and isinstance(item, str)
+            and item not in self._known
+            and is_discord_snowflake(item)
+        )
+
+    def __bool__(self) -> bool:
+        return self._unknown_narrow or bool(self.listed)
+
+
+def _limited(policy: TenantAccessPolicy) -> LimitedRooms:
+    """Every id enforced as inside or own: the stored rules and the automatic ones."""
+    stored = {i for i, rule in policy.channel_rules.items() if rule.readers != "any"}
+    automatic = {
+        i
+        for i, rule in policy.automatic_channel_rules.items()
+        if rule.readers != "any" and channel_rule(policy, i).readers == "any"
+    }
+    # A stored rule that leaves readers open (writers set) takes the automatic `inside`.
+    known = frozenset(policy.automatic_channel_rules)
+    return LimitedRooms(
+        stored | automatic, unknown_narrow=policy.automatic_unknown_narrow, known=known
+    )
 
 
 def any_own_readers(policy: TenantAccessPolicy) -> bool:
@@ -235,10 +304,24 @@ def ruled_agents(policy: TenantAccessPolicy) -> frozenset[str]:
     return frozenset(policy.agent_rules)
 
 
+def limited_among(policy: TenantAccessPolicy, ids: Iterable[str]) -> frozenset[str]:
+    """The ids of `ids` whose readers are limited, counting a Discord room with no fact
+    as narrow when the policy says so. Use it where `limited_ids` would miss unknown rooms."""
+    limited = _limited(policy)
+    return frozenset(i for i in ids if i in limited)
+
+
+def facts_missing(policy: TenantAccessPolicy) -> bool:
+    """Whether the room facts are missing or expired while the audience mode is `on`:
+    no room is known, so a room that runs in the workspace default is narrow too."""
+    return policy.automatic_facts_missing
+
+
 def limited_ids(policy: TenantAccessPolicy) -> frozenset[str]:
     """Every id whose readers are inside or own: channels, Discord threads and
-    Slack ``channel:ts`` keys."""
-    return _limited(policy)
+    Slack ``channel:ts`` keys. Lists known rooms only: a Discord room with no fact
+    (unknown counts as narrow) is not in it, so test a room with `readers_limited_at`."""
+    return _limited(policy).listed
 
 
 def readers_limited_at(
@@ -426,6 +509,11 @@ def agent_permissions(
     return AgentPermissions(runs_in=rules, home=home)
 
 
+def is_barred_from_web_chat(policy: TenantAccessPolicy, agent_names: Iterable[str | None]) -> bool:
+    """Whether the agent is a channel's own, which answers only there (`authz._decide`)."""
+    return agent_permissions(policy, tuple(agent_names)).home is not None
+
+
 def rule_token(place_id: str | None) -> str | None:
     """The id an agent rule names for a place: `web` for any person's web chat place."""
     if place_id is not None and place_id.startswith(WEB_PLACE_PREFIX):
@@ -475,6 +563,40 @@ def held_to(agent: AgentPermissions, origin: ChannelPermissions | None = None) -
     if agent.home is not None:
         return agent.home
     return origin.home if origin is not None else None
+
+
+SEALED_REFUSAL: Final[str] = "This channel is private. Change its settings from inside the channel."
+"""What a person is told when a change to a private channel, or to its own agent, comes
+from outside it (`sealed_outside`)."""
+
+
+def sealed_outside(
+    policy: TenantAccessPolicy,
+    inside: Collection[str],
+    *,
+    channel_ids: Iterable[str | None] = (),
+    agent_names: Iterable[str | None] = (),
+    operator: bool = False,
+) -> str | None:
+    """The private channel a settings change reaches from outside it, or None.
+
+    A settings change reaches a channel with limited readers (inside or own),
+    and a channel's own agent (`AgentPermissions.home`). It stays inside only
+    when the request's verified origin (`inside`: its channel and thread) is
+    that channel, for admins too. No origin (the web app, the hub, a DM, an agent
+    key) is outside. The operator's CLI is the recovery path and is never held.
+    """
+    if operator:
+        return None
+    sealed = [
+        c
+        for c in channel_ids
+        if c is not None and effective_channel_rule(policy, c).readers != "any"
+    ]
+    home = agent_permissions(policy, agent_names).home
+    if home is not None:
+        sealed.append(home)
+    return next((c for c in sealed if c not in inside), None)
 
 
 def crosses_home(
@@ -564,6 +686,16 @@ def readable_from(
     return True
 
 
+def readers_set_by_hand(
+    policy: TenantAccessPolicy, channel_id: str, parent_channel_id: str | None = None
+) -> bool:
+    """Whether a rule set by hand limits who reads this channel, or the channel a thread
+    is under. Such a limit is an admin's own choice: the room facts neither made it nor
+    lift it."""
+    ids = (channel_id,) if parent_channel_id is None else (channel_id, parent_channel_id)
+    return any(channel_rule(policy, i).readers != "any" for i in ids)
+
+
 def session_readable_from(
     policy: TenantAccessPolicy,
     origin_ids: Collection[str],
@@ -612,7 +744,7 @@ def limited_under(policy: TenantAccessPolicy, channel: str, thread_ids: Iterable
     """Whether `channel` or a thread under it has limited readers: a Slack
     ``channel:ts`` by its key, a Discord thread when `thread_ids` names it."""
     limited = _limited(policy)
-    if channel in limited or any(key.startswith(f"{channel}:") for key in limited):
+    if channel in limited or any(key.startswith(f"{channel}:") for key in limited.listed):
         return True
     return any(thread and thread in limited for thread in thread_ids)
 
@@ -639,8 +771,11 @@ __all__ = [
     "thread_rule_key",
     "crosses_home",
     "dm_source_limited",
+    "effective_channel_rule",
     "held_to",
     "home_of",
+    "facts_missing",
+    "limited_among",
     "limited_ids",
     "limited_under",
     "limiting_ids_at",
@@ -653,6 +788,7 @@ __all__ = [
     "post_refusal",
     "posts_at",
     "readable_from",
+    "readers_set_by_hand",
     "readers_limited_at",
     "ruled_agents",
     "run_refusal",

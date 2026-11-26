@@ -7,12 +7,11 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from daimon.core.turn.admission import admit
 from daimon.core.turn.prepare import PreparedTurn, bind_session
-from daimon.core.turn.run import RunOutcome, run_prepared_turn
-from daimon.core.turn_hold import RequesterOrg
+from daimon.core.turn.run import RunOutcome
+from daimon.testing.builders import admit_chat
 from daimon.testing.recovery import Process
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 
 PLATFORM = "slack"
 USER = "writer"
@@ -22,10 +21,6 @@ THREAD = "thread"
 
 async def _no_reseed() -> str:
     return "history reseed"
-
-
-def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
-    return RecordingLifecycle()
 
 
 @dataclass
@@ -43,16 +38,14 @@ class ChatTurn:
 
     async def run(self) -> RunOutcome:
         deps = self.process.deps
-        admission = await admit(
+        admission = await admit_chat(
             deps,
-            tenant_id=self.tenant_id,
-            requester_org=RequesterOrg.HOST,
+            self.tenant_id,
             platform=PLATFORM,
             external_user_id=USER,
             channel_id=CHANNEL,
             thread_id=self.thread_id,
             now=datetime.now(UTC),
-            origin="chat",
         )
         self.prepared = await bind_session(
             deps,
@@ -64,7 +57,7 @@ class ChatTurn:
             session_account_id=admission.account_id,
             reuse_existing=True,
         )
-        self.outcome = await run_prepared_turn(
+        self.outcome = await run_prepared(
             deps,
             self.prepared,
             tenant_id=self.tenant_id,
@@ -75,8 +68,6 @@ class ChatTurn:
             lifecycle=self.lifecycle,
             cancel=self.cancel,
             reseed_user_message=_no_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
         )
         return self.outcome
 

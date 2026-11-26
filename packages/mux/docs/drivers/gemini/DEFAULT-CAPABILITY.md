@@ -19,9 +19,13 @@ The official [environment documentation](https://ai.google.dev/gemini-api/docs/a
 (`source-G-env.txt:447-490,1449-1450`) defines raw-text inline sources at 1 MiB
 per file and 2 MiB total, and GCS directory sources up to 2 GB. The driver retains
 a 64 MiB bundle bound for host storage. Combined inline mounts respect native
-limits. With no publisher, binary/oversize skill bundles refuse explicitly with
-`UnsupportedCapability("skill_bundle_gcs_deployment")`; ordinary text bundles
-retain their existing inline representation. External bundles still require a
+limits. With no publisher but a host `skill_files` reader, bundles up to 28 MiB
+(binaries allowed) keep a path/size/SHA-256 manifest. Session start creates the
+environment with each such SKILL.md inline, uploads the other files as one
+tar.gz and checks their sizes. A skill whose upload fails is left out and named
+in `Session.native["skills_left_out"]`. With neither, binary/oversize bundles
+refuse with `UnsupportedCapability("skill_bundle_gcs_deployment")`; ordinary
+text bundles retain their existing inline representation. External bundles still require a
 UTF-8 root SKILL.md, safe canonical paths and no file/directory collisions.
 
 The host must supply an authorized, idempotent publisher, immutable retention
@@ -57,20 +61,7 @@ budget rates. The primary is `gemini-3.8-flash`, with fallback only after a 503 
 `gemini-flash-latest`, then `gemini-3.5-flash-lite`; key appearance alone does not
 authorize a call. This adapter ships no live path.
 
-F2 offline proof (`tests/parity/test_f2_gemini_default_capability.py`) explicitly
-injects a full-byte GCS publisher and N3 credential resolver. All twelve authored
-skills, including binary font assets, are retained and pinned; no asset filtering
-or implicit publisher is enabled. The wire request maps the six logical builtins
-to one Python code-execution tool and the neutral `daimon-mcp` toolset selector
-to its declared native server once. Unbound selectors and confirmation policies
-are refused. The scenario admits only two read-only MCP tools through N2’s real
-loopback host; the provider endpoint and GCS/model execution remain replayed.
-Valid authorization yields both host tool results; wrong/revoked bearers fail.
-The normalized tape uses the merged credential-audited identity projection.
-This is an offline SDK/host proof, with no native-agent CAS or live certification
-claim. The uninjected adapter stays typed PENDING.
-
-The bundle and F2 replay tests use `mux.testing.isolated_sdk.build_gemini_client`
+The bundle replay tests use `mux.testing.isolated_sdk.build_gemini_client`
 with explicit synthetic keys, fixed routes and owned sync/async MockTransport
 clients. Ambient provider names, including empty and unknown future settings,
 refuse before SDK construction; proxy/TLS settings do not configure the clients.

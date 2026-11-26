@@ -1,17 +1,14 @@
-"""The turn leg a test run selects: one real `TurnSettings` read from the environment.
+"""The backend flags a test run selects: one real `TurnSettings` read from the environment.
 
-CI runs the turn-relevant suites twice. The legacy leg sets nothing, and
-`daimon.testing.stop_leg_default` then selects the emergency stop (legacy, backend
-flags off). The mux leg sets ``DAIMON_TURN__PATH=mux`` and
-``DAIMON_TURN__CHANNEL_BACKENDS=true``: the production default. Fixtures that
-build turn dependencies (`daimon.testing.turn_fakes.deps_for`, the parity drivers)
-take their path and
-backend flags from `turn_leg()` instead of hard-coding them, so the environment
-moves them with the product settings loader and not around it.
+Tests run on the code default, backend selection on. A CI leg may turn the
+emergency stops off (``DAIMON_TURN__CHANNEL_BACKENDS=false``,
+``DAIMON_TURN__AGENT_BACKENDS=false``). Fixtures that build turn dependencies
+(`daimon.testing.turn_fakes.deps_for`, the parity drivers) take their backend
+flags from `turn_leg()` instead of hard-coding them, so the environment moves
+them with the product settings loader and not around it.
 
-A test that only makes sense on one path pins it explicitly, using
-`MUX_LEG` / `LEGACY_LEG` (and the ``*_pinned_mux`` / ``*_pinned_legacy`` name
-suffix) so a reader sees the pin and the other leg is not silently converted.
+A test of behaviour that needs the backends on whatever the leg pins `MUX_LEG`
+(and the ``*_pinned_mux`` name suffix) so a reader sees the pin.
 """
 
 from __future__ import annotations
@@ -19,9 +16,7 @@ from __future__ import annotations
 from daimon.core.config import TurnSettings, load_turn_settings
 from mux.contracts.ids import Scope
 
-# The legacy leg is the emergency stop: every turn flag off, as an operator sets it.
-LEGACY_LEG = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
-MUX_LEG = TurnSettings(path="mux", channel_backends=True, agent_backends=True)
+MUX_LEG = TurnSettings(channel_backends=True, agent_backends=True)
 
 
 def turn_leg() -> TurnSettings:
@@ -39,18 +34,4 @@ LEG_SCOPE = Scope(
     principal_id="test-host",
     authorization_id="offline-admitted-turn",
 )
-
-
-def leg_scope() -> Scope | None:
-    """The authorized scope a direct driver call carries on this leg.
-
-    The mux path refuses a turn without the caller's authorized scope; the legacy
-    path takes none. A test that calls the driver directly passes this, so one
-    test body exercises whichever path the leg selected.
-    """
-    return LEG_SCOPE if is_mux_leg() else None
-
-
-def is_mux_leg() -> bool:
-    """True when the run selected the mux path."""
-    return turn_leg().path == "mux"
+"""The authorized scope a test that calls the driver directly passes."""

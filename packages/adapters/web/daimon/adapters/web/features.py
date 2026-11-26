@@ -29,6 +29,7 @@ from daimon.core.agent_editing import (
     load_tenant_agent,
 )
 from daimon.core.agent_ownership import owns_agent
+from daimon.core.agent_target import agent_names_loader
 from daimon.core.channel_changes import Expected
 from daimon.core.channel_directory import WEB_ROW_ID
 from daimon.core.features.registry import DEFAULT, Tier
@@ -55,6 +56,7 @@ _NEEDED: dict[Tier, str] = {
     "agent": "agents.edit",
     "channel": "channels.manage",
     "thread": "channels.manage",
+    "routine": "workspace.manage",
 }
 _NO_WEB = "Web chat has no such setting."
 
@@ -257,6 +259,12 @@ def features_router(runtime: WebRuntime) -> APIRouter:
 
             write_tool = audited_write
 
+        async def names_of(ma_agent_id: str) -> tuple[str | None, ...]:
+            # Built on use: only a change at the agent tier needs the provider.
+            return await agent_names_loader(change_deps(runtime).edit, agent_actor_of(caller))(
+                ma_agent_id
+            )
+
         actor = FeatureActor(
             place.tenant_id,
             account,
@@ -267,6 +275,8 @@ def features_router(runtime: WebRuntime) -> APIRouter:
             owns_agent=owns,
             write_builtin=write_tool,
             read_builtins=read_tools,
+            # The web app proves no origin: a private channel and its own agent are read only here.
+            agent_names=names_of,
         )
         with channel_refusals():
             result = await change_feature(

@@ -20,18 +20,13 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.teams import card
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
-from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.stores.domain import TurnCardIntentRow
-from daimon.core.stores.thread_sessions import (
-    clear_active_turn_if_message_id,
-    list_orphaned_turns,
-    mark_dead,
-)
+from daimon.core.stores.thread_sessions import list_orphaned_turns
 from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
     retire_turn_card_intent,
 )
-from mux.contracts.ids import Scope
+from daimon.core.turn.bookkeeping import retire_orphan_marker
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -73,23 +68,7 @@ async def retire_orphaned_turns(
         conversation_id = row.active_turn_channel_id or row.thread_id
         await _interrupt_card(sender, conversation_id=conversation_id, message_id=message_id)
         edited.add(message_id)
-        async with sessionmaker.begin() as session:
-            cleared = await clear_active_turn_if_message_id(
-                session, id=row.id, expected_message_id=message_id
-            )
-            if cleared and not await interrupt_orphaned_session(
-                anthropic,
-                session_id=row.ma_session_id,
-                scope=Scope(
-                    tenant_id=str(row.tenant_id),
-                    account_id=str(row.account_id),
-                    principal_id="daimon",
-                    authorization_id="teams-orphan-sweep",
-                )
-                if row.account_id is not None
-                else None,
-            ):
-                await mark_dead(session, id=row.id)
+        await retire_orphan_marker(sessionmaker, anthropic, row, platform="teams")
         started = row.active_turn_started_at
         log.info(
             "teams.turn.orphan_retired",

@@ -7,17 +7,19 @@ from typing import Final
 
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, find_renamed_seeded_agent
+from daimon.core.defaults.builtin_agent import route_builtin_agent
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAMES,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
-    is_renamed_seeded_agent,
 )
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from mux.errors import ScopeViolation
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Copy for the surfaces that open or describe a setup conversation. It lives
 # here so the Discord panel, the Slack panel and the MCP outcome cannot drift:
@@ -33,6 +35,9 @@ EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Set up agents to add 
 # Discord rejects a thread name longer than 100 characters outright, so the
 # name is truncated rather than left to fail at thread creation.
 _MAX_SETUP_THREAD_NAME_CHARS: Final = 100
+
+# A setup thread opened before the built-in agent's rename keeps its responder.
+_RESPONDER_NAMES = BUILTIN_AGENT_NAMES
 
 
 def setup_thread_name(target_name: str | None) -> str:
@@ -65,12 +70,16 @@ class BoundAgentUnavailable(UserFacingError):
 
 
 async def get_setup_agent(
-    anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
     """Retrieve the exact live identity; never substitute an agent with the same name."""
     backend_scope = resource_scope(tenant_id=str(tenant_id))
     try:
-        agent = await retrieve_agent(anthropic, ma_agent_id, scope=backend_scope)
+        agent = await retrieve_agent(anthropic, ma_agent_id, scope=backend_scope, records=records)
     except APIStatusError as error:
         if error.status_code in (400, 404):
             raise BoundAgentUnavailable(
@@ -89,18 +98,24 @@ async def get_setup_agent(
 
 
 async def get_setup_responder(
-    anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
     try:
-        responder = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+        responder = await get_setup_agent(
+            anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id, records=records
+        )
     except DaimonError as error:
         raise UserFacingError(
             "This setup conversation's Daimon agent is missing. "
             "Ask the operator to restore it, then open a new setup conversation."
         ) from error
-    if not is_renamed_seeded_agent(responder.metadata) and (
+    if (
         responder.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
-        or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
+        or responder.metadata.get(MA_METADATA_KEY_NAME) not in _RESPONDER_NAMES
     ):
         raise UserFacingError(
             "This conversation's agent is no longer the built-in Daimon. "
@@ -114,12 +129,13 @@ async def resolve_setup_agents(
     *,
     tenant_id: uuid.UUID,
     target_ma_agent_id: str | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[BetaManagedAgentsAgent, BetaManagedAgentsAgent | None]:
-    responders = [
-        agent
-        for agent in await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name="daimon")
-        if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    ] or [ag for ag in [await find_renamed_seeded_agent(anthropic, tenant_id=tenant_id)] if ag]
+    responders = route_builtin_agent(
+        await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records),
+        tenant_id=tenant_id,
+        surface="setup_conversation",
+    )
     if len(responders) != 1:
         raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."
@@ -127,7 +143,7 @@ async def resolve_setup_agents(
     target = None
     if target_ma_agent_id is not None:
         target = await get_setup_agent(
-            anthropic, tenant_id=tenant_id, ma_agent_id=target_ma_agent_id
+            anthropic, tenant_id=tenant_id, ma_agent_id=target_ma_agent_id, records=records
         )
     return responders[0], target
 

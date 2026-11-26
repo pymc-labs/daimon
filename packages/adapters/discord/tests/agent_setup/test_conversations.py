@@ -14,11 +14,11 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
@@ -35,7 +35,7 @@ async def test_setup_entry_binds_exact_target_before_ready_without_a_billed_turn
         account = await make_account(session, tenant=tenant)
     responder = ma_agent(
         id="agent_daimon",
-        name="daimon",
+        name="default",
         tenant_id=tenant.id,
         metadata={"daimon_managed": "true"},
     )
@@ -67,12 +67,10 @@ async def test_setup_entry_binds_exact_target_before_ready_without_a_billed_turn
     )
     defaults = DeploymentDefault(agent_name="specialist")
     cache = new_resolver_cache()
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=defaults,
         resolver_cache=cache,
         turn_deps=build_turn_deps(

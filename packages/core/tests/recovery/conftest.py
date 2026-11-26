@@ -19,8 +19,6 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.recovery import Process, ProviderWorld, restarted
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from ..turn_path_support import TurnPath
-
 
 @dataclass
 class Scenario:
@@ -31,12 +29,11 @@ class Scenario:
     world: ProviderWorld
     engine: AsyncEngine
     tmp_path: Path
-    path: TurnPath
     process: Process
 
     def restart(self) -> Process:
         """Replace the process with a fresh one; the old one is left as it died."""
-        self.process = restarted(self.process, self.path, tmp_path=self.tmp_path)
+        self.process = restarted(self.process, tmp_path=self.tmp_path)
         return self.process
 
 
@@ -45,7 +42,6 @@ async def scenario(
     db_session: AsyncSession,
     db_committing_engine: AsyncEngine,
     tmp_path: Path,
-    turn_path: TurnPath,
 ) -> Scenario:
     tenant = await make_tenant(db_session)
     await make_tenant_config(
@@ -57,14 +53,13 @@ async def scenario(
     agent = ma_agent(id="ag_recovery", name="daimon", tenant_id=tenant.id)
     environment = ma_environment(id="env_recovery", name="default", tenant_id=tenant.id)
     world = ProviderWorld(agent=agent, environment=environment, tenant_id=tenant.id)
-    process = Process.start(world, db_committing_engine, turn_path, tmp_path=tmp_path)
+    process = Process.start(world, db_committing_engine, tmp_path=tmp_path)
     return Scenario(
         tenant_id=tenant.id,
         account_id=account.id,
         world=world,
         engine=db_committing_engine,
         tmp_path=tmp_path,
-        path=turn_path,
         process=process,
     )
 

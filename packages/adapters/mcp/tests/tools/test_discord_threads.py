@@ -36,6 +36,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 # Load patch_discord_http directly from the sibling conftest.py by file path.
 _conftest_path = Path(__file__).parent / "conftest.py"
 _spec = importlib.util.spec_from_file_location("_tools_conftest", _conftest_path)
@@ -87,9 +89,9 @@ def _runtime_with_discord_token(
 
 
 def _auth(*, external_id: str = "111", platform_user_id: str = "42") -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform="discord",
         external_id=external_id,

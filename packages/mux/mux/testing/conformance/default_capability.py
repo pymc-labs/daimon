@@ -7,7 +7,7 @@ claim about live model quality or about arguments omitted from a replay tape.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
@@ -116,6 +116,8 @@ class DefaultCapabilityAdapter:
         }
     )
     atomic_revision_pin: bool = True
+    # The bundle the driver deliberately uploads for a source one (OpenAI: `plain_bundle`).
+    uploaded: Callable[[SkillUpload], SkillUpload] = lambda upload: upload
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "builtin_mapping", MappingProxyType(dict(self.builtin_mapping)))
@@ -131,7 +133,7 @@ def request_metadata(session: ResourceRef, *, stream: bool) -> RequestMetadata:
 
 
 def skill_text(manifest: DefaultManifest) -> str:
-    require(manifest.name == "daimon", "F1: expected authored default agent")
+    require(manifest.name == "default", "F1: expected authored default agent")
     require(
         tuple(s.name for s in manifest.skills) == DEFAULT_SKILLS,
         "F1: default must bind all twelve authored skills",
@@ -427,7 +429,7 @@ async def scenario(
         pins.append(pin)
     require(len({pin.id for pin in pins}) == 12, "F1: twelve distinct uploaded skills required")
     require(
-        transport.skill_uploads == tuple(s.upload for s in manifest.skills),
+        transport.skill_uploads == tuple(adapter.uploaded(s.upload) for s in manifest.skills),
         "F1: upstream skill bytes changed",
     )
     desired = AgentSpec(

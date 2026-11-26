@@ -228,3 +228,40 @@ async def test_panel_rows_redact_legacy_diagnostics_for_non_owners(
                 result.delivery_payload is None and "private-error" not in result.model_dump_json()
             )
     await client.close()
+
+
+async def test_load_guild_routines_marks_which_opt_in_decides(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+    seed_routine: SeedRoutineFn,
+) -> None:
+    """Each routine shows the opt-in that turns its sandbox tools on: its agent's or its own."""
+    from daimon.core.stores.domain import (
+        SANDBOX_KEY,
+        AgentSandboxPin,
+        FeatureTarget,
+        SandboxPin,
+        pin_json,
+    )
+    from daimon.core.stores.feature_values import set_feature_value
+
+    await seed_routine(tenant_id=tenant_id, trigger_message="agent", agent_id="agent_on")
+    await seed_routine(tenant_id=tenant_id, trigger_message="off", agent_id="agent_off")
+    own = await seed_routine(tenant_id=tenant_id, trigger_message="own", agent_id="agent_off")
+    pins = [
+        (FeatureTarget("agent", agent_id="agent_on"), AgentSandboxPin("agent_on", "env")),
+        (
+            FeatureTarget("routine", routine_id=own.id),
+            SandboxPin("agent_off", 1, "env_1", datetime(2026, 10, 1, tzinfo=UTC)),
+        ),
+    ]
+    for target, pin in pins:
+        await set_feature_value(
+            db_session, tenant_id=tenant_id, key=SANDBOX_KEY, value="on", set_by=None,
+            target=target, surface="cli", pin=pin_json(pin),
+        )  # fmt: skip
+    entries, _, _ = await load_guild_routines(
+        db_session, build_stub_anthropic(_handler_with([])), tenant_id=tenant_id
+    )
+    marked = {e.label: e.sandbox_by for e in entries}
+    assert marked == {"agent": "agent", "off": None, "own": "routine"}, "the deciding opt-in"

@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import uuid
+from dataclasses import replace
 from typing import Any, Final
 
 import structlog
@@ -37,7 +38,7 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
-from daimon.core.authz import AgentRef, Decision, Subject, build_agent_ref
+from daimon.core.authz import AgentRef, Decision, Subject, build_agent_ref, origin_ids
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
     authorize_coding_token,
@@ -186,6 +187,7 @@ async def handle_coding_tools_click(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=True,
+            records=runtime.sessionmaker,
         )
     target = next((row for row in roster.rows if row.name == agent_name), None)
     if target is None:
@@ -392,6 +394,8 @@ async def _authorize_mint(
             caller=caller,
             action=None,
         )
+        # The panel's own channel is where the press came from (never a pick).
+        subject = replace(subject, origin_channel_ids=origin_ids(channel_id))
         owned = not subject.is_admin and await owns_agent(
             session,
             tenant_id=tenant_id,
@@ -401,7 +405,10 @@ async def _authorize_mint(
     agent = AgentRef.of(target.name)
     if channel_id is not None and any_agent_rules(policy):
         ma_agent = await retrieve_agent(
-            runtime.anthropic, target.ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+            runtime.anthropic,
+            target.ma_agent_id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
         agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
     decision, bound_channel_id = authorize_coding_token(

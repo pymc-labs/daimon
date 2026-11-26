@@ -39,6 +39,9 @@ AdmissionDenialReason = Literal[
     # A tenant's daily spend cap on one OpenAI model is used up; it resets at
     # midnight UTC. `AdmissionDenied.provider` carries the model id for the copy.
     "provider_daily_cap_reached",
+    # Every tenant together used up the deployment's daily spend ceiling on one
+    # provider; it resets at midnight UTC. `provider` carries the provider id.
+    "provider_daily_ceiling_reached",
     # No tariff is current for the model, so its spend can't be counted against the
     # daily cap: refused rather than run uncounted. `provider` carries the model id.
     "provider_price_unavailable",
@@ -56,9 +59,6 @@ BackendRefusalCause = Literal[
     "provider_not_allowed",
     "agent_backend",
     "provider_not_configured",
-    # A switch's stored consent no longer matches its source: ask for a fresh
-    # preview instead of claiming the provider is not set up (J6g).
-    "re_confirm",
     "no_credit_yet",
     # Getting the agent ready failed for a reason a retry can clear (a timeout, a
     # busy database): "busy, try again", never "not set up".
@@ -66,6 +66,22 @@ BackendRefusalCause = Literal[
     # Getting the agent ready failed for a reason nobody proved is missing setup:
     # "couldn't get it ready", with the reference, never "not set up".
     "preparation_failed",
+    # A Managed Agents agent on an install with no Anthropic key: make a copy on a
+    # keyed provider, or add the key. Never a 401.
+    "anthropic_unconfigured",
+    # A channel pinned to a keyed provider whose code defaults hold no channel row
+    # (OpenAI's needs a native agent): the operator adds a row, or the pin is cleared.
+    "channel_row_missing",
+    # A channel's or thread's tool switches can't be applied by the provider the agent
+    # runs on (it compiles one revision per agent): refused, never run with the tool.
+    "tool_limits",
+    # The provider key is serving as many turns as Daimon allows: "busy, try again".
+    "provider_busy",
+    # The provider asked for a pause on this key and model: "try again shortly".
+    "provider_cooling",
+    # The provider no longer holds this thread's conversation or files (it sat idle
+    # too long): "start a new thread", never a retry.
+    "session_lost",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

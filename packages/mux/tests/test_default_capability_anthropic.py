@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import json
 import subprocess
@@ -32,7 +31,6 @@ from mux.testing.conformance.default_capability import (
     BASH_RESULT,
     DEFAULT_TOOLS,
     FINAL_MESSAGE,
-    MCP_TOOLS,
     PROMPT,
     DefaultCapabilityAdapter,
     DefaultCapabilityReplayEvents,
@@ -69,7 +67,7 @@ ENVIRONMENT = ResourceRef(
 
 
 def manifest() -> DefaultManifest:
-    authored = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+    authored = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
     uploads = []
     for ref in authored["skills"]:
         if ref["type"] != "custom" or "platforms" in ref:
@@ -380,28 +378,6 @@ async def record(path: Path) -> None:
     if result.status != "pass":
         raise RuntimeError(result.evidence)
     recorder.save(path, fixture_id="F1", provider=MODEL.provider, model=MODEL.id, complete=True)
-
-
-def test_required_mcp_tools_are_registered_no_argument_agent_reads() -> None:
-    catalog = (ROOT / "docs/mcp-tools.md").read_text()
-    module = ast.parse(
-        (ROOT / "packages/adapters/mcp/daimon/adapters/mcp/tools/agent_chat.py").read_text()
-    )
-    functions = {
-        node.name: node for node in ast.walk(module) if isinstance(node, ast.AsyncFunctionDef)
-    }
-    assert {"describe_agent", "list_my_sessions"} == MCP_TOOLS
-    for name in MCP_TOOLS:
-        assert f"| `{name}` | agent tokens only |" in catalog
-        function = functions[name]
-        assert [arg.arg for arg in function.args.args] == ["ctx"]
-        assert not function.args.kwonlyargs and function.args.vararg is function.args.kwarg is None
-        assert any(
-            isinstance(decorator, ast.Call)
-            and isinstance(decorator.func, ast.Attribute)
-            and decorator.func.attr == "tool"
-            for decorator in function.decorator_list
-        )
 
 
 async def test_scripted_default_agent_turn_and_repeatable_normalized_replay(tmp_path: Path) -> None:

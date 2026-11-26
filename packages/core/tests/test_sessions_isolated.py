@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from functools import partial
 from typing import Any
 
 import httpx
@@ -12,6 +13,10 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
+
+_isolated_session = partial(
+    create_isolated_session, account_id=None, tenant_id=None, tool_safety=OPEN_TOOL_SAFETY
+)
 
 
 def _make_agent(*, anthropic_id: str = "ag_reader", name: str = "reader") -> BetaManagedAgentsAgent:
@@ -62,15 +67,7 @@ async def test_create_isolated_session_sends_exactly_the_passed_resources() -> N
 
     client = build_fake_anthropic_http(_handler)
 
-    result = await create_isolated_session(
-        client,
-        agent=agent,
-        environment=env,
-        account_id=None,
-        tenant_id=None,
-        resources=resources,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    result = await _isolated_session(client, agent=agent, environment=env, resources=resources)
 
     assert isinstance(result, BetaManagedAgentsSession), (
         "create_isolated_session must return BetaManagedAgentsSession"
@@ -103,15 +100,7 @@ async def test_create_isolated_session_never_sends_vault_ids_key() -> None:
 
     client = build_fake_anthropic_http(_handler)
 
-    await create_isolated_session(
-        client,
-        agent=agent,
-        environment=env,
-        account_id=None,
-        tenant_id=None,
-        resources=[_bundle_resource()],
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    await _isolated_session(client, agent=agent, environment=env, resources=[_bundle_resource()])
 
     body = json.loads(requests[0].content)
     assert "vault_ids" not in body, (
@@ -141,14 +130,13 @@ async def test_create_isolated_session_stamps_account_and_tenant_when_given() ->
 
     client = build_fake_anthropic_http(_handler)
 
-    await create_isolated_session(
+    await _isolated_session(
         client,
         agent=agent,
         environment=env,
         account_id=account_id,
         tenant_id=tenant_id,
         resources=[_bundle_resource()],
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     body = json.loads(requests[0].content)
@@ -175,15 +163,7 @@ async def test_create_isolated_session_omits_metadata_keys_when_ids_are_none() -
 
     client = build_fake_anthropic_http(_handler)
 
-    await create_isolated_session(
-        client,
-        agent=agent,
-        environment=env,
-        account_id=None,
-        tenant_id=None,
-        resources=[_bundle_resource()],
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    await _isolated_session(client, agent=agent, environment=env, resources=[_bundle_resource()])
 
     body = json.loads(requests[0].content)
     assert "daimon_account" not in body.get("metadata", {})
@@ -211,15 +191,7 @@ async def test_create_isolated_session_makes_zero_vault_or_file_upload_calls() -
 
     client = build_fake_anthropic_http(_handler)
 
-    await create_isolated_session(
-        client,
-        agent=agent,
-        environment=env,
-        account_id=None,
-        tenant_id=None,
-        resources=[_bundle_resource()],
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    await _isolated_session(client, agent=agent, environment=env, resources=[_bundle_resource()])
 
     paths = [r.url.path for r in requests]
     assert all("vault" not in p for p in paths), f"no vault endpoint should be called; got {paths}"
@@ -263,12 +235,10 @@ async def test_create_isolated_session_gates_third_party_tools_with_safety_on() 
             ),
         )
 
-    await create_isolated_session(
+    await _isolated_session(
         build_fake_anthropic_http(_handler),
         agent=agent,
         environment=_make_env(),
-        account_id=None,
-        tenant_id=None,
         resources=[_bundle_resource()],
         tool_safety=ToolSafetyPolicy(enabled=True),
     )

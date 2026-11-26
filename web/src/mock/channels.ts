@@ -3,7 +3,7 @@ import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
   AccessChange, AgentRefs, ChannelApprovals, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
-  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, Readers, SkillChange, ThreadClear,
+  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, PinSet, Readers, SkillChange, ThreadClear,
   ToolRuleChange, WorkspaceAgentChange, Writers,
 } from "@/modules/channels/types"
 import { roster } from "./agents"
@@ -13,7 +13,7 @@ import { me } from "./world"
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const READERS: Record<Readers, string> = { any: "Anyone", inside: "Only this channel", own: "Only its own agents" }
 const WRITERS: Record<Writers, string> = { any: "Anyone", own: "Only its own agents", none: "Nobody" }
-const WORKSPACE = { value: "daimon", source: "workspace" } as const
+const WORKSPACE = { value: "default", source: "workspace" } as const
 
 /** A channel as stored: members are sent it without its budget and spend. */
 type Stored = Channel & { spend: NonNullable<Channel["spend"]> }
@@ -30,7 +30,7 @@ const C = (id: string, name: string | null, path: PathNode[], more: Partial<Stor
 })
 const monthly = (spent: number, limit = 25): Channel["budget"] => ({
   limit_usd: limit.toFixed(2), window: "monthly", starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)),
-  percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
+  percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit, on_limit: "stop", alert_channel_id: null,
 })
 const thread = (id: string, name: string, path: PathNode[], more: Partial<Stored> = {}) => C(id, name, path, { kind: "thread", ...more })
 
@@ -69,7 +69,7 @@ const channels: Stored[] = [
   C("s_gone", "retired-team", [], { platform: "slack", status: "gone" }),
 ]
 /** Agent keys as channels store them, and the roster agent each names. A key not found here is an agent that no longer exists. */
-const KEYS: Record<string, string> = { daimon: "ag_daimon", clv: "ag_mmm", "pricing-analyst": "ag_pricing", "board-desk": "ag_sales" }
+const KEYS: Record<string, string> = { default: "ag_default", clv: "ag_mmm", "pricing-analyst": "ag_pricing", "board-desk": "ag_sales" }
 function refOf(key: string): AgentRefs[string] {
   const recs = roster.all()
   const rec = recs.find((r) => r.id === KEYS[key]) ?? recs.find((r) => r.versions.at(-1)!.config.name === key)
@@ -97,6 +97,10 @@ const curve = (total: number, days: number): { key: string; name: null; usd: num
 }
 const ap = (value: ChannelApprovals["value"], source: ChannelApprovals["source"], own: ChannelApprovals["own"] = null): ChannelApprovals =>
   ({ available: true, own, value, source, editable: true })
+const PIN_CHOICES: ChannelSettings["pin_choices"] = [
+  { value: "openai:gpt-6-luna", label: "GPT-6 Luna", provider: "openai", price: "~$0.10 input / $0.50 output per million tokens" },
+  { value: "openai:gpt-6-astra", label: "GPT-6 Astra", provider: "openai", price: "~$10.00 input / $50.00 output per million tokens" },
+]
 const settingsOf = (c: Stored): ChannelSettings => ({
   participation: sw("off", "deployment"),
   progress_plans: sw("on", "workspace"),
@@ -107,7 +111,8 @@ const settingsOf = (c: Stored): ChannelSettings => ({
     { agent: "clv", tool: "mail/send_email", tool_label: "Send email", server_name: "Mail", rule: "deny", scope: "chat_and_routines", revision: 1 },
     { agent: "retired-analyst", tool: "bigquery/run_query", tool_label: "Run query", server_name: "Bigquery", rule: "allow", scope: "chat", revision: 1 },
   ] : [] },
-  provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-5.5", model_label: null, local: 3 } : null,
+  provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-6-astra", model_label: null, local: 3 } : null,
+  pin_choices: PIN_CHOICES,
   channel_copy: c.id === "c_board" ? { name: "board-desk", agent_id: "agent_board" } : null,
   threads: c.id === "c_general" ? [
     { thread_id: "t_launch", name: "Launch", kind: "progress_plans", value: "off" }, { thread_id: "t_help", name: "Help", kind: "handoff", value: "clv" },
@@ -178,7 +183,7 @@ export const channelsHandlers: HttpHandler[] = [
   })),
   http.get("/api/channels", () => HttpResponse.json<ChannelList>({
     platform: "discord", default_agent: WORKSPACE, default_environment: { value: "default", source: "deployment" },
-    channels: channels.filter(listed).map(figures), agents: refs(["daimon", ...channels.filter(listed).flatMap(keysOf)]),
+    channels: channels.filter(listed).map(figures), agents: refs(["default", ...channels.filter(listed).flatMap(keysOf)]),
   })),
   http.get("/api/channels/:id/history", ({ params }) => manage()
     ? HttpResponse.json({ entries: history[params.id as string] ?? [], agents: refs(historyKeys(params.id as string)) })
@@ -222,6 +227,18 @@ export const channelsHandlers: HttpHandler[] = [
     const rule = { agent: body.agent, tool: body.tool, tool_label: words(tool), server_name: server ? words(server) : "", rule: body.rule, scope: body.scope ?? "chat", revision: body.expected_revision + 1 }
     s.tool_rules.rules = [...s.tool_rules.rules.filter((r) => r !== prior), rule]
     return changed(c, {}, "tool_rule", prior ?? null, rule)
+  }),
+  http.post("/api/channels/:id/provider-pin", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    const body = (await request.json()) as PinSet
+    const s = settingsFor(c)
+    if ((s.provider_pin?.local ?? null) !== body.expected_local) return stale()
+    const pick = PIN_CHOICES.find((x) => x.value === body.value)
+    if (!pick) return HttpResponse.json({ detail: "That model isn't allowed here." }, { status: 422 })
+    const before = s.provider_pin
+    s.provider_pin = { backend: pick.provider, model: pick.value.split(":")[1] ?? null, model_label: pick.label, local: (before?.local ?? 0) + 1 }
+    return changed(c, {}, "provider_pin", before, s.provider_pin)
   }),
   http.post("/api/channels/:id/provider-pin/clear", async ({ params, request }) => {
     const c = find(params.id as string)
@@ -289,17 +306,19 @@ export const channelsHandlers: HttpHandler[] = [
     if (!c) return notFound()
     if (c.id === "web") return invalid("Web chat has no channel budget.")
     const body = (await request.json()) as BudgetChange
-    const now = c.budget && { limit_usd: c.budget.limit_usd, window: c.budget.window, starts_at: c.budget.starts_at, ends_at: c.budget.ends_at }
+    const now = c.budget && { limit_usd: c.budget.limit_usd, window: c.budget.window, starts_at: c.budget.starts_at, ends_at: c.budget.ends_at, on_limit: c.budget.on_limit, alert_channel_id: c.budget.alert_channel_id }
     if (!same(body.expected, now)) return stale()
     if (body.action === "clear") return changed(c, { budget: null }, "budget", now, null)
     const limit = body.action === "raise" ? Number(c.budget?.limit_usd ?? 0) + Number(body.amount_usd) : Number(body.limit_usd)
     if (!(limit > 0)) return invalid("Enter a budget in dollars and pick a window.")
     const spent = c.budget?.spent_usd ?? c.spend.month_usd
+    const onLimit = body.action === "raise" ? (c.budget?.on_limit ?? "stop") : (body.on_limit ?? "stop")
     const budget = {
       limit_usd: limit.toFixed(2), window: body.window ?? c.budget?.window ?? "monthly", starts_at: body.starts_at ?? null, ends_at: body.ends_at ?? null,
-      spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)), percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
+      spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)), percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: onLimit === "stop" && spent >= limit,
+      on_limit: onLimit, alert_channel_id: onLimit === "alert" ? (body.alert_channel_id ?? c.budget?.alert_channel_id ?? null) : null,
     }
-    return changed(c, { budget }, "budget", now, { limit_usd: budget.limit_usd, window: budget.window, starts_at: budget.starts_at, ends_at: budget.ends_at })
+    return changed(c, { budget }, "budget", now, { limit_usd: budget.limit_usd, window: budget.window, starts_at: budget.starts_at, ends_at: budget.ends_at, on_limit: budget.on_limit, alert_channel_id: budget.alert_channel_id })
   }),
   http.get("/api/channel-defaults", async () => {
     await wait()
@@ -312,7 +331,7 @@ export const channelsHandlers: HttpHandler[] = [
     if (what === "agent") {
       const body = (await request.json()) as WorkspaceAgentChange
       if (body.expected !== (defaults.agent.source === "workspace" ? defaults.agent.value : null)) return stale()
-      defaults.agent = body.agent ? { value: body.agent, source: "workspace" } : { value: "daimon", source: "deployment" }
+      defaults.agent = body.agent ? { value: body.agent, source: "workspace" } : { value: "default", source: "deployment" }
     } else if (what === "environment") {
       const body = (await request.json()) as EnvironmentChange
       if (body.expected !== (defaults.environment.source === "workspace" ? defaults.environment.value : null)) return stale()

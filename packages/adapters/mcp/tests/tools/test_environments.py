@@ -9,8 +9,9 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
 from daimon.adapters.mcp.tools.environments import (
     _archive_environment_impl,
     _create_environment_impl,
@@ -18,7 +19,7 @@ from daimon.adapters.mcp.tools.environments import (
     _list_environments_impl,
     _update_environment_impl,
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.specs import EnvironmentSpec
 from daimon.core.stores.access_policy import set_access_policy
@@ -33,6 +34,8 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 
 def _ma_env(**overrides: object) -> BetaEnvironment:
@@ -94,7 +97,7 @@ async def test_list_environments_impl_returns_list(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = auth_identity(account_id, tenant_id, is_admin=False, is_platform_admin=False)
     result = await _list_environments_impl(
         _runtime(client, committing_sessionmaker), auth, page=None
     )
@@ -110,7 +113,7 @@ async def test_get_environment_impl_raises_not_found() -> None:
     router.add("GET", r"/v1/environments", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = auth_identity(account_id, tenant_id, is_admin=False, is_platform_admin=False)
     with pytest.raises(ToolError, match="not found"):
         await _get_environment_impl(_runtime(client), auth, "nope")
 
@@ -132,7 +135,7 @@ async def test_create_environment_impl_calls_ma_create() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = EnvironmentSpec(name="e")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     result = await _create_environment_impl(_runtime(client), auth, spec)
     assert result.name == "e", "should return the created environment name"
     assert result.id == "env_x", "should store the MA-assigned id"
@@ -164,7 +167,7 @@ async def test_create_environment_sends_the_pip_list_the_caller_supplied() -> No
             "packages": {"type": "packages", "pip": ["numpy", "pandas", "pymc"]},
         },
     )
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     await _create_environment_impl(_runtime(client), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
@@ -208,7 +211,7 @@ async def test_create_environment_impl_rejects_duplicate_name() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = EnvironmentSpec(name="dupe")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     with pytest.raises(ToolError, match="already exists in this server"):
         await _create_environment_impl(_runtime(client), auth, spec)
     assert created == [], "create route must not be hit when the name collides"
@@ -245,7 +248,7 @@ async def test_update_environment_impl_patch_only_non_none(
     router.add("POST", r"/v1/environments/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     await _update_environment_impl(
         _runtime(client, committing_sessionmaker),
         auth,
@@ -261,7 +264,7 @@ async def test_update_environment_impl_rejects_empty_patch() -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     with pytest.raises(ToolError, match="at least one field"):
         await _update_environment_impl(
             _runtime(MagicMock()),  # type: ignore[arg-type]
@@ -319,9 +322,7 @@ async def test_archive_environment_impl_archives_in_ma_and_clears_its_picks(
         deployment_default=DeploymentDefault(),
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
     result = await _archive_environment_impl(runtime, auth, "e")
 
     assert archived == ["env_a"], "should archive the correct MA environment"
@@ -377,9 +378,7 @@ async def test_update_and_archive_refuse_a_managed_environment(
     )
     router.add("POST", r"/v1/environments/([^/]+)", on_write)
     runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
 
     with pytest.raises(ToolError, match="managed by defaults.*create_environment"):
         await _update_environment_impl(
@@ -400,9 +399,99 @@ _CLOSED_NETWORK: dict[str, object] = {
 }
 
 
+async def _archive_world(
+    sessionmaker: async_sessionmaker[AsyncSession], *, picked_by: tuple[str, ...]
+) -> tuple[McpRuntime, AuthIdentity, uuid.UUID, list[str]]:
+    """Environment `e`, picked by the channels `picked_by`; channel `c_seal` is private, `c_open` is not.
+
+    A private channel's pick is hidden from a caller outside it unless an open channel shares it,
+    so the refusal under test is the seal's, not the isolation view's "not found".
+    """
+    async with sessionmaker.begin() as session:
+        tenant_id = (await make_tenant(session)).id
+        for channel_id in picked_by:
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
+                tenant_id=tenant_id,
+                environment_name="e",
+            )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(
+                channel_rules={"c_seal": ChannelRule(readers="own", writers="own")}
+            ),
+        )
+    writes: list[str] = []
+
+    def on_write(req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        writes.append(req.url.path)
+        return httpx.Response(200, json=_ma_env(id=m.group(1)).model_dump(mode="json"))
+
+    router = MARouter()
+    env = _ma_env(
+        id="env_a",
+        name="e",
+        config={**_ma_env().config.model_dump(mode="json"), "networking": _CLOSED_NETWORK},
+        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "e"},
+    ).model_dump(mode="json")
+    router.add("GET", r"/v1/environments", lambda _req, _m: list_response([env]))
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
+    router.add("POST", r"/v1/environments/([^/]+)/archive", on_write)
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
+    runtime = _runtime(build_fake_anthropic(router.dispatch), sessionmaker)
+    return runtime, auth, tenant_id, writes
+
+
+async def test_archiving_an_environment_a_private_channel_picks_is_refused_from_outside(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    runtime, auth, tenant_id, writes = await _archive_world(
+        committing_sessionmaker, picked_by=("c_seal", "c_open")
+    )
+    CALL_ORIGIN.set(frozenset({"c_open"}))
+    with pytest.raises(ToolError, match=r"This channel is private.*c_seal.*first") as refused:
+        await _archive_environment_impl(runtime, auth, "e", confirm_open_network=True)
+    assert "Nothing changed" in str(refused.value)
+    assert writes == [], "nothing reaches the provider"
+    pick = await get_scope(
+        db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="c_seal")
+    )
+    assert pick is not None and pick.environment_name == "e", "the channel's pick stays"
+
+
+async def test_archiving_an_environment_a_private_channel_picks_works_from_inside_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    runtime, auth, tenant_id, writes = await _archive_world(
+        committing_sessionmaker, picked_by=("c_seal", "c_open")
+    )
+    CALL_ORIGIN.set(frozenset({"c_seal"}))
+    result = await _archive_environment_impl(runtime, auth, "e", confirm_open_network=True)
+    assert result.cleared_picks == 2
+    assert writes == ["/v1/environments/env_a/archive"]
+    assert (
+        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="c_seal"))
+        is None
+    )
+
+
+async def test_archiving_an_environment_only_open_channels_pick_needs_no_origin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime, auth, _tenant_id, writes = await _archive_world(
+        committing_sessionmaker, picked_by=("c_open",)
+    )
+    result = await _archive_environment_impl(runtime, auth, "e", confirm_open_network=True)
+    assert result.cleared_picks == 1
+    assert writes == ["/v1/environments/env_a/archive"]
+
+
 @pytest.mark.parametrize("sealed", ["c_sealed", "c_sealed;messageid=17"])
 async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirming(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], sealed: str
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    sealed: str,
 ) -> None:
     """A sealed channel's environment opened or archived onto an open fallback is the
     same call as picking an open one there: a server admin confirms it first. A Teams
@@ -454,9 +543,9 @@ async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirmi
     router.add("POST", r"/v1/environments/([^/]+)/archive", on_write)
     router.add("POST", r"/v1/environments/([^/]+)", on_write)
     runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
+    # The admin is inside the sealed channel, the only place its pick of the environment changes.
+    CALL_ORIGIN.set(frozenset({"c_sealed"}))
     unrestricted: Any = {"type": "cloud", "networking": {"type": "unrestricted"}}
     a_host: Any = {"type": "cloud", "networking": {**_CLOSED_NETWORK, "allowed_hosts": ["x.io"]}}
     packages_only: Any = {"type": "cloud", "packages": {"pip": ["numpy"]}}
@@ -527,9 +616,7 @@ async def test_a_sealed_thread_counts_under_the_channel_a_session_ran_it_in(
         lambda _req, m: httpx.Response(200, json=_ma_env(id=m.group(1)).model_dump(mode="json")),
     )
     runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id, is_platform_admin=False)
     unrestricted: Any = {"type": "cloud", "networking": {"type": "unrestricted"}}
 
     await _update_environment_impl(

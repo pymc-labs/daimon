@@ -40,6 +40,7 @@ from daimon.core.channel_environments import (
     build_set_environment_note,
     save_scope_environment,
 )
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.platform_names import get_channel_names
@@ -137,6 +138,7 @@ async def _require_pick_allowed(
                 thread_id=target.thread_id,
                 environment_name=environment_name,
                 default=runtime.deployment_default,
+                records=runtime.session_factory,
             )
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
@@ -147,6 +149,8 @@ async def _require_pick_allowed(
             _require_admin(
                 auth, action=DelegatedAction.ENVIRONMENTS
             )  # the workspace default's own copy
+        if pick.decision.reason == "sealed_channel":
+            raise ToolError(f"{SEALED_REFUSAL} Nothing was changed. Do not retry.")
         raise ToolError(_needs_admin(auth))
     # Only a caller who may make the change learns whether a name exists, and never a hidden one.
     hidden = await load_caller_hidden_environments(runtime, auth)

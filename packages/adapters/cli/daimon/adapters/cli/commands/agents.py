@@ -30,9 +30,15 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_override,
 )
 from daimon.core import channel_backend
+from daimon.core.agent_convert import (
+    convert_agent_to_anthropic,
+    convert_agent_to_daimon,
+    skill_receipt,
+)
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
+from daimon.core.agent_rename import AgentRenamePlan, rename_user_agent
 from daimon.core.authz import Subject
 from daimon.core.config import load_settings, load_turn_settings
 from daimon.core.defaults.ma_index import (
@@ -41,27 +47,24 @@ from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
 )
 from daimon.core.defaults.metadata import (
-    MA_METADATA_KEY_ACCOUNT,
-    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
-    MA_METADATA_KEY_READER_OF,
-    MA_METADATA_KEY_READER_SOURCE,
-    MA_METADATA_KEY_SPEC_HASH,
-    build_metadata,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.errors import SpecError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.model_presets import resolve_model
+from daimon.core.models_catalog import is_priced_claude_model, priced_claude_ids
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
-from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
+from daimon.core.mux_compat import archive_agent
+from daimon.core.specs import load_agent_spec
 from daimon.core.stores import agent_tool_rules as tool_rules_store
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.turn.notices import conversations_follow_line
-from mux.profiles import selectable_models
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import ModelRef
+from mux.profiles import DAIMON_RECORD_PROVIDERS, selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,7 +110,9 @@ async def _tool_rule_target(
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in this workspace")
     url = None
@@ -183,7 +188,7 @@ def tool_rules_set_command(
                     rule=rule,
                     scope=scope,
                     set_by=actor,
-                    actor=Subject(is_admin=True),
+                    actor=Subject(is_admin=True, operator=True),
                 )
             console.print(
                 f"{agent_name} {tool_key} channel={channel or 'all'}: "
@@ -234,7 +239,7 @@ def tool_rules_clear_command(
                     channel_id=channel,
                     server_url=url,
                     set_by=actor,
-                    actor=Subject(is_admin=True),
+                    actor=Subject(is_admin=True, operator=True),
                 )
             console.print(
                 f"{agent_name} {tool_key} channel={channel or 'all'}: cleared, "
@@ -293,7 +298,7 @@ async def agents_list(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    rows = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id)
+    rows = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id, records=rt.sessionmaker)
     emit_rows(
         console,
         rows,
@@ -356,7 +361,11 @@ async def agents_get(
         )
         return
     agent = await find_agent_by_daimon_tag(
-        rt.anthropic, tenant_id=tenant_id, name=name, include_archived=include_archived
+        rt.anthropic,
+        tenant_id=tenant_id,
+        name=name,
+        include_archived=include_archived,
+        records=rt.sessionmaker,
     )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
@@ -442,7 +451,9 @@ async def _hosted_agent(
     from mux.contracts.ids import Scope
 
     catalog = PostgresNeutralCatalog(
-        rt.sessionmaker, provider="openai", account_scope_id=factory.account_scope_id
+        rt.sessionmaker,
+        provider=PERSISTENT_WORKSPACE.provider,
+        account_scope_id=factory.account_scope_id,
     )
     for account in accounts:
         scope = Scope(
@@ -542,7 +553,9 @@ async def agents_bind_google(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
 
@@ -565,26 +578,90 @@ async def agents_bind_google(
     )
 
 
+MODEL_OPTION = typer.Option(
+    "--model", help="provider:id, or a Claude id; overrides the file's model."
+)
+#: Older scripts pass it; a switch applies at once, so it is ignored.
+IGNORED_ACCEPT_DROPS = typer.Option("--accept-drops", hidden=True)
+
+
+def parse_model_flag(value: str) -> ModelRef:
+    """`--model`: `provider:id`, or a bare Claude id."""
+    provider, sep, model_id = value.strip().partition(":")
+    try:
+        ref = ModelRef.model_validate(
+            {"provider": provider if sep else DEFAULT_BACKEND, "id": model_id if sep else provider}
+        )
+    except ValidationError as exc:
+        raise typer.BadParameter("--model takes provider:id, like openai:gpt-6-luna.") from exc
+    if ref.provider == DEFAULT_BACKEND and not is_priced_claude_model(ref.id):
+        raise typer.BadParameter(f"--model must be one of: {', '.join(priced_claude_ids())}.")
+    return ref
+
+
+async def _apply_model_flag(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    model: ModelRef | None,
+    yes: bool,
+    selector: TenantSelector | None,
+) -> None:
+    """Another provider's `--model` is its backend setting, after the record is written."""
+    if model is None or model.provider == DEFAULT_BACKEND:
+        return
+    await agents_backend_change(
+        rt=rt,
+        console=console,
+        name=name,
+        backend=model.provider,
+        yes=yes,
+        as_json=False,
+        selector=selector,
+        model=model.id,
+    )
+
+
 @agents_app.command("create")
 def agents_create_command(
     ctx: typer.Context,
     path: Path,
+    model: Annotated[str | None, MODEL_OPTION] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
 ) -> None:
     settings = load_settings()
     console = Console(highlight=False)
     selector = ctx.obj
+    picked = parse_model_flag(model) if model is not None else None
 
     async def _with_defaults() -> None:
         async with build_runtime(settings) as rt:
-            await agents_create(rt=rt, console=console, path=path, selector=selector)
+            await agents_create(
+                rt=rt,
+                console=console,
+                path=path,
+                selector=selector,
+                model=picked,
+                yes=yes,
+            )
 
     run_cli(_with_defaults(), console=console)
 
 
 async def agents_create(
-    *, rt: CliRuntime, console: Console, path: Path, selector: TenantSelector | None = None
+    *,
+    rt: CliRuntime,
+    console: Console,
+    path: Path,
+    selector: TenantSelector | None = None,
+    model: ModelRef | None = None,
+    yes: bool = False,
 ) -> None:
     spec = load_agent_spec(path)
+    if model is not None and model.provider == DEFAULT_BACKEND:
+        spec.model = resolve_model(model.id)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
@@ -595,7 +672,9 @@ async def agents_create(
     # Tenant-scoped collision pre-check MUST precede reconcile_agent — reconcile
     # silently UPDATEs an existing name instead of raising (name-as-identity).
     # ANY match in this tenant blocks the create regardless of owner.
-    matches = await find_agents_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=spec.name)
+    matches = await find_agents_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=spec.name, records=rt.sessionmaker
+    )
     if matches:
         raise StoreError(
             f"agent {spec.name!r} already exists in this server — pick a different name, "
@@ -626,6 +705,14 @@ async def agents_create(
         timeout_s=FACE_WAIT_S,
     )
     console.print(f"[green]✓ created agent {spec.name!r}[/green]")
+    await _apply_model_flag(
+        rt=rt,
+        console=console,
+        name=spec.name,
+        model=model,
+        yes=yes,
+        selector=selector,
+    )
 
 
 @agents_app.command("update")
@@ -633,14 +720,26 @@ def agents_update_command(
     ctx: typer.Context,
     name: str,
     path: Path,
+    model: Annotated[str | None, MODEL_OPTION] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
 ) -> None:
     settings = load_settings()
     console = Console(highlight=False)
     selector = ctx.obj
+    picked = parse_model_flag(model) if model is not None else None
 
     async def _with_defaults() -> None:
         async with build_runtime(settings) as rt:
-            await agents_update(rt=rt, console=console, name=name, path=path, selector=selector)
+            await agents_update(
+                rt=rt,
+                console=console,
+                name=name,
+                path=path,
+                selector=selector,
+                model=picked,
+                yes=yes,
+            )
 
     run_cli(_with_defaults(), console=console)
 
@@ -652,13 +751,17 @@ async def agents_update(
     name: str,
     path: Path,
     selector: TenantSelector | None = None,
+    model: ModelRef | None = None,
+    yes: bool = False,
 ) -> None:
     spec = load_agent_spec(path)
     if spec.name != name:
         raise SpecError(
             f"cannot rename {name!r} -> {spec.name!r} via update; agent names are identity. "
-            "Fork under the new name instead."
+            "Use `daimon agents rename` to rename it, or fork under the new name."
         )
+    if model is not None and model.provider == DEFAULT_BACKEND:
+        spec.model = resolve_model(model.id)
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
@@ -666,7 +769,9 @@ async def agents_update(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account.")
     found_name = agent.metadata.get(MA_METADATA_KEY_NAME)
@@ -695,6 +800,140 @@ async def agents_update(
         sessions=rt.sessionmaker,
     )
     console.print(f"[green]✓ updated agent {spec.name!r}[/green]")
+    await _apply_model_flag(
+        rt=rt,
+        console=console,
+        name=name,
+        model=model,
+        yes=yes,
+        selector=selector,
+    )
+
+
+@agents_app.command("rename")
+def agents_rename_command(
+    ctx: typer.Context,
+    old: str,
+    new: str,
+    tenant: Annotated[str | None, TENANT_OPTION] = None,
+    guild: Annotated[str | None, GUILD_OPTION] = None,
+    replace_seeded: Annotated[
+        bool,
+        typer.Option(
+            "--replace-seeded",
+            help="Retire the built-in agent that holds NEW in this tenant, then take its name.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change; write nothing.")
+    ] = False,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Rename a tenant's own agent OLD to NEW, keeping its id.
+
+    The agent keeps its id, so its stored MCP credentials, memory and sessions
+    stay. Every live name reference moves with it: channel and tenant defaults,
+    rules, routines, bindings, avatars, access-policy rules, and the provider
+    agent's name with its report readers. History and audit rows keep the old
+    name. Refuses when OLD is missing or built-in, or when NEW is held by one
+    of the tenant's own agents.
+
+    `--replace-seeded` is for a tenant that wants its own agent under a built-in
+    name, such as `default`: the seeded agent and its readers are renamed to
+    `NEW-seeded-retired-<date>` and archived, only in this tenant, and later
+    `defaults apply` runs leave the renamed agent alone. The scope rows that
+    named the seeded agent now name the renamed one. Use `--dry-run` first.
+
+    Select the tenant with `--tenant` or `--guild` (also accepted before `rename`).
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+    selector = TenantSelector(tenant_id=tenant, guild_id=guild) if tenant or guild else ctx.obj
+
+    async def _with_defaults() -> None:
+        async with build_runtime(settings) as rt:
+            await agents_rename(
+                rt=rt,
+                console=console,
+                old=old,
+                new=new,
+                selector=selector,
+                replace_seeded=replace_seeded,
+                dry_run=dry_run,
+                yes=yes,
+            )
+
+    run_cli(_with_defaults(), console=console)
+
+
+def _print_rename_plan(console: Console, plan: AgentRenamePlan, *, tenant_label: str) -> None:
+
+    def out(line: str) -> None:
+        console.print(line, markup=False)
+
+    out(f"Tenant: {tenant_label}")
+    out(f"Rename {plan.old!r} -> {plan.new!r}; agent id {plan.agent.id} stays.")
+    for agent in plan.readers:
+        out(f"  provider reader {agent.id} moves with it")
+    if plan.retired_name is not None:
+        out(f"Retire the built-in {plan.new!r} as {plan.retired_name!r}, then archive it:")
+        for agent in plan.seeded:
+            out(f"  provider agent {agent.id} ({agent.name})")
+        for agent in plan.seeded_readers:
+            out(f"  its reader {agent.id} ({agent.name}) is renamed and kept, not archived")
+    moved = {label: n for label, n in plan.references.items() if n}
+    out(f"Database rows to move: {sum(moved.values())}")
+    for label, count in moved.items():
+        out(f"  {label}: {count}")
+    if plan.policy_keys:
+        out(f"Access policy keys to move: {', '.join(plan.policy_keys)}")
+
+
+async def agents_rename(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    old: str,
+    new: str,
+    selector: TenantSelector | None = None,
+    replace_seeded: bool = False,
+    dry_run: bool = False,
+    yes: bool = False,
+) -> None:
+    """Plan and run `daimon.core.agent_rename.rename_user_agent` for the selected tenant."""
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        tenant_label = await resolve_tenant_display(session, tenant_id)
+    preview = await rename_user_agent(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        old=old,
+        new=new,
+        replace_seeded=replace_seeded,
+        dry_run=True,
+    )
+    _print_rename_plan(console, preview.plan, tenant_label=tenant_label)
+    if dry_run:
+        console.print("Dry run: nothing was written.", markup=False)
+        return
+    confirm_or_abort(console, f"rename {old!r} -> {new!r} in {tenant_label}?", yes=yes)
+    result = await rename_user_agent(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        old=old,
+        new=new,
+        replace_seeded=replace_seeded,
+    )
+    console.print(f"[green]✓ renamed agent {old!r} -> {new!r}[/green]")
+    if result.unarchived:
+        console.print(
+            "Could not archive the retired built-in agent(s) "
+            f"{', '.join(result.unarchived)}; the next `daimon defaults apply` archives them.",
+            markup=False,
+        )
 
 
 @backend_app.command("set")
@@ -704,7 +943,7 @@ def agents_backend_set_command(
     backend: str,
     yes: Annotated[bool, YES_OPTION] = False,
     as_json: Annotated[bool, JSON_OPTION] = False,
-    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     model: Annotated[
         str | None,
@@ -725,7 +964,6 @@ def agents_backend_set_command(
                 yes=yes,
                 as_json=as_json,
                 selector=ctx.obj,
-                accept_drops=accept_drops,
                 dry_run=dry_run,
                 model=model,
             )
@@ -752,7 +990,7 @@ def agents_backend_settings_command(
     ] = None,
     yes: Annotated[bool, YES_OPTION] = False,
     as_json: Annotated[bool, JSON_OPTION] = False,
-    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Preview and state the agent's thread mode, profile and required capabilities.
@@ -791,7 +1029,6 @@ def agents_backend_settings_command(
                 yes=yes,
                 as_json=as_json,
                 selector=ctx.obj,
-                accept_drops=accept_drops,
                 dry_run=dry_run,
                 settings=agent_settings,
             )
@@ -865,7 +1102,6 @@ async def agents_backend_change(
     yes: bool,
     as_json: bool,
     selector: TenantSelector | None = None,
-    accept_drops: str | None = None,
     dry_run: bool = False,
     revert: bool = False,
     model: str | None = None,
@@ -899,7 +1135,7 @@ async def agents_backend_change(
     actor = channel_backend.BackendActor(
         tenant_id=tenant_id,
         account_id=principal.account_id,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
     )
     from functools import partial
 
@@ -997,29 +1233,6 @@ async def agents_backend_change(
         if as_json:
             console.print(preview_json, markup=False, highlight=False, soft_wrap=True)
         return
-    accepted: tuple[str, ...] | None = None
-    if not revert and target is not None and preview.drop_consent is not None:
-        # A settings change on such a provider names its drops again, as a switch does.
-        try:
-            consent = type(preview.drop_consent).model_validate(
-                {
-                    **preview.drop_consent.model_dump(),
-                    "declared_drops": tuple(part.strip() for part in accept_drops.split(","))
-                    if accept_drops and accept_drops.strip()
-                    else (),
-                }
-            )
-        except ValidationError as exc:
-            raise typer.BadParameter(
-                "--accept-drops must exactly match: " + ",".join(preview.declared_drops)
-            ) from exc
-        if consent != preview.drop_consent:
-            raise typer.BadParameter(
-                "--accept-drops must exactly match: " + ",".join(preview.declared_drops)
-            )
-        accepted = consent.declared_drops
-    elif accept_drops is not None:
-        raise typer.BadParameter("This preview does not declare drops.")
     confirm_or_abort(
         console,
         f"Change {name}'s {'settings' if settings is not None else 'model backend'}?",
@@ -1034,8 +1247,6 @@ async def agents_backend_change(
             settings,
             preview.setting_revision,
             actor,
-            expected_preview_digest=preview.digest,
-            accepted_drops=accepted,
         )
     elif revert:
         assert current_revision is not None
@@ -1043,24 +1254,16 @@ async def agents_backend_change(
             current,
             actor,
             expected_revision=current_revision.local,
-            expected_preview_digest=preview.digest,
         )
     elif target is None:
-        revision = await service.clear_backend(
-            current,
-            preview.setting_revision,
-            actor,
-            expected_preview_digest=preview.digest,
-        )
+        revision = await service.clear_backend(current, preview.setting_revision, actor)
     else:
         revision = await service.set_backend(
             current,
             target,
             preview.setting_revision,
             actor,
-            expected_preview_digest=preview.digest,
             model=preview.target_model,
-            accepted_drops=accepted,
         )
     if as_json:
         console.print(
@@ -1127,10 +1330,17 @@ async def agents_archive(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
-    await archive_agent(rt.anthropic, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
+    await archive_agent(
+        rt.anthropic,
+        agent.id,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=rt.sessionmaker,
+    )
     await archive_memory_store_best_effort(
         anthropic=rt.anthropic,
         sessionmaker=rt.sessionmaker,
@@ -1145,6 +1355,73 @@ async def agents_archive(
     await forget_archived_agent(rt.sessionmaker, tenant_id=tenant_id, name=name, agent=agent)
 
     console.print(f"[green]✓ archived agent {name!r}[/green]")
+
+
+@agents_app.command(
+    "convert",
+    help="Move an agent between Claude and OpenAI or Gemini.",
+)
+def agents_convert_command(
+    ctx: typer.Context,
+    name: str,
+    to: Annotated[str | None, typer.Option("--to", help="anthropic, openai or gemini.")] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    settings = load_settings()
+    console = Console(highlight=False)
+    selector = ctx.obj
+
+    async def _run() -> None:
+        async with build_runtime(settings) as rt:
+            await agents_convert(
+                rt=rt, console=console, name=name, to=to, yes=yes, selector=selector
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def agents_convert(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    to: str | None,
+    yes: bool,
+    selector: TenantSelector | None = None,
+) -> None:
+    """Convert an agent between Managed Agents and a Daimon record (`agent_convert`)."""
+    if to not in (None, DEFAULT_BACKEND, *DAIMON_RECORD_PROVIDERS):
+        raise StoreError("--to takes anthropic, openai or gemini.")
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        tenant_label = await resolve_tenant_display(session, tenant_id)
+        confirm_or_abort(console, f"convert agent {name!r} in {tenant_label}?", yes=yes)
+    if to == DEFAULT_BACKEND:
+        public_url = (
+            str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
+        )
+        converted = await convert_agent_to_anthropic(
+            rt.anthropic,
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            name=name,
+            subject=Subject(is_admin=True, operator=True),
+            public_url=public_url,
+        )
+    else:
+        converted = await convert_agent_to_daimon(
+            rt.anthropic,
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            name=name,
+            subject=Subject(is_admin=True, operator=True),
+            provider=to,
+        )
+    console.print(f"[green]✓ converted agent {name!r} ({converted.agent.id})[/green]")
+    # Run as the operator: no person owns copied skills, so they are only listed.
+    for line in skill_receipt(converted):
+        console.print(f"[yellow]{line}[/yellow]")
 
 
 @agents_app.command(
@@ -1193,10 +1470,14 @@ async def agents_fork(
     # Session closed. MA calls below.
     # Tenant-scoped collision pre-check on the destination name.
     # ANY match in this tenant blocks the fork regardless of owner.
-    dst_matches = await find_agents_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=dst)
+    dst_matches = await find_agents_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=dst, records=rt.sessionmaker
+    )
     if dst_matches:
         raise StoreError(f"agent {dst!r} already exists in this server — pick a different name.")
-    source = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
+    source = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=src, records=rt.sessionmaker
+    )
     if source is None:
         raise StoreError(f"no agent named {src!r} in your account or system defaults.")
     public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
@@ -1208,7 +1489,7 @@ async def agents_fork(
         new_name=dst,
         public_url=public_url,
         # The CLI is the deployment operator.
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         default_agent_name=rt.deployment_default.agent_name,
     )
     await ensure_agent_face(
@@ -1225,315 +1506,6 @@ async def agents_fork(
     if copy.dropped_skills:
         left_off = ", ".join(copy.dropped_skills)
         console.print(f"[yellow]Left off the copy: {left_off}[/yellow]")
-
-
-class _BackfillRow(BaseModel):
-    """Report row for backfill-toolset output."""
-
-    tenant_id: str
-    agent_id: str
-    agent_name: str
-    tool_count: int
-
-
-@agents_app.command("backfill-toolset")
-def agents_backfill_toolset_command(
-    yes: Annotated[bool, YES_OPTION] = False,
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="List agents that would be patched without writing."),
-    ] = False,
-) -> None:
-    """Patch every tenant-tagged agent missing the base agent_toolset_20260401.
-
-    Enumerates every registered Discord and Slack workspace, lists non-archived agents
-    per tenant, and adds the base agent toolset to any agent that lacks it.
-    Agents that already carry the toolset are skipped. Re-running selects zero
-    agents (idempotent by construction).
-    """
-    settings = load_settings()
-    console = Console(highlight=False)
-
-    async def _with_defaults() -> None:
-        async with build_runtime(settings) as rt:
-            await agents_backfill_toolset(rt=rt, console=console, yes=yes, dry_run=dry_run)
-
-    run_cli(_with_defaults(), console=console)
-
-
-async def agents_backfill_toolset(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    yes: bool,
-    dry_run: bool,
-) -> None:
-    """Async implementation of backfill-toolset."""
-    # Chat platforms only: a Slack tenant's agents need the base toolset just as
-    # much as a Discord tenant's. The operator's own `cli` tenant is left alone.
-    tenant_rows = await list_tenants_by_platform(rt.sessionmaker, platform="discord")
-    tenant_rows += await list_tenants_by_platform(rt.sessionmaker, platform="slack")
-
-    report_rows: list[_BackfillRow] = []
-    for tenant_row in tenant_rows:
-        tenant_id: uuid.UUID = tenant_row.id
-        agents = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id)
-        for agent in agents:
-            has_toolset = any(tool.type == "agent_toolset_20260401" for tool in agent.tools)
-            if not has_toolset:
-                report_rows.append(
-                    _BackfillRow(
-                        tenant_id=str(tenant_id),
-                        agent_id=agent.id,
-                        agent_name=agent.metadata.get(MA_METADATA_KEY_NAME, agent.name),
-                        tool_count=len(agent.tools),
-                    )
-                )
-
-    tenant_count = len({row.tenant_id for row in report_rows})
-    n_agents = len(report_rows)
-
-    if not report_rows:
-        console.print("[green]✓ No agents need the base agent toolset.[/green]")
-        return
-
-    summary = f"{n_agents} agent(s) lack the base agent toolset across {tenant_count} tenant(s)"
-
-    if dry_run:
-        console.print(f"[yellow]dry-run:[/yellow] {summary}")
-        emit_rows(
-            console,
-            report_rows,
-            columns=("tenant_id", "agent_id", "agent_name", "tool_count"),
-            as_json=False,
-        )
-        return
-
-    confirm_or_abort(console, summary, yes=yes)
-
-    for row in report_rows:
-        fresh = await retrieve_agent(
-            rt.anthropic, row.agent_id, scope=resource_scope(tenant_id=row.tenant_id)
-        )
-        # Re-check predicate against fresh copy — a concurrent edit may have
-        # already added the toolset; skip rather than double-apply.
-        already_has_toolset = any(tool.type == "agent_toolset_20260401" for tool in fresh.tools)
-        if already_has_toolset:
-            console.print(
-                f"[yellow]skipped[/yellow] {row.agent_name!r} (toolset added concurrently)"
-            )
-            continue
-        patched_tools = merge_default_agent_toolset(
-            [t.model_dump(mode="json", exclude_none=True) for t in fresh.tools]  # type: ignore[arg-type]
-        )
-        await update_agent(
-            rt.anthropic,
-            fresh.id,
-            version=fresh.version,
-            payload={"tools": patched_tools},
-            scope=resource_scope(tenant_id=row.tenant_id),
-        )
-        console.print(f"[green]✓[/green] patched {row.agent_name!r}")
-
-    console.print(f"[green]✓ Patched {n_agents} agent(s).[/green]")
-
-
-class _RekeyRow(BaseModel):
-    """Report row for rekey-guild-ownership output."""
-
-    agent_id: str
-    agent_name: str
-    new_name: str  # equals agent_name unless a collision rename is required
-    tenant_id: str
-    current_account: str
-    new_account: str
-
-
-@agents_app.command("rekey-guild-ownership")
-def agents_rekey_command(
-    yes: Annotated[bool, YES_OPTION] = False,
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="List what would be re-keyed without writing."),
-    ] = False,
-) -> None:
-    """Re-key existing guild-tenant agents' daimon_account to the derived guild account.
-
-    Enumerates every registered Discord and Slack workspace, compares each
-    agent's current daimon_account against the deterministically-derived guild
-    account for that tenant, and updates any agent still pointing at a per-user
-    account. Slack stamps the same derived account on create/fork/edit
-    (slack/agent_setup/submit.py), so its agents belong in this sweep.
-
-    Operator-tenant agents (no chat workspace) are never enumerated.
-    Already-guild-owned and system agents (no daimon_account) are skipped.
-    """
-    settings = load_settings()
-    console = Console(highlight=False)
-
-    async def _with_defaults() -> None:
-        async with build_runtime(settings) as rt:
-            await agents_rekey(rt=rt, console=console, yes=yes, dry_run=dry_run)
-
-    run_cli(_with_defaults(), console=console)
-
-
-async def agents_rekey(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    yes: bool,
-    dry_run: bool,
-) -> None:
-    """Async implementation of rekey-guild-ownership."""
-    # Enumerate registered chat tenants (no raw .list() — ISO-01). Filtering to
-    # discord silently left every Slack tenant's agents un-rekeyed; the operator's
-    # own `cli` tenant stays excluded, as the docstring promises.
-    tenant_rows = await list_tenants_by_platform(rt.sessionmaker, platform="discord")
-    tenant_rows += await list_tenants_by_platform(rt.sessionmaker, platform="slack")
-
-    # Collect items that need re-keying — (tenant_id, guild_account, agent_id,
-    # name, current_acct) — plus the names already claimed by guild-owned agents
-    # per tenant. Both come from ONE agent snapshot per tenant so the collision
-    # math never operates on inconsistent data.
-    to_rekey: list[tuple[uuid.UUID, uuid.UUID, str, str, str]] = []
-    guild_owned_names: dict[uuid.UUID, set[str]] = {}
-
-    for tenant_row in tenant_rows:
-        tenant_id: uuid.UUID = tenant_row.id
-        guild_account: uuid.UUID = derive_guild_account_uuid(tenant_id)
-
-        agents = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id)
-        # Canonical-first: max created_at keeps the bare name on collision
-        # (list_agents_by_tenant returns MA list order, which is unsorted).
-        agents.sort(key=lambda agent: agent.created_at, reverse=True)
-        guild_owned_names[tenant_id] = set()
-        for agent in agents:
-            current_account = agent.metadata.get(MA_METADATA_KEY_ACCOUNT)
-            agent_name = agent.metadata.get(MA_METADATA_KEY_NAME, agent.name)
-            # Skip system agents (no daimon_account) and already-guild-owned.
-            if current_account is None:
-                continue
-            if current_account == str(guild_account):
-                guild_owned_names[tenant_id].add(agent_name)
-                continue
-            to_rekey.append((tenant_id, guild_account, agent.id, agent_name, current_account))
-
-    if not to_rekey:
-        console.print("[green]✓ No agents need re-keying.[/green]")
-        return
-
-    # -----------------------------------------------------------------------
-    # Collision-rename: post-rekey, every (tenant, name) pair must be unique
-    # among guild-stamped agents — including names held by already-guild-owned
-    # agents that are skipped above. The canonical member of each colliding
-    # group (max created_at — to_rekey is built from a created_at-descending
-    # sort) keeps the bare name; the others get the smallest free numeric
-    # suffix (-2, -3, …).
-    # -----------------------------------------------------------------------
-
-    # Determine the post-rekey name for each candidate in two passes so the
-    # final name set is collision-free against BOTH already-guild-owned names
-    # and every other candidate's assigned name:
-    #   pass 1 — a candidate whose bare name is still free (not guild-owned,
-    #            not claimed by an earlier candidate) keeps it;
-    #   pass 2 — everything else gets the smallest numeric suffix (-2, -3, …)
-    #            not taken in the complete per-tenant claimed set.
-    claimed_names: dict[uuid.UUID, set[str]] = {
-        tid: set(names) for tid, names in guild_owned_names.items()
-    }
-    resolved_names: dict[int, str] = {}  # to_rekey index → post-rekey name
-
-    for i, (tid, _guild_acct, _agent_id, agent_name, _current_acct) in enumerate(to_rekey):
-        taken = claimed_names.setdefault(tid, set())
-        if agent_name not in taken:
-            taken.add(agent_name)
-            resolved_names[i] = agent_name
-
-    for i, (tid, _guild_acct, _agent_id, agent_name, _current_acct) in enumerate(to_rekey):
-        if i in resolved_names:
-            continue
-        taken = claimed_names[tid]
-        suffix = 2
-        while f"{agent_name}-{suffix}" in taken:
-            suffix += 1
-        new_name = f"{agent_name}-{suffix}"
-        taken.add(new_name)
-        resolved_names[i] = new_name
-
-    post_rekey_names: list[str] = [resolved_names[i] for i in range(len(to_rekey))]
-
-    n_agents = len(to_rekey)
-    guild_count = len({item[0] for item in to_rekey})
-    rename_count = sum(
-        1 for orig, new in zip(to_rekey, post_rekey_names, strict=True) if orig[3] != new
-    )
-    summary = (
-        f"{n_agents} agent(s) across {guild_count} guild(s) will be re-keyed to guild ownership"
-        + (f" ({rename_count} collision rename(s))" if rename_count else "")
-    )
-
-    # Build report rows for display.
-    report_rows = [
-        _RekeyRow(
-            agent_id=agent_id,
-            agent_name=agent_name,
-            new_name=new_name,
-            tenant_id=str(tid),
-            current_account=current_acct,
-            new_account=str(guild_acct),
-        )
-        for (tid, guild_acct, agent_id, agent_name, current_acct), new_name in zip(
-            to_rekey, post_rekey_names, strict=True
-        )
-    ]
-
-    if dry_run:
-        console.print(f"[yellow]dry-run:[/yellow] {summary}")
-        emit_rows(
-            console,
-            report_rows,
-            columns=("agent_name", "new_name", "agent_id", "current_account", "new_account"),
-            as_json=False,
-        )
-        return
-
-    confirm_or_abort(console, summary, yes=yes)
-
-    # Retrieve each agent fresh to get the current version before writing.
-    for (tid, guild_acct, agent_id, _agent_name, _current_acct), new_name in zip(
-        to_rekey, post_rekey_names, strict=True
-    ):
-        agent = await retrieve_agent(
-            rt.anthropic, agent_id, scope=resource_scope(tenant_id=str(tid))
-        )
-        new_meta = build_metadata(
-            tenant_id=tid,
-            name=new_name,  # renamed if collision; original name otherwise
-            account_id=guild_acct,
-            managed=(agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"),
-            spec_hash=agent.metadata.get(MA_METADATA_KEY_SPEC_HASH),
-        )
-        # A report reader's link to its source agent is what holds it to the
-        # source's pins; a re-key must not drop it.
-        for key in (MA_METADATA_KEY_READER_OF, MA_METADATA_KEY_READER_SOURCE):
-            if key in agent.metadata:
-                new_meta[key] = agent.metadata[key]
-        await update_agent(
-            rt.anthropic,
-            agent.id,
-            version=agent.version,
-            payload={"name": new_name, "metadata": new_meta},
-            scope=resource_scope(tenant_id=str(tid)),
-        )
-
-    console.print(f"[green]✓ Re-keyed {n_agents} agent(s).[/green]")
-    emit_rows(
-        console,
-        report_rows,
-        columns=("agent_name", "new_name", "agent_id", "new_account"),
-        as_json=False,
-    )
 
 
 @owner_app.command("show")
@@ -1742,7 +1714,9 @@ async def agents_owner(
             owner_id = await _owner_account_argument(
                 session, tenant_id=tenant_id, account=account, platform=platform, user=user
             )
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account.")
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)

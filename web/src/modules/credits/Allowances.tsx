@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, Ticket, Users, UserRound } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { toast } from "sonner"
 import { Link } from "react-router"
 import { AgentAvatar } from "@/components/common"
@@ -21,7 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { api } from "@/lib/api"
 import { ENTITY_FALLBACK, shortDate, usd } from "@/lib/format"
-import { useChatAgents, useGroups, usePeopleSearch } from "@/lib/hooks"
+import { useChatAgents, useDebounced, useGroups, usePeopleSearch } from "@/lib/hooks"
 import type { Allowance, Subject, Window } from "./types"
 import { Field } from "./shared"
 
@@ -100,7 +100,7 @@ function AllowanceTable({ data }: { data: Allowance[] }) {
 }
 
 function SubjectName({ s }: { s: Subject }) {
-  if (s.kind === "group") return <Link to={`/admin?group=${encodeURIComponent(s.id)}`} className="truncate hover:underline">{s.name || "Deleted group"}</Link>
+  if (s.kind === "group") return <Link to={`/admin/people?group=${encodeURIComponent(s.id)}`} className="truncate hover:underline">{s.name || "Deleted group"}</Link>
   if (s.kind === "person") return <PersonLink id={s.id} name={s.name || null} />
   return <span className="truncate">{s.name}</span>
 }
@@ -157,17 +157,13 @@ function Detail({ a }: { a: Allowance }) {
 }
 
 /** A group or a person, found by name; the choice is what the allowance is for. */
-function SubjectPicker({ value, onChange, everyoneOnly }: { value: Subject | null; onChange: (s: Subject) => void; everyoneOnly?: boolean }) {
+export function SubjectPicker({ value, onChange, everyoneOnly, peopleOnly }: { value: Subject | null; onChange: (s: Subject) => void; everyoneOnly?: boolean; peopleOnly?: boolean }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState("")
-  const [term, setTerm] = useState("")
-  useEffect(() => {
-    const t = setTimeout(() => setTerm(text.trim()), 200)
-    return () => clearTimeout(t)
-  }, [text])
+  const term = useDebounced(text.trim(), 200)
   const groups = useGroups()
   const people = usePeopleSearch(term)
-  const shown = (groups.data ?? []).filter((g) => (!everyoneOnly || g.id === "everyone") && g.name.toLowerCase().includes(text.trim().toLowerCase()))
+  const shown = (groups.data ?? []).filter((g) => !peopleOnly && (!everyoneOnly || g.id === "everyone") && g.name.toLowerCase().includes(text.trim().toLowerCase()))
   const pick = (s: Subject) => { onChange(s); setOpen(false) }
   const Icon = value ? KIND_ICON[value.kind] : null
   return (
@@ -180,7 +176,7 @@ function SubjectPicker({ value, onChange, everyoneOnly }: { value: Subject | nul
       </PopoverTrigger>
       <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
         <Command shouldFilter={false}>
-          <CommandInput placeholder="Find a group or person" value={text} onValueChange={setText} />
+          <CommandInput placeholder={peopleOnly ? "Find a person" : "Find a group or person"} value={text} onValueChange={setText} />
           <CommandList className="max-h-64">
             {shown.length > 0 && (
               <CommandGroup heading="Groups">
@@ -217,11 +213,16 @@ export function NewAllowance({ open, onOpenChange }: { open: boolean; onOpenChan
   const [amount, setAmount] = useState("50")
   const [window, setWindow] = useState<Window>("month")
   const [expires, setExpires] = useState("")
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) { setCap(false); setSubject(null); setAgent("any"); setAmount("50"); setWindow("month"); setExpires("") }
+  }
   const qc = useQueryClient()
   const save = useMutation({
     mutationFn: () => api.post("/api/credits/allowances", {
       subject, agent: cap ? null : agents?.find((a) => a.id === agent) ?? null,
-      amount_usd: Number(amount), window: cap ? "month" : window, expires_at: !cap && expires ? new Date(expires).toISOString() : null, cap,
+      amount_usd: Number(amount), window: cap ? "month" : window, expires_at: !cap && expires ? new Date(`${expires}T00:00`).toISOString() : null, cap,
     }),
     onSuccess: () => { changed(qc); onOpenChange(false); toast(cap ? "Cap added" : "Allowance added") },
   })

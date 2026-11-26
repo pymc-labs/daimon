@@ -13,13 +13,10 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.middleware.mcp_identity import (
     IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
 )
+from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
+from daimon.core.host_memory import HOST_MEMORY_TAG
+from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG, PINNED_HOST_TOOLS
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
@@ -29,6 +26,8 @@ from fastmcp.server.transforms import Visibility
 from mcp.shared.exceptions import McpError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
+
+from .harness import auth_identity, production_identity_middleware
 
 
 async def _list_tools(app: ASGIApp, *, token: str) -> list[str]:
@@ -52,17 +51,7 @@ def _make_narrowing_app(
     a real DB lookup (the middleware resolvers use get_access_token() claims).
     """
     mcp = FastMCP(name="narrowing-test", auth=StaticTokenVerifier(tokens=token_map))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(sessionmaker))
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
     async def agent_tool() -> str:  # pyright: ignore[reportUnusedFunction]
@@ -297,11 +286,7 @@ async def test_auth_identity_default_agent_id_is_none() -> None:
     """AuthIdentity.agent_id defaults to None when not supplied."""
     from daimon.core.stores.domain import Role
 
-    identity = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-    )
+    identity = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     assert identity.agent_id is None, "agent_id should default to None"
 
 
@@ -982,17 +967,7 @@ def _make_platform_app(
       - ``agent_tool`` tagged {"agent-chat"}
     """
     mcp = FastMCP(name="platform-test", auth=StaticTokenVerifier(tokens=token_map))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(sessionmaker))
     mcp.add_transform(Visibility(False, tags={"discord"}))
     mcp.add_transform(Visibility(False, tags={"slack"}))
 
@@ -1474,3 +1449,56 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
         assert (await client.call_tool("provider_probe", {})).data == "allowed"
     await middleware.drain_audit()
     require_anthropic_allowed()  # A completed request must restore its caller's context.
+
+
+def _make_host_memory_app(
+    sessionmaker: async_sessionmaker[AsyncSession], claims: dict[str, object]
+) -> ASGIApp:
+    """The production host-tool baseline: hidden by tag, shown per credential."""
+    mcp = FastMCP(name="host-memory-test", auth=StaticTokenVerifier(tokens={"t": claims}))
+    mcp.add_middleware(production_identity_middleware(sessionmaker))
+    mcp.add_transform(Visibility(False, tags={HOST_MEMORY_TAG}))
+    mcp.add_transform(Visibility(False, tags={HOST_WEB_FETCH_TAG}))
+    mcp.add_transform(AgentChatAwareBM25SearchTransform(always_visible=list(PINNED_HOST_TOOLS)))
+
+    @mcp.tool(tags={HOST_WEB_FETCH_TAG})  # pyright: ignore[reportArgumentType]
+    async def web_fetch() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "page"
+
+    @mcp.tool(tags={HOST_MEMORY_TAG})  # pyright: ignore[reportArgumentType]
+    async def memory_view() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "memory"
+
+    @mcp.tool
+    async def other_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "other"
+
+    return mcp.http_app()  # pyright: ignore[reportReturnType]
+
+
+@pytest.mark.parametrize(
+    ("extra", "memory", "fetch"),
+    [
+        ({"no_confirmation_surface": True}, True, True),
+        ({}, False, False),
+        ({"no_confirmation_surface": True, "anthropic_disabled": True}, False, True),
+    ],
+)
+async def test_host_tool_visibility_when_credential_varies_then_provider_turns_only(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    extra: dict[str, object],
+    memory: bool,
+    fetch: bool,
+) -> None:
+    claims: dict[str, object] = {
+        "sub": str(uuid.uuid4()),
+        "tenant_id": str(uuid.uuid4()),
+        "role": "user",
+        "client_id": "test",
+        "platform": "discord",
+        **extra,
+    }
+    names = await _list_tools(_make_host_memory_app(sessionmaker, claims), token="t")
+    assert ("memory_view" in names) is memory, f"host memory listed by name for {extra}"
+    assert ("web_fetch" in names) is fetch, f"host page fetch listed by name for {extra}"
+    assert "other_tool" not in names, "the rest stays behind search"

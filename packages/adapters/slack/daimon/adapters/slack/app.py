@@ -17,7 +17,7 @@ import functools
 import json
 import time
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -31,18 +31,15 @@ from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_command,
 )
 from daimon.adapters.slack.agent_setup.add_skill import (
-    AddSkillDecision,
     evaluate_add_skill_submission,
     run_add_skill_submission,
 )
 from daimon.adapters.slack.agent_setup.avatar import evaluate_avatar_submission
 from daimon.adapters.slack.agent_setup.channel_skills import (
-    ChannelSkillsSubmission,
     evaluate_channel_skills_submission,
     run_channel_skills_submission,
 )
 from daimon.adapters.slack.agent_setup.operator_tokens import (
-    OperatorTokenSubmission,
     evaluate_operator_token_submission,
     run_operator_token_submission,
 )
@@ -52,7 +49,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_CHANNEL_SKILLS,
     CALLBACK_OPERATOR_MINT,
 )
-from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
+from daimon.adapters.slack.agent_setup.state import decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
     evaluate_new_agent_submission,
     run_new_agent_submission,
@@ -70,7 +67,6 @@ from daimon.adapters.slack.billing_panel.actions import (
 )
 from daimon.adapters.slack.billing_panel.redeem import (
     REDEEM_CALLBACK_ID,
-    RedeemDecision,
     evaluate_redeem_submission,
     handle_redeem_open,
     run_redeem_submission,
@@ -86,7 +82,7 @@ from daimon.adapters.slack.boot_sweep import (
     retire_orphaned_turns,
     snapshot_slack_card_intents,
 )
-from daimon.adapters.slack.budget_notice import with_budget_notifier
+from daimon.adapters.slack.budget_notice import slack_budget_alerter, with_budget_notifier
 from daimon.adapters.slack.channel_listing import list_all_once
 from daimon.adapters.slack.channel_reads import load_channel_read_policy
 from daimon.adapters.slack.context import (
@@ -96,7 +92,6 @@ from daimon.adapters.slack.context import (
 )
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
-    CredentialSubmissionDecision,
     evaluate_credential_submission,
     handle_credential_request_click,
     run_env_credential_submission,
@@ -106,7 +101,9 @@ from daimon.adapters.slack.credential_requests import (
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.direct_messages import (
+    DM_PICK_ACTION_ID,
     handle_direct_message,
+    handle_dm_agent_pick,
     handle_dm_command,
     is_direct_message_event,
 )
@@ -126,7 +123,6 @@ from daimon.adapters.slack.external_access import (
 )
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
-    FeedbackTextDecision,
     evaluate_feedback_text_submission,
     handle_feedback_details_click,
     handle_feedback_vote,
@@ -160,6 +156,7 @@ from daimon.adapters.slack.names import (
     remember_payload_names,
 )
 from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
+from daimon.adapters.slack.own_cards import handle_own_card_click, is_own_card_action
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
     handle_privacy_command,
@@ -171,7 +168,7 @@ from daimon.adapters.slack.privacy_panel.submit import (
 from daimon.adapters.slack.provider_actions import ACTION_PREFIX as PROVIDER_ACTION_PREFIX
 from daimon.adapters.slack.provider_actions import SlackProviderActions, provider_action_options
 from daimon.adapters.slack.requester_org import decide_requester_org
-from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
+from daimon.adapters.slack.routine_delivery import make_slack_owner_dm, make_slack_routine_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
     handle_routines_command,
@@ -202,15 +199,39 @@ from daimon.adapters.slack.shared_channel import (
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
+    SupportSubmission,
+    evaluate_menu_submission,
     evaluate_support_submission,
     handle_ask_human_click,
+    handle_option_pick,
     run_support_submission,
-    slack_support_enabled,
+)
+from daimon.adapters.slack.support_menu_form import MENU_CALLBACK_ID, OPTION_ACTION_ID
+from daimon.adapters.slack.support_post import (
+    SETTLE_ACCEPT_ACTION_ID,
+    SETTLE_DECLINE_ACTION_ID,
+    SETTLE_SET_ACTION_ID,
+)
+from daimon.adapters.slack.support_settle import (
+    SETTLE_CALLBACK_ID,
+    evaluate_settle_submission,
+    handle_settle_click,
+    run_settle_submission,
 )
 from daimon.adapters.slack.thread_handoff import (
     HAND_OVER_ACTION_ID,
     build_hand_over_blocks,
     handle_hand_over_click,
+)
+from daimon.adapters.slack.thread_model import (
+    SHORTCUT_CALLBACK_ID as THREAD_MODEL_SHORTCUT_ID,
+)
+from daimon.adapters.slack.thread_model import (
+    THREAD_MODEL_ACTION_IDS,
+    handle_thread_model_cancel,
+    handle_thread_model_confirm,
+    handle_thread_model_pick,
+    handle_thread_model_shortcut,
 )
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
@@ -229,6 +250,8 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.channel_budget_notice import run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -249,13 +272,16 @@ from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
+from daimon.core.host_calls import wake_prefix
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.credential_requests import peek_credential_request
@@ -296,10 +322,12 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -316,7 +344,7 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
-from daimon.core.turn_keys import list_mounted_key_names
+from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
     render_turn_origin,
@@ -376,6 +404,23 @@ def _payload_team_id(payload: dict[str, Any]) -> str:
     """The workspace an interactive payload is addressed to (the host)."""
     team: dict[str, Any] = payload.get("team") or {}
     return str(team.get("id") or "")
+
+
+def _payload_ids(payload: dict[str, Any]) -> tuple[str, str]:
+    """The (team_id, user_id) a view submission came from."""
+    user: dict[str, Any] = payload.get("user") or {}
+    return _payload_team_id(payload), str(user.get("id") or "")
+
+
+def _view_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    view: dict[str, Any] = payload.get("view") or {}
+    return decode_private_metadata(str(view.get("private_metadata") or ""))
+
+
+type _SubmissionJob = Callable[[], Coroutine[Any, Any, None]]
+# What a view submission acks with (None: an empty ack) and the job to spawn after.
+type _Submitted = tuple[dict[str, Any] | None, _SubmissionJob | None]
+type _SubmissionHandler = Callable[[dict[str, Any]], Awaitable[_Submitted]]
 
 
 def _author_id(event: dict[str, Any]) -> str:
@@ -502,6 +547,263 @@ class SlackApp:
         self.draining: bool = False
         self._orphan_recovery_task: asyncio.Task[None] | None = None
         self._card_recovery_task: asyncio.Task[None] | None = None
+
+    @property
+    def _view_submissions(self) -> dict[str, _SubmissionHandler]:
+        return {
+            "privacy_delete": self._submit_privacy_delete,
+            "routines__create": self._submit_routines_create,
+            "routines__delete_confirm": self._submit_routines_delete,
+            "agent_setup__new_agent": self._submit_new_agent,
+            REDEEM_CALLBACK_ID: self._submit_redeem,
+            CALLBACK_CHANNEL_SKILLS: self._submit_channel_skills,
+            CALLBACK_OPERATOR_MINT: self._submit_operator_token,
+            CALLBACK_ADD_SKILL: self._submit_add_skill,
+            CALLBACK_AVATAR_UPLOAD: self._submit_avatar,
+            "feedback_text": self._submit_feedback_text,
+            SUPPORT_CALLBACK_ID: self._submit_support,
+            MENU_CALLBACK_ID: self._submit_menu,
+            SETTLE_CALLBACK_ID: self._submit_settle,
+        }
+
+    def _with_web_client(
+        self, team_id: str, run: Callable[[AsyncWebClient], Awaitable[None]]
+    ) -> _SubmissionJob:
+        async def job() -> None:
+            web_client = await resolve_web_client(self.runtime, team_id=team_id)
+            if web_client is not None:
+                await run(web_client)
+
+        return job
+
+    async def _submit_privacy_delete(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_delete_submission(
+            payload, delete_enabled=self.runtime.settings.privacy.delete_enabled
+        )
+        account_id, view_id = decision.account_id, decision.view_id
+        if not decision.proceed or account_id is None or view_id is None:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_purge_and_update(
+                self.runtime,
+                wc,
+                account_id=account_id,
+                tenant_id=tenant_id,
+                platform_user_id=user_id,
+                view_id=view_id,
+            ),
+        )
+
+    async def _submit_routines_create(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_routines_create_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        # view_submission payloads carry no top-level "channel": the invoking
+        # channel lives in the view's private_metadata.
+        meta = _view_metadata(payload)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_routines_create_submission(
+                self.runtime,
+                wc,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=str(meta.get("channel_id") or ""),
+                extra=decision.extra,
+            ),
+        )
+
+    async def _submit_routines_delete(self, payload: dict[str, Any]) -> _Submitted:
+        # No form fields to validate: an empty ack pops the confirm modal back
+        # to the panel, then delete + refresh run in the background.
+        team_id, user_id = _payload_ids(payload)
+        meta = _view_metadata(payload)
+        return None, self._with_web_client(
+            team_id,
+            lambda wc: run_routines_delete_submission(
+                self.runtime,
+                wc,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=str(meta.get("channel_id") or ""),
+                routine_id=str(meta.get("routine_id") or ""),
+                root_view_id=str(meta.get("root_view_id") or ""),
+            ),
+        )
+
+    async def _submit_new_agent(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_new_agent_submission(payload)
+        panel_meta = decision.panel_meta
+        if not decision.proceed or panel_meta is None:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        view: dict[str, Any] = payload.get("view") or {}
+        extra = decision.extra
+        # The invoking channel comes from the view's metadata, so success and
+        # refusal ephemerals reach a real channel rather than "" (channel_not_found).
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_new_agent_submission(
+                self.runtime,
+                wc,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=panel_meta.channel_id,
+                view_id=str(view.get("id") or ""),
+                meta=panel_meta,
+                name=str(extra.get("name") or ""),
+                purpose=str(extra["purpose"]) if extra.get("purpose") else None,
+                model=str(extra.get("model") or ""),
+            ),
+        )
+
+    async def _submit_credential(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_credential_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+
+        async def dispatch_continuations() -> None:
+            """Run whatever the just-saved value unblocked.
+
+            Addressed from the request row, never from the form: the modal
+            carries routing handles only, and the thread that is waiting is the
+            one the request was minted in, which may not be where the form was
+            submitted from.
+            """
+            async with self.runtime.sessionmaker() as session:
+                row = await peek_credential_request(session, token=decision.token)
+            if row is None or row.origin_thread_id is None:
+                return
+            web_client = await resolve_web_client(self.runtime, team_id=team_id)
+            if web_client is None:
+                return
+            await self.dispatch_continuations_in_thread(
+                web_client=web_client,
+                tenant_id=row.tenant_id,
+                channel=row.parent_channel_id or row.channel_id,
+                thread_id=row.origin_thread_id,
+                account_id=row.account_id,
+                team_id=team_id,
+            )
+
+        async def job() -> None:
+            common: dict[str, Any] = {
+                "team_id": team_id,
+                "user_id": user_id,
+                "channel_id": decision.channel_id,
+                "message_ts": decision.message_ts,
+                "token": decision.token,
+                "dispatch_continuations": dispatch_continuations,
+            }
+            if decision.kind == "env":
+                await run_env_credential_submission(self.runtime, value=decision.value, **common)
+            elif decision.kind == "env_file":
+                await run_env_file_credential_submission(
+                    self.runtime, file_id=decision.file_id or "", **common
+                )
+            elif decision.kind == "mcp":
+                await run_mcp_credential_submission(self.runtime, value=decision.value, **common)
+            elif decision.kind == "skill_repo":
+                await run_skill_repo_credential_submission(
+                    self.runtime, value=decision.value, **common
+                )
+            elif decision.kind == "repo":
+                await run_repo_bind_credential_submission(
+                    self.runtime, value=decision.value, **common
+                )
+            else:
+                log.info("slack.on_request.unknown_credential_kind", kind=decision.kind)
+
+        return decision.response_payload, job
+
+    async def _submit_redeem(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_redeem_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_redeem_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, decision=decision
+            ),
+        )
+
+    async def _submit_channel_skills(self, payload: dict[str, Any]) -> _Submitted:
+        submission = evaluate_channel_skills_submission(payload)
+        if submission is None:
+            return None, None
+        team_id, user_id = _payload_ids(payload)
+        return None, self._with_web_client(
+            team_id,
+            lambda wc: run_channel_skills_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, submission=submission
+            ),
+        )
+
+    async def _submit_operator_token(self, payload: dict[str, Any]) -> _Submitted:
+        # An empty ack closes the form; the token arrives as an ephemeral and
+        # the routing view refreshes.
+        submission = evaluate_operator_token_submission(payload)
+        if submission is None:
+            return None, None
+        team_id, user_id = _payload_ids(payload)
+        return None, self._with_web_client(
+            team_id,
+            lambda wc: run_operator_token_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, submission=submission
+            ),
+        )
+
+    async def _submit_add_skill(self, payload: dict[str, Any]) -> _Submitted:
+        # Pure but slow, so off the loop: errors, a fresh preview, or close and add.
+        decision = await asyncio.to_thread(evaluate_add_skill_submission, payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_add_skill_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, decision=decision
+            ),
+        )
+
+    async def _submit_avatar(self, payload: dict[str, Any]) -> _Submitted:
+        return evaluate_avatar_submission(payload), None
+
+    async def _submit_feedback_text(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_feedback_text_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+
+        async def job() -> None:
+            await run_feedback_text_submission(
+                self.runtime, team_id=team_id, user_id=user_id, decision=decision
+            )
+
+        return decision.response_payload, job
+
+    async def _submit_support(self, payload: dict[str, Any]) -> _Submitted:
+        return self._support_submitted(evaluate_support_submission(payload))
+
+    async def _submit_menu(self, payload: dict[str, Any]) -> _Submitted:
+        return self._support_submitted(evaluate_menu_submission(payload))
+
+    def _support_submitted(self, submission: SupportSubmission) -> _Submitted:
+        if not submission.proceed:
+            return submission.response_payload, None
+        return submission.response_payload, lambda: run_support_submission(self.runtime, submission)
+
+    async def _submit_settle(self, payload: dict[str, Any]) -> _Submitted:
+        submission = evaluate_settle_submission(payload)
+        if not submission.proceed:
+            return submission.response_payload, None
+        return submission.response_payload, lambda: run_settle_submission(self.runtime, submission)
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -647,13 +949,23 @@ class SlackApp:
             )
 
     def start_delivery_poller(self) -> asyncio.Task[None]:
-        """Post routine results to their destinations until draining."""
+        """Post routine results and budget alerts to their destinations until draining."""
+        self._spawn(
+            run_budget_alert_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                alerter=slack_budget_alerter(self.runtime),
+                settings=self.runtime.settings,
+                should_stop=lambda: self.draining,
+            )
+        )
         return self._spawn(
             run_delivery_poller(
                 self.runtime.sessionmaker,
                 platform="slack",
                 post=make_slack_routine_poster(self.runtime),
                 should_stop=lambda: self.draining,
+                owner_dm=make_slack_owner_dm(self.runtime),
             )
         )
 
@@ -720,37 +1032,37 @@ class SlackApp:
         channel: str,
         thread_id: str,
         team_id: str,
-        selfhosted: bool,
         requester_user_id: str,
     ) -> None:
-        """Serialize the optional Anthropic file sweep after a tool turn."""
+        """Serialize the file sweep after a tool turn."""
 
-        if selfhosted or not any(
+        outputs = outcome.outputs
+        if outputs is None or not any(
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
         # Read the chain link synchronously, before spawning, so it cannot be lost.
-        previous = self._output_sweeps.get(outcome.ma_session_id)
+        previous = self._output_sweeps.get(outputs.session_id)
         task = self._spawn(
             self._sweep_session_outputs(
                 previous,
                 web_client,
-                session_id=outcome.ma_session_id,
+                outputs=outputs,
                 channel_id=channel,
                 thread_ts=thread_id,
                 team_id=team_id,
                 requester_user_id=requester_user_id,
             )
         )
-        self._output_sweeps[outcome.ma_session_id] = task
-        task.add_done_callback(functools.partial(self._forget_output_sweep, outcome.ma_session_id))
+        self._output_sweeps[outputs.session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, outputs.session_id))
 
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
         web_client: AsyncWebClient,
         *,
-        session_id: str,
+        outputs: OutputRuntime,
         channel_id: str,
         thread_ts: str,
         team_id: str,
@@ -780,11 +1092,11 @@ class SlackApp:
         except Exception:  # named boundary: the files still go out, pinging nobody
             log.warning("slack.output_delivery.opt_out_lookup_failed", exc_info=True)
             requester_label = "@someone"
+        session_id = outputs.session_id
         try:
             await deliver_session_outputs(
-                self.runtime.turn_deps.anthropic,
+                outputs,
                 web_client,
-                session_id=session_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 notice_keys=self._delivery_notice_keys,
@@ -792,13 +1104,28 @@ class SlackApp:
                 noticed_files=self._noticed_output_files,
                 requester_user_id=requester_user_id,
                 requester_label=requester_label,
+                sessions=self.runtime.sessionmaker,
             )
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(
                 "slack.output_delivery.unhandled_error",
+                tenant_id=str(derive_tenant_uuid(platform="slack", workspace_id=team_id)),
+                platform="slack",
                 session_id=session_id,
                 thread_id=thread_ts,
-                error=str(exc)[:300],
+                error_type=type(exc).__name__,
+            )
+            report_ops_event(
+                self.runtime.sessionmaker,
+                OpsEvent(
+                    "delivery.output_failed",
+                    derive_tenant_uuid(platform="slack", workspace_id=team_id),
+                    reason=type(exc).__name__,
+                    platform="slack",
+                    thread_id=thread_ts,
+                    session_id=session_id,
+                ),
+                logged=False,
             )
 
     async def on_request(
@@ -865,398 +1192,22 @@ class SlackApp:
                     )
                 )
                 return
-            if cb_id == "privacy_delete":
-                decision = evaluate_delete_submission(
-                    payload, delete_enabled=self.runtime.settings.privacy.delete_enabled
-                )
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=decision.response_payload,
-                        )
-                    )
-                )
-                if (
-                    decision.proceed
-                    and decision.account_id is not None
-                    and decision.view_id is not None
-                ):
-                    _account_id = decision.account_id
-                    _view_id = decision.view_id
-                    team_info_vs: dict[str, Any] = payload.get("team") or {}
-                    _team_id_vs: str = str(team_info_vs.get("id") or "")
-                    user_info_vs: dict[str, Any] = payload.get("user") or {}
-                    _user_id_vs: str = str(user_info_vs.get("id") or "")
-                    _tenant_id_vs = derive_tenant_uuid(platform="slack", workspace_id=_team_id_vs)
-
-                    async def _run_purge() -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_team_id_vs)
-                        if wc is not None:
-                            await run_purge_and_update(
-                                self.runtime,
-                                wc,
-                                account_id=_account_id,
-                                tenant_id=_tenant_id_vs,
-                                platform_user_id=_user_id_vs,
-                                view_id=_view_id,
-                            )
-
-                    self._spawn(_run_purge())
-            elif cb_id == "routines__create":
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _rc_decision = evaluate_routines_create_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_rc_decision.response_payload,
-                        )
-                    )
-                )
-                if _rc_decision.proceed:
-                    _rc_team_info: dict[str, Any] = payload.get("team") or {}
-                    _rc_team_id: str = str(_rc_team_info.get("id") or "")
-                    _rc_user_info: dict[str, Any] = payload.get("user") or {}
-                    _rc_user_id: str = str(_rc_user_info.get("id") or "")
-                    _rc_view_info: dict[str, Any] = payload.get("view") or {}
-                    # view_submission payloads carry no top-level "channel" — the
-                    # invoking channel lives in the view's private_metadata.
-                    _rc_meta = decode_private_metadata(
-                        str(_rc_view_info.get("private_metadata") or "")
-                    )
-                    _rc_channel_id: str = str(_rc_meta.get("channel_id") or "")
-                    _rc_extra: dict[str, Any] = _rc_decision.extra
-
-                    async def _run_routines_create_submission(
-                        *,
-                        _t: str = _rc_team_id,
-                        _u: str = _rc_user_id,
-                        _c: str = _rc_channel_id,
-                        _e: dict[str, Any] = _rc_extra,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is None:
-                            return
-                        await run_routines_create_submission(
-                            self.runtime,
-                            wc,
-                            team_id=_t,
-                            user_id=_u,
-                            channel_id=_c,
-                            extra=_e,
-                        )
-
-                    self._spawn(_run_routines_create_submission())
-            elif cb_id == "routines__delete_confirm":
-                # No form fields to validate — ack empty to pop the confirm modal
-                # back to the panel, then delete + refresh in the background.
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                _rd_team_info: dict[str, Any] = payload.get("team") or {}
-                _rd_team_id: str = str(_rd_team_info.get("id") or "")
-                _rd_user_info: dict[str, Any] = payload.get("user") or {}
-                _rd_user_id: str = str(_rd_user_info.get("id") or "")
-                _rd_view_info: dict[str, Any] = payload.get("view") or {}
-                _rd_meta = decode_private_metadata(str(_rd_view_info.get("private_metadata") or ""))
-                _rd_channel_id: str = str(_rd_meta.get("channel_id") or "")
-                _rd_routine_id: str = str(_rd_meta.get("routine_id") or "")
-                _rd_root_view_id: str = str(_rd_meta.get("root_view_id") or "")
-
-                async def _run_routines_delete_submission(
-                    *,
-                    _t: str = _rd_team_id,
-                    _u: str = _rd_user_id,
-                    _c: str = _rd_channel_id,
-                    _r: str = _rd_routine_id,
-                    _v: str = _rd_root_view_id,
-                ) -> None:
-                    wc = await resolve_web_client(self.runtime, team_id=_t)
-                    if wc is None:
-                        return
-                    await run_routines_delete_submission(
-                        self.runtime,
-                        wc,
-                        team_id=_t,
-                        user_id=_u,
-                        channel_id=_c,
-                        routine_id=_r,
-                        root_view_id=_v,
-                    )
-
-                self._spawn(_run_routines_delete_submission())
-            elif cb_id == "agent_setup__new_agent":
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _as_decision = evaluate_new_agent_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_as_decision.response_payload,
-                        )
-                    )
-                )
-                if _as_decision.proceed and _as_decision.panel_meta is not None:
-                    _as_team_info: dict[str, Any] = payload.get("team") or {}
-                    _as_team_id: str = str(_as_team_info.get("id") or "")
-                    _as_user_info: dict[str, Any] = payload.get("user") or {}
-                    _as_user_id: str = str(_as_user_info.get("id") or "")
-                    _as_view_info: dict[str, Any] = payload.get("view") or {}
-                    _as_view_id: str = str(_as_view_info.get("id") or "")
-                    # view_submission payloads carry no top-level "channel" — the
-                    # invoking channel lives in the view's metadata, so success
-                    # and refusal ephemerals reach a real channel rather than ""
-                    # (channel_not_found).
-                    _as_panel_meta = _as_decision.panel_meta
-                    _as_channel_id: str = _as_panel_meta.channel_id
-                    _as_extra: dict[str, Any] = _as_decision.extra
-
-                    async def _run_agent_setup_submission(
-                        *,
-                        _t: str = _as_team_id,
-                        _u: str = _as_user_id,
-                        _c: str = _as_channel_id,
-                        _v: str = _as_view_id,
-                        _e: dict[str, Any] = _as_extra,
-                        _pm: PanelMetadata = _as_panel_meta,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is None:
-                            return
-                        await run_new_agent_submission(
-                            self.runtime,
-                            wc,
-                            team_id=_t,
-                            user_id=_u,
-                            channel_id=_c,
-                            view_id=_v,
-                            meta=_pm,
-                            name=str(_e.get("name") or ""),
-                            purpose=str(_e["purpose"]) if _e.get("purpose") else None,
-                            model=str(_e.get("model") or ""),
-                        )
-
-                    self._spawn(_run_agent_setup_submission())
-            elif cb_id.startswith("credential_request__"):
-                # Pure pre-ack evaluation (as feedback/agent_setup).
-                _cred_decision = evaluate_credential_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(
-                        envelope_id=req.envelope_id,
-                        payload=_cred_decision.response_payload,
-                    )
-                )
-                if _cred_decision.proceed:
-                    cred_team: dict[str, Any] = payload.get("team") or {}
-                    cred_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_credential_submission(
-                        _d: CredentialSubmissionDecision = _cred_decision,
-                        _team: str = str(cred_team.get("id") or ""),
-                        _user: str = str(cred_user.get("id") or ""),
-                    ) -> None:
-                        async def _dispatch_continuations() -> None:
-                            """Run whatever the just-saved value unblocked.
-
-                            Addressed from the request row, never from the
-                            form: the modal carries routing handles only, and
-                            the thread that is waiting is the one the request
-                            was minted in, which may not be where the form
-                            was submitted from.
-                            """
-                            async with self.runtime.sessionmaker() as _session:
-                                _row = await peek_credential_request(_session, token=_d.token)
-                            if _row is None or _row.origin_thread_id is None:
-                                return
-                            _client = await resolve_web_client(self.runtime, team_id=_team)
-                            if _client is None:
-                                return
-                            await self.dispatch_continuations_in_thread(
-                                web_client=_client,
-                                tenant_id=_row.tenant_id,
-                                channel=_row.parent_channel_id or _row.channel_id,
-                                thread_id=_row.origin_thread_id,
-                                account_id=_row.account_id,
-                                team_id=_team,
-                            )
-
-                        common: dict[str, Any] = {
-                            "team_id": _team,
-                            "user_id": _user,
-                            "channel_id": _d.channel_id,
-                            "message_ts": _d.message_ts,
-                            "token": _d.token,
-                            "dispatch_continuations": _dispatch_continuations,
-                        }
-                        if _d.kind == "env":
-                            await run_env_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        elif _d.kind == "env_file":
-                            await run_env_file_credential_submission(
-                                self.runtime, file_id=_d.file_id or "", **common
-                            )
-                        elif _d.kind == "mcp":
-                            await run_mcp_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        elif _d.kind == "skill_repo":
-                            await run_skill_repo_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        elif _d.kind == "repo":
-                            await run_repo_bind_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        else:
-                            log.info("slack.on_request.unknown_credential_kind", kind=_d.kind)
-
-                    self._spawn(_run_credential_submission())
-            elif cb_id == REDEEM_CALLBACK_ID:
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _pr_decision = evaluate_redeem_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_pr_decision.response_payload,
-                        )
-                    )
-                )
-                if _pr_decision.proceed:
-                    _pr_team_info: dict[str, Any] = payload.get("team") or {}
-                    _pr_user_info: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_redeem(
-                        *,
-                        _t: str = str(_pr_team_info.get("id") or ""),
-                        _u: str = str(_pr_user_info.get("id") or ""),
-                        _d: RedeemDecision = _pr_decision,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_redeem_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, decision=_d
-                            )
-
-                    self._spawn(_run_redeem())
-            elif cb_id == CALLBACK_CHANNEL_SKILLS:
-                _cs = evaluate_channel_skills_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                if _cs is not None:
-                    _cs_team: dict[str, Any] = payload.get("team") or {}
-                    _cs_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_channel_skills(
-                        *,
-                        _t: str = str(_cs_team.get("id") or ""),
-                        _u: str = str(_cs_user.get("id") or ""),
-                        _s: ChannelSkillsSubmission = _cs,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_channel_skills_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
-                            )
-
-                    self._spawn(_run_channel_skills())
-            elif cb_id == CALLBACK_OPERATOR_MINT:
-                # Pure evaluate, then an empty ack closes the form; the token
-                # arrives as an ephemeral and the routing view refreshes.
-                _ot = evaluate_operator_token_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                if _ot is not None:
-                    _ot_team: dict[str, Any] = payload.get("team") or {}
-                    _ot_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_operator_token(
-                        *,
-                        _t: str = str(_ot_team.get("id") or ""),
-                        _u: str = str(_ot_user.get("id") or ""),
-                        _s: OperatorTokenSubmission = _ot,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_operator_token_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
-                            )
-
-                    self._spawn(_run_operator_token())
-            elif cb_id == CALLBACK_ADD_SKILL:
-                # Pure evaluate, off the loop: errors, a fresh preview, or close and add.
-                _as = await asyncio.to_thread(evaluate_add_skill_submission, payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_as.response_payload)
-                )
-                if _as.proceed:
-                    _as_team: dict[str, Any] = payload.get("team") or {}
-                    _as_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_add_skill(
-                        *,
-                        _t: str = str(_as_team.get("id") or ""),
-                        _u: str = str(_as_user.get("id") or ""),
-                        _d: AddSkillDecision = _as,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_add_skill_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, decision=_d
-                            )
-
-                    self._spawn(_run_add_skill())
-            elif cb_id == CALLBACK_AVATAR_UPLOAD:
-                await client.send_socket_mode_response(
-                    SocketModeResponse(
-                        envelope_id=req.envelope_id,
-                        payload=evaluate_avatar_submission(payload),
-                    )
-                )
-            elif cb_id == "feedback_text":
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _fb_decision = evaluate_feedback_text_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_fb_decision.response_payload,
-                        )
-                    )
-                )
-                if _fb_decision.proceed:
-                    _fb_team_info: dict[str, Any] = payload.get("team") or {}
-                    _fb_user_info: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_feedback_text(
-                        *,
-                        _t: str = str(_fb_team_info.get("id") or ""),
-                        _u: str = str(_fb_user_info.get("id") or ""),
-                        _d: FeedbackTextDecision = _fb_decision,
-                    ) -> None:
-                        await run_feedback_text_submission(
-                            self.runtime, team_id=_t, user_id=_u, decision=_d
-                        )
-
-                    self._spawn(_run_feedback_text())
-            elif cb_id == SUPPORT_CALLBACK_ID:
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _sup = evaluate_support_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_sup.response_payload)
-                )
-                if _sup.proceed:
-                    self._spawn(run_support_submission(self.runtime, _sup))
-            else:
-                # Unknown view_submission callback_id — log and ack empty.
+            # Each submit handler is pure before the ack (which may carry its
+            # response_action payload); any I/O runs in the spawned job after it.
+            submit = self._view_submissions.get(cb_id)
+            if submit is None and cb_id.startswith("credential_request__"):
+                submit = self._submit_credential
+            ack_payload: dict[str, Any] | None = None
+            followup: _SubmissionJob | None = None
+            if submit is None:
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
+            else:
+                ack_payload, followup = await submit(payload)
+            await client.send_socket_mode_response(
+                SocketModeResponse(envelope_id=req.envelope_id, payload=ack_payload)
+            )
+            if followup is not None:
+                self._spawn(followup())
             return  # view_submission fully handled
 
         # ACK FIRST for all non-view_submission envelope types.
@@ -1402,6 +1353,12 @@ class SlackApp:
                     # Slack did not say whose workspace the clicker is in:
                     # users.info decides before anything runs.
                     self._spawn(self._verify_then_route_block_action(payload, action_id))
+            elif (
+                payload.get("type") == "message_action"
+                and payload.get("callback_id") == THREAD_MODEL_SHORTCUT_ID
+            ):
+                # A shortcut is the host's, like every control but the allowlisted ones.
+                self._spawn(self._gated_shortcut(payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs.
@@ -1540,6 +1497,14 @@ class SlackApp:
             self._spawn(handle_routine_action(self.runtime, payload))
         elif is_settings_action(action_id):
             self._spawn(handle_settings_change(self.runtime, payload))
+        elif action_id in THREAD_MODEL_ACTION_IDS:
+            handler = {
+                "thread_model_pick": handle_thread_model_pick,
+                "thread_model_confirm": handle_thread_model_confirm,
+            }.get(action_id, handle_thread_model_cancel)
+            self._spawn(handler(self.runtime, payload))
+        elif action_id == DM_PICK_ACTION_ID:
+            self._spawn(handle_dm_agent_pick(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
@@ -1580,10 +1545,16 @@ class SlackApp:
             self._spawn(handle_feedback_details_click(self.runtime, payload))
         elif action_id == ASK_HUMAN_ACTION_ID:
             self._spawn(handle_ask_human_click(self.runtime, payload))
+        elif action_id == OPTION_ACTION_ID:
+            self._spawn(handle_option_pick(self.runtime, payload))
+        elif action_id in (SETTLE_SET_ACTION_ID, SETTLE_ACCEPT_ACTION_ID, SETTLE_DECLINE_ACTION_ID):
+            self._spawn(handle_settle_click(self.runtime, payload))
         elif action_id.startswith(PROVIDER_ACTION_PREFIX):
             self._spawn(self._provider_actions.handle_click(payload))
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
             self._spawn(self._confirmations.handle_click(payload))
+        elif is_own_card_action(action_id):
+            self._spawn(handle_own_card_click(self.runtime, payload))
         elif action_id == HAND_OVER_ACTION_ID:
             self._spawn(handle_hand_over_click(self.runtime, payload, app=self))
 
@@ -1647,6 +1618,17 @@ class SlackApp:
             self._route_block_action(payload, action_id)
             return
         log.info("slack.on_request.unverified_block_action_refused", check=check)
+        await self._refuse_external_click(
+            payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
+        )
+
+    async def _gated_shortcut(self, payload: dict[str, Any]) -> None:
+        """Run the thread model shortcut for a verified host member; anyone else is refused."""
+        check = await self._submitter_check(payload)
+        if check == "member":
+            await handle_thread_model_shortcut(self.runtime, payload)
+            return
+        log.info("slack.on_request.unverified_shortcut_refused", check=check)
         await self._refuse_external_click(
             payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
         )
@@ -1944,6 +1926,7 @@ class SlackApp:
                 event_ts=event_ts,
                 request_id=request_id,
                 exc_info=exc,
+                causes=backend_refusal_causes(exc),
             )
             capture_exception_with_scope(exc)
             # Before the per-event client exists there is no token to post
@@ -2236,6 +2219,7 @@ class SlackApp:
                     thread_id=thread_id,
                     team_id=team_id,
                     exc_info=exc,
+                    causes=backend_refusal_causes(exc),
                 )
                 with contextlib.suppress(SlackApiError):
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
@@ -2589,8 +2573,8 @@ class SlackApp:
         is_admin = admission.is_admin
 
         agent = admission.agent
-        _lc_agent_name: str = agent.name
-        _lc_model_id: str = agent.model.id
+        _lc_agent_name: str = admission.display_name(agent.name)
+        _lc_model_id: str = shown_model(admission).id
         turn_identity: AgentIdentity | None = None
         try:
             async with self.runtime.sessionmaker.begin() as identity_session:
@@ -2598,6 +2582,7 @@ class SlackApp:
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
+                    display_name=_lc_agent_name,
                     is_builtin=is_builtin_agent(
                         name=agent.name,
                         metadata=agent.metadata,
@@ -2609,7 +2594,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -2634,8 +2623,7 @@ class SlackApp:
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(admission),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support)
-            and admission.feature_on("support_escalation"),
+            ask_human=admission.feature_on("support_escalation"),
             vote_buttons=admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
@@ -2778,7 +2766,9 @@ class SlackApp:
             # run_prepared_turn fail immediately at its first await with a
             # ceiling TurnError. Bounding the interstitial itself is separate,
             # deferred work.
-            turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+            turn_deadline_at = turn_deadline(
+                now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s
+            )
 
             # --- Stage two: bind_session (find-or-create, mapping write,
             # recorder binding) -- bind_session(). As on Discord,
@@ -2847,6 +2837,7 @@ class SlackApp:
                             self.runtime.anthropic,
                             error.source_agent_id,
                             scope=resource_scope(tenant_id=str(tenant_id)),
+                            records=self.runtime.sessionmaker,
                         )
                         owner_name = owner_agent.name
                 except (anthropic.APIStatusError, ScopeViolation):
@@ -2909,6 +2900,7 @@ class SlackApp:
                         active_turn_message_id=lifecycle.status_ts,
                         active_turn_channel_id=channel,
                         now=datetime.now(UTC),
+                        deadline=turn_deadline_at,
                     )
                     await _at_session.commit()
                 _marker_mapping_ids.add(prepared.mapping_id)
@@ -2932,15 +2924,11 @@ class SlackApp:
                     thread_id=thread_id,
                     account_id=admission.account_id,
                 )
-                _live_config = (
-                    None if _live_row_for_keys is None else _live_row_for_keys.effective_config
-                )
-                _env_sha256 = None if _live_config is None else _live_config.env_sha256
                 key_names = await list_mounted_key_names(
                     _keys_session,
                     tenant_id=tenant_id,
                     agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-                    env_sha256=_env_sha256,
+                    env_sha256=answering_env_sha256(prepared, _live_row_for_keys),
                 )
 
             # --- Build user message ---
@@ -3096,8 +3084,7 @@ class SlackApp:
                     sessionmaker=self.runtime.sessionmaker,
                     reply_people_cap=self._reply_people_cap(admission),
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                    ask_human=slack_support_enabled(self.runtime.settings.support)
-                    and admission.feature_on("support_escalation"),
+                    ask_human=admission.feature_on("support_escalation"),
                     vote_buttons=admission.shown("message_feedback", "slack"),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
@@ -3319,10 +3306,6 @@ class SlackApp:
                 thread_id=thread_id,
                 team_id=team_id,
                 requester_user_id=author_id,
-                selfhosted=(
-                    admission.backend_revision is not None
-                    and admission.backend_revision.backend == "selfhosted"
-                ),
             )
         finally:
             # Bookkeeping only -- see the comment above the try. Deregister
@@ -3507,7 +3490,9 @@ class SlackApp:
             admitted_name=follow_admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        follow_deadline = turn_deadline(now=datetime.now(UTC))
+        follow_deadline = turn_deadline(
+            now=datetime.now(UTC), ceiling_s=follow_admission.turn_ceiling_s
+        )
         follow_prepared = await bind_session(
             self.runtime.turn_deps,
             follow_admission,
@@ -3537,6 +3522,7 @@ class SlackApp:
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=follow_admission.agent.name,
+                    display_name=follow_admission.display_name(follow_admission.agent.name),
                     is_builtin=is_builtin_agent(
                         name=follow_admission.agent.name,
                         metadata=follow_admission.agent.metadata,
@@ -3548,7 +3534,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(
@@ -3556,8 +3546,7 @@ class SlackApp:
                 attended=row.reason != "watch_fired" and continuation_attended(row),
             ),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support)
-            and follow_admission.feature_on("support_escalation"),
+            ask_human=follow_admission.feature_on("support_escalation"),
             vote_buttons=follow_admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
@@ -3570,8 +3559,8 @@ class SlackApp:
             requester_is_admin=follow_admission.is_admin,
             requester_foreign=standing.foreign,
             notify_on_completion=follow_admission.shown("completion_pings", "slack"),
-            agent_name=follow_admission.agent.name,
-            model_id=follow_admission.agent.model.id,
+            agent_name=follow_admission.display_name(follow_admission.agent.name),
+            model_id=shown_model(follow_admission).id,
             markup=self.runtime.turn_deps.markup,
             register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
             deregister=functools.partial(self._deregister_cancel, team_id=team_id, channel=channel),
@@ -3611,6 +3600,7 @@ class SlackApp:
                     active_turn_message_id=follow_lifecycle.status_ts,
                     active_turn_channel_id=channel,
                     now=datetime.now(UTC),
+                    deadline=follow_deadline,
                 )
                 await _at_session.commit()
 
@@ -3659,8 +3649,7 @@ class SlackApp:
                     attended=row.reason != "watch_fired" and continuation_attended(row),
                 ),
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                ask_human=slack_support_enabled(self.runtime.settings.support)
-                and follow_admission.feature_on("support_escalation"),
+                ask_human=follow_admission.feature_on("support_escalation"),
                 vote_buttons=follow_admission.shown("message_feedback", "slack"),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
@@ -3673,8 +3662,8 @@ class SlackApp:
                 requester_is_admin=follow_admission.is_admin,
                 requester_foreign=standing.foreign,
                 notify_on_completion=follow_admission.shown("completion_pings", "slack"),
-                agent_name=follow_admission.agent.name,
-                model_id=follow_admission.agent.model.id,
+                agent_name=follow_admission.display_name(follow_admission.agent.name),
+                model_id=shown_model(follow_admission).id,
                 markup=self.runtime.turn_deps.markup,
                 register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
                 deregister=functools.partial(
@@ -3707,26 +3696,42 @@ class SlackApp:
             return new_lifecycle
 
         try:
-            async with turn_origin(
-                self.runtime.sessionmaker,
-                attended=continuation_attended(row),
-                tenant_id=tenant_id,
-                account_id=follow_admission.account_id,
-                platform="slack",
-                parent_channel_id=channel,
-                thread_id=thread_id,
-                responder_ma_agent_id=str(follow_admission.agent.id),
-                responder_name=follow_admission.config.agent_name or follow_admission.agent.name,
-                configuration_target_ma_agent_id=(
-                    follow_admission.config.configuration_target_ma_agent_id
+            async with (
+                turn_origin(
+                    self.runtime.sessionmaker,
+                    attended=continuation_attended(row),
+                    tenant_id=tenant_id,
+                    account_id=follow_admission.account_id,
+                    platform="slack",
+                    parent_channel_id=channel,
+                    thread_id=thread_id,
+                    responder_ma_agent_id=str(follow_admission.agent.id),
+                    responder_name=follow_admission.config.agent_name
+                    or follow_admission.agent.name,
+                    configuration_target_ma_agent_id=(
+                        follow_admission.config.configuration_target_ma_agent_id
+                    ),
+                    configuration_target_name=(follow_admission.config.configuration_target_name),
+                    role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
+                    sender_foreign=follow_admission.hold is not None
+                    and follow_admission.hold.client,
+                    shared_channel=follow_admission.shared_channel,
+                    is_setup=follow_admission.config.thread_binding_kind == "setup",
+                    platform_channel_id=channel,
+                ) as follow_origin,
+                send_prefix(
+                    wake_prefix(
+                        self.runtime.sessionmaker,
+                        self.runtime.settings.mcp,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        thread_id=thread_id,
+                        target_ma_agent_id=row.target_ma_agent_id,
+                    )
+                    if row.reason == "confirmed_call"
+                    else None
                 ),
-                configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
-                sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
-                shared_channel=follow_admission.shared_channel,
-                is_setup=follow_admission.config.thread_binding_kind == "setup",
-                platform_channel_id=channel,
-            ) as follow_origin:
+            ):
                 await run_prepared_turn(
                     self.runtime.turn_deps,
                     follow_prepared,
@@ -3735,6 +3740,7 @@ class SlackApp:
                     thread_id=thread_id,
                     external_user_id=row.requester_external_user_id,
                     watch_row=row if row.reason == "watch_fired" else None,
+                    continues=row,
                     origin="handoff" if handoff_notice is not None else "chat",
                     attended=False if row.reason == "watch_fired" else continuation_attended(row),
                     user_message=(
@@ -3923,12 +3929,14 @@ class SlackApp:
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.
 
-        Sets draining=True so new mentions are rejected, waits for acked
+        Sets draining=True so new mentions are rejected, ends every direct
+        message burst's wait so it is answered now, waits for acked
         mention handlers and ``_processing`` to drain (or the grace window to
         elapse), then closes the WebSocket client. Stays within the
         deployment's 60s kill timeout.
         """
         self.draining = True
+        self.runtime.dm_bursts.stop()
         log.info(
             "slack.draining",
             inflight_threads=len(self._processing),

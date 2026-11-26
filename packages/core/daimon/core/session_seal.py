@@ -15,11 +15,13 @@ seal can't be read, the successor is sealed to its own thread.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from typing import cast
 
 import anthropic as anthropic_pkg
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.authz import SessionFacts
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
@@ -30,11 +32,13 @@ from daimon.core.session_ports_compat import retrieve_session_record
 from mux.contracts.ids import Scope
 
 __all__ = [
+    "child_seal_ids",
     "format_seal_ids",
     "inherited_seal_ids",
     "is_private_conversation",
     "origin_stamp",
     "seal_ids",
+    "seal_ids_from_value",
     "session_facts",
 ]
 
@@ -67,6 +71,23 @@ def seal_ids(metadata: Mapping[str, str | None] | None) -> frozenset[str]:
         else:
             ids.add(part)
     return frozenset(ids) if ids else frozenset({_UNMATCHABLE})
+
+
+def seal_ids_from_value(value: str) -> frozenset[str]:
+    """The ids a `format_seal_ids` value names (credential metadata holds strings only)."""
+    return seal_ids({MA_METADATA_KEY_SEALED: value})
+
+
+def child_seal_ids(
+    parent_metadata: Mapping[str, str | None] | None, turn_seal: Collection[str] = ()
+) -> frozenset[str]:
+    """The seal a session a turn starts must carry.
+
+    A Managed Agents turn's seal is on its session's metadata. A provider turn
+    has no such session; its seals ride its credential (`AuthIdentity.seal_ids`,
+    passed as `turn_seal`), so a child started from either is sealed alike.
+    """
+    return seal_ids(parent_metadata) | frozenset(turn_seal)
 
 
 def is_private_conversation(conversation_id: str) -> bool:
@@ -106,6 +127,24 @@ def format_seal_ids(ids: Collection[str]) -> str:
     return _SEPARATOR.join(sorted(ids))
 
 
+SEAL_CLAIM = "seal_ids"
+"""A provider turn credential's signed seals: the ids its turn runs sealed under."""
+
+
+def seal_claim(ids: Collection[str]) -> list[str]:
+    return sorted(ids)
+
+
+def parse_seal_claim(value: object) -> frozenset[str] | None:
+    """The signed seal ids, or None when malformed (absent reads as no seal)."""
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list) or not value:
+        return None
+    parts = [part for part in cast("list[object]", value) if isinstance(part, str) and part]
+    return frozenset(parts) if len(parts) == len(cast("list[object]", value)) else None
+
+
 def origin_stamp(
     *, channel_id: str, thread_id: str | None, seal: Collection[str] = ()
 ) -> dict[str, str]:
@@ -142,6 +181,7 @@ async def inherited_seal_ids(
             "session_seal.predecessor_unreadable",
             predecessor_session_id=predecessor_session_id,
             error=type(error).__name__,
+            causes=backend_refusal_causes(error),
         )
         return frozenset({own_thread_id})
     metadata = predecessor.metadata or {}

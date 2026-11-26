@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -79,14 +80,16 @@ def test_a_stored_row_costs_what_its_settlement_charged(
     )
     limit = PROVIDER_PRICED_INPUT_LIMITS[model]
     charged = provider_cost_of(observation, price, infrastructure_usd=Decimal(0))
-    shown = provider_cost_of_bucket(tokens, price, long_prompt=limit is not None and prompt > limit)
+    # A turn total is settled at the base rates; only one known request takes the tier.
+    long_prompt = observation.grain == "model_request" and limit is not None and prompt > limit
+    shown = provider_cost_of_bucket(tokens, price, long_prompt=long_prompt)
     assert shown == charged, f"{model} {counts}: display must equal the settled debit"
 
 
 def test_a_row_above_an_unpriced_limit_has_no_cost() -> None:
-    """Luna has no long-context multipliers; settlement refuses such a turn, so does display."""
-    price = _price("gpt-6-luna")
-    observation = _observation(price, input_tokens=300_000)
+    """A tariff with no long-context multipliers refuses such a request, and so does display."""
+    price = replace(_price("gpt-6-luna"), long_context_multipliers=None)
+    observation = _observation(price, input_tokens=300_000, grain="model_request")
     tokens = provider_usage_tokens(observation, price)
     assert tokens is not None
     assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) is None
@@ -95,15 +98,15 @@ def test_a_row_above_an_unpriced_limit_has_no_cost() -> None:
     )
 
 
-def test_provider_price_on_follows_each_tariffs_dates() -> None:
-    assert provider_price_on("gemini-4-argon", date(2026, 10, 21)) is None, (
+@pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-4-carbon"])
+def test_provider_price_on_follows_each_tariffs_dates(model: str) -> None:
+    assert provider_price_on(model, date(2026, 10, 21)) is None, (
         "before its checked date a tariff does not apply"
     )
-    argon = provider_price_on("gemini-4-argon", date(2026, 11, 30))
-    assert argon is not None and argon.input == Decimal("2.00"), "last day of the intro tariff"
-    assert provider_price_on("gemini-4-argon", date(2026, 12, 1)) is None, (
-        "the intro tariff ends at valid_before"
-    )
+    intro = provider_price_on(model, date(2026, 11, 30))
+    assert intro is not None and intro.input == Decimal("2.00"), "last day of the intro tariff"
+    standard = provider_price_on(model, date(2026, 12, 1))
+    assert standard is not None and standard.input == Decimal("4.00"), "the standard tariff starts"
     assert provider_price_on("claude-opus-4-7", ON) is None, "list-priced models are not here"
 
 

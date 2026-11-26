@@ -34,8 +34,8 @@ from daimon.core.stores.platform_names import list_channel_names
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
+from daimon.testing.slack_notices import shown_text
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
 from slack_sdk.errors import SlackApiError
@@ -78,7 +78,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
     responder = BetaManagedAgentsAgent(
         id="agent_daimon",
         type="agent",
-        name="daimon",
+        name="default",
         version=1,
         model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
         system=None,
@@ -87,7 +87,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
         mcp_servers=[],
         metadata={
             "daimon_tenant": str(tenant.id),
-            "daimon_name": "daimon",
+            "daimon_name": "default",
             "daimon_managed": "true",
         },
         created_at=now,

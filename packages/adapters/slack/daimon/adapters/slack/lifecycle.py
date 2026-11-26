@@ -43,7 +43,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import aiohttp
@@ -69,7 +69,6 @@ from daimon.adapters.slack.mrkdwn import (
     markdown_block_fallback,
     seal_markdown_block,
 )
-from daimon.adapters.slack.progress_receipt import InitialProgressReceipt
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
@@ -78,12 +77,15 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.cost_footer import cost_footer_shown
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.mentions import mentioned_user_ids, untag
 from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE, turn_tally_key
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.stores.reach_tallies import approved_people
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
@@ -199,7 +201,6 @@ class SlackTurnLifecycle(OutputGate):
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: UUID | None = None,
         budget_channel_id: str | None = None,
-        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
         vote_buttons: bool = True,
@@ -212,12 +213,14 @@ class SlackTurnLifecycle(OutputGate):
         self._reply_people_cap = reply_people_cap
         self._trigger_ts = trigger_ts
         # Whether the final answer offers Ask a human beside the vote buttons
-        # (`support_escalation.slack_support_enabled`).
+        # (the `support_escalation` feature at this place).
         self._ask_human = ask_human
         # `message_feedback` at this place: the 👍/👎 buttons under a final answer.
         self._vote_buttons = vote_buttons
         self._notify_on_completion = notify_on_completion
         self._answer_ts: str | None = None
+        # Each post carrying the summary line: ts, text, blocks, the line's index, its clock.
+        self._summary_posts: list[tuple[str, str, list[dict[str, Any]], int, float]] = []
         self._render_tables = render_tables
         self._client = client
         self._post_as_agent = self.guarded_output(post_as_agent)
@@ -228,7 +231,6 @@ class SlackTurnLifecycle(OutputGate):
         self._ma_agent_id = ma_agent_id
         self._intent_id = intent_id
         self._budget_channel_id = budget_channel_id
-        self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
         self._agent_name = agent_name
@@ -254,7 +256,6 @@ class SlackTurnLifecycle(OutputGate):
         self._state: State = State(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
-            platform="slack",
             header_customized=header_customized,
             started_at=self._clock(),
         )
@@ -287,6 +288,10 @@ class SlackTurnLifecycle(OutputGate):
             timestamp=self._trigger_ts,
             name="white_check_mark",
         )
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
+        """Tell the person, in a card apart from the reply, that admins can read this."""
+        await self.post_notice(notice.text, neutral=True)
 
     async def _clear_acknowledgment(self) -> None:
         if self._trigger_ts is None:
@@ -375,7 +380,7 @@ class SlackTurnLifecycle(OutputGate):
         card, before its response supplies the message ts. Once the response
         returns, the ts is registered as a recovery and legacy lookup key.
         """
-        await self._maybe_flush(initial=True)
+        await self._maybe_flush()
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -410,7 +415,7 @@ class SlackTurnLifecycle(OutputGate):
                 else dataclasses.replace(self._state, text_preview=None)
             )
 
-    async def _maybe_flush(self, *, initial: bool = False) -> None:
+    async def _maybe_flush(self) -> None:
         """Post or update the status message, subject to debounce. No-op after terminal."""
         if self._terminal:
             return
@@ -427,11 +432,6 @@ class SlackTurnLifecycle(OutputGate):
             cancel_key = self._status_ts
         blocks = await self._untag_blocks(to_blocks(self._state, now=now, cancel_key=cancel_key))
         text = await self._untag(to_fallback_text(self._state, now=now))
-        rendered_json = (
-            json.dumps({"blocks": blocks, "text": text})
-            if initial and self._on_initial_progress is not None
-            else None
-        )
 
         if self._status_ts is None:
             # First flush — immediate, no debounce.
@@ -456,8 +456,6 @@ class SlackTurnLifecycle(OutputGate):
                     self._pending_registered = False
                 raise
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
-            if rendered_json is not None:
-                self._observe_initial_progress(rendered_json, operation="send")
             self._register(self._status_ts, self._cancel, self._author_id)
             # The card is now routable by its message ts. Remove the temporary
             # key promptly so later clicks follow any recovery rebind of that ts.
@@ -476,25 +474,6 @@ class SlackTurnLifecycle(OutputGate):
                 text=text,
             )
             self._last_flush = now
-            if rendered_json is not None:
-                self._observe_initial_progress(rendered_json, operation="edit")
-
-    def _observe_initial_progress(
-        self, rendered_json: str, *, operation: Literal["send", "edit"]
-    ) -> None:
-        if self._on_initial_progress is None:
-            return
-        assert self._status_ts is not None
-        self._on_initial_progress(
-            InitialProgressReceipt(
-                operation=operation,
-                destination_id=self._channel,
-                thread_id=self._thread_ts,
-                message_id=self._status_ts,
-                rendered_json=rendered_json,
-                observed_s=self._clock(),
-            )
-        )
 
     def _apply_usage(self, state: TurnState) -> None:
         """Price accumulated token totals onto the Block Kit state.
@@ -504,8 +483,9 @@ class SlackTurnLifecycle(OutputGate):
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Compatibility counters never become an MA meter: no cost shown.
-            self._state = dataclasses.replace(self._state, cost_str=None)
+            # Compatibility counters never become an MA meter: priced from the observations.
+            cost = LATE_TURN_COSTS.turn_debit(t, markup=self._markup, show=self._show_late_debit)
+            self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
             return
         cost = cost_of_totals(
             state.usage_totals,
@@ -538,6 +518,10 @@ class SlackTurnLifecycle(OutputGate):
             self._register(self._status_ts, self._cancel, self._author_id)
             await self.record_post(self._status_ts)
         else:
+            # A rewritten status card no longer carries the summary a late debit edits.
+            self._summary_posts = [
+                post for post in self._summary_posts if post[0] != self._status_ts
+            ]
             await self.check_output()
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
@@ -687,20 +671,40 @@ class SlackTurnLifecycle(OutputGate):
         whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
+        now = self._clock()
         blocks = await self._untag_blocks(
             to_blocks(
                 self._state,
-                now=self._clock(),
+                now=now,
                 cancel_key=self._cancel_key,
                 answer_visible=answer_visible,
             )
         )
+        summary = len(blocks) - 1
         if feedback and (controls := self._feedback_block()) is not None:
             blocks.append(controls)
         fallback = "Something went wrong. Mention me to try again."
         if self._state.phase is TurnPhase.DONE:
             fallback = "Done."
-        await self._post_or_update(blocks, fallback_text or fallback)
+        text = fallback_text or fallback
+        await self._post_or_update(blocks, text)
+        if not self._state.footer_hidden and self._status_ts is not None:
+            self._summary_posts.append((self._status_ts, text, blocks, summary, now))
+
+    async def _show_late_debit(self, debit: float) -> bool:
+        """Edit a debit priced after the turn ended into each summary line the turn posted."""
+        self._state = dataclasses.replace(self._state, cost_str=format_cost(debit))
+        await self._apply_balance()
+        if self._state.footer_hidden or not self._summary_posts:
+            return False
+        for ts, text, posted, index, now in self._summary_posts:
+            blocks = list(posted)
+            blocks[index] = to_blocks(self._state, now=now)[-1]
+            await self.check_output()
+            await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                channel=self._channel, ts=ts, blocks=blocks, text=text
+            )
+        return True
 
     def _feedback_block(self) -> dict[str, Any] | None:
         """👍/👎 while `message_feedback` is on, plus Ask a human when offered; None for neither."""
@@ -860,9 +864,12 @@ class SlackTurnLifecycle(OutputGate):
                 if index == 0 and mention and block.get("type") == "table":
                     blocks.insert(0, {"type": "markdown", "text": mention})
                     notification_chunk = f"{mention}\n{chunk}"
+                summary_at, summary = None, 0
                 if index == len(deliveries) - 1:
                     # The summary line closes the answer, under its last chunk.
-                    blocks.extend(to_blocks(self._state, now=self._clock(), answer_visible=True))
+                    summary_at = self._clock()
+                    blocks.extend(to_blocks(self._state, now=summary_at, answer_visible=True))
+                    summary = len(blocks) - 1
                     if not cancelled and (controls := self._feedback_block()) is not None:
                         blocks.append(controls)
                 try:
@@ -884,10 +891,36 @@ class SlackTurnLifecycle(OutputGate):
                     if index == 0:
                         self._answer_ts = current_ts
                         surface_replaced = True
+                    if summary_at is not None and current_ts and not self._state.footer_hidden:
+                        self._summary_posts.append(
+                            (
+                                current_ts,
+                                _notification_text(notification_chunk),
+                                blocks,
+                                summary,
+                                summary_at,
+                            )
+                        )
                 except SlackApiError as exc:
                     if block.get("type") != "table":
                         raise
-                    log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+                    log.warning(
+                        "turn.table_delivery_failed",
+                        tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
+                        platform="slack",
+                        error_type=type(exc).__name__,
+                    )
+                    if self._sessionmaker is not None:
+                        report_ops_event(
+                            self._sessionmaker,
+                            OpsEvent(
+                                "delivery.output_failed",
+                                self._tenant_id,
+                                reason=type(exc).__name__,
+                                platform="slack",
+                            ),
+                            logged=False,
+                        )
                     # The renderer retains escaped original Markdown alongside
                     # the native table. Avoid double-escaping it on retry, but
                     # seal each part: a split can move code into prose.

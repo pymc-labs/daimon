@@ -27,12 +27,12 @@ from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -57,12 +57,10 @@ def _runtime(
     payload.update(settings_overrides or {})
     settings = Settings.model_validate(payload)
     cache = new_resolver_cache()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=default,
         resolver_cache=cache,
         turn_deps=build_turn_deps(
@@ -243,7 +241,7 @@ def _guild(
     threads: tuple[dict[str, Any], ...] = (),
     uncached_role_ids: tuple[int, ...] = (),
 ) -> discord.Guild:
-    """A cached guild where Daimon holds the 'insighta client' and 'Daimon' roles.
+    """A cached guild where Daimon holds the 'acme client' and 'Daimon' roles.
 
     `uncached_role_ids` are roles Daimon holds that the guild's role cache lacks.
     """
@@ -266,7 +264,7 @@ def _guild(
                 "owner_id": 1,
                 "roles": [
                     _role(GUILD_ID, "@everyone", position=0, permissions=everyone.value),
-                    _role(CLIENT_ROLE_ID, "insighta client", position=2),
+                    _role(CLIENT_ROLE_ID, "acme client", position=2),
                     _role(BOT_ROLE_ID, "Daimon", position=1),
                 ],
                 "members": [
@@ -309,15 +307,15 @@ def _guild_panel(guild: discord.Guild, *, channel_id: int = CHANNEL_ID) -> Magic
 
 
 def test_a_role_overwrite_that_denies_webhooks_names_the_channel_and_role() -> None:
-    guild = _guild(_channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
+    guild = _guild(_channel(CHANNEL_ID, "acme-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
 
     assert webhook_blocks(guild, [str(CHANNEL_ID)]) == (
         WebhookBlock(
-            channel_name="insighta-client",
+            channel_name="acme-client",
             denied_by="roles",
-            roles=(DenyingRole(id=CLIENT_ROLE_ID, name="insighta client"),),
+            roles=(DenyingRole(id=CLIENT_ROLE_ID, name="acme client"),),
         ),
-    ), "the server grant is undone by the 'insighta client' role's deny in that channel"
+    ), "the server grant is undone by the 'acme client' role's deny in that channel"
 
 
 def test_an_everyone_overwrite_that_denies_webhooks_names_everyone() -> None:
@@ -413,14 +411,14 @@ def test_a_channel_daimon_cannot_see_is_left_out() -> None:
 
 
 def test_a_cached_webhook_does_not_hide_the_denied_permission() -> None:
-    guild = _guild(_channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
+    guild = _guild(_channel(CHANNEL_ID, "acme-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
     post_transport._webhooks[CHANNEL_ID] = {77: MagicMock(spec=discord.Webhook)}  # pyright: ignore[reportPrivateUsage]
     try:
         blocks = webhook_blocks(guild, [str(CHANNEL_ID)])
     finally:
         post_transport._webhooks.pop(CHANNEL_ID, None)  # pyright: ignore[reportPrivateUsage]
 
-    assert [block.channel_name for block in blocks] == ["insighta-client"], (
+    assert [block.channel_name for block in blocks] == ["acme-client"], (
         "the cached webhook still posts, but a restart or a new channel webhook cannot be "
         "found or created, so the permission fact is reported either way"
     )
@@ -428,13 +426,13 @@ def test_a_cached_webhook_does_not_hide_the_denied_permission() -> None:
 
 def test_a_thread_is_checked_through_its_parent_channel() -> None:
     guild = _guild(
-        _channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
+        _channel(CHANNEL_ID, "acme-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
         threads=(_thread(THREAD_ID, CHANNEL_ID),),
     )
 
     blocks = webhook_blocks(guild, [str(THREAD_ID), str(CHANNEL_ID)])
 
-    assert [block.channel_name for block in blocks] == ["insighta-client"], (
+    assert [block.channel_name for block in blocks] == ["acme-client"], (
         "a thread posts through its parent's webhook, and the parent is named once"
     )
 
@@ -498,7 +496,7 @@ async def test_an_admin_panel_in_a_thread_reports_the_parents_blocking_overwrite
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     guild = _guild(
-        _channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
+        _channel(CHANNEL_ID, "acme-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
         threads=(_thread(THREAD_ID, CHANNEL_ID),),
     )
 
@@ -507,9 +505,9 @@ async def test_an_admin_panel_in_a_thread_reports_the_parents_blocking_overwrite
     assert state.webhook_fix_url is None, "the server grants Manage Webhooks"
     assert state.webhook_blocks == (
         WebhookBlock(
-            channel_name="insighta-client",
+            channel_name="acme-client",
             denied_by="roles",
-            roles=(DenyingRole(id=CLIENT_ROLE_ID, name="insighta client"),),
+            roles=(DenyingRole(id=CLIENT_ROLE_ID, name="acme client"),),
         ),
     ), "the panel opened in a thread checks the parent channel"
 
@@ -518,7 +516,7 @@ async def test_a_missing_server_grant_gets_the_link_instead_of_channel_lines(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     guild = _guild(
-        _channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
+        _channel(CHANNEL_ID, "acme-client", _overwrite(CLIENT_ROLE_ID, allow=False)),
         server_grant=False,
     )
 
@@ -541,7 +539,7 @@ async def test_channel_blocks_are_withheld(
     reason: str,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    guild = _guild(_channel(CHANNEL_ID, "insighta-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
+    guild = _guild(_channel(CHANNEL_ID, "acme-client", _overwrite(CLIENT_ROLE_ID, allow=False)))
 
     state = await _panel_state(db_session_factory, guild, enabled=enabled, is_admin=is_admin)
 

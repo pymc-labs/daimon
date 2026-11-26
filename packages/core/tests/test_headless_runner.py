@@ -68,8 +68,8 @@ from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
 from daimon.core.rule_views import RoutineOrigin
-from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.errors import ScopeViolation
@@ -84,7 +84,7 @@ from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
+from .turn_io_support import HeadlessIdentity, TurnIOSpy
 
 _NOW = dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=dt.UTC)
 _SESSION_ID = "ses_test"
@@ -94,28 +94,24 @@ RunTurn = Callable[..., Awaitable[str]]
 
 
 @pytest.fixture
-def run_turn(
-    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
-) -> RunTurn:
-    """`headless_runner.run_turn` on this leg's turn path, for a real tenant and account.
+def run_turn(headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy) -> RunTurn:
+    """`headless_runner.run_turn` for a real tenant and account.
 
     A test overrides any of the three by passing it. Every turn it drives must
-    have used the leg's own turn I/O: a turn that never reached the driver
-    (a refusal, a deadline breach during assembly) is held only to not having
-    used the other leg's I/O.
+    have used mux turn I/O: a turn that never reached the driver (a refusal, a
+    deadline breach during assembly) is held only to not having used any other.
     """
 
     async def bound(**kwargs: Any) -> str:
-        kwargs.setdefault("turn_path", turn_path)
         kwargs.setdefault("tenant_id", headless_identity.tenant_id)
         kwargs.setdefault("account_id", headless_identity.account_id)
         kwargs.setdefault("tool_safety", OPEN_TOOL_SAFETY)
         try:
             tail = await headless_runner.run_turn(**kwargs)
         except BaseException:
-            turn_io_used.assert_matches(turn_path)
+            turn_io_used.assert_matches()
             raise
-        turn_io_used.assert_ran(turn_path)
+        turn_io_used.assert_ran()
         return tail
 
     return bound
@@ -856,53 +852,212 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
     )
 
 
-async def test_run_turn_raises_value_error_when_account_id_missing(
-    run_turn: RunTurn, turn_path: TurnPath
+@pytest.mark.parametrize(
+    ("origin", "signed", "daimon_mcp"),
+    [
+        pytest.param(
+            RoutineOrigin("c1", None, frozenset({"c1"}), "routine:r1", reads_inside=True),
+            ["c1"],
+            True,
+            id="channel-destination",
+        ),
+        pytest.param(
+            RoutineOrigin("c1", "t1", frozenset({"c1", "t1"}), "routine:r1", reads_inside=True),
+            ["c1", "t1"],
+            True,
+            id="thread-destination",
+        ),
+        pytest.param(
+            RoutineOrigin("c1", None, frozenset({"c1"}), "routine:r1"),
+            None,
+            True,
+            id="no-destination-dm-or-other-platform",
+        ),
+        pytest.param(
+            RoutineOrigin("c2", None, frozenset(), "routine:r1", reads_inside=True),
+            None,
+            True,
+            id="open-destination",
+        ),
+        pytest.param(
+            RoutineOrigin("c1", None, frozenset({"c1"}), "routine:r1", reads_inside=True),
+            None,
+            False,
+            id="agent-without-daimon-mcp",
+        ),
+    ],
+)
+async def test_a_routine_into_a_limited_room_signs_that_room_into_its_session_credential(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    run_turn: RunTurn,
+    headless_identity: HeadlessIdentity,
+    origin: RoutineOrigin,
+    signed: list[str] | None,
+    daimon_mcp: bool,
 ) -> None:
-    """When mcp_settings carries both fields but account_id is None,
-    run_turn must raise ValueError with the exact wording from sessions.py.
+    """The unattended run names no turn origin, so the credential its `daimon-mcp` server
+    uses (the session-specific one) is what places it in its room: it signs the seals of a
+    channel or thread destination and no others. The ordinary vault, which holds personal
+    connections, stays the same vault and signs none, and both are mounted. An agent
+    without `daimon-mcp` has no Daimon read tools, so no credential is made for it."""
+    import jwt as pyjwt
+    from daimon.core.mcp_server_url import session_mcp_url
 
-    On the mux path the turn is refused earlier still: it never runs without an
-    authorized account (`headless_runner.run_turn_impl`), so the sessions.py guard
-    is not reached.
-    """
-    # The agent/environment retrieve bridge runs before create_session's
-    # ValueError guard, so those two routes must exist even though no
-    # session-create/events call is expected.
+    account_id, agent_uuid = headless_identity.account_id, uuid.uuid4()
+    public_url = "https://mcp.example.local/mcp"
+    vault_names: dict[str, str] = {}
+    credentials: list[tuple[str, dict[str, Any]]] = []
+    session_bodies: list[dict[str, Any]] = []
     router = MARouter()
-    _register_agent_environment_routes(router)
-    client = build_fake_anthropic(router.dispatch)
 
-    refusal: tuple[type[Exception], str] = (
-        (ValueError, r"^account_id is required when mcp_settings has public_url and jwt_secret$")
-        if turn_path == "legacy"
-        else (ScopeViolation, r"mux headless turns require the authorized tenant/account")
-    )
-    with pytest.raises(refusal[0], match=refusal[1]):
-        await run_turn(
-            anthropic=client,
-            agent_id="agent_x",
-            environment_id="env_x",
-            trigger_message="hi",
-            mcp_settings=McpSettings(
-                jwt_secret=SecretStr("x" * 32),
-                public_url=HttpUrl("https://mcp.example.local/mcp"),
-            ),
-            account_id=None,
-            tool_safety=OPEN_TOOL_SAFETY,
+    def create_vault(request: httpx.Request, match: Any) -> httpx.Response:
+        name = json.loads(request.content)["display_name"]
+        vault_id = f"vlt_{len(vault_names) + 1}"
+        vault_names[vault_id] = name
+        return httpx.Response(
+            200,
+            json={
+                "id": vault_id,
+                "type": "vault",
+                "display_name": name,
+                "metadata": None,
+                "archived_at": None,
+                "created_at": "2026-05-20T00:00:00Z",
+            },
         )
+
+    def create_credential(request: httpx.Request, match: Any) -> httpx.Response:
+        body = json.loads(request.content)
+        credentials.append((match.group(1), body))
+        return httpx.Response(
+            200,
+            json={
+                "id": "vcrd_new",
+                "type": "vault_credential",
+                "vault_id": match.group(1),
+                "metadata": {},
+                "created_at": "2026-05-20T00:00:00Z",
+                "updated_at": "2026-05-20T00:00:00Z",
+                "auth": {"type": "static_bearer", "mcp_server_url": body["auth"]["mcp_server_url"]},
+            },
+        )
+
+    def create_session(request: httpx.Request, match: Any) -> httpx.Response:
+        session_bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_fake_session_json())
+
+    router.add_agent(
+        ma_agent(
+            id="agent_x",
+            name="test-agent",
+            model=_MODEL_ID,
+            created_at=_NOW,
+            mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": public_url}]
+            if daimon_mcp
+            else [],
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "daimon-mcp",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [],
+                }
+            ]
+            if daimon_mcp
+            else [],
+        )
+    )
+    router.add(
+        "GET",
+        r"/v1/vaults",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    router.add("POST", r"/v1/vaults$", create_vault)
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    router.add("POST", r"/v1/vaults/([^/]+)/credentials", create_credential)
+    router.add("POST", r"/v1/sessions$", create_session)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events/stream",
+        lambda _r, _m: sse_response([e.model_dump(mode="json") for e in _idle_events()]),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/[^/]+/events",
+        lambda _r, _m: httpx.Response(200, json={"data": None}),
+    )
+    router.add(
+        "GET",
+        r"/v1/environments/([^/]+)",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_environment(
+                id=m.group(1), name="test-env", created_at=_NOW.isoformat()
+            ).model_dump(mode="json"),
+        ),
+    )
+
+    await run_turn(
+        anthropic=build_fake_anthropic(router.dispatch),
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        account_id=account_id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        origin_place=origin,
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+
+    def claims(body: dict[str, Any]) -> dict[str, Any]:
+        return pyjwt.decode(
+            body["auth"]["token"], "x" * 32, algorithms=["HS256"], options={"verify_exp": False}
+        )
+
+    ordinary = [(v, b) for v, b in credentials if b["auth"]["mcp_server_url"] == public_url]
+    session_url = [
+        (v, b)
+        for v, b in credentials
+        if b["auth"]["mcp_server_url"].startswith(public_url + "?daimon_session=")
+    ]
+    assert len(ordinary) == 1, "the ordinary vault is the same one, with its own credential"
+    assert ":session:" not in vault_names[ordinary[0][0]]
+    assert "seal_ids" not in claims(ordinary[0][1]), "personal connections' vault signs no seals"
+    if not daimon_mcp:
+        assert session_url == [], "no session credential and so no seals for an agent without it"
+        assert session_bodies[0]["vault_ids"] == [ordinary[0][0]]
+        return
+    assert len(session_url) == 1
+    vault_id, body = session_url[0]
+    assert ":session:" in vault_names[vault_id]
+    assert body["auth"]["mcp_server_url"] == session_mcp_url(
+        public_url, vault_names[vault_id].rsplit(":session:", 1)[1]
+    ), "the URL the agent's daimon-mcp server is pointed at"
+    assert claims(body).get("seal_ids") == signed, "only a room destination signs its seals"
+    assert set(session_bodies[0]["vault_ids"]) == {ordinary[0][0], vault_id}, (
+        "both the ordinary and the session-specific vault are mounted"
+    )
 
 
 @pytest.mark.parametrize(
     "identity",
     ["no tenant", "no account", "neither"],
 )
-async def test_a_headless_turn_without_its_identity_runs_on_legacy_and_is_refused_on_mux(
-    identity: str, run_turn: RunTurn, turn_path: TurnPath, turn_io_used: TurnIOSpy
+async def test_a_headless_turn_without_its_identity_is_refused(
+    identity: str, run_turn: RunTurn, turn_io_used: TurnIOSpy
 ) -> None:
-    """The mux refusal for an unauthorized turn stays: no tenant or no account
-    means no session is opened and no turn I/O is built. Legacy keeps running
-    such a turn (a tenantless caller is the legacy host)."""
+    """No tenant or no account means no session is opened and no turn I/O is built."""
     session_create_capture: list[dict[str, Any]] = []
     client = _build_client(_idle_events(), session_create_capture=session_create_capture)
     missing = {
@@ -920,42 +1075,10 @@ async def test_a_headless_turn_without_its_identity_runs_on_legacy_and_is_refuse
             **missing,
         )
 
-    if turn_path == "mux":
-        with pytest.raises(ScopeViolation, match="require the authorized tenant/account"):
-            await attempt()
-        assert session_create_capture == [], "a refused turn must not open a session"
-        assert turn_io_used.classes == [], "a refused turn must not build turn I/O"
-    else:
-        assert await attempt() == "ok"
-        assert len(session_create_capture) == 1
-        turn_io_used.assert_ran("legacy")
-
-
-async def test_the_turn_path_argument_wins_over_settings(
-    headless_identity: HeadlessIdentity,
-    turn_path: TurnPath,
-    turn_io_used: TurnIOSpy,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`turn_path` is read once at the edge and handed down: with settings
-    pointing at the other path, the turn still runs on the one it was given."""
-    other: TurnPath = "mux" if turn_path == "legacy" else "legacy"
-    monkeypatch.setenv("DAIMON_TURN__PATH", other)
-    client = _build_client(_idle_events())
-
-    tail = await headless_runner.run_turn(
-        tool_safety=OPEN_TOOL_SAFETY,
-        anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
-        trigger_message="hi",
-        tenant_id=headless_identity.tenant_id,
-        account_id=headless_identity.account_id,
-        turn_path=turn_path,
-    )
-
-    assert tail == "ok"
-    turn_io_used.assert_ran(turn_path)
+    with pytest.raises(ScopeViolation, match="require the authorized tenant/account"):
+        await attempt()
+    assert session_create_capture == [], "a refused turn must not open a session"
+    assert turn_io_used.classes == [], "a refused turn must not build turn I/O"
 
 
 async def test_run_turn_raises_when_mcp_active_and_agent_uuid_none(run_turn: RunTurn) -> None:
@@ -1187,13 +1310,8 @@ async def test_run_turn_mounts_env_resource_when_agent_has_secrets(
 ) -> None:
     tenant_id = headless_identity.tenant_id
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_uuid,
-        key="API_KEY",
-        content="secret",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant_id, agent_id=agent_uuid, key="API_KEY", content="secret"
     )
     await db_session.commit()
 
@@ -1251,13 +1369,8 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     agent_uuid = uuid.uuid4()
     account_id = headless_identity.account_id
     public_url = "https://mcp.example.local/mcp"
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_uuid,
-        key="API_KEY",
-        content="secret",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant_id, agent_id=agent_uuid, key="API_KEY", content="secret"
     )
     await db_session.commit()
 
@@ -1768,6 +1881,65 @@ async def test_headless_role_gated_target_is_refused_before_session_creation(
     assert sent == []
 
 
+@pytest.mark.parametrize(
+    ("owner", "facts"),
+    [
+        (None, ("999", True)),
+        ("u1", ("999", True)),
+        ("u1", ("", False)),
+        ("u1", "unreadable"),
+        ("u1", "no_resolver"),
+    ],
+)
+async def test_headless_role_gated_target_refuses_an_owner_without_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    run_turn: RunTurn,
+    headless_identity: HeadlessIdentity,
+    owner: str | None,
+    facts: tuple[str, bool] | str,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.turn.errors import AdmissionDenied
+
+    await set_access_policy(
+        db_session,
+        tenant_id=headless_identity.tenant_id,
+        policy=TenantAccessPolicy(agent_rules={"test-agent": AgentRule(invoker_role_ids=("123",))}),
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        if facts == "unreadable":
+            raise RuntimeError("down")
+        assert isinstance(facts, tuple)
+        role, is_member = facts
+        return Membership(is_member=is_member, role_ids=(role,) if role else (), is_admin=True)
+
+    resolver = None if facts == "no_resolver" else CachedMembershipResolver(fetch)
+    created: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+    client = _build_client([], session_create_capture=created, send_capture=sent)
+    try:
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await run_turn(
+                anthropic=client,
+                agent_id="agent_x",
+                environment_id="env_x",
+                trigger_message="work",
+                tenant_id=headless_identity.tenant_id,
+                session_factory=db_session_factory,
+                runs_as_user=owner,
+                membership_resolver=resolver,
+            )
+    finally:
+        await client.close()
+    assert created == []
+    assert sent == []
+
+
 async def test_routine_receives_shared_repo_memory_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1812,3 +1984,136 @@ async def test_routine_receives_shared_repo_memory_only(
         "a routine never adopts its owner's directives"
     )
     assert "Shared rule" in sent[0]["events"][0]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("requester_meta", [True, False])
+async def test_routine_relay_claim_only_when_a_server_names_the_requester(
+    requester_meta: bool,
+    run_turn: RunTurn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older MCP image rejects the routine claim keys, so they wait for the opt-in."""
+    from daimon.core.config import (
+        AnthropicSettings,
+        DatabaseSettings,
+        McpIdentitySettings,
+        Settings,
+        SignedIdentityServer,
+    )
+    from pydantic import PostgresDsn, SecretStr
+
+    settings = Settings(
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+    )
+    settings.mcp_identity = McpIdentitySettings(
+        servers=[
+            SignedIdentityServer(
+                name="source",
+                url="https://source.example.test/mcp",
+                issuer="daimon-test",
+                audience="https://source.example.test",
+                requester_meta=requester_meta,
+            )
+        ]
+    )
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def capture(*_args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr("daimon.core.headless_runner.create_session", capture)
+    routine_id = uuid.uuid4()
+    with pytest.raises(_Stop):
+        await run_turn(
+            anthropic=_build_client([]),
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            origin="routine",
+            routine_id=routine_id,
+            runs_as_user="42",
+            feature_settings=settings,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+    assert seen["relay_routine_id"] == (routine_id if requester_meta else None)
+    assert seen["relay_owner"] == ("42" if requester_meta else None)
+
+
+@pytest.mark.parametrize(
+    ("mode", "held", "kept"), [("on", True, False), ("shadow", True, True), ("on", False, True)]
+)
+async def test_a_held_fire_mounts_no_identity_server_only_in_mode_on(
+    run_turn: RunTurn,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    held: bool,
+    kept: bool,
+) -> None:
+    """A held routine, watch or digest session answers a room outsiders may read (or nobody
+    can vouch for): in `on` it gets the agent with no signed-identity server."""
+    from daimon.core.config import McpSettings
+    from daimon.core.turn_hold import TurnHold
+    from daimon.testing.ma_models import ma_agent
+    from pydantic import HttpUrl, SecretStr
+
+    public_url = "https://daimon.example"
+    agent = ma_agent(
+        id="agent_x",
+        name="test-agent",
+        model={"id": _MODEL_ID},
+        created_at=_NOW,
+        mcp_servers=[
+            {"type": "url", "name": "daimon-mcp", "url": public_url + "/mcp"},
+            {"type": "url", "name": "grove", "url": public_url + "/mcp-identity/grove"},
+        ],
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": name,
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+                "configs": [],
+            }
+            for name in ("daimon-mcp", "grove")
+        ],
+    )
+
+    async def read(*_: object, **__: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.headless_runner.sdk_agent", lambda _raw: agent)
+    monkeypatch.setattr("daimon.core.audience_gate.read_audience_mode", read)
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def capture(*_args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr("daimon.core.headless_runner.create_session", capture)
+    with pytest.raises(_Stop):
+        await run_turn(
+            anthropic=_build_client([]),
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            origin="routine",
+            session_factory=db_session_factory,
+            mcp_settings=McpSettings(
+                jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)
+            ),
+            agent_uuid=uuid.uuid4(),
+            account_id=uuid.uuid4(),
+            hold=TurnHold("discord", "C-1", client=False) if held else None,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+    names = {server.name for server in seen["agent"].mcp_servers}
+    assert ("grove" in names) is kept
+    assert "daimon-mcp" in names

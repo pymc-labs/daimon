@@ -13,7 +13,6 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, cast
 
 import anthropic
@@ -22,6 +21,8 @@ import pytest
 import structlog.testing
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentToolResultEvent,
+    BetaManagedAgentsAgentToolUseEvent,
     BetaManagedAgentsSessionEndTurn,
     BetaManagedAgentsSessionStatusIdleEvent,
     BetaManagedAgentsSpanModelRequestEndEvent,
@@ -30,7 +31,6 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core import usage_sweep
 from daimon.core._models import TenantLedger, UsageEvent
-from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -38,13 +38,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.pricing import MODEL_PRICING, cost_of
-from daimon.core.scope import DeploymentDefault
+from daimon.core.pricing import AGENT_WEB_SEARCH_USD, MODEL_PRICING, cost_of
 from daimon.core.stores import session_settle_state, turn_outcomes
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import bind_recorder
 from daimon.core.turn.termination import TerminationReason
@@ -57,6 +53,7 @@ from daimon.core.usage_sweep import (
     sweep_headless_usage,
     turn_ended,
 )
+from daimon.testing.builders import plain_turn_deps
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, not_found_response
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
@@ -81,6 +78,23 @@ def _call(event_id: str, *, at: datetime, input_tokens: int = 1000) -> dict[str,
         processed_at=at,
         type="span.model_request_end",
     ).model_dump(mode="json")
+
+
+def _tool(
+    use_id: str, *, at: datetime, name: str = "web_search", error: bool = False
+) -> list[dict[str, Any]]:
+    """A tool's use and, a second later, its result."""
+    use = BetaManagedAgentsAgentToolUseEvent(
+        id=use_id, input={"query": "q"}, name=name, processed_at=at, type="agent.tool_use"
+    )
+    result = BetaManagedAgentsAgentToolResultEvent(
+        id=f"result_{use_id}",
+        tool_use_id=use_id,
+        is_error=error,
+        processed_at=at + timedelta(seconds=1),
+        type="agent.tool_result",
+    )
+    return [use.model_dump(mode="json"), result.model_dump(mode="json")]
 
 
 def _message(event_id: str, *, at: datetime) -> dict[str, Any]:
@@ -193,22 +207,7 @@ async def _ledger(db_session: AsyncSession) -> dict[str, TenantLedger]:
 def _chat_recorder(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, ma: _MA
 ) -> UsageRecorder:
-    deps = TurnDeps(
-        anthropic=ma.client,
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=MARKUP,
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    deps = plain_turn_deps(ma.client, sessionmaker, markup=MARKUP)
     return bind_recorder(
         deps,
         tenant_id=tenant_id,
@@ -610,6 +609,64 @@ async def test_the_drain_settles_finished_sends_and_leaves_running_ones(
     assert debited == 1
     assert pending == ["sesn_running"], "running kept; settled and gone cleared"
     assert set(await _ledger(db_session)) == {f"turn:{SESSION}:evt_a"}
+
+
+async def test_headless_searches_when_settled_then_each_success_bills_once(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An MCP turn drives no stream, so only the settle bills its Claude searches."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    ma.turn("evt_a")
+    ma.events[SESSION] += [
+        *_tool("use_search", at=NOW + timedelta(seconds=10)),
+        *_tool("use_failed", at=NOW + timedelta(seconds=20), error=True),
+        *_tool("use_bash", at=NOW + timedelta(seconds=30), name="bash"),
+    ]
+
+    first = await settle_stamped_session(ma.client, db_session_factory, session, markup=MARKUP)
+    again = await settle_stamped_session(ma.client, db_session_factory, session, markup=MARKUP)
+
+    search = debit_amount(float(AGENT_WEB_SEARCH_USD), markup=MARKUP)
+    ledger = await _ledger(db_session)
+    assert {k: r.delta_usd for k, r in ledger.items()} == {
+        f"turn:{SESSION}:evt_a": _expected_debit(1),
+        f"turn:{SESSION}:use_search": -search,
+    }, "only the search that succeeded bills, on the stream's key"
+    assert first is not None and [c.id for c in first.unbilled_searches] == ["use_search"]
+    assert first.complete and first.debited == 2
+    assert again is not None and (again.debited, again.unbilled_searches) == (0, ())
+
+
+async def test_searches_before_the_search_cutoff_are_never_billed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Searches ran unbilled before search billing shipped; no settle charges them now."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    session = _session(tenant.id)
+    ma = _MA(session)
+    ma.events[SESSION] = [
+        *_tool("use_old", at=NOW - timedelta(days=1)),
+        *_tool("use_new", at=NOW),
+    ]
+    async with db_session_factory() as s, s.begin():
+        await s.execute(
+            text(
+                "INSERT INTO usage_reconcile_progress (managed_session_id, covered_through) "
+                "VALUES (:id, :at)"
+            ),
+            {"id": session_settle_state.WEB_SEARCH_CUTOFF_ID, "at": NOW - timedelta(hours=1)},
+        )
+
+    result = await settle_stamped_session(ma.client, db_session_factory, session, markup=MARKUP)
+
+    assert result is not None and [c.id for c in result.unbilled_searches] == ["use_new"]
+    assert set(await _ledger(db_session)) == {f"turn:{SESSION}:use_new"}
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 import os
 import socket
 from dataclasses import FrozenInstanceError, replace
-from datetime import UTC, date, datetime, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from decimal import Decimal, localcontext
 from pathlib import Path
 
@@ -12,6 +12,7 @@ import pytest
 from daimon.core import pricing
 from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
+from mux.profiles.gemini import OPT_IN_MODELS
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +81,7 @@ def test_unsupported_models_and_profiles_are_absent():
     assert ("gemini", "gemini-pro") not in pricing.provider_prices("gemini.inline_reuse")
 
 
-def test_luna_context_and_unknown_write_keep_exact_actual_pending():
+def test_luna_long_context_rates_and_unknown_write_keep_exact_actual_pending():
     price = pricing.provider_prices("openai.persistent_workspace")[("openai", "gpt-6-luna")]
     assert pricing.provider_cost_of(usage(price), price, infrastructure_usd=Decimal(0)) == Decimal(
         ".0000191"
@@ -91,9 +92,15 @@ def test_luna_context_and_unknown_write_keep_exact_actual_pending():
         )
         is not None
     )
+    # Past 272k input one request takes the official rule: 2x input and cache, 1.5x output.
     aggregate = usage(price, input_tokens=272_001)
-    assert pricing.provider_cost_of(aggregate, price, infrastructure_usd=Decimal(0)) is None
-    assert pricing.minimum_cost_of(aggregate, price) == Decimal(".0272092")
+    request = usage(price, input_tokens=272_001, grain="model_request")
+    assert pricing.provider_cost_of(request, price, infrastructure_usd=Decimal(0)) == Decimal(
+        ".0544134"
+    ), "a long request settles at the long-context rates"
+    assert pricing.provider_cost_of(aggregate, price, infrastructure_usd=Decimal(0)) == Decimal(
+        ".0272092"
+    ), "a total of many requests keeps the base rates"
     # OpenAI's turn meter never counts cache writes (ROOT D2=B): an unknown write is
     # priced as no write, an estimate marked on its debit, never above the counts.
     unreported = usage(price, input_cache_write_tokens=None)
@@ -129,16 +136,9 @@ def test_published_expiry_and_future_source_refuse_floor_and_exact_cost(monkeypa
         value = usage(price, observed_at=observed)
         assert pricing.minimum_cost_of(value, price) is None
         assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) is None
-
-    class AfterPromotion(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            assert tz is UTC
-            return datetime(2027, 1, 1, tzinfo=UTC)
-
-    monkeypatch.setattr(pricing, "datetime", AfterPromotion)
+    _clock(monkeypatch, date(2027, 1, 1))
     rows = pricing.provider_prices("gemini.inline_reuse")
-    assert ("gemini", "gemini-3.8-flash") not in rows
+    assert rows[("gemini", "gemini-3.8-flash")].input == Decimal("1.50"), "its successor row"
     assert ("gemini", "gemini-3.5-flash-lite") in rows
 
 
@@ -200,11 +200,12 @@ def _clock(monkeypatch: pytest.MonkeyPatch, day: date) -> None:
     monkeypatch.setattr(pricing, "datetime", Clock)
 
 
-def test_argon_intro_tariff_prices_cached_input_at_five_percent_of_input(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-4-carbon"])
+def test_intro_tariff_prices_cached_input_at_five_percent_of_input(
+    monkeypatch: pytest.MonkeyPatch, model: str
 ) -> None:
     _clock(monkeypatch, date(2026, 11, 30))
-    price = pricing.provider_prices("gemini.inline_reuse")[("gemini", "gemini-4-argon")]
+    price = pricing.provider_prices("gemini.inline_reuse")[("gemini", model)]
     assert (price.input, price.output, price.cache_read, price.cache_write) == (
         Decimal("2.00"),
         Decimal("10.00"),
@@ -212,7 +213,7 @@ def test_argon_intro_tariff_prices_cached_input_at_five_percent_of_input(
         None,
     )
     assert price.cache_read == price.input * Decimal("0.05")
-    assert (price.checked_on, price.valid_before) == (date(2026, 10, 22), date(2026, 12, 1))
+    assert price.valid_before == date(2026, 12, 1)
     # 100 inclusive input with 10 cached: 90 x $2 + 10 x $0.10 + 20 output x $10, per 1M.
     value = usage(price, observed_at=datetime(2026, 11, 30, tzinfo=UTC))
     assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) == Decimal(
@@ -226,29 +227,111 @@ def test_argon_intro_tariff_prices_cached_input_at_five_percent_of_input(
     )
 
 
-def test_argon_has_no_price_outside_its_intro_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clock(monkeypatch, date(2026, 11, 30))
-    price = pricing.provider_prices("gemini.inline_reuse")[("gemini", "gemini-4-argon")]
-    for observed in (datetime(2026, 10, 21, tzinfo=UTC), datetime(2026, 12, 1, tzinfo=UTC)):
-        value = usage(price, observed_at=observed)
-        assert pricing.minimum_cost_of(value, price) is None
-        assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) is None
-    # No post-intro row is invented: from 2026-12-01 Argon is simply unpriced.
-    _clock(monkeypatch, date(2026, 12, 1))
-    rows = pricing.provider_prices("gemini.inline_reuse")
-    assert ("gemini", "gemini-4-argon") not in rows
-    assert ("gemini", "gemini-3.8-flash") in rows
+def test_hydrogen_has_one_flat_tariff(monkeypatch: pytest.MonkeyPatch) -> None:
+    for day in (date(2026, 11, 15), date(2026, 12, 1), date(2030, 1, 1)):
+        _clock(monkeypatch, day)
+        price = pricing.provider_prices("gemini.inline_reuse")[("gemini", "gemini-4-hydrogen")]
+        assert (price.input, price.output, price.cache_read, price.valid_before) == (
+            Decimal("1.50"),
+            Decimal("7.50"),
+            Decimal("0.075"),
+            None,
+        ), f"flat rates on {day}"
+    _clock(monkeypatch, date(2026, 11, 14))
+    assert ("gemini", "gemini-4-hydrogen") not in pricing.provider_prices("gemini.inline_reuse")
 
 
-def test_argon_expiry_is_reported_only_after_its_window(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_neon_has_one_flat_tariff(monkeypatch: pytest.MonkeyPatch) -> None:
+    for day in (date(2026, 11, 24), date(2026, 12, 1), date(2030, 1, 1)):
+        _clock(monkeypatch, day)
+        price = pricing.provider_prices("gemini.inline_reuse")[("gemini", "gemini-4-neon")]
+        assert (price.input, price.output, price.cache_read, price.valid_before) == (
+            Decimal("3.00"),
+            Decimal("15.00"),
+            Decimal("0.15"),
+            None,
+        ), f"flat rates on {day}"
+        assert price.cache_read == price.input * Decimal("0.05")
+        # 90 x $3 + 10 cached x $0.15 + 20 output x $15, per 1M.
+        value = usage(price, observed_at=datetime(day.year, day.month, day.day, tzinfo=UTC))
+        assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) == Decimal(
+            ".0005715"
+        )
+        assert pricing.provider_price_on("gemini-4-neon", day) is price, "settlement picks it too"
+    _clock(monkeypatch, date(2026, 11, 23))
+    assert ("gemini", "gemini-4-neon") not in pricing.provider_prices("gemini.inline_reuse"), (
+        "no price before its checked date"
+    )
+    assert pricing.provider_price_on("gemini-4-neon", date(2026, 11, 23)) is None
+
+
+@pytest.mark.parametrize(
+    ("model", "before", "after"),
+    [
+        ("gemini-4-argon", ("2.00", "10.00", "0.10"), ("4.00", "20.00", "0.20")),
+        ("gemini-4-carbon", ("2.00", "10.00", "0.10"), ("4.00", "20.00", "0.20")),
+        ("gemini-3.8-flash", ("0.75", "3.75", "0.075"), ("1.50", "7.50", "0.15")),
+    ],
+)
+def test_a_successor_row_takes_over_on_its_start_date(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    before: tuple[str, str, str],
+    after: tuple[str, str, str],
+) -> None:
+    """A successor's `checked_on` is its start date: the day before it the old row prices."""
+    start = date(2027, 1, 1) if model == "gemini-3.8-flash" else date(2026, 12, 1)
+    for day, rates in ((start - timedelta(days=1), before), (start, after)):
+        _clock(monkeypatch, day)
+        price = pricing.provider_prices("gemini.inline_reuse")[("gemini", model)]
+        assert (price.input, price.output, price.cache_read) == tuple(map(Decimal, rates)), (
+            f"{model} on {day}"
+        )
+        assert pricing.provider_price_on(model, day) is price, "settlement picks the same row"
+
+
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_an_opt_in_model_never_lapses(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    for day in (date(2026, 12, 1), date(2027, 1, 1), date(2035, 1, 1)):
+        _clock(monkeypatch, day)
+        assert ("gemini", model) in pricing.provider_prices("gemini.inline_reuse")
+        assert pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", model) is None
+    assert not [each for each in pricing.price_expiries() if each[1] == model]
+
+
+def test_expiry_is_reported_only_after_a_lapsing_models_last_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synthetic dated row with no successor, so expiry stays covered."""
+    row = pricing.ProviderPrice(
+        "gemini",
+        "gemini-synthetic",
+        date(2026, 10, 22),
+        Decimal("2.00"),
+        Decimal("10.00"),
+        Decimal("0.10"),
+        valid_before=date(2026, 12, 1),
+    )
+    monkeypatch.setattr(pricing, "_PROVIDER_PRICING", {"gemini.inline_reuse": (row,)})
+
     def expired():
-        return pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "gemini-4-argon")
+        return pricing.provider_price_expired_on(
+            "gemini.inline_reuse", "gemini", "gemini-synthetic"
+        )
 
     _clock(monkeypatch, date(2026, 11, 30))
     assert expired() is None
+    assert ("gemini", "gemini-synthetic") in pricing.provider_prices("gemini.inline_reuse")
     _clock(monkeypatch, date(2026, 12, 1))
     assert expired() == date(2026, 11, 30)
+    assert ("gemini", "gemini-synthetic") not in pricing.provider_prices("gemini.inline_reuse")
+    assert pricing.price_expiries() == (
+        ("gemini.inline_reuse", "gemini-synthetic", date(2026, 12, 1)),
+    )
     assert pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "unknown") is None
+
+
+def test_a_model_with_a_row_in_force_does_not_report_expiry() -> None:
     assert (
         pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "gemini-3.5-flash-lite")
         is None

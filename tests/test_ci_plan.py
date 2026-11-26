@@ -34,10 +34,12 @@ def _ci() -> dict[str, Any]:
         ("packages/adapters/web/README.md", "web"),
         ("web/src/App.tsx", "spa"),
         ("tests/parity/test_x.py", "parity"),
+        ("tests/simulated/test_x.py", "simulated"),
         ("tests/golden/turn.json", "golden"),
         ("packages/testing/daimon/testing/asgi.py", "testing"),
         ("packages/core/daimon/core/x.py", "core"),
         ("packages/core/alembic/versions/0100_x.py", "migrations"),
+        ("packages/core/daimon/core/_models.py", "migrations"),
         ("alembic.ini", "migrations"),
         ("tests/test_ci_plan.py", "repo"),
         ("tests/conftest.py", "tests"),
@@ -53,6 +55,8 @@ def _ci() -> dict[str, Any]:
         (".gitignore", "tooling"),
         ("LICENSE", "docs"),
         ("apps/report-host/src/report_host/app.py", "report-host"),
+        ("apps/compute-session/src/compute_session/server.py", "compute-session"),
+        ("apps/compute-session/README.md", "tooling"),
         ("pyproject.toml", "all"),
         ("uv.lock", "all"),
         (".github/workflows/ci.yml", "all"),
@@ -82,13 +86,12 @@ def test_prose_runs_nothing() -> None:
 def test_web_adapter_change_runs_only_its_suites() -> None:
     paths = ["packages/adapters/web/daimon/adapters/web/app.py"]
     suites, jobs = _tests(paths)
-    assert suites == {"web", "parity", "parity-mux", "lint", "shard-check", "image-daimon"}
-    assert jobs == {"lint", "pytest-db", "pytest-mux-leg", "shard-check", "docker-build"}
+    assert suites == {"web", "parity", "lint", "shard-check", "image-daimon"}
+    assert jobs == {"lint", "pytest-db", "shard-check", "docker-build", "image-smoke"}
     # Only the selected legs start.
     result = plan.plan_tests(paths)
     legs = {job: json.loads(result[job])["include"] for job in plan.MATRICES}
     assert [leg["suite"] for leg in legs["pytest-db"]] == ["web", "parity"]
-    assert [leg["suite"] for leg in legs["pytest-mux-leg"]] == ["parity-mux"]
     assert legs["pytest-light"] == []
 
 
@@ -108,7 +111,29 @@ def test_without_a_base_every_leg_runs() -> None:
 
 def test_test_helpers_run_every_pytest_job() -> None:
     _, jobs = _tests(["packages/testing/daimon/testing/asgi.py"])
-    assert jobs == set(plan.JOBS) - {"web", "docker-build", "harness-image"}
+    assert jobs == set(plan.JOBS) - {
+        "web",
+        "docker-build",
+        "harness-image",
+        "migration-upgrade",
+    }
+
+
+def test_a_migration_runs_the_upgrade_check_and_nothing_else_does() -> None:
+    _, jobs = _tests(["packages/core/alembic/versions/0220_x.py"])
+    assert "migration-upgrade" in jobs
+    _, jobs = _tests(["packages/core/daimon/core/_models.py"])
+    assert "migration-upgrade" in jobs, "a change to the table models can need a migration"
+    _, jobs = _tests(["packages/core/daimon/core/stores/domain.py"])
+    assert "migration-upgrade" not in jobs
+    _, jobs = _tests(["packages/adapters/slack/daimon/adapters/slack/app.py"])
+    assert "migration-upgrade" not in jobs
+    _, jobs = _tests(["scripts/ci/migration_upgrade.py"])
+    assert jobs == {"lint", "migration-upgrade"}
+    _, jobs = _tests(["tests/simulated/test_discord.py"])
+    assert "image-smoke" in jobs
+    _, jobs = _tests(["scripts/ci/image_tls_check.py"])
+    assert jobs == {"lint", "docker-build", "image-smoke"}
 
 
 def test_a_journey_file_runs_the_journeys() -> None:
@@ -148,6 +173,7 @@ _LEAVES = {
     "harness": r"\bdaimon_harness\b",
     "notebook-host": r"\bnotebook_host\b",
     "report-host": r"\breport_host\b",
+    "compute-session": r"\bcompute_session\b",
 }
 
 

@@ -18,6 +18,8 @@ from anthropic.types.beta.vaults.beta_managed_agents_static_bearer_auth_response
     BetaManagedAgentsStaticBearerAuthResponse,
 )
 from cryptography.fernet import InvalidToken, MultiFernet
+from daimon.core.caller_resources import APP_REPO_CREDENTIAL_PREFIX
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
@@ -556,7 +558,7 @@ async def declared_app_repositories(
             kind="repository",
             target_path=grant.mount_path or f"/workspace/{repo.repo_full_name}",
             repository_url=f"https://github.com/{repo.repo_full_name}",
-            credential_ref=f"app-repo:{tenant_id}:{agent_id}:{repo.repo_id}:{grant.version}:{repo.version}",
+            credential_ref=f"{APP_REPO_CREDENTIAL_PREFIX}{tenant_id}:{agent_id}:{repo.repo_id}:{grant.version}:{repo.version}",
         )
         for grant, repo in rows
     )
@@ -1530,15 +1532,16 @@ async def _rotate_live_app_tokens_unlocked(
                     )
                     swapped = True
                     delivered.add(resource["authorization_token"])
-                except APIStatusError:
+                except APIStatusError as error:
                     if not active_turn:
                         raise
                     # MA can refuse resource changes while a turn is running.
                     # Keep the in-session environment and Copilot token fresh.
                     _log.warning(
-                        "MA refused App resource refresh during active turn %s: %s",
+                        "MA refused App resource refresh during active turn %s: %s (%s)",
                         session_id,
                         resource_id,
+                        backend_refusal_causes(error),
                     )
             await add_app_credentials(
                 anthropic,

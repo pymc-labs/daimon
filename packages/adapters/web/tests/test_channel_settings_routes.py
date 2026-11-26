@@ -9,14 +9,16 @@ from pathlib import Path
 import pytest
 from daimon.adapters.web import channels as channels_module
 from daimon.core import routine_service
+from daimon.core.config import Settings, TurnSettings
 from daimon.core.routine_service import RoutineRefused
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.routines import create_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.turn_router import AGENT_ID
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .agent_support import provider_choice
 from .conftest import WebClientFactory
 from .test_channels_routes import _channels  # pyright: ignore[reportPrivateUsage]
 
@@ -117,14 +119,13 @@ async def test_a_members_drawer_opens_when_routines_cannot_be_checked(
         admin.as_member()
         empty = await admin.client.get("/api/channels/c1/settings")
         async with db_session_factory.begin() as db:
-            await create_routine(
+            await new_routine(
                 db,
-                tenant_id=admin.ws.tenant_id,
+                admin.ws.tenant_id,
                 created_by_user_id=str(admin.member.id),
                 agent_id=AGENT_ID,
                 agent_name=DEFAULT_AGENT_NAME,
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message="mine",
                 next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
                 destination_kind="channel",
@@ -152,14 +153,13 @@ async def test_a_member_reads_no_spend_or_budget_and_only_the_routines_they_may_
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
             for owner, message in ((str(admin.member.id), "mine"), ("someone-else", "theirs")):
-                await create_routine(
+                await new_routine(
                     db,
-                    tenant_id=admin.ws.tenant_id,
+                    admin.ws.tenant_id,
                     created_by_user_id=owner,
                     agent_id=AGENT_ID,
                     agent_name=DEFAULT_AGENT_NAME,
                     cron_expr="0 9 * * *",
-                    timezone_="UTC",
                     trigger_message=message,
                     next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
                     destination_kind="channel",
@@ -189,14 +189,13 @@ async def test_settings_name_the_agents_they_mention_and_a_missing_one_is_null(
 ) -> None:
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
-            await create_routine(
+            await new_routine(
                 db,
-                tenant_id=admin.ws.tenant_id,
+                admin.ws.tenant_id,
                 created_by_user_id=str(admin.member.id),
                 agent_id=AGENT_ID,
                 agent_name="ghost",
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message="hi",
                 next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
                 destination_kind="channel",
@@ -207,3 +206,43 @@ async def test_settings_name_the_agents_they_mention_and_a_missing_one_is_null(
 
     assert settings["agents"]["ghost"] == {"id": None, "name": None, "avatar": None}
     assert settings["routines"][0]["title"] == "hi"
+
+
+_PINNING = Settings(
+    _env_file=None,  # pyright: ignore[reportCallIssue]
+    database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+    turn=TurnSettings(channel_backends=True),
+)
+
+
+async def test_an_admin_pins_a_channel_to_another_providers_model(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The settings list the pinnable models, a pin is set, and a stale or unallowed one is refused."""
+    async with _channels(web_client, db_session_factory, tmp_path, settings=_PINNING) as admin:
+        await provider_choice(db_session_factory, admin.ws.person, ("anthropic", "openai"))
+        before = (await admin.client.get("/api/channels/c1/settings")).json()
+        value = "openai:gpt-6-astra"
+        pinned = await admin.client.post(
+            "/api/channels/c1/provider-pin", json={"value": value, "expected_local": None}
+        )
+        after = (await admin.client.get("/api/channels/c1/settings")).json()
+        stale = await admin.client.post(
+            "/api/channels/c1/provider-pin", json={"value": value, "expected_local": None}
+        )
+        refused = await admin.client.post(
+            "/api/channels/c1/provider-pin",
+            json={
+                "value": "gemini:gemini-4-argon",
+                "expected_local": after["provider_pin"]["local"],
+            },
+        )
+
+    assert value in [c["value"] for c in before["pin_choices"]], "an allowed model is pinnable"
+    assert before["provider_pin"] is None, "nothing is pinned yet"
+    assert pinned.status_code == 200, pinned.text
+    assert after["provider_pin"] is not None, "the pin is read back"
+    assert stale.status_code == 409, "a pin set against a stale read is refused"
+    assert refused.status_code == 422, "a provider the workspace has not allowed is refused"

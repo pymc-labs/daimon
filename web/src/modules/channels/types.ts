@@ -11,6 +11,8 @@ export type Sourced = { value: string | null; source: "channel" | "workspace" | 
 export type Readers = "any" | "inside" | "own"
 export type Writers = "any" | "own" | "none"
 export type BudgetWindow = "monthly" | "total" | "fixed"
+/** What a budget does at its limit: refuse new turns, or only post alerts. */
+export type BudgetOnLimit = "stop" | "alert"
 /** `locked`: only its own agents read it (confidential, admins only). `shared`: shared with another organisation. */
 export type ChannelTag = "kept_inside" | "locked" | "shared"
 
@@ -24,6 +26,9 @@ export type ChannelBudget = {
   percent_used: number
   active: boolean
   exceeded: boolean
+  on_limit: BudgetOnLimit
+  /** Where alerts post; null is the support channel. */
+  alert_channel_id: string | null
 }
 
 /** An ancestor in a channel's `path`. */
@@ -92,7 +97,7 @@ export type AccessChange = {
   release_agents?: boolean
   keep_rules?: boolean
 }
-/** PUT /:id/budget. `expected` is the budget as read (limit, window, dates), or null. */
+/** PUT /:id/budget. `expected` is the budget as read (limit, window, dates, mode), or null. */
 export type BudgetChange = {
   action: "set" | "raise" | "clear"
   limit_usd?: string
@@ -100,7 +105,9 @@ export type BudgetChange = {
   starts_at?: string | null
   ends_at?: string | null
   amount_usd?: string
-  expected: Pick<ChannelBudget, "limit_usd" | "window" | "starts_at" | "ends_at"> | null
+  on_limit?: BudgetOnLimit
+  alert_channel_id?: string | null
+  expected: Pick<ChannelBudget, "limit_usd" | "window" | "starts_at" | "ends_at" | "on_limit" | "alert_channel_id"> | null
 }
 
 /** GET /:id/history (admins): entries newest first, and the agents their values name. `tool_rule` values are `{agent, tool, rule}`. */
@@ -111,13 +118,14 @@ export type ChannelHistoryEntry = {
   before: unknown
   after: unknown
   actor: { id: string; name: string | null } | null
-  surface: "web" | "chat" | "panel" | "cli" | null
+  surface: "web" | "chat" | "panel" | "cli" | "system" | null
 }
 
 export type ChannelSetting =
   | "default_agent" | "kept_agents" | "access" | "budget" | "participation" | "progress_plans" | "environment"
   | "skills" | "provider_pin" | "channel_copy" | "thread_participation" | "thread_progress_plans" | "thread_rule"
   | "thread_handoff" | "tool_rule" | "approvals" | "thread_approvals" | "cost_footer"
+  | "support_limit" | "support_menu" | "support_menu_use" | "support_channel" | "support_settle"
 
 export type SwitchMode = "on" | "off" | "disabled"
 /** Following threads or progress plans. `own` is this tier's own mode (null: inherits); `value` and `source` are what applies. */
@@ -136,7 +144,7 @@ export type ChannelApprovals = {
   available: boolean
   own: ApprovalMode | null
   value: ApprovalMode
-  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread"
+  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread" | "routine"
   editable: boolean
 }
 export type CostFooter = { shown: boolean; editable: boolean }
@@ -154,6 +162,8 @@ export type ChannelSettings = {
   /** `editable` is false while tool safety is off, or for members. */
   tool_rules: { editable: boolean; rules: ToolRule[] }
   provider_pin: { backend: string; model: string | null; model_label: string | null; local: number } | null
+  /** The models an admin may pin, `value` as `provider:id`; empty for a member. */
+  pin_choices: { value: string; label: string; provider: string; price: string | null }[]
   channel_copy: { name: string; agent_id: string } | null
   /** Threads with their own setting; `value` is the mode, "readers/writers", or the agent handed to. */
   threads: { thread_id: string; name: string | null; kind: ThreadOverrideKind; value: string }[]
@@ -171,6 +181,8 @@ export type EnvironmentChange = { environment: string | null; expected: string |
 export type SkillChange = { action: "add" | "remove"; skill: string; expected: string[] }
 /** PUT /:id/tool-rules. null rule clears; `expected_revision` is the rule's revision as read (0 when none). */
 export type ToolRuleChange = { agent: string; tool: string; rule: ToolRule["rule"]; scope?: ToolRule["scope"]; expected_revision: number }
+/** POST /:id/provider-pin. `expected_local` is the pin as read, null for none. */
+export type PinSet = { value: string; expected_local: number | null }
 /** POST /:id/provider-pin/clear. */
 export type PinClear = { expected_local: number }
 /** POST /:id/channel-copy/retire. */

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
@@ -66,8 +65,6 @@ class CardState:
     plan_lines: tuple[str, ...] = ()
     """The agent's latest progress plan as a checklist; empty unless progress plans are on."""
     agent_name: str = ""
-    platform: str | None = None
-    """The chat platform the card is on: the draft and tool lines never name another app."""
     header_customized: bool = False
     started_at: float = 0.0
     cost_str: str | None = None
@@ -84,6 +81,12 @@ class CardState:
     """Approved title for a terminal notice; never populated from exception text."""
     notice: str = ""
     """Rendered termination notice; the ERROR card's body."""
+    model_label: str = ""
+    """The model the turn runs on, in the working card's footer."""
+    waiting: bool = False
+    """The model is rate limited and the turn waits for it."""
+    timed: bool = False
+    """`card_timer` is on: the headline carries the time so far, the footer the model."""
 
 
 _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
@@ -99,7 +102,7 @@ def update(state: CardState, event: CardEvent) -> CardState:
     if event.kind in ("message", "draft"):
         if not event.label:
             return state
-        draft = format_draft(scrub_other_platforms(event.label, state.platform))
+        draft = format_draft(event.label)
         if event.kind == "draft":
             return dataclasses.replace(state, text_preview=draft)
         earlier, latest = roll_draft(state.earlier_drafts, state.text_preview, draft)
@@ -127,6 +130,7 @@ def update_activity(state: CardState, turn: TurnState) -> CardState:
     return dataclasses.replace(
         state,
         phase=phase,
-        tool_lines=tuple(scrub_other_platforms(line, state.platform) for line in lines),
-        plan_lines=tuple(scrub_other_platforms(line, state.platform) for line in plan),
+        tool_lines=lines,
+        plan_lines=plan,
+        waiting=turn.rate_limit_wait,
     )

@@ -197,7 +197,8 @@ async def test_gate_heals_a_foreign_reserved_server_policy_on_or_off(enabled: bo
     ]
     daimon = agent["tools"][1]
     asked = {c["name"] for c in daimon["configs"]}
-    assert {"request_agent_backend_switch", "microsoft_send", "lead_intake_resolve"} <= asked
+    assert {"microsoft_send", "lead_intake_resolve"} <= asked, asked
+    assert "request_agent_backend_switch" in asked, "a move to another provider asks"
 
 
 async def test_a_failed_gate_raises() -> None:
@@ -213,7 +214,7 @@ async def test_a_failed_gate_raises() -> None:
 @pytest.mark.parametrize(
     ("tool", "tool_input", "allowed"),
     [
-        ("request_agent_backend_switch", {"preview_digest": "d"}, False),
+        ("request_agent_backend_switch", {"expected_revision": 1}, False),
         ("microsoft_send", {"action": "send_mail"}, False),
         (
             "lead_intake_resolve",

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -93,7 +92,7 @@ def _build_runtime(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
 
@@ -180,7 +179,7 @@ async def test_spec_edit_refuses_a_managed_agent_even_for_an_admin(
         mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=True), repeat=True)  # pyright: ignore[reportUnknownMemberType]
         mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
         runtime = _build_runtime(
-            None, handler=_agent_list_handler(tenant_id=tenant.id, managed=True)
+            db_session_factory, handler=_agent_list_handler(tenant_id=tenant.id, managed=True)
         )
 
         refused = await refuse_unless_allowed_for_agent_name(

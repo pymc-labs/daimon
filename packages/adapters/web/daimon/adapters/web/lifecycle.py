@@ -13,9 +13,10 @@ from collections.abc import Awaitable, Callable
 from decimal import Decimal
 
 import structlog
-from daimon.adapters.web.chat_json import message_json
+from daimon.adapters.web.chat_json import message_json, notice_json
 from daimon.adapters.web.stream import TurnStream
 from daimon.adapters.web.stream_events import ReplyView, events_between, snapshot_events, view_of
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.stores.domain import WebCard, WebMessageRow, WebMessageStatus, WebOutputFile
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.state import ToolUseBlock, TurnState, extract_final_response
@@ -101,6 +102,10 @@ class WebTurnLifecycle(TurnLifecycle):
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         self._state = state
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
+        """Show the notice above the composer of a page opened before monitoring began."""
+        await self.stream.publish({"type": "monitoring", "notice": notice_json(notice)})
 
     async def raise_card(self, card: WebCard) -> None:
         """Show `card` now; the reply carries it unless it ends on a card of its own."""

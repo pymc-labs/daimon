@@ -1,11 +1,10 @@
-"""Actual scoped A7 host turns and F2 default-capability ports; no scripted native replies."""
+"""Actual scoped A7 host turn and F2 default-capability ports; no scripted native replies."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from collections.abc import Mapping
-from contextlib import nullcontext
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path
@@ -105,77 +104,72 @@ async def a7_pair(context: LiveContext) -> Mapping[str, object]:
             or any(ext.namespace == "anthropic.multiagent" for ext in agent.spec.extensions or ())
         ):
             raise LiveRefused("A7 agent must be Haiku5.5 with no skills/MCP/delegation")
-        for path in ("legacy", "mux"):
-            session = await context.driver.sessions.create(
-                binding.scope,
-                SessionSpec(
-                    agent=agent.ref,
-                    agent_revision=agent.revision,
-                    environment=binding.environment,
-                    config_revision=0,
-                ),
-                key=f"a7-{path}-{context.reservation.receipt.run_id}",
-            )
-            ref = session.ref
-            persisted = ProviderBinding(
-                id=f"a7:{context.reservation.receipt.run_id}:{path}",
-                thread=ThreadRef(
-                    channel=ChannelRef(
-                        tenant_id=binding.scope.tenant_id,
-                        platform="slack",
-                        channel_id="a7-disposable",
-                    ),
-                    thread_id=ref.id,
-                ),
-                provider="anthropic",
-                profile="anthropic.managed_agents",
-                generation=1,
+        path = "mux"
+        session = await context.driver.sessions.create(
+            binding.scope,
+            SessionSpec(
+                agent=agent.ref,
+                agent_revision=agent.revision,
+                environment=binding.environment,
                 config_revision=0,
-                native_refs={"session": ref.id},
-                legacy_account_id=binding.scope.account_id,
+            ),
+            key=f"a7-{path}-{context.reservation.receipt.run_id}",
+        )
+        ref = session.ref
+        persisted = ProviderBinding(
+            id=f"a7:{context.reservation.receipt.run_id}:{path}",
+            thread=ThreadRef(
+                channel=ChannelRef(
+                    tenant_id=binding.scope.tenant_id,
+                    platform="slack",
+                    channel_id="a7-disposable",
+                ),
+                thread_id=ref.id,
+            ),
+            provider="anthropic",
+            profile="anthropic.managed_agents",
+            generation=1,
+            config_revision=0,
+            native_refs={"session": ref.id},
+            legacy_account_id=binding.scope.account_id,
+        )
+        await store.put_binding(persisted, expected_generation=0)
+        persistence = TurnPersistence(store, persisted, binding.scope, operation_key=f"a7:{ref.id}")
+        lifecycle = RecordingLifecycle()
+        started = time.perf_counter()
+        with persistence.activate():
+            state = await run_turn(
+                anthropic=context.client,
+                session_id=ref.id,
+                session_ref=ref,
+                scope=binding.scope,
+                user_message=A7_PROMPT,
+                lifecycle=lifecycle,
+                cancel=asyncio.Event(),
+                billing=BillingExempt(reason="headless-unrecorded"),
+                render_interval_s=3600,
             )
-            await store.put_binding(persisted, expected_generation=0)
-            persistence = TurnPersistence(
-                store, persisted, binding.scope, operation_key=f"a7:{ref.id}"
-            )
-            lifecycle = RecordingLifecycle()
-            started = time.perf_counter()
-            with persistence.activate() if path == "mux" else nullcontext():
-                state = await run_turn(
-                    anthropic=context.client,
-                    session_id=ref.id,
-                    session_ref=ref,
-                    scope=binding.scope,
-                    user_message=A7_PROMPT,
-                    lifecycle=lifecycle,
-                    cancel=asyncio.Event(),
-                    billing=BillingExempt(reason="headless-unrecorded"),
-                    path=path,
-                    render_interval_s=3600,
-                )
-            context.retain_completed_leg(
-                {
-                    "path": path,
-                    "session_id": ref.id,
-                    "elapsed_ms": (time.perf_counter() - started) * 1000,
-                    "termination": state.termination.value if state.termination else None,
-                    "final_text": extract_final_response(state.content),
-                    "journal_records": len(await store.read_events(ref.id)),
-                }
-            )
-            operation = await store.get_operation(binding.scope, f"a7:{ref.id}:send:0")
-            if path == "mux" and (
-                operation is None or operation.operation.status not in {"accepted", "processed"}
-            ):
-                raise LiveRefused("mux native send did not retain its accepted claim")
-            await collect_usage(context, ref)
-            # Finish the first leg before starting the second; no fresh retry on any failure.
-            await context.driver.session_admin.archive(binding.scope, ref, key=f"a7-{path}-archive")
-            if (
-                state.termination != TerminationReason.COMPLETED
-                or extract_final_response(state.content).strip() != "a7-paired-probe-ok"
-            ):
-                return {"status": "fail", "legs": outcomes}
+        context.retain_completed_leg(
+            {
+                "path": path,
+                "session_id": ref.id,
+                "elapsed_ms": (time.perf_counter() - started) * 1000,
+                "termination": state.termination.value if state.termination else None,
+                "final_text": extract_final_response(state.content),
+                "journal_records": len(await store.read_events(ref.id)),
+            }
+        )
+        operation = await store.get_operation(binding.scope, f"a7:{ref.id}:send:0")
+        if operation is None or operation.operation.status not in {"accepted", "processed"}:
+            raise LiveRefused("mux native send did not retain its accepted claim")
+        await collect_usage(context, ref)
+        # No fresh retry on any failure.
+        await context.driver.session_admin.archive(binding.scope, ref, key=f"a7-{path}-archive")
+        if (
+            state.termination != TerminationReason.COMPLETED
+            or extract_final_response(state.content).strip() != "a7-paired-probe-ok"
+        ):
+            return {"status": "fail", "legs": outcomes}
         return {
             "status": "pass",
             "legs": outcomes,
@@ -187,7 +181,7 @@ async def a7_pair(context: LiveContext) -> Mapping[str, object]:
 
 
 def default_manifest(root: Path, mcp_url: str) -> DefaultManifest:
-    authored = yaml.safe_load((root / "defaults/agents/daimon.yaml").read_text())
+    authored = yaml.safe_load((root / "defaults/agents/default.yaml").read_text())
     skills: list[NamedSkill] = []
     custom = tuple(
         ref["skill_id"]

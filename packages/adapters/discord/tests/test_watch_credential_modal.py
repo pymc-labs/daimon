@@ -53,7 +53,6 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
         turn_deps=replace(
             deps_for(None, None),
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
-            turn_path=None,
         ),
     )
 

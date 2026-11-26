@@ -15,7 +15,7 @@ import asyncio
 import html
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -26,7 +26,7 @@ from daimon.adapters.slack.external_access import host_only_notice
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import AgentIdentity
-from daimon.core.authz import Subject
+from daimon.core.authz import Subject, origin_ids
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -96,13 +96,14 @@ def _attachment(card: ConfirmationCard, prompt: ConfirmationPrompt) -> list[dict
         for block in blocks:
             if block["type"] == "actions":
                 block["elements"][0]["text"]["text"] = "Confirm"
-        blocks.insert(
-            1,
-            {
-                "type": "section",
-                "text": {"type": "plain_text", "text": "\n".join(card.detail_lines)},
-            },
-        )
+        if card.detail_lines:  # Slack refuses a section with empty text.
+            blocks.insert(
+                1,
+                {
+                    "type": "section",
+                    "text": {"type": "plain_text", "text": "\n".join(card.detail_lines)},
+                },
+            )
     return [{"color": _COLORS[card.state], "blocks": blocks}]
 
 
@@ -153,10 +154,13 @@ class SlackConfirmationCards:
         """
 
         if runtime is not None:
-            from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+            from daimon.core.channel_backend import (
+                NO_CAPTURE,
+                backend_selection_enabled,
+                make_backend_service,
+            )
 
             if backend_selection_enabled(runtime.settings.turn):
-                from daimon.adapters.slack.admin import resolve_is_admin
                 from daimon.core.confirmation import backend_switch_callbacks
                 from mux.contracts.ids import ChannelRef
 
@@ -170,42 +174,15 @@ class SlackConfirmationCards:
                         client, user_id=clicker, host_team_id=team_id
                     )
 
-                async def current_admin(clicker: str) -> bool:
-                    return team_id is not None and await resolve_is_admin(
-                        client,
-                        user_id=clicker,
-                        host_team_id=team_id,
-                        action=DelegatedAction.AGENT_SETTINGS,
-                    )
-
-                from functools import partial
-
-                from daimon.core.turn.admission import capture_admitted_backend_source
-
-                capture = partial(
-                    capture_admitted_backend_source,
-                    runtime.turn_deps,
-                    admission=admission,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    platform="slack",
-                )
-
+                # The admin cards set the allowed providers or clear a pin: no agent source.
                 prepare_admin, check_admin = backend_switch_callbacks(
                     make_backend_service(
-                        runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                        runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
                     ),
                     sessionmaker=runtime.sessionmaker,
-                    anthropic=runtime.anthropic,
                     tenant_id=tenant_id,
                     account_id=account_id,
-                    current_admin=current_admin,
                     current_platform_admin=current_platform_admin,
-                    answering_agent_name=(
-                        getattr(getattr(admission, "config", None), "agent_name", None)
-                    ),
-                    default_agent_name=runtime.deployment_default.agent_name,
-                    place_word="workspace",
                     # A channel-pin card clears only the channel this turn runs in.
                     pin_channel=ChannelRef(
                         tenant_id=str(tenant_id),
@@ -390,7 +367,16 @@ class SlackConfirmationCards:
             await _ephemeral(posted, clicker, self._controls.missing_message(token))
             return
         try:
-            subject = await posted.rule_subject(clicker)
+            # Where the click came from is the origin; the card never names it.
+            card: dict[str, Any] = payload.get("message") or {}
+            where: dict[str, Any] = payload.get("channel") or {}
+            subject = replace(
+                await posted.rule_subject(clicker),
+                origin_channel_ids=origin_ids(
+                    str(where.get("id") or "") or None,
+                    card.get("thread_ts"),
+                ),
+            )
             scope = allowed_rule_scope(reference, subject)
         except Exception:
             scope = None

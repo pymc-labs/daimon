@@ -9,7 +9,7 @@ import pytest
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.agent_fork import copy_agent
 from daimon.core.authz import Subject
-from daimon.core.channel_backend import load_backend_agent
+from daimon.core.channel_backend import AgentSettings, load_backend_agent
 from daimon.core.mux_compat import agent_spec
 from daimon.core.sessions import create_session, project_session_resources
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -93,28 +93,40 @@ async def test_real_root_model_survives_session_source_projection(
             mcp_servers=(),
             declared_drops=("memory", "sandbox", "mcp", "skills", "tools"),
         )
-        # Valid foreign model controls require their own explicit loss consent.
-        assert classify_source_obligations(projected, foreign, environment=None) == frozenset(
-            {"model_controls"}
+        # Each valid foreign model control requires its own explicit loss consent. Claude's
+        # defaults are no loss, and an effort the target offers carries over.
+        carried = AgentSettings().for_backend(provider, projected).effort
+        level = effort["type"] if isinstance(effort, dict) else effort
+        lost = {
+            *(("fast_mode",) if speed == "fast" else ()),
+            *(("effort_setting",) if level != "high" and not carried else ()),
+        }
+        assert carried == (
+            level if provider == "openai" and level in ("low", "medium", "high") else None
+        ), "only an effort the target offers carries over"
+        assert (
+            classify_source_obligations(projected, foreign, environment=None, target_effort=carried)
+            == lost
         )
-        assert "model_controls" in classify_source_obligations(
+        assert lost <= classify_source_obligations(
             projected,
             foreign.model_copy(update={"extensions": target.extensions}),
             environment=None,
+            target_effort=carried,
         )
         consented = foreign.model_copy(
-            update={"declared_drops": (*foreign.declared_drops, "model_controls")}
+            update={"declared_drops": (*foreign.declared_drops, *sorted(lost))}
         )
-        assert classify_source_obligations(projected, consented, environment=None) == frozenset()
-        preview = preview_source_drops(projected, foreign.model)
-        assert preview.declared_drops == (
-            "mcp",
-            "memory",
-            "model_controls",
-            "sandbox",
-            "skills",
-            "tools",
+        assert (
+            classify_source_obligations(
+                projected, consented, environment=None, target_effort=carried
+            )
+            == frozenset()
         )
+        preview = preview_source_drops(projected, foreign.model, effort=carried)
+        assert preview.declared_drops == tuple(
+            sorted(("mcp", "memory", "sandbox", "skills", "tools", *lost))
+        ), "each lost control is named once, sorted among the drops"
         for invalid in ({**model, "effort": "invalid"}, {**model, "unknown": True}):
             invalid_spec = projected.effective_spec.model_copy(
                 update={
@@ -142,8 +154,13 @@ async def test_real_root_model_survives_session_source_projection(
     extensions = tuple(
         item for item in target.extensions or () if item.namespace != "anthropic.model_config"
     )
-    assert "source_definition" in classify_source_obligations(
+    unrepresented = classify_source_obligations(
         projected, target.model_copy(update={"extensions": extensions}), environment=None
+    )
+    # Claude's defaults are no loss, so an agent stating only those needs no extension.
+    only_defaults = speed in (None, "standard") and effort in ("high", {"type": "high"})
+    assert ("source_definition" in unrepresented) != only_defaults, (
+        "a model setting the target does not carry is a loss unless it is a default"
     )
     for change in (
         {"effort": "high" if effort != "high" else "low"},
@@ -155,9 +172,12 @@ async def test_real_root_model_survives_session_source_projection(
             else item
             for item in target.extensions or ()
         )
-        assert "source_definition" in classify_source_obligations(
-            projected, target.model_copy(update={"extensions": changed}), environment=None
-        )
+        assert (
+            "source_definition"
+            in classify_source_obligations(
+                projected, target.model_copy(update={"extensions": changed}), environment=None
+            )
+        ) != only_defaults, "a different model setting is a loss unless the source is all defaults"
     for invalid in ({"id": model["id"], "unknown": True}, {**model, "effort": "invalid"}):
         changed = tuple(
             item.model_copy(update={"value": {"model": invalid}})

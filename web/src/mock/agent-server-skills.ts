@@ -34,7 +34,7 @@ const UNMIRRORED: ServerSkillOption[] = [
 const UNFOLLOWED = new Set(["ag_pricing:survey-weighting", "ag_pricing:geo-lift"])
 const HELD = new Set(["ag_pricing:segment-profiles"])
 /** Agents whose skills settings fix. */
-const MANAGED = new Set(["ag_daimon"])
+const MANAGED = new Set(["ag_default"])
 
 export const mirrorOf = (id: string): MirrorDoc | null => MIRRORS.get(id)?.doc ?? null
 
@@ -118,7 +118,7 @@ export const serverSkillsHandlers = [
     const key = `${agent}:${skill_id}`
     if (follow) UNFOLLOWED.delete(key)
     else UNFOLLOWED.add(key)
-    // Following again moves the agent at once, unless its backend consent needs the owner.
+    // Following again moves the agent at once; an update held earlier waits for Apply.
     if (follow && !HELD.has(key) && MIRRORS.get(skill_id)?.doc.status === "current") repin(agent, skill_id)
     return new HttpResponse(null, { status: 204 })
   }),

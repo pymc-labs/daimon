@@ -7,6 +7,7 @@ import json
 import pytest
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG, build_adaptive_card
 
+from ..shared_fakes import control_card as _control_card
 from .test_cards import AGENT, KINDS, STATES, TOKEN, build
 
 
@@ -49,3 +50,21 @@ def test_an_env_file_card_asks_for_a_paste_on_teams() -> None:
     card = json.dumps(build_adaptive_card(build("env_file", "requested"), token=TOKEN))
     assert "Paste it privately" in card, "the button names what the dialog takes"
     assert "upload" not in card.lower(), "a core copy change must be mirrored in teams_card"
+
+
+@pytest.mark.parametrize("kind", ["call", "switch"])
+def test_a_control_card_answers_through_one_execute_verb(kind: str) -> None:
+    """A call or switch press is an Action.Execute carrying the button's custom id, no dialog."""
+    from daimon.core.posted_controls.teams_card import CONTROL_VERB
+
+    card = _control_card(kind, "user-1")
+    body = build_adaptive_card(card)["body"]
+    (actions,) = [b for b in body if b["type"] == "ActionSet"]  # type: ignore[index]
+    got = [(a["type"], a["verb"], a["data"]) for a in actions["actions"]]  # type: ignore[index]
+    assert got == [
+        ("Action.Execute", CONTROL_VERB, {"action": CONTROL_VERB, "custom_id": b.custom_id})
+        for b in card.buttons
+    ], "every button presses through the one verb with its own custom id"
+    assert [a.get("style") for a in actions["actions"]] == [None, "positive"], (  # type: ignore[union-attr]
+        "only the rightmost button, the card's own action, is filled"
+    )

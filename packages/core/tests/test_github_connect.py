@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -48,6 +49,10 @@ from daimon.core.stores.github_connect_notices import ConnectNotice, claim_next,
 from daimon.core.stores.task_continuations import get_continuation
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+_linked_permissions = partial(
+    linked_permissions, installation_id=88, client_id="client", client_secret="secret"
+)
 
 
 @pytest.mark.asyncio
@@ -1403,15 +1408,8 @@ async def test_refresh_serializes_for_one_github_user(
         cache = PermissionCache(ttl_seconds=0)
         left, right = await asyncio.gather(
             *(
-                linked_permissions(
-                    sessionmaker,
-                    client,
-                    user_id=user_id,
-                    installation_id=88,
-                    fernet=fernet,
-                    client_id="client",
-                    client_secret="secret",
-                    cache=cache,
+                _linked_permissions(
+                    sessionmaker, client, user_id=user_id, fernet=fernet, cache=cache
                 )
                 for _ in range(2)
             )
@@ -1464,15 +1462,8 @@ async def test_bad_refresh_token_does_not_break_a_rotated_link(
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        permissions = await linked_permissions(
-            sessionmaker,
-            client,
-            user_id=681,
-            installation_id=88,
-            fernet=fernet,
-            client_id="client",
-            client_secret="secret",
-            cache=PermissionCache(),
+        permissions = await _linked_permissions(
+            sessionmaker, client, user_id=681, fernet=fernet, cache=PermissionCache()
         )
     assert permissions == {101: "read"}
     assert refreshes == 1
@@ -1532,15 +1523,8 @@ async def test_expired_refresh_does_not_break_a_rotated_link(
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        permissions = await linked_permissions(
-            sessionmaker,
-            client,
-            user_id=682,
-            installation_id=88,
-            fernet=fernet,
-            client_id="client",
-            client_secret="secret",
-            cache=PermissionCache(),
+        permissions = await _linked_permissions(
+            sessionmaker, client, user_id=682, fernet=fernet, cache=PermissionCache()
         )
     assert permissions == {101: "read"}
     assert raced
@@ -1586,15 +1570,8 @@ async def test_refresh_only_breaks_invalid_grant(
         return httpx.Response(status, json=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        call = linked_permissions(
-            sessionmaker,
-            client,
-            user_id=678,
-            installation_id=88,
-            fernet=fernet,
-            client_id="client",
-            client_secret="secret",
-            cache=PermissionCache(),
+        call = _linked_permissions(
+            sessionmaker, client, user_id=678, fernet=fernet, cache=PermissionCache()
         )
         if broken:
             assert await call == {}
@@ -1638,15 +1615,8 @@ async def test_repo_permission_denial_is_cached_as_empty(
         cache = PermissionCache()
         for _ in range(2):
             assert (
-                await linked_permissions(
-                    sessionmaker,
-                    client,
-                    user_id=679,
-                    installation_id=88,
-                    fernet=fernet,
-                    client_id="client",
-                    client_secret="secret",
-                    cache=cache,
+                await _linked_permissions(
+                    sessionmaker, client, user_id=679, fernet=fernet, cache=cache
                 )
                 == {}
             )
@@ -1690,15 +1660,8 @@ async def test_repo_permission_rate_limit_is_not_cached(
         cache = PermissionCache()
         for _ in range(2):
             with pytest.raises(httpx.HTTPStatusError):
-                await linked_permissions(
-                    sessionmaker,
-                    client,
-                    user_id=680,
-                    installation_id=88,
-                    fernet=fernet,
-                    client_id="client",
-                    client_secret="secret",
-                    cache=cache,
+                await _linked_permissions(
+                    sessionmaker, client, user_id=680, fernet=fernet, cache=cache
                 )
     assert calls == 2
 
@@ -1721,15 +1684,8 @@ async def test_user_token_401_invalidates_link(db_engine: AsyncEngine, db_clean:
         return httpx.Response(401, json={"message": "bad credentials"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(unauthorized)) as client:
-        result = await linked_permissions(
-            sessionmaker,
-            client,
-            user_id=1234,
-            installation_id=88,
-            fernet=fernet,
-            client_id="client",
-            client_secret="secret",
-            cache=PermissionCache(),
+        result = await _linked_permissions(
+            sessionmaker, client, user_id=1234, fernet=fernet, cache=PermissionCache()
         )
     assert result == {}
     async with sessionmaker() as session:

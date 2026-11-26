@@ -1,10 +1,11 @@
-"""`daimon.core.mcp_oauth.complete`: code exchange, vault write, agent attach."""
+"""`daimon.core.mcp_oauth.complete`: code exchange, Daimon-held grant, agent attach."""
 
 from __future__ import annotations
 
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -12,6 +13,7 @@ import httpx
 import pytest
 from anthropic.types.beta.vaults import BetaManagedAgentsCredential
 from daimon.core.credential_requests import mint_request_token
+from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.complete import (
     McpOAuthIncompleteFlowError,
@@ -19,10 +21,11 @@ from daimon.core.mcp_oauth.complete import (
     registered_client,
 )
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import McpOAuthFlowRow, Role
+from daimon.core.stores.domain import ConnectorTokenRow, McpOAuthFlowRow, Role
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -32,11 +35,13 @@ from mux.testing.drivers.anthropic.ma import (
     json_body,
     list_response,
 )
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 _MCP_URL = "https://mcp.notion.com/mcp"
 _PUBLIC_URL = "https://daimon.example/mcp"
+
+_complete_mcp_oauth_flow = partial(complete_mcp_oauth_flow, public_url=_PUBLIC_URL, now=_NOW)
 
 
 async def _flow(
@@ -224,23 +229,19 @@ async def test_complete_exchanges_code_writes_grant_and_attaches_server(
     anthropic, created, updates = _fake_ma(
         tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
     )
-    completion = await complete_mcp_oauth_flow(
+    completion = await _complete_mcp_oauth_flow(
         httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
         anthropic,
         flow=flow,
         code="code123",
         fernet=make_fernet(),
         jwt_secret=b"x" * 32,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
         session_factory=db_session_factory,
         default=DeploymentDefault(agent_name="daimon", environment_name="default"),
     )
-    assert completion.vault_id == "vlt_me" and completion.credential_id == "vcrd_oauth"
     assert completion.ma_agent_id == "ag_oauth"
     assert token_forms[0]["code"] == ["code123"] and token_forms[0]["code_verifier"] == ["v" * 64]
-    assert created[0]["auth"]["type"] == "mcp_oauth", "the grant is an mcp_oauth credential"
-    assert created[0]["auth"]["refresh"]["refresh_token"] == "rt", "Anthropic can refresh it"
+    assert created == [], "the sign-in writes no vault: each turn mirrors the grant"
     assert [s["name"] for s in updates[0]["mcp_servers"]] == ["notion"], (
         "the server is attached to the agent so its toolset exists"
     )
@@ -288,15 +289,13 @@ async def test_complete_refuses_repointing_a_shared_agents_server_for_a_member(
         mcp_servers=[{"name": "notion", "type": "url", "url": "https://real.example.com/mcp"}],
     )
     with pytest.raises(McpServerReplaceRefusedError):
-        await complete_mcp_oauth_flow(
+        await _complete_mcp_oauth_flow(
             httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
             anthropic,
             flow=flow,
             code="code123",
             fernet=make_fernet(),
             jwt_secret=b"x" * 32,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
             session_factory=db_session_factory,
             default=DeploymentDefault(agent_name="daimon", environment_name="default"),
         )
@@ -324,15 +323,13 @@ async def test_complete_lets_an_admin_requester_repoint_a_shared_agents_server(
         agent_id=flow.agent_id,
         mcp_servers=[{"name": "notion", "type": "url", "url": "https://real.example.com/mcp"}],
     )
-    completion = await complete_mcp_oauth_flow(
+    completion = await _complete_mcp_oauth_flow(
         httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
         anthropic,
         flow=flow,
         code="code123",
         fernet=make_fernet(),
         jwt_secret=b"x" * 32,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
         session_factory=db_session_factory,
         default=DeploymentDefault(agent_name="daimon", environment_name="default"),
     )
@@ -341,7 +338,7 @@ async def test_complete_lets_an_admin_requester_repoint_a_shared_agents_server(
 
 
 async def test_member_oauth_cannot_attach_a_new_server_to_an_unbound_agent(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     """A personal grant must not authorize a shared-spec write; withdraw it on refusal."""
     from anthropic import AsyncAnthropic
@@ -350,6 +347,8 @@ async def test_member_oauth_cannot_attach_a_new_server_to_an_unbound_agent(
     flow, tenant_id = await _flow(db_session)
     await set_role(db_session, flow.account_id, Role.USER)
     await db_session.commit()
+    # Own connections: the withdraw commits inside the MCP lock's transaction.
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fake, created, updates = _fake_ma(
         tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
     )
@@ -371,20 +370,18 @@ async def test_member_oauth_cannot_attach_a_new_server_to_an_unbound_agent(
         )
     )
     with pytest.raises(McpOAuthWriteRefusedError):
-        await complete_mcp_oauth_flow(
+        await _complete_mcp_oauth_flow(
             http,
             client,
             flow=flow,
             code="code",
             fernet=make_fernet(),
             jwt_secret=b"x" * 32,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
-            session_factory=db_session_factory,
+            session_factory=factory,
             default=DeploymentDefault(agent_name="other"),
         )
-    assert len(created) == 1
-    assert deleted == ["/v1/vaults/vlt_me/credentials/vcrd_oauth"]
+    assert created == [] and deleted == [], "no vault is written or cleaned"
+    assert await _grant(factory, flow) is None, "the refused sign-in leaves no grant"
     assert updates == [], "the personal sign-in never changes the unbound agent"
     assert not await flows_store.list_completed_grants(
         db_session, tenant_id=tenant_id, server_urls=[_MCP_URL]
@@ -408,24 +405,22 @@ async def test_personal_oauth_for_an_existing_server_does_not_mutate_the_agent(
             lambda _request: httpx.Response(200, json={"access_token": "personal-grant"})
         )
     )
-    completion = await complete_mcp_oauth_flow(
+    completion = await _complete_mcp_oauth_flow(
         http,
         client,
         flow=flow,
         code="code",
         fernet=make_fernet(),
         jwt_secret=b"x" * 32,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
         session_factory=db_session_factory,
         default=DeploymentDefault(agent_name="daimon"),
     )
-    assert completion.ma_agent_id == "ag_oauth" and len(created) == 1
+    assert completion.ma_agent_id == "ag_oauth" and created == []
     assert updates == [], "personal authentication must leave the shared spec untouched"
 
 
 async def test_concurrent_server_replacement_withdraws_the_new_oauth_grant(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     """A writer installs this name after the list read; the fresh attach refuses."""
     from anthropic import AsyncAnthropic
@@ -433,6 +428,8 @@ async def test_concurrent_server_replacement_withdraws_the_new_oauth_grant(
 
     flow, tenant_id = await _flow(db_session, admin=True)
     await db_session.commit()
+    # Own connections: the withdraw commits inside the MCP lock's transaction.
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fake, created, updates = _fake_ma(
         tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
     )
@@ -467,22 +464,69 @@ async def test_concurrent_server_replacement_withdraws_the_new_oauth_grant(
         )
     )
     with pytest.raises(McpServerReplaceRefusedError):
-        await complete_mcp_oauth_flow(
+        await _complete_mcp_oauth_flow(
             http,
             client,
             flow=flow,
             code="code",
             fernet=make_fernet(),
             jwt_secret=b"x" * 32,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
-            session_factory=db_session_factory,
+            session_factory=factory,
             default=DeploymentDefault(agent_name="other"),
         )
     assert installed == ["https://concurrent.example.com/mcp"]
-    assert len(created) == 1, "the personal grant was already written before the attach"
-    assert deleted == ["/v1/vaults/vlt_me/credentials/vcrd_oauth"]
+    assert created == [] and deleted == [], "no vault is written or cleaned"
+    assert await _grant(factory, flow) is None, "the grant written before the attach is withdrawn"
     assert updates == [], "the concurrent server is never repointed"
     assert not await flows_store.list_completed_grants(
         db_session, tenant_id=tenant_id, server_urls=[_MCP_URL]
     )
+
+
+async def _grant(
+    factory: async_sessionmaker[AsyncSession], flow: McpOAuthFlowRow
+) -> ConnectorTokenRow | None:
+    async with factory() as session:
+        return await connector_tokens_store.get_connector_token(
+            session,
+            tenant_id=flow.tenant_id,
+            account_id=flow.account_id,
+            agent_id=flow.agent_id,
+            server_url=_MCP_URL,
+        )
+
+
+async def test_the_grant_is_daimons_to_refresh_on_every_backend(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """One refresh owner, Daimon, so the grant survives a switch off Managed Agents."""
+    flow, tenant_id = await _flow(db_session, admin=True)
+    await db_session.commit()
+
+    def token_handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+        )
+
+    anthropic, created, updates = _fake_ma(
+        tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
+    )
+    fernet = make_fernet()
+    completion = await _complete_mcp_oauth_flow(
+        httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
+        anthropic,
+        flow=flow,
+        code="code123",
+        fernet=fernet,
+        jwt_secret=b"x" * 32,
+        session_factory=db_session_factory,
+        default=DeploymentDefault(agent_name="daimon", environment_name="default"),
+    )
+    row = await _grant(db_session_factory, flow)
+    assert [s["name"] for s in updates[0]["mcp_servers"]] == ["notion"], "the server is attached"
+    assert created == [], "a grant never touches the vault at sign-in"
+    assert row is not None and row.id == completion.connector_token_id, "the row is the grant"
+    assert decrypt_token(fernet, row.access_token_encrypted) == "at", "the token round-trips"
+    assert row.refresh_token_encrypted is not None, "Daimon keeps the refresh token"
+    assert row.resource == "https://mcp.notion.com", "the resource the exchange used is kept"
+    assert row.refresh_owner == "daimon", "Daimon is the one refresh owner"

@@ -1,6 +1,5 @@
 """Session output migration preserves MA headers, page boundaries and SDK errors."""
 
-from datetime import UTC, datetime
 from typing import Literal
 
 import httpx
@@ -14,13 +13,14 @@ from daimon.core.output_ports_compat import (
     list_output_records,
     read_output_record,
 )
+from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.testing.builders import file_meta
 from mux.contracts.ids import ResourceRef
 from mux.drivers.anthropic.outputs import Outputs
 from mux.errors import ScopeViolation
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 SCOPE = resource_scope(tenant_id="tenant-a", account_id="account-a")
 MA_BETA = "managed-agents-2026-04-01"
 
@@ -30,15 +30,7 @@ MA_BETA = "managed-agents-2026-04-01"
 async def test_output_requests_and_errors_match_the_original(
     operation: Literal["list", "read", "delete"], status: int
 ) -> None:
-    metadata = FileMetadata(
-        id="file_output",
-        filename="output.txt",
-        mime_type="text/plain",
-        size_bytes=3,
-        created_at=NOW,
-        type="file",
-        downloadable=True,
-    )
+    metadata = file_meta(id="file_output", filename="output.txt", size_bytes=3)
     method, path = {
         "list": ("GET", "/v1/files"),
         "read": ("GET", "/v1/files/file_output/content"),
@@ -263,8 +255,8 @@ async def test_public_sweep_preserves_partial_metadata_and_delivery(downloadable
             response = await legacy.beta.files.download("file_output", betas=[MA_BETA])
             assert await response.read() == b"abc"
             await legacy.beta.files.delete("file_output", betas=[MA_BETA])
-        count = await output_delivery.sweep_session_outputs(
-            client, session_id="sess_output", post=post, sleep=sleep, scope=SCOPE
+        count = await output_delivery.sweep_outputs(
+            AnthropicOutputRuntime(client, "sess_output", scope=SCOPE), post=post, sleep=sleep
         )
     assert count == int(downloadable)
     assert posted == (

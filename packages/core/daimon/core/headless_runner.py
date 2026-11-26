@@ -8,20 +8,21 @@ the hardened render error policy — instead of a bespoke bare drain
 loop, and answers tool confirmations via `unattended_posture`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
-(`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
+(`daimon.core.turn.ceiling`: 45 minutes, or a shorter unattended run limit set at the run's
+place): one shared deadline covers BOTH
 session assembly (the `agent`/`environment` retrieve calls plus
 `create_session`) and the delegated drain, mirroring how the chat path
 splits its own ceiling coverage between `bind_session` and
 `run_prepared_turn`. `deadline` is fail-safe like those two sites: a caller
 that passes none (every caller today, including the scheduler's `_fire`)
-still gets `turn_deadline(now=datetime.now(UTC))` computed here. A breach
+still gets that deadline computed here (`unattended_ceiling_s`). A breach
 during assembly is raised as `TurnError(kind="ceiling")`; a breach during
 the drain comes back the same way via the driver's own `state.error` and
 this function's existing `if state.error is not None: raise state.error`.
 Either way it reaches the scheduler's `_fire_guarded` boundary as
 `"TurnError: ceiling: ..."` via `_record_fire_error`, not the adapter's own
 bespoke `"timeout: exceeded Ns"` string — the scheduler's `dispatch_timeout_s`
-is now strictly above `TURN_CEILING_S` and exists only as an outer process
+is strictly above `LONGEST_TURN_CEILING_S` and exists only as an outer process
 guard that this ceiling always fires ahead of.
 
 Used by `daimon.adapters.scheduler` for routine fires and by
@@ -48,13 +49,12 @@ caller (the scheduler's `_fire_one`, which is the boundary).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import functools
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -68,25 +68,30 @@ from daimon.core.config import (
     McpSettings,
     RepoMemorySettings,
     Settings,
-    load_turn_settings,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
-from daimon.core.features.model_input import DEFAULT_TOOLSET
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.model_input import DEFAULT_TOOLSET, turn_limit_minutes
 from daimon.core.features.session_identity import DEFAULT_IDENTITY
-from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_features
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
 from daimon.core.routine_sandbox import RoutineSandbox, run_matches_pin
+from daimon.core.routine_sandbox import builtins_allowed as _routine_builtins_allowed
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.approvals import daimon_rule_tools_for
-from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
+from daimon.core.turn.ceiling import (
+    TURN_CEILING_S,
+    ceiling_error,
+    limit_ceiling_s,
+    remaining_s,
+    turn_deadline,
+)
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.driver import unattended_sends
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -95,10 +100,16 @@ from daimon.core.turn.persistence import MutationRetry, TurnPersistence, current
 from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture, ExemptReason
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn.unattended import session_gate, unattended_posture
+from daimon.core.turn.unattended import (
+    owner_principal_check,
+    session_gate,
+    unattended_posture,
+)
 from daimon.core.turn.unattended_capabilities import protected_tools
+from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.turn_hold import TurnHold
-from mux.contracts.ids import ChannelRef, Scope, ThreadRef
+from daimon.core.usage_recording import WebSearchCall
+from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
@@ -108,12 +119,11 @@ from mux.state.mutation_retry import MutationRetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.membership import MembershipResolver
+
     pass
 
 log = structlog.get_logger(__name__)
-
-TurnPath = Literal["legacy", "mux"]
-"""The two turn paths (`TurnSettings.path`), named so a caller can pass one in."""
 
 
 class _NoOpLifecycle(TurnLifecycle):
@@ -156,6 +166,35 @@ def _assert_satisfies_turn_lifecycle(lifecycle: TurnLifecycle) -> None:
 _assert_satisfies_turn_lifecycle(_NoOpLifecycle())
 
 
+async def unattended_ceiling_s(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    feature_settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID | None,
+    agent_id: str,
+    platform: str | None,
+    channel_id: str | None,
+    thread_id: str | None,
+) -> float:
+    """How long an unattended run may take: the unattended run limit at its place, else the
+    built-in 45 minutes (a run without a workspace has no place to read one), never past
+    `LONGEST_TURN_CEILING_S`."""
+    if session_factory is None or tenant_id is None:
+        return TURN_CEILING_S
+    place = FeaturePlace.of(
+        tenant_id,
+        platform or "routine",
+        channel_id,
+        thread_id,
+        agent_id=agent_id,
+        backend=MANAGED_AGENTS.provider,
+    )
+    snapshot = await resolve_features(
+        session_factory, feature_settings, place, keys=("unattended_time_limit",)
+    )
+    return limit_ceiling_s(turn_limit_minutes(snapshot, unattended=True))
+
+
 async def run_turn(
     *,
     anthropic: AsyncAnthropic,
@@ -186,9 +225,11 @@ async def run_turn(
     sandbox: RoutineSandbox | None = None,
     platform: str | None = None,
     hold: TurnHold | None = None,
-    turn_path: TurnPath | None = None,
     personal_memory: bool = False,
     feature_settings: Settings | None = None,
+    runs_as_user: str | None = None,
+    membership_resolver: MembershipResolver | None = None,
+    routine_id: uuid.UUID | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -224,9 +265,11 @@ async def run_turn(
             sandbox=sandbox,
             platform=platform,
             hold=hold,
-            turn_path=turn_path,
             personal_memory=personal_memory,
             feature_settings=feature_settings,
+            runs_as_user=runs_as_user,
+            membership_resolver=membership_resolver,
+            routine_id=routine_id,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -262,9 +305,11 @@ async def run_turn(
                 sandbox=sandbox,
                 platform=platform,
                 hold=hold,
-                turn_path=turn_path,
                 personal_memory=personal_memory,
                 feature_settings=feature_settings,
+                runs_as_user=runs_as_user,
+                membership_resolver=membership_resolver,
+                routine_id=routine_id,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -272,22 +317,6 @@ async def run_turn(
             observation.finish(error=exc)
         raise
     return result
-
-
-async def _routine_builtins_allowed(
-    session_factory: async_sessionmaker[AsyncSession] | None,
-    settings: Settings | None,
-    tenant_id: uuid.UUID | None,
-    platform: str | None,
-    agent_id: str,
-) -> bool:
-    """Whether `unattended_capabilities` lets an opted-in routine keep its built-ins.
-    With no store nothing is set, so the default applies; unreadable, they stay off."""
-    if session_factory is None or tenant_id is None:
-        return FEATURES["unattended_capabilities"].default == "on"
-    place = FeaturePlace.of(tenant_id, platform or "routine", None, agent_id=agent_id)
-    found = await place_guardrail(session_factory, settings, place, "unattended_capabilities")
-    return found.on
 
 
 def _outside_turn_persistence[**P, R](run: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -344,9 +373,11 @@ async def run_turn_impl(
     sandbox: RoutineSandbox | None = None,
     platform: str | None = None,
     hold: TurnHold | None = None,
-    turn_path: TurnPath | None = None,
     personal_memory: bool = False,
     feature_settings: Settings | None = None,
+    runs_as_user: str | None = None,
+    membership_resolver: MembershipResolver | None = None,
+    routine_id: uuid.UUID | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -437,26 +468,33 @@ async def run_turn_impl(
     ``hold`` runs the turn held to a shared channel (`routine_hold.routine_hold`):
     the channel's own store replaces the agent-wide and personal ones, and the
     Daimon credential is the held one.
-
-    ``turn_path`` is the turn path this fire runs on, resolved by the caller at
-    its edge (``load_turn_settings().path``). It is read once here and handed to
-    the driver, so nothing below re-reads settings for the turn. ``None`` falls
-    back to one settings read here.
     """
-    turn_scope: Scope | None = None
-    selected_path = turn_path if turn_path is not None else load_turn_settings().path
-    if selected_path == "mux":
-        if tenant_id is None or account_id is None:
-            raise ScopeViolation(
-                agent_id, "mux headless turns require the authorized tenant/account"
-            )
-        turn_scope = resource_scope(
-            tenant_id=str(tenant_id),
-            account_id=str(account_id),
-            authorization_id="headless-turn",
-        )
+    if tenant_id is None or account_id is None:
+        raise ScopeViolation(agent_id, "headless turns require the authorized tenant/account")
+    turn_scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id),
+        authorization_id="headless-turn",
+    )
 
-    effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
+    effective_deadline = (
+        deadline
+        if deadline is not None
+        else turn_deadline(
+            now=datetime.now(UTC),
+            ceiling_s=await unattended_ceiling_s(
+                session_factory,
+                feature_settings,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                platform=platform,
+                channel_id=origin_place.channel_id
+                if origin_place is not None
+                else budget_channel_id,
+                thread_id=origin_place.thread_id if origin_place is not None else None,
+            ),
+        )
+    )
     public_url = (
         str(mcp_settings.public_url)
         if mcp_settings is not None and mcp_settings.public_url is not None
@@ -479,19 +517,28 @@ async def run_turn_impl(
         else frozenset[str]()
     )
 
+    principal_check = owner_principal_check(
+        session_factory,
+        membership_resolver,
+        tenant_id=tenant_id,
+        owner_user_id=runs_as_user,
+    )
     fragments = True  # `origin_fragments` where the session is placed
     memory_on = False  # `repo_memory` where the session is placed
 
+    # Older MCP images reject the claim keys, so only a deployment that opted in sends them.
+    relay_routine = (
+        origin == "routine"
+        and feature_settings is not None
+        and feature_settings.mcp_identity.names_requester
+    )
+
     async def _assemble_session() -> BetaManagedAgentsSession:
         nonlocal fragments, memory_on
-        scope = (
-            resource_scope(
-                tenant_id=str(tenant_id),
-                account_id=str(account_id) if account_id is not None else "service",
-                authorization_id="headless-session-assembly",
-            )
-            if tenant_id is not None
-            else Scope.legacy_host_authorized(call_site="headless_runner:run_turn:tenantless")
+        scope = resource_scope(
+            tenant_id=str(tenant_id),
+            account_id=str(account_id),
+            authorization_id="headless-session-assembly",
         )
         backend = managed_agents(
             anthropic,
@@ -505,15 +552,33 @@ async def run_turn_impl(
                 )
             )
         )
-        if session_factory is not None and tenant_id is not None:
+        if session_factory is not None:
             from daimon.core.access_policy import agent_invoker_roles
             from daimon.core.authz import build_agent_ref
             from daimon.core.turn.errors import AdmissionDenied
 
             async with session_factory() as db:
                 access = await policy_store.load_access_policy(db, tenant_id=tenant_id)
-            if agent_invoker_roles(access, build_agent_ref(agent.name, agent.metadata).names):
+            ref = build_agent_ref(agent.name, agent.metadata)
+            if agent_invoker_roles(access, ref.names) and not await principal_check(access, ref):
+                # Unattended: only a run-as owner freshly verified to hold the roles.
                 raise AdmissionDenied(reason="invoker_not_allowed")
+        if session_factory is not None and hold is not None:
+            from daimon.core.audience_gate import read_audience_mode
+            from daimon.core.relay_scope import without_identity_relays
+
+            # A held fire answers a destination that outsiders may read, or that nobody can
+            # vouch for. In `on` its session mounts no signed-identity server.
+            if (
+                await read_audience_mode(
+                    session_factory,
+                    tenant_id=tenant_id,
+                    platform=hold.platform,
+                    channel_id=hold.channel_id,
+                )
+                == "on"
+            ):
+                agent = without_identity_relays(agent, public_url=public_url)[0]
         environment = sdk_environment(
             await legacy_call(
                 backend.environments.retrieve(
@@ -522,7 +587,7 @@ async def run_turn_impl(
             )
         )
         toolset, identity = DEFAULT_TOOLSET, DEFAULT_IDENTITY
-        if session_factory is not None and tenant_id is not None:
+        if session_factory is not None:
             place = FeaturePlace.of(
                 tenant_id,
                 platform or "routine",
@@ -572,9 +637,18 @@ async def run_turn_impl(
             origin_channel_id=origin_place.channel_id if origin_place is not None else None,
             origin_thread_id=origin_place.thread_id if origin_place is not None else None,
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
+            # A run into a room reads inside it, as a turn there does: its credential
+            # signs the room's seals. A held fire has its hold instead.
+            credential_seal_ids=(
+                origin_place.seal_ids
+                if origin_place is not None and origin_place.reads_inside and hold is None
+                else ()
+            ),
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
+            relay_routine_id=routine_id if relay_routine else None,
+            relay_owner=runs_as_user if relay_routine and routine_id else None,
             identity=identity,
         )
 
@@ -600,7 +674,6 @@ async def run_turn_impl(
             and repo_memory.enabled  # a caller without feature settings cannot see the setup
             and memory_on
             and origin == "routine"
-            and tenant_id is not None
             and session_factory is not None
         ):
             from daimon.core.ma_identity import derive_agent_uuid
@@ -626,7 +699,7 @@ async def run_turn_impl(
         sandbox_tools = False
         if sandbox is not None:
             sandbox_tools = await run_matches_pin(
-                anthropic, sandbox.pin, session, tenant_id=tenant_id
+                anthropic, sandbox.pin, session, tenant_id=tenant_id, records=session_factory
             )
             if not sandbox_tools:
                 log.warning(
@@ -647,7 +720,9 @@ async def run_turn_impl(
         if usage_record is not None:
             _bound_usage_record = usage_record
 
-            async def _record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
+            async def _record(
+                *, event: BetaManagedAgentsSpanModelRequestEndEvent | WebSearchCall
+            ) -> None:
                 await _bound_usage_record(event=event)
 
             billing = Billed(record=_record)
@@ -655,90 +730,89 @@ async def run_turn_impl(
             billing = BillingExempt(reason="headless-unrecorded")
 
         cancel = asyncio.Event()  # Headless has no external cancel source.
-        persistence: TurnPersistence | None = None
-        if selected_path == "mux":
-            assert turn_scope is not None and account_id is not None and tenant_id is not None
-            # The newly assembled session owns a private synthetic slot. Its
-            # claims live for this fire only; no new transcript copy is stored.
-            store = MemoryStateStore()
-            slot = Slot(
-                thread=ThreadRef(
-                    channel=ChannelRef(
-                        tenant_id=str(tenant_id), platform="headless", channel_id=session.id
-                    ),
-                    thread_id=session.id,
+        # The newly assembled session owns a private synthetic slot. Its
+        # claims live for this fire only; no new transcript copy is stored.
+        store = MemoryStateStore()
+        slot = Slot(
+            thread=ThreadRef(
+                channel=ChannelRef(
+                    tenant_id=str(tenant_id), platform="headless", channel_id=session.id
                 ),
-                account_id=str(account_id),
+                thread_id=session.id,
+            ),
+            account_id=str(account_id),
+        )
+        binding = ProviderBinding(
+            id=str(uuid.uuid4()),
+            thread=slot.thread,
+            provider=MANAGED_AGENTS.provider,
+            profile=MANAGED_AGENTS.profile_id,
+            native_refs={"session": session.id, "agent": agent_id},
+            generation=1,
+            config_revision=0,
+            legacy_account_id=str(account_id),
+        )
+        try:
+            binding = await asyncio.wait_for(
+                store.put_binding(binding, expected_generation=0),
+                timeout=remaining_s(effective_deadline, now=datetime.now(UTC)),
             )
-            binding = ProviderBinding(
-                id=str(uuid.uuid4()),
-                thread=slot.thread,
-                provider=MANAGED_AGENTS.provider,
-                profile=MANAGED_AGENTS.profile_id,
-                native_refs={"session": session.id, "agent": agent_id},
-                generation=1,
-                config_revision=0,
-                legacy_account_id=str(account_id),
-            )
-            try:
-                binding = await asyncio.wait_for(
-                    store.put_binding(binding, expected_generation=0),
-                    timeout=remaining_s(effective_deadline, now=datetime.now(UTC)),
-                )
-            except TimeoutError as err:
-                raise ceiling_error() from err
-            persistence = TurnPersistence(
-                store,
-                binding,
-                turn_scope,
-                operation_key=f"turn:{session.id}:{uuid.uuid4()}",
-                source_agent_id=agent_id,
-                retry=MutationRetry(
-                    policy=MutationRetryPolicy(max_attempts=anthropic.max_retries + 1),
-                    deadline=time.monotonic()
-                    + remaining_s(effective_deadline, now=datetime.now(UTC)),
-                    cancel=cancel,
-                ),
-            )
+        except TimeoutError as err:
+            raise ceiling_error() from err
+        persistence = TurnPersistence(
+            store,
+            binding,
+            turn_scope,
+            operation_key=f"turn:{session.id}:{uuid.uuid4()}",
+            source_agent_id=agent_id,
+            retry=MutationRetry(
+                policy=MutationRetryPolicy(max_attempts=anthropic.max_retries + 1),
+                deadline=time.monotonic() + remaining_s(effective_deadline, now=datetime.now(UTC)),
+                cancel=cancel,
+            ),
+        )
 
         # Driver's own run_turn builds and sends the `user.message` event itself
         # from `user_message=trigger_message` — the drain (steps 3-6 of the old
         # bespoke loop) is fully delegated below.
         # A routine turn runs on Managed Agents; its driver lines name it, as a
         # chat turn's do (`run_prepared_turn`).
-        gate_scope = (
-            turn_scope
-            if turn_scope is not None
-            else Scope.legacy_host_authorized(call_site="headless_runner:run_turn:gate")
-        )
         with (
             structlog.contextvars.bound_contextvars(
                 backend=MANAGED_AGENTS.provider,
                 profile=MANAGED_AGENTS.profile_id,
                 model=model_choice_id(session.agent.model),
             ),
-            persistence.activate() if persistence is not None else contextlib.nullcontext(),
+            persistence.activate(),
             unattended_sends(
                 session_gate(
                     anthropic,
                     session.id,
                     tool_safety,
-                    scope=gate_scope,
+                    scope=turn_scope,
                     public_url=public_url,
                     session_factory=session_factory,
                     tenant_id=tenant_id,
                     entry_point="routine",
                     routine_sandbox_tools=sandbox_tools,
+                    principal_check=principal_check,
                 )
             ),
         ):
             state: TurnState = await drive_turn(
                 anthropic=anthropic,
-                path=selected_path,
                 scope=turn_scope,
                 session_id=session.id,
                 user_message=(
                     context_prompt(origin, fragments=fragments, system=session.agent.system)
+                    # Built-ins, search included, run only with the routine's sandbox
+                    # opt-in; the gate above disables them otherwise.
+                    + sources_prefix(
+                        on=sandbox_tools
+                        and claude_searches(
+                            [tool.model_dump(mode="json") for tool in session.agent.tools]
+                        )
+                    )
                     + routine_memory
                     + trigger_message
                 ),

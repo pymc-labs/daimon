@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 import pytest_asyncio
+from daimon.core import _models
 from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.pricing import ProviderPrice, minimum_cost_of
@@ -22,6 +23,7 @@ from daimon.testing.factories import make_tenant
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 TENANT, OTHER = (
@@ -117,7 +119,7 @@ async def record(sm, name: str, value: UsageObservation) -> None:
             platform_user_id="person",
             pricing=None,
             provider_price=PRICES[value.model.id],
-            # As on every OpenAI turn today: infrastructure unknown, no ledger debit.
+            # Infrastructure unknown: the usage stays pending, with no ledger debit.
             infrastructure_usd=None,
             channel_id="c",
             billing_grain="turn",
@@ -162,7 +164,12 @@ def _request(
         tenant_id=TENANT,
         worker=SimpleNamespace() if worker else None,
         now=lambda: NOW,
-        deps=SimpleNamespace(openai_daily_model_cap_usd=cap, sessionmaker=sm, markup=Decimal(1)),
+        deps=SimpleNamespace(
+            openai_daily_model_cap_usd=cap,
+            sessionmaker=sm,
+            markup=Decimal(1),
+            provider_ceiling=None,
+        ),
     )
 
 
@@ -229,6 +236,61 @@ def test_the_refusal_names_the_model_and_when_it_resets():
     assert "midnight UTC" in text and "DAIMON_" not in text
 
 
+async def test_the_provider_ceiling_sums_every_tenant_and_refuses_at_its_limit(sessions):
+    """The deployment's ceiling counts today's usage of every tenant on one provider."""
+    from daimon.core.pricing import provider_price_on
+    from daimon.core.stores.model_spend import provider_spend_today
+    from daimon.core.turn.daily_model_cap import ProviderCeiling
+
+    await record(sessions, "astra", usage(BINDINGS["astra"][1], "gpt-6-astra"))
+    await record(sessions, "other", usage(BINDINGS["other"][1], "gpt-6-astra"))
+    tariff = provider_price_on("gpt-6-astra", NOW.date())
+    assert tariff is not None, "Astra has a current tariff"
+    one = minimum_cost_of(usage(BINDINGS["astra"][1], "gpt-6-astra"), tariff)
+    assert one is not None and one > 0
+    async with sessions() as db:
+        total = await provider_spend_today(db, provider="openai", now=NOW)
+    assert total == 2 * one, "both tenants count"
+    stored = _models.UsageObservation
+    async with sessions() as db, db.begin():
+        cleared = await db.execute(
+            update(stored)
+            .where(stored.provider == "openai", stored.observed_at.is_not(None))
+            .values(provider=None, observed_at=None)
+        )
+    assert cleared.rowcount == 2, "the writer fills the indexed columns"
+    async with sessions() as db:
+        assert await provider_spend_today(db, provider="openai", now=NOW) == total, (
+            "a row older code wrote without the indexed columns counts by its JSON"
+        )
+
+    await ProviderCeiling({"openai": total + 1}).check(sessions, provider="openai", now=NOW)
+    with pytest.raises(AdmissionDenied) as refused:
+        await ProviderCeiling({"openai": total}).check(sessions, provider="openai", now=NOW)
+    assert (refused.value.reason, refused.value.provider) == (
+        "provider_daily_ceiling_reached",
+        "openai",
+    ), refused.value
+    text = admission_refusal_text(
+        "provider_daily_ceiling_reached", RefusalNouns.for_platform("discord"), provider="openai"
+    )
+    assert "Today's OpenAI budget for this Daimon install is used up." in text, text
+
+
+async def test_the_provider_ceiling_does_not_carry_a_read_across_midnight(sessions):
+    """Yesterday's full ceiling must not refuse the first turns of the next UTC day."""
+    from daimon.core.stores.model_spend import provider_spend_today
+    from daimon.core.turn.daily_model_cap import ProviderCeiling
+
+    await record(sessions, "astra", usage(BINDINGS["astra"][1], "gpt-6-astra"))
+    async with sessions() as db:
+        total = await provider_spend_today(db, provider="openai", now=NOW)
+    ceiling = ProviderCeiling({"openai": total})
+    with pytest.raises(AdmissionDenied):
+        await ceiling.check(sessions, provider="openai", now=NOW)
+    await ceiling.check(sessions, provider="openai", now=NOW + timedelta(days=1))
+
+
 async def test_an_expired_or_missing_tariff_refuses_instead_of_counting_nothing(sessions):
     expired = ProviderPrice(
         "openai",
@@ -272,8 +334,8 @@ def test_a_gemini_refusal_names_the_gemini_model():
 
 
 @pytest.mark.parametrize("count", [0, 2])
-def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
-    """The real usage shape: a list of `{type, count}` per grounding tool."""
+def test_a_gemini_grounding_call_other_than_search_is_logged_as_a_leak(count):
+    """The real usage shape: a list of `{type, count}` per grounding tool; search is metered."""
     import structlog.testing
     from daimon.core.turn.gemini_prepare import _warn_on_grounding
 
@@ -297,8 +359,8 @@ def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
         native_meter={
             "total_input_tokens": 10,
             "grounding_tool_count": [
-                {"type": "google_search", "count": count},
-                {"type": "url_context", "count": 0},
+                {"type": "google_search", "count": 3},
+                {"type": "url_context", "count": count},
             ],
         },
         completeness="measured",
@@ -310,7 +372,7 @@ def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
     assert len(leaks) == (1 if count else 0)
     if count:
         assert leaks[0]["grounding_tool_count"] == count and leaks[0]["observation_id"]
-        assert leaks[0]["grounding_types"] == ["google_search", "url_context"]
+        assert leaks[0]["grounding_types"] == ["url_context"]
 
 
 class _Inner:
@@ -347,6 +409,11 @@ def _flash_request() -> dict[str, Any]:
     }
 
 
+FLASH = ProviderPrice("gemini", "gemini-3.8-flash", NOW.date(), Decimal(1), Decimal(1), Decimal(1))
+# A request whose clock reads NOW; the cap check itself is stubbed where it would run.
+STUB_REQUEST = cast(Any, SimpleNamespace(now=lambda: NOW))
+
+
 async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(monkeypatch):
     """A 503 on the primary moves down the chain; each fallback model is capped too."""
     from daimon.core.turn import daily_model_cap
@@ -362,7 +429,8 @@ async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(mon
 
     monkeypatch.setattr(daily_model_cap, "check_daily_model_cap", cap)
     inner, source = _Inner(), _Source()
-    accounting = CappedFlashAccounting(inner, cast(Any, None), {}, Decimal(20))
+    prices = {"gemini-3.8-flash": FLASH, "gemini-flash-latest": FLASH}
+    accounting = CappedFlashAccounting(inner, STUB_REQUEST, prices, Decimal(20))
     with pytest.raises(AdmissionDenied) as refused:
         await FlashTransport(cast(Any, source), accounting).create(_flash_request())
 
@@ -372,41 +440,31 @@ async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(mon
     assert inner.attempts == ["gemini-3.8-flash"], "no hold for the refused fallback"
 
 
-async def test_a_fallback_without_a_tariff_never_runs_and_the_503_stands():
-    """gemini-flash-latest has no dated tariff: never run uncounted, never 'unpriced'."""
-    from contextlib import asynccontextmanager
-
+async def test_a_model_without_a_tariff_never_runs_on_any_request():
+    """gemini-flash-latest has no dated tariff: never run uncounted, first request or later."""
     from daimon.core.turn.daily_model_cap import CappedFlashAccounting
-
-    @asynccontextmanager
-    async def no_db():
-        yield None
-
-    request = SimpleNamespace(
-        admission=SimpleNamespace(resolved=lambda key: None),
-        tenant_id=TENANT,
-        now=lambda: NOW,
-        deps=SimpleNamespace(sessionmaker=no_db, markup=Decimal(1)),
-    )
+    from mux.drivers.gemini.flash import FlashAttempt
     from mux.errors import ProviderError
 
     inner = _Inner()
-    accounting = CappedFlashAccounting(inner, cast(Any, request), {}, Decimal(20))
-    with pytest.raises(ProviderError) as busy:
-        await accounting.before_attempt(
-            model=ModelRef(provider="gemini", id="gemini-flash-latest"), attempt=2
-        )
-    assert (busy.value.category, busy.value.native_code) == ("overloaded", "503")
-    assert inner.attempts == [], "no hold for a fallback that never runs"
-    # The turn's own model without a tariff is still refused plainly.
+    accounting = CappedFlashAccounting(inner, STUB_REQUEST, {}, None)
+    alias = ModelRef(provider="gemini", id="gemini-flash-latest")
     with pytest.raises(AdmissionDenied) as refused:
-        await accounting.before_attempt(
-            model=ModelRef(provider="gemini", id="gemini-flash-latest"), attempt=1
-        )
+        await accounting.before_attempt(model=alias, attempt=1)
     assert (refused.value.reason, refused.value.provider) == (
         "provider_price_unavailable",
         "gemini-flash-latest",
+    ), "the turn's own model without a tariff is refused plainly, even uncapped"
+    with pytest.raises(ProviderError) as busy:
+        await accounting.before_attempt(model=alias, attempt=2)
+    assert (busy.value.category, busy.value.native_code) == ("overloaded", "503"), busy.value
+    await accounting.after_attempt(
+        receipt=FlashAttempt(model=alias, attempt=1, outcome="accepted", interaction_id="i1")
     )
+    for attempt in (1, 2):  # a tool-result continuation, and its fallback
+        with pytest.raises(ProviderError):
+            await accounting.before_attempt(model=alias, attempt=attempt)
+    assert inner.attempts == [], "no hold for a model that never runs"
 
 
 async def test_a_continuation_is_never_refused_halfway(monkeypatch):
@@ -422,14 +480,16 @@ async def test_a_continuation_is_never_refused_halfway(monkeypatch):
 
     monkeypatch.setattr(daily_model_cap, "check_daily_model_cap", cap)
     inner = _Inner()
-    accounting = CappedFlashAccounting(inner, cast(Any, None), {}, Decimal(20))
+    accounting = CappedFlashAccounting(
+        inner, STUB_REQUEST, {"gemini-3.8-flash": FLASH}, Decimal(20)
+    )
     flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
     await accounting.before_attempt(model=flash, attempt=1)
     await accounting.after_attempt(
         receipt=FlashAttempt(model=flash, attempt=1, outcome="accepted", interaction_id="i1")
     )
     await accounting.before_attempt(model=flash, attempt=1)  # a tool-result continuation
-    assert checked == [1]
+    assert checked == [1], "the cap is checked once, as the turn starts"
     assert inner.attempts == ["gemini-3.8-flash", "gemini-3.8-flash"]
 
 

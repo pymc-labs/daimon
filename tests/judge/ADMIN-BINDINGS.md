@@ -24,8 +24,7 @@ parent channels; this module does not infer platform channel creation or remap
 threads.
 
 N9 owns runner hooks, original operation order, deadlines, receipt capture and
-all outcome assertions. N6 owns this module and
-`packages/testing/tests/test_qa_admin_bindings.py`. N2 owns the real credential-submit edge.
+all outcome assertions. N6 owns this module. N2 owns the real credential-submit edge.
 The pinned fixture retains 19 frozen source scenarios / 38 admin invocations,
 source hashes and the frozen TARGET-53 digest. Source snapshots are not changed
 to make an unsupported operation pass.

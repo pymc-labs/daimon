@@ -16,6 +16,7 @@ import json
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +67,16 @@ from mux.testing.drivers.anthropic.ma import (
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .turn_path_support import TurnIOSpy, TurnPath
+from .turn_io_support import TurnIOSpy
+
+_run_smoke_check = partial(
+    run_smoke_check,
+    agent_tag="daimon",
+    environment_tag="default",
+    markup=Decimal("1.0"),
+    tool_safety=OPEN_TOOL_SAFETY,
+)
+
 
 _TENANT_ID = derive_tenant_uuid(platform="cli", workspace_id="smoke")
 _CREATED_AT = datetime(2026, 4, 21, tzinfo=UTC)
@@ -329,25 +339,19 @@ def _build_happy_client(workspace: _Workspace, *, session_id: str = "ses_smoke")
 async def test_run_smoke_check_writes_usage_event_and_returns_result_when_turn_completes(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
     client = _build_happy_client(workspace)
 
-    result = await run_smoke_check(
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=client,
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="happy-path",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     assert result.tail == "done", "tail should reflect the agent.message text"
@@ -366,18 +370,17 @@ async def test_run_smoke_check_writes_usage_event_and_returns_result_when_turn_c
     assert workspace.agents[result.agent_id]["model"]["id"] == _MODEL_ID, (
         "the per-session smoke override must leave the reconciled deployment default unchanged"
     )
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_runs_the_turn_as_the_provisioned_smoke_account(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The turn carries the tenant and account `provision_tenant` made, so a mux
-    turn's scope names the smoke account; a legacy turn has no scope to carry it."""
+    """The turn carries the tenant and account `provision_tenant` made, so the
+    turn's scope names the smoke account."""
     from daimon.core import headless_runner
 
     driven: list[dict[str, Any]] = []
@@ -391,33 +394,21 @@ async def test_run_smoke_check_runs_the_turn_as_the_provisioned_smoke_account(
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    result = await run_smoke_check(
-        tool_safety=OPEN_TOOL_SAFETY,
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="smoke-account",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        turn_path=turn_path,
     )
 
     (call,) = driven
-    assert call["path"] == turn_path
-    if turn_path == "mux":
-        scope = call["scope"]
-        assert (scope.tenant_id, scope.account_id) == (
-            str(result.tenant_id),
-            str(result.account_id),
-        )
-    else:
-        assert call["scope"] is None
+    scope = call["scope"]
+    assert (scope.tenant_id, scope.account_id) == (str(result.tenant_id), str(result.account_id))
     session_metadata = workspace.session_create_calls[0]["metadata"]
     assert session_metadata["daimon_account"] == str(result.account_id)
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_runs_its_turn_under_the_policy_it_is_given(
@@ -440,15 +431,12 @@ async def test_run_smoke_check_runs_its_turn_under_the_policy_it_is_given(
 
     monkeypatch.setattr(smoke, "run_turn", spy)
     policy = ToolSafetyPolicy(enabled=True)
-    await run_smoke_check(
+    await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=client,
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="policy",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
         tool_safety=policy,
     )
@@ -458,37 +446,26 @@ async def test_run_smoke_check_runs_its_turn_under_the_policy_it_is_given(
 async def test_run_smoke_check_is_idempotent_when_called_twice(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    first = await run_smoke_check(
+    first = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_idempotent_1"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="idempotent-1",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
-    second = await run_smoke_check(
+    second = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_idempotent_2"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="idempotent-2",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     assert second.tenant_id == first.tenant_id, (
@@ -502,30 +479,24 @@ async def test_run_smoke_check_is_idempotent_when_called_twice(
         account_is_live = await accounts_store.account_exists(s, account_id=first.account_id)
     assert tenant_row is not None, "the (cli, smoke) tenant row must exist after both runs"
     assert account_is_live, "the smoke account row must exist after both runs"
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_recreates_agent_when_ma_agent_missing(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    first = await run_smoke_check(
+    first = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_self_heal_1"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="self-heal",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     # Simulate the smoke tenant's MA agent being wiped from the workspace
@@ -544,20 +515,18 @@ async def test_run_smoke_check_recreates_agent_when_ma_agent_missing(
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
         tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     assert second.tail == "done", "second run must still complete successfully"
     assert len(workspace.agent_create_calls) >= 1, (
         "self-heal must issue at least one agent create request via the apply_callable branch"
     )
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_raises_when_no_usage_event_written(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
@@ -582,26 +551,20 @@ async def test_run_smoke_check_raises_when_no_usage_event_written(
     client = build_fake_anthropic(router.dispatch)
 
     with pytest.raises(SmokeCheckError, match="no usage_events row"):
-        await run_smoke_check(
+        await _run_smoke_check(
             session_factory=db_session_factory,
             anthropic=client,
             defaults_root=tmp_path,
-            agent_tag="daimon",
-            environment_tag="default",
             resolver_cache=new_resolver_cache(),
             topup_key="no-usage-event",
-            markup=Decimal("1.0"),
             on_stage=lambda msg: None,
-            tool_safety=OPEN_TOOL_SAFETY,
-            turn_path=turn_path,
         )
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_propagates_session_error_when_stream_errors(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     """A `session.error` event is not itself stream-terminal, so the stream
@@ -632,46 +595,35 @@ async def test_run_smoke_check_propagates_session_error_when_stream_errors(
     client = build_fake_anthropic(router.dispatch)
 
     with pytest.raises(TurnError) as exc_info:
-        await run_smoke_check(
+        await _run_smoke_check(
             session_factory=db_session_factory,
             anthropic=client,
             defaults_root=tmp_path,
-            agent_tag="daimon",
-            environment_tag="default",
             resolver_cache=new_resolver_cache(),
             topup_key="session-error",
-            markup=Decimal("1.0"),
             on_stage=lambda msg: None,
-            tool_safety=OPEN_TOOL_SAFETY,
-            turn_path=turn_path,
         )
 
     assert exc_info.value.kind == "upstream"
     assert "boom" in exc_info.value.message
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_inserts_topup_when_balance_zero(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    result = await run_smoke_check(
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="topup-zero-balance",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     assert result.topped_up is True, "zero balance must trigger a top-up"
@@ -680,13 +632,12 @@ async def test_run_smoke_check_inserts_topup_when_balance_zero(
     topup_rows = [r for r in rows if r.reason == "smoke-topup"]
     assert len(topup_rows) == 1, "exactly one smoke-topup ledger row expected"
     assert topup_rows[0].delta_usd == SMOKE_TOPUP_USD, "top-up amount must equal SMOKE_TOPUP_USD"
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_skips_topup_when_balance_positive(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     from daimon.core.defaults.provisioning import provision_tenant
@@ -703,18 +654,13 @@ async def test_run_smoke_check_skips_topup_when_balance_positive(
             idempotency_key="preseed-positive-balance",
         )
 
-    result = await run_smoke_check(
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="skip-topup",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     assert result.topped_up is False, "a positive balance must not trigger a top-up"
@@ -723,30 +669,24 @@ async def test_run_smoke_check_skips_topup_when_balance_positive(
     assert not any(r.reason == "smoke-topup" for r in rows), (
         "no smoke-topup row should be inserted when the balance is already positive"
     )
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    await run_smoke_check(
+    await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_repeat_1"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="repeat-key",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     # Drain the balance back to <= 0 so the second call's top-up floor check
@@ -762,18 +702,13 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
                 idempotency_key="drain-for-repeat-test",
             )
 
-    second = await run_smoke_check(
+    second = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_repeat_2"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="repeat-key",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     assert second.topped_up is False, (
@@ -783,13 +718,12 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
         rows = await tenant_ledger.list_for_tenant(s, tenant_id=_TENANT_ID)
     topup_rows = [r for r in rows if r.reason == "smoke-topup"]
     assert len(topup_rows) == 1, "repeating topup_key must not insert a second smoke-topup row"
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_raises_timeout_error_when_turn_exceeds_timeout(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
@@ -800,49 +734,38 @@ async def test_run_smoke_check_raises_timeout_error_when_turn_exceeds_timeout(
     client = build_fake_anthropic(router.dispatch)
 
     with pytest.raises(SmokeCheckError, match="timed out"):
-        await run_smoke_check(
+        await _run_smoke_check(
             session_factory=db_session_factory,
             anthropic=client,
             defaults_root=tmp_path,
-            agent_tag="daimon",
-            environment_tag="default",
             resolver_cache=new_resolver_cache(),
             topup_key="timeout-case",
-            markup=Decimal("1.0"),
             timeout_s=0.05,
             on_stage=lambda msg: None,
-            tool_safety=OPEN_TOOL_SAFETY,
-            turn_path=turn_path,
         )
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_run_smoke_check_reports_each_stage_via_on_stage(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
     stages: list[str] = []
 
-    await run_smoke_check(
+    await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="stage-reporting",
-        markup=Decimal("1.0"),
         on_stage=stages.append,
-        tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=turn_path,
     )
 
     assert len(stages) >= 6, f"expected at least 6 stage reports, got {stages!r}"
     joined = " ".join(stages).lower()
     for keyword in ("tenant", "balance", "agent", "environment", "turn", "usage_events"):
         assert keyword in joined, f"stage reports must mention {keyword!r}: {stages!r}"
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()

@@ -19,18 +19,25 @@ import { KnowledgePanel } from "../setup/KnowledgePanel"
 import { GoogleBadge, ToolRulesPanel } from "../setup/ToolRulesPanel"
 import { GithubPanel } from "../setup/GithubPanel"
 import { KeysPanel } from "../setup/KeysPanel"
+import { monitoringNotes } from "../setup/monitoringNotes"
+import { useMonitoringState } from "../setup/useMonitoringState"
 import { PeoplePanel } from "../setup/PeoplePanel"
+import { usePendingPreview } from "../usePendingPreview"
+import { unsupportedOf } from "../unsupported"
 import { nodeUi } from "../nodes/registry"
 import { FeatureSettings } from "@/modules/features/Settings"
+import { SUPPORT_KEYS } from "@/modules/admin/support/lib"
 
 const TITLES: Record<string, string> = {
   agent: "Agent", instructions: "Instructions", model: "Model", skills: "Skills", tools: "Tools", places: "Channels", helpers: "Helpers",
   history: "History", features: "Features", "mcp:new": "New MCP server", keys: "Keys", coding: "Access via MCP", people: "People", knowledge: "Knowledge", github: "GitHub",
 }
 
-export function Inspector(p: Props) {
-  const { node, agent, config, select } = p
+export function Inspector(props: Props) {
+  const { node, agent, config, select } = props
+  const p = { ...props, unsupported: unsupportedOf(usePendingPreview(agent, config.model).data) }
   const can = useCan()
+  const monitoring = useMonitoringState(agent.id, can("workspace.manage")).data
   useKey((e) => { if (e.key === "Escape") select("") }, [select])
   const kind = node.split(/[:/]/)[0]!
   const server = kind === "mcp" ? config.mcp_servers.find((s) => node.startsWith(`mcp:${s.key}`)) : undefined
@@ -55,7 +62,7 @@ export function Inspector(p: Props) {
   else if (node === "mcp:new") body = <NewServer {...p} />
   else if (server) body = <ServerEditor {...p} server={server} />
   else if (node === "history") body = <History agent={agent} />
-  else if (node === "features") body = <FeatureSettings place={{ agent: agent.id }} tier="agent" edit={!p.ro} />
+  else if (node === "features") body = <FeatureSettings place={{ agent: agent.id }} tier="agent" edit={!p.ro} hide={SUPPORT_KEYS} notes={monitoringNotes(agent.id, monitoring)} />
   else if (platform) {
     const { Panel } = nodeUi(platform.kind)
     body = <Panel agent={agent} node={platform} ro={p.ro} select={select} />

@@ -3,10 +3,17 @@
 A template row with `template_capabilities: "mcp"` keeps the source agent's Daimon
 MCP toolset without any operator credential. Each turn mints one registered caller
 credential in memory: the requesting person's account with the agent's
-chat-execution authority (no admin elevation; roles are re-read live by the
-server), surface `provider_turn` (the server refuses it gated and publishing tools),
-living at most min(turn deadline + 60 s, 900 s). It is checked against the
-consented catalogue before use, and `finalize` revokes it and reads that back.
+chat-execution authority (an admin acts as themselves, as on a native chat
+turn; roles are re-read live by the server), surface `provider_turn` (the server
+refuses it gated and publishing tools), living at most min(turn deadline + 60 s,
+900 s). It is checked against the consented catalogue before use, and `finalize`
+revokes it and reads that back.
+
+An operator-pinned credential file cannot carry a turn's own flags, so a held or
+Slack DM context turn on such a row mints the same per-turn credential once the
+file is proven (`mint`). It carries the flags as MA's chat credential does: the
+hold (held label, channel-bound row, signed claim; the server then lists only
+the held allowlist), the Slack turn context, and the origin's read-only stamp.
 """
 
 from __future__ import annotations
@@ -14,15 +21,48 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_origin import current_execution_origin_id
 from mux.errors import ScopeViolation
 
 if TYPE_CHECKING:
     from daimon.core.stores.domain import BackendAgent
+    from daimon.core.turn.admission import Admission
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from mux.contracts.ids import Scope
     from mux.contracts.resources import AgentSpec
     from pydantic import JsonValue
+
+
+def needs_turn_credential(admission: Admission) -> bool:
+    """Whether the turn's flags must travel on a credential minted for this turn."""
+    return (
+        admission.hold is not None
+        or admission.slack_turn_context_id is not None
+        or bool(admission.origin_seal_ids)
+        or admission.shared_owner is not None
+    )
+
+
+def host_builtins_allowed() -> bool:
+    """Whether this turn's policy lets host built-ins run (outside a turn: no)."""
+    from daimon.core.turn_origin import current_execution_flags
+
+    flags = current_execution_flags.get()
+    return flags is not None and flags.host_builtins
+
+
+def unattended_turn() -> bool:
+    """An unattended turn: its own minted credential says whether built-ins may run."""
+    from daimon.core.turn.mutation_gate import unattended_execution
+
+    return unattended_execution.get()
+
+
+def origin_read_only(admission: Admission) -> bool | None:
+    """The origin stamp a sealed or read-only turn's credential binds; None keeps it."""
+    return True if admission.memory_read_only or admission.source_sealed else None
 
 
 def template_mcp_kept(target: AgentSpec | None) -> bool:
@@ -37,7 +77,8 @@ def consented_catalogue(source: BackendAgent, target: AgentSpec | None) -> froze
     represented = represented_source(source, target)
     if represented is None:
         raise AdmissionDenied(reason="backend_unsupported")
-    servers = represented.target.mcp_servers or ()
+    # Relayed connectors sit beside Daimon's server; the catalogue is Daimon's own.
+    servers = [s for s in represented.target.mcp_servers or () if s.name == DAIMON_SERVER_NAME]
     if len(servers) != 1:
         raise AdmissionDenied(reason="backend_unsupported")
     connection = servers[0]
@@ -60,37 +101,75 @@ class TemplateMCPCredential:
 
     The host sets `catalogue` once the counterpart is verified (`consented_catalogue`)
     and clears it whenever verification restarts; nothing resolves without it.
+    `scope` is the asker's; `session_scope`, a shared thread's owner's, keys the session.
     """
 
-    def __init__(self, request: ProviderPreparationRequest, scope: Scope, *, label: str) -> None:
+    def __init__(
+        self,
+        request: ProviderPreparationRequest,
+        scope: Scope,
+        *,
+        label: str,
+        session_scope: Scope | None = None,
+    ) -> None:
         self._request, self._scope, self._label = request, scope, label
+        self._session_scope = session_scope or scope
         self.catalogue: frozenset[str] | None = None
         self._minted: tuple[str, UUID] | None = None
+        self._bound = False
 
     async def resolve(self, authorized: Scope, reference: str, destination: str) -> str:
         from daimon.core.ma_identity import derive_agent_uuid
-        from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti, validate_agent_mcp_token
+
+        request, scope = self._request, self._session_scope
+        agent_id = derive_agent_uuid(
+            tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+        )
+        if (
+            authorized != scope
+            or reference != f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{agent_id}"
+        ):
+            raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        return await self.mint(destination, agent_id=agent_id)
+
+    async def mint(self, destination: str, *, agent_id: UUID) -> str:
+        """Mint (once) and check this turn's credential for `agent_id`'s Daimon MCP."""
+        from daimon.core.connector_relay import daimon_destination
+        from daimon.core.mcp_auth import (
+            mint_agent_mcp_token,
+            token_jti,
+            validate_agent_mcp_token,
+        )
+        from daimon.core.mcp_hold import held_catalogue
         from daimon.core.mcp_oauth.discovery import list_mcp_tools
         from daimon.core.stores.accounts import get_account_with_tenant
 
         request, scope = self._request, self._scope
-        agent_id = derive_agent_uuid(
-            tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
-        )
+        admission = request.admission
         public_url = request.deps.mcp.public_url
+        # A relay URL authenticates this same credential: mint and check it for Daimon's.
+        own = None if public_url is None else daimon_destination(destination, str(public_url))
         if (
             self.catalogue is None
-            or authorized != scope
             or scope.is_platform
             or scope.is_legacy_host_authorized
-            or reference != f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{agent_id}"
-            or public_url is None
-            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or own is None
             or request.deps.mcp.jwt_secret is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
         if self._minted is not None:
-            return self._minted[0]
+            if self._bound or current_execution_origin_id.get() is None:
+                return self._minted[0]
+            # Minted while preparing, before the turn ran: bind it to the turn now.
+            try:
+                return await self._bind(self._minted[0], agent_id=agent_id)
+            except (OSError, ValueError):
+                await self.finalize()
+                raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
+        # A held credential lists only the held allowlist (`daimon.core.mcp_hold`).
+        expected = self.catalogue if admission.hold is None else held_catalogue(self.catalogue)
+        # The server lists a tool Off here (`_lists_everything`); the allowlist leaves it out.
+        hidden = admission.toolset.hidden_daimon_tools
         now = request.now()
         ttl_s = min(int(max((request.deadline - now).total_seconds(), 0.0)) + 60, 900)
         secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
@@ -110,6 +189,10 @@ class TemplateMCPCredential:
                 ttl_days=ttl_s / 86400,  # pyright: ignore[reportArgumentType]
                 chat_execution=True,
                 surface="provider_turn",
+                hold=admission.hold,
+                slack_turn_context_id=admission.slack_turn_context_id,
+                seal_ids=admission.origin_seal_ids,
+                host_builtins=host_builtins_allowed(),
             )
         self._minted = token, token_jti(token)
         try:
@@ -123,11 +206,38 @@ class TemplateMCPCredential:
                 max_ttl_s=ttl_s,
                 chat_execution=True,
             )
-            if await list_mcp_tools(destination, token) != self.catalogue:
+            if await list_mcp_tools(own, token) - hidden != expected - hidden:
                 raise ValueError("target MCP catalogue differs from captured source")
+            token = await self._bind(token, agent_id=agent_id)
         except (OSError, ValueError):
             await self.finalize()
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
+        return token
+
+    async def _bind(self, token: str, *, agent_id: UUID) -> str:
+        """Bind `token` to the executing turn, if one runs (unchanged otherwise)."""
+        from daimon.core.mcp_auth import bind_execution_session
+
+        request, admission = self._request, self._request.admission
+        assert self._minted is not None and request.deps.mcp.jwt_secret is not None
+        bound = current_execution_origin_id.get() is not None
+        # The host call gate finds the turn's origin through this claim, and
+        # the server reads a sealed or read-only turn's memory posture from it.
+        token = await bind_execution_session(
+            request.deps.sessionmaker,
+            token=token,
+            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
+            scope=self._scope,
+            agent_id=agent_id,
+            now=request.now(),
+            memory_read_only=origin_read_only(admission),
+            # A shared thread's credential names its asker: the relay then
+            # hides personal sign-ins, as MA's `hide_personal_for` does.
+            requester_account_id=(
+                admission.account_id if admission.shared_owner is not None else None
+            ),
+        )
+        self._minted, self._bound = (token, self._minted[1]), bound
         return token
 
     async def finalize(self) -> None:
@@ -145,3 +255,27 @@ class TemplateMCPCredential:
         if row is not None and row.revoked_at is None:
             raise ScopeViolation("mcp-credential", "MCP credential revocation readback failed")
         self._minted = None
+        await _close_github_router(request, jti)
+
+
+async def _close_github_router(request: ProviderPreparationRequest, jti: UUID) -> None:
+    """Close the GitHub router the relay opened for this credential, if any.
+
+    The record closes first, so a failed GitHub revoke leaves only tokens that
+    nobody outside Daimon holds and that lapse within the hour.
+    """
+    import httpx
+    import structlog
+    from daimon.core.github_turn_router import close_turn_router
+
+    if request.deps.fernet is None:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            await close_turn_router(
+                request.deps.sessionmaker, client, turn_jti=jti, fernet=request.deps.fernet
+            )
+    except (httpx.HTTPError, OSError) as error:
+        structlog.get_logger(__name__).warning(
+            "template_mcp.github_router_close_failed", error_type=type(error).__name__
+        )

@@ -261,10 +261,11 @@ async def _web_slack_postable(facts: dict[str, bool], monkeypatch: pytest.Monkey
     async def guest(*_args: Any) -> bool:
         return facts["is_guest"]
 
-    monkeypatch.setattr(web_visibility, "_slack_token", token)
+    monkeypatch.setattr(web_visibility, "slack_token", token)
     monkeypatch.setattr(web_visibility, "_slack_conversations", conversations)
     monkeypatch.setattr(web_visibility, "_slack_guest", guest)
-    reach = await web_visibility._slack(cast(Any, None), "T1", "U1")  # pyright: ignore[reportPrivateUsage]
+    runtime = SimpleNamespace(sessionmaker=None, fernet=None)
+    reach = await web_visibility._slack(cast(Any, runtime), "T1", "U1")  # pyright: ignore[reportPrivateUsage]
     return "C1" in reach.postable
 
 

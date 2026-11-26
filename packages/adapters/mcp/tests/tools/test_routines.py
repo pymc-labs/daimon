@@ -42,12 +42,14 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.core.teams_graph import GraphUnavailable
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, call_mcp_tool
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _create_routine_impl = _routines_mod._create_routine_impl  # pyright: ignore[reportPrivateUsage]
 _delete_routine_impl = _routines_mod._delete_routine_impl  # pyright: ignore[reportPrivateUsage]
@@ -111,19 +113,17 @@ def _auth_identity(
 ) -> AuthIdentity:
     """A member in a chat turn with the MA agent ``talking_to`` (None: no agent)."""
     tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
+    return auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         role=Role.USER,
+        is_admin=is_admin,
         platform=platform,
         external_id=external_id,
         platform_user_id=platform_user_id,
-        is_admin=is_admin,
-        chat_agent_id=(
-            None
-            if talking_to is None
-            else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=talking_to)
-        ),
+        chat_agent_id=None
+        if talking_to is None
+        else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=talking_to),
         chat_session_id="test-session",
     )
 
@@ -602,7 +602,7 @@ async def test_create_routine_unknown_agent_raises_toolerror(
 
 
 async def test_update_routine_renames_agent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     """Updating with a new ``agent_name`` re-resolves the id and persists both."""
@@ -624,7 +624,7 @@ async def test_update_routine_renames_agent(
     client = _ma_client_with_agents(
         [_ma_agent(agent_id="ag_other", name="other", tenant_id=tenant.id)]
     )
-    runtime = _runtime(committing_sessionmaker, client=client)
+    runtime = _runtime(pooled_sessionmaker, client=client)
     auth = _auth_identity(tenant_id=tenant.id, talking_to="ag_other")
     updated = await _update_routine_impl(runtime, auth, routine_id=created.id, agent_name="other")
     assert updated.agent_name == "other", "new agent_name must be persisted"
@@ -634,7 +634,7 @@ async def test_update_routine_renames_agent(
 
 
 async def test_update_routine_unknown_agent_raises_toolerror(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -652,7 +652,7 @@ async def test_update_routine_unknown_agent_raises_toolerror(
     await db_session.commit()
 
     client = _ma_client_with_agents([])  # no agents in MA for this tenant
-    runtime = _runtime(committing_sessionmaker, client=client)
+    runtime = _runtime(pooled_sessionmaker, client=client)
     auth = _auth_identity(tenant_id=tenant.id)
     with pytest.raises(ToolError, match="no agent named"):
         await _update_routine_impl(runtime, auth, routine_id=created.id, agent_name="ghost")
@@ -1535,7 +1535,7 @@ async def test_create_routine_refuses_a_member_scheduling_another_projects_agent
 
 
 async def test_update_routine_refuses_a_member_moving_it_to_another_projects_agent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -1553,14 +1553,14 @@ async def test_update_routine_refuses_a_member_moving_it_to_another_projects_age
     client = _ma_client_with_agents(
         [_ma_agent(agent_id="ag_acme", name="acme-project", tenant_id=tenant.id)]
     )
-    runtime = _runtime(committing_sessionmaker, client=client)
+    runtime = _runtime(pooled_sessionmaker, client=client)
     member = _auth_identity(tenant_id=tenant.id, talking_to="ag_clientb")
 
     with pytest.raises(ToolError, match="only a server admin"):
         await _update_routine_impl(
             runtime, member, routine_id=created.id, agent_name="acme-project"
         )
-    async with committing_sessionmaker() as session:
+    async with pooled_sessionmaker() as session:
         row = await get_routine(session, created.id, tenant_id=tenant.id)
     assert row is not None and row.agent_id == "ag_clientb", "a refused update changes nothing"
 
@@ -1607,7 +1607,7 @@ _PINNED_CHANNEL = "111111111111111111"
 
 @pytest.mark.parametrize("change", ["clear-destination", "switch-to-pinned-agent"])
 async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     change: str,
 ) -> None:
@@ -1637,7 +1637,7 @@ async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
     client = _ma_client_with_agents(
         [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
     )
-    runtime = _runtime(committing_sessionmaker, client=client)
+    runtime = _runtime(pooled_sessionmaker, client=client)
     admin = _auth_identity(tenant_id=tenant.id, is_admin=True)
 
     with pytest.raises(
@@ -1649,19 +1649,19 @@ async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
             )
         else:
             await _update_routine_impl(runtime, admin, routine_id=created.id, agent_name="daimon")
-    async with committing_sessionmaker() as session:
+    async with pooled_sessionmaker() as session:
         row = await get_routine(session, created.id, tenant_id=tenant.id)
     assert row is not None and row.agent_id == created.agent_id
     assert row.destination_id == created.destination_id, "a refused update changes nothing"
 
 
 def _display_named_agent(tenant_id: uuid.UUID) -> dict[str, object]:
-    return ma_agent(
+    return ma_agent_payload(
         id="ag_resolved",
         name="Acme Display",
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "acme-config"},
-    ).model_dump(mode="json")
+    )
 
 
 async def test_create_routine_checks_the_pin_on_every_name_of_the_resolved_agent(
@@ -1694,7 +1694,7 @@ async def test_create_routine_checks_the_pin_on_every_name_of_the_resolved_agent
 
 
 async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     """A routine saved before the pin, under the config name, must not keep being
@@ -1717,7 +1717,7 @@ async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name
     )
     await db_session.commit()
     runtime = _runtime(
-        committing_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
+        pooled_sessionmaker, client=_ma_client_with_agents([_display_named_agent(tenant.id)])
     )
 
     with pytest.raises(
@@ -1732,16 +1732,16 @@ async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name
 
 
 def _empty_display_agent(tenant_id: uuid.UUID) -> dict[str, object]:
-    return ma_agent(
+    return ma_agent_payload(
         id="ag_resolved",
         name="",
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "acme-config"},
-    ).model_dump(mode="json")
+    )
 
 
 async def test_an_empty_name_pin_does_not_pin_a_routine_on_create_or_update(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
     """A pin keyed by the empty name never makes a routine pinned (save-time rule).
@@ -1757,7 +1757,7 @@ async def test_an_empty_name_pin_does_not_pin_a_routine_on_create_or_update(
     )
     await db_session.commit()
     runtime = _runtime(
-        committing_sessionmaker, client=_ma_client_with_agents([_empty_display_agent(tenant.id)])
+        pooled_sessionmaker, client=_ma_client_with_agents([_empty_display_agent(tenant.id)])
     )
     auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
 
@@ -2394,7 +2394,6 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
         )
         await start_conversation(
             db_session,
-            now=now,
             conversation=DirectMessageRow(
                 platform="discord",
                 route_key="physical-dm",
@@ -2412,7 +2411,7 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
                 source_thread_keys=None,
                 history=[],
                 recent_message_ids=[],
-                active_until=None,
+                claimed_at=None,
             ),
         )
     origin = await create_origin(
@@ -2945,3 +2944,48 @@ async def test_legacy_private_output_on_all_mcp_reads(
     with pytest.raises(ToolError, match="routine not found"):
         await _get_routine_impl(runtime, outsider, routine_id=row.id)
     await client.close()
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        _auth_identity(platform="slack"),
+        _auth_identity(platform_user_id=None),
+        dataclasses.replace(_auth_identity(), foreign_home_id="other"),
+        dataclasses.replace(_auth_identity(), agent_id=uuid.uuid4()),
+    ],
+)
+async def test_save_caller_reads_no_roles_for_anyone_but_a_discord_member(
+    monkeypatch: pytest.MonkeyPatch, auth: AuthIdentity
+) -> None:
+    """A client, an agent key or another platform can never show a fresh role read."""
+    read = AsyncMock(side_effect=AssertionError("must not read roles"))
+    monkeypatch.setattr(_routines_mod, "resolve_subject", read)
+    caller = _routines_mod._saving_caller(_runtime(MagicMock()), auth)
+    assert caller.fresh_subject is None, "only a Discord member has live roles to read"
+    assert not caller.subject.membership_fresh, "the stored subject never claims a fresh read"
+
+
+async def test_save_caller_reads_a_discord_members_roles_fresh_and_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roles are read lazily, so a save for an agent without roles costs no lookup."""
+    from daimon.core.authz import Subject
+
+    read = AsyncMock(
+        return_value=Subject(
+            platform_user_id="u_test",
+            role_ids=("123",),
+            verified_membership=True,
+            membership_fresh=True,
+        )
+    )
+    monkeypatch.setattr(_routines_mod, "resolve_subject", read)
+    caller = _routines_mod._saving_caller(_runtime(MagicMock()), _auth_identity())
+    read.assert_not_awaited()
+    assert caller.fresh_subject is not None, "a Discord member's roles can be read"
+    subject = await caller.fresh_subject()
+    assert read.await_args is not None
+    assert read.await_args.kwargs["require_fresh"] is True, "the read skips the cache"
+    assert subject.membership_fresh, "the subject marks the read as live"
+    assert subject.role_ids == ("123",), "the live roles are the ones checked"

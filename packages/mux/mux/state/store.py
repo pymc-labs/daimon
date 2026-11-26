@@ -77,14 +77,46 @@ def is_released(binding: ProviderBinding | None) -> bool:
     return binding is not None and binding.native_refs.get(RELEASED_REF) == "1"
 
 
-def released_successor(current: ProviderBinding) -> ProviderBinding:
+PREVIOUS_PREFIX = "previous."
+"""Prefix of the `native_refs` a released binding keeps from the session it
+released, so the slot's next provider can read that conversation."""
+
+
+def previous_refs(binding: ProviderBinding) -> dict[str, str]:
+    """What a released binding kept of its released session, unprefixed."""
+    n = len(PREVIOUS_PREFIX)
+    return {k[n:]: v for k, v in binding.native_refs.items() if k.startswith(PREVIOUS_PREFIX)}
+
+
+def released_successor(
+    current: ProviderBinding, *, released_at: datetime | None = None
+) -> ProviderBinding:
     """The next generation of `current` with no provider session: the thread's
     next turn selects its provider afresh and starts a fresh native session.
 
-    Written through `put_binding`'s compare-and-swap like any rebind.
+    It keeps the released session's refs under `PREVIOUS_PREFIX`; nothing reads
+    them as a live session. Written through `put_binding`'s compare-and-swap.
     """
+    kept: dict[str, str] = (
+        {
+            "provider": current.provider,
+            "profile": current.profile,
+            "config_revision": str(current.config_revision),
+            **{k: v for k, v in current.native_refs.items() if k in ("session", "account_scope")},
+        }
+        if SESSION_REF in current.native_refs
+        else previous_refs(current)
+    )
+    if released_at is not None:
+        kept["released_at"] = released_at.isoformat()
     return current.model_copy(
-        update={"generation": current.generation + 1, "native_refs": {RELEASED_REF: "1"}}
+        update={
+            "generation": current.generation + 1,
+            "native_refs": {
+                RELEASED_REF: "1",
+                **{PREVIOUS_PREFIX + k: v for k, v in kept.items()},
+            },
+        }
     )
 
 
@@ -280,6 +312,7 @@ async def bind_new_slot(store: StateStore, binding: ProviderBinding) -> Provider
 __all__ = [
     "ConfigRevisionConflict",
     "ERA_REF",
+    "PREVIOUS_PREFIX",
     "RELEASED_REF",
     "SESSION_REF",
     "StateStore",
@@ -289,5 +322,6 @@ __all__ = [
     "binding_slot",
     "check_binding_successor",
     "is_released",
+    "previous_refs",
     "released_successor",
 ]

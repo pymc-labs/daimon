@@ -14,7 +14,6 @@ import discord
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.output_delivery import (
     MAX_ATTACHMENTS_PER_MESSAGE,
@@ -24,11 +23,15 @@ from daimon.adapters.discord.output_delivery import (
     upload_limit,
 )
 from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhooks
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
+from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.testing.builders import file_meta
+from daimon.testing.discord_builders import discord_runtime
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
 NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
@@ -47,14 +50,12 @@ def _client_with_file(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_chart",
                     created_at=NOW,
                     filename=filename,
                     mime_type="image/png",
                     size_bytes=size_bytes,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -83,6 +84,11 @@ def _thread(limit: int = 10 * _MIB) -> discord.Thread:
     return cast(discord.Thread, thread)
 
 
+def _runtime(client: AsyncAnthropic, session_id: str) -> AnthropicOutputRuntime:
+    scope = Scope.legacy_host_authorized(call_site="test_discord_output_delivery")
+    return AnthropicOutputRuntime(client, session_id, scope=scope)
+
+
 async def _no_sleep(delay: float) -> None:
     pass
 
@@ -104,9 +110,8 @@ async def test_delivers_file_and_deletes_only_after_discord_post() -> None:
 
     thread.send = AsyncMock(side_effect=send)
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -154,9 +159,8 @@ async def test_a_file_the_agent_already_posted_is_cleared_without_a_second_post(
     thread.history = _history(_posted(author_id=42, filename="chart.png", size=9))
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -176,9 +180,8 @@ async def test_a_revised_file_with_the_same_name_and_size_still_posts() -> None:
     )
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -200,9 +203,8 @@ async def test_a_same_named_file_from_someone_else_or_another_size_still_posts()
     thread.send = AsyncMock(return_value=SimpleNamespace(id=555))
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -218,9 +220,8 @@ async def test_oversize_uses_guild_limit_posts_skip_notice_and_keeps_the_file() 
     thread = _thread()
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -267,9 +268,8 @@ async def test_a_boosted_guild_takes_a_file_the_default_limit_would_skip() -> No
     thread = _thread(50 * _MIB)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -287,9 +287,8 @@ async def test_an_unboosted_guild_skips_a_file_a_boosted_one_would_take_and_quot
     thread = _thread(10 * _MIB)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -310,9 +309,8 @@ async def test_a_kept_oversize_file_is_announced_once_across_turns() -> None:
 
     for _ in range(3):
         await deliver_session_outputs(
-            client,
+            _runtime(client, "sesn_1"),
             thread,
-            session_id="sesn_1",
             may_post=_allowed,
             notice_thread_ids=set(),
             noticed_files=noticed,
@@ -331,14 +329,8 @@ async def test_oversize_file_kept_and_normal_file_attached_and_cleared() -> None
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
-                    id=file_id,
-                    created_at=NOW,
-                    filename=name,
-                    mime_type=mime,
-                    size_bytes=size,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id=file_id, created_at=NOW, filename=name, mime_type=mime, size_bytes=size
                 ).model_dump(mode="json")
                 for file_id, name, mime, size in (
                     ("file_big", "render.mp4", "video/mp4", 12 * _MIB),
@@ -361,9 +353,8 @@ async def test_oversize_file_kept_and_normal_file_attached_and_cleared() -> None
     thread = _thread()
 
     await deliver_session_outputs(
-        build_fake_anthropic(router.dispatch),
+        _runtime(build_fake_anthropic(router.dispatch), "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         noticed_files=NoticedFiles(),
@@ -391,9 +382,8 @@ async def test_oversize_notice_does_not_contradict_an_already_delivered_file(
     thread.guild.me.id = 42
     thread.history = _history(_posted(author_id=author, filename="report.zip", size=size))
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -413,9 +403,8 @@ async def test_missing_attach_permission_keeps_file_and_posts_one_notice() -> No
 
     for _ in range(2):
         await deliver_session_outputs(
-            client,
+            _runtime(client, "sesn_1"),
             thread,
-            session_id="sesn_1",
             may_post=_allowed,
             notice_thread_ids=notice_thread_ids,
             sleep=_no_sleep,
@@ -437,9 +426,8 @@ async def test_protected_thread_posts_nothing_and_keeps_file() -> None:
         return False
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=protected,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -454,12 +442,11 @@ async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None
     from daimon.core.scope import DeploymentDefault
     from daimon.testing.turn_fakes import deps_for
 
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=MagicMock(),
         anthropic=MagicMock(),
         sessionmaker=MagicMock(),
         notebook_rate_limiter=MagicMock(),
-        billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
         turn_deps=deps_for(),
@@ -468,7 +455,11 @@ async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None
     thread = _thread()
     tenant_id = uuid.uuid4()
     text_outcome = RunOutcome(
-        TurnState(content=[TextBlock(kind="text", text="done")]), "sesn_1", None, False
+        TurnState(content=[TextBlock(kind="text", text="done")]),
+        "sesn_1",
+        None,
+        False,
+        outputs=_runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
     )
     tool_outcome = RunOutcome(
         TurnState(
@@ -481,6 +472,7 @@ async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None
         "sesn_1",
         None,
         False,
+        outputs=_runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
     )
     started = [asyncio.Event(), asyncio.Event()]
     release = [asyncio.Event(), asyncio.Event()]
@@ -525,6 +517,7 @@ async def test_the_sweep_names_the_turns_person_and_replies_to_their_message() -
         "sesn_1",
         None,
         False,
+        outputs=_runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
     )
     lifecycle = MagicMock(output_authorization=None)
     lifecycle.requester_id = 4242
@@ -539,6 +532,42 @@ async def test_the_sweep_names_the_turns_person_and_replies_to_their_message() -
     lifecycle.files_reply_to.assert_called_once_with(thread.id)
     assert deliver.await_args.kwargs["requester_id"] == 4242
     assert deliver.await_args.kwargs["reply_to"] == 5150
+
+
+async def test_a_sweep_that_fails_outright_is_an_ops_issue() -> None:
+    from daimon.core.ma_identity import derive_tenant_uuid
+
+    from .harness import make_bot
+
+    bot = make_bot(MagicMock())
+    thread = _thread()
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sesn_1",
+        None,
+        False,
+        outputs=_runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
+    )
+    with (
+        patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=OSError),
+        patch("daimon.adapters.discord.bot.report_ops_event") as report,
+    ):
+        bot._schedule_output_sweep(outcome, thread=thread, tenant_id=uuid.uuid4())  # pyright: ignore[reportPrivateUsage]
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    event = report.call_args.args[1]
+    assert (event.code, event.tenant_id, event.reason, event.session_id) == (
+        "delivery.output_failed",
+        derive_tenant_uuid(platform="discord", workspace_id="456"),
+        "OSError",
+        "sesn_1",
+    )
 
 
 # --- Files go onto the turn's answer -----------------------------------------
@@ -558,14 +587,12 @@ def _client_with_files(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id=file_id,
                     created_at=created_at,
                     filename=filename,
                     mime_type="application/pdf",
                     size_bytes=len(content),
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
                 for file_id, filename, content, created_at in files
             ]
@@ -649,9 +676,8 @@ async def test_files_are_added_to_the_answer_keeping_what_is_already_there() -> 
     answer, calls = _recording_edit(deleted)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_window_after(NOW),
@@ -697,9 +723,8 @@ async def test_a_failed_answer_edit_posts_the_file_and_never_reposts_the_answer(
     transport.send = transport_send
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_window_after(NOW),
@@ -724,9 +749,8 @@ async def test_after_one_failed_edit_the_rest_post_on_their_own() -> None:
     edit = AsyncMock(side_effect=discord.ClientException("own webhook token unavailable"))
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_window_after(NOW),
@@ -748,9 +772,8 @@ async def test_files_past_the_ten_attachment_limit_post_on_their_own() -> None:
     answer, calls = _recording_edit(deleted)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_window_after(NOW),
@@ -779,9 +802,8 @@ async def test_a_file_the_agent_already_sent_is_not_added_to_the_answer() -> Non
     edit = AsyncMock()
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=window,
@@ -803,9 +825,8 @@ async def test_an_answer_that_cannot_be_fetched_falls_back_to_a_post() -> None:
     edit = AsyncMock()
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_window_after(NOW),
@@ -896,9 +917,8 @@ async def test_an_edit_that_applied_before_failing_counts_and_keeps_the_file(
     thread.fetch_message = AsyncMock(side_effect=server.fetch)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -922,9 +942,8 @@ async def test_an_edit_that_never_applied_falls_back_to_one_post(failure: BaseEx
     thread.fetch_message = AsyncMock(side_effect=server.fetch)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -955,9 +974,8 @@ async def test_a_same_named_file_with_other_bytes_on_the_answer_does_not_count()
     thread.send = AsyncMock(side_effect=send)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         thread,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -1045,14 +1063,12 @@ def _per_session_client(files: dict[str, tuple[str, int]]) -> AsyncAnthropic:
             return list_response([])
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id=file_id,
                     created_at=NOW,
                     filename=filename,
                     mime_type="application/pdf",
                     size_bytes=size,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         )
@@ -1098,9 +1114,8 @@ async def _overlapping_sweeps(
 
     alice = asyncio.create_task(
         deliver_session_outputs(
-            client,
+            _runtime(client, "sesn_alice"),
             thread,
-            session_id="sesn_alice",
             may_post=_allowed,
             notice_thread_ids=set(),
             answer=alice_answer,
@@ -1112,9 +1127,8 @@ async def _overlapping_sweeps(
     await alice_settling.wait()
     for session_id in ("sesn_bob", "sesn_bob_big"):
         await deliver_session_outputs(
-            client,
+            _runtime(client, session_id),
             thread,
-            session_id=session_id,
             may_post=_allowed,
             notice_thread_ids=set(),
             answer=bob_answer,
@@ -1210,8 +1224,10 @@ async def test_overlapping_turns_attach_each_file_to_its_own_answer() -> None:
     ]
 
 
-def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
+def test_selfhosted_tool_turn_when_outputs_then_schedules_sweep() -> None:
+    """A self-hosted tool turn with an outputs runtime sweeps its files like any provider."""
     bot = MagicMock(spec=DaimonBot)
+    outputs = MagicMock(session_id="sh_session_test")
     outcome = RunOutcome(
         TurnState(
             content=[
@@ -1223,11 +1239,14 @@ def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
         "sh_session_test",
         None,
         False,
+        outputs=outputs,
     )
-    with patch.object(bot, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
-        DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
-            bot, outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
-        )
+    DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+        bot, outcome, thread=_thread(), tenant_id=uuid.uuid4()
+    )
+    queued = bot._queue_output_sweep  # pyright: ignore[reportPrivateUsage]
+    queued.assert_called_once()
+    assert queued.call_args.args[1] is outputs, "the sweep must read the turn's own outputs"
 
 
 # --- Direct messages ----------------------------------------------------------
@@ -1247,9 +1266,8 @@ async def test_a_dm_gets_the_file_and_the_listing_entry_is_cleared() -> None:
     channel = _dm()
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         channel,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -1266,9 +1284,8 @@ async def test_a_dm_skips_a_file_over_discords_default_limit_and_keeps_it() -> N
     channel = _dm()
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         channel,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -1285,9 +1302,8 @@ async def test_a_file_the_agent_already_sent_in_the_dm_is_not_sent_again() -> No
     channel.history = _history(_posted(author_id=42, filename="chart.png", size=9))
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         channel,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         turn_window=_WINDOW,
@@ -1305,9 +1321,8 @@ async def test_a_refused_dm_upload_keeps_the_file_and_asks_for_no_permission() -
     channel.send = AsyncMock(side_effect=forbidden)
 
     await deliver_session_outputs(
-        client,
+        _runtime(client, "sesn_1"),
         channel,
-        session_id="sesn_1",
         may_post=_allowed,
         notice_thread_ids=set(),
         sleep=_no_sleep,
@@ -1335,9 +1350,19 @@ async def test_a_dm_sweep_attaches_to_the_answer_names_nobody_and_chains_per_ses
         await release.wait()
 
     with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=sweep):
-        bot.schedule_dm_output_sweep(channel, "sesn_1", may_post=_allowed, lifecycle=lifecycle)
+        bot.schedule_dm_output_sweep(
+            channel,
+            _runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
+            may_post=_allowed,
+            lifecycle=lifecycle,
+        )
         await started[0].wait()
-        bot.schedule_dm_output_sweep(channel, "sesn_1", may_post=_allowed, lifecycle=lifecycle)
+        bot.schedule_dm_output_sweep(
+            channel,
+            _runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
+            may_post=_allowed,
+            lifecycle=lifecycle,
+        )
         await asyncio.sleep(0)
         assert len(calls) == 1, "a DM sweep waits for the session's earlier sweep"
         release.set()
@@ -1349,3 +1374,109 @@ async def test_a_dm_sweep_attaches_to_the_answer_names_nobody_and_chains_per_ses
     assert first["answer"] is lifecycle.answer_message
     assert first["requester_id"] is None and first["reply_to"] is None
     lifecycle.files_reply_to.assert_not_called()
+
+
+# --- The room audience (`audience_hold`) and the detached sweep ----------------------
+
+
+class _AudienceLifecycle(OutputGate):
+    """The parts of a turn lifecycle that the sweep reads, over the real output latches."""
+
+    turn_window = None
+    answer_message = None
+    requester_id = 4242
+
+    def files_reply_to(self, thread_id: int) -> int | None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("mode", "held", "contained", "files_go_out", "fact_reads"),
+    [
+        ("off", False, True, True, 0),
+        ("shadow", False, True, True, 1),
+        ("on", False, False, True, 1),
+        ("on", False, True, False, 1),
+        ("on", True, True, True, 1),
+    ],
+)
+async def test_a_turns_files_follow_the_audience_gate_from_turn_to_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    held: bool,
+    contained: bool,
+    files_go_out: bool,
+    fact_reads: int,
+) -> None:
+    """The turn installs the audience latch; the sweep still runs for an ordinary turn, and
+    asks the same latch before each file. Only `on` and a contained room refuses a file."""
+    from daimon.core import audience_gate
+    from daimon.core.channel_audience import ChannelAudience
+    from daimon.core.turn import output as output_mod
+    from daimon.core.turn.run import _install_audience_gate  # pyright: ignore[reportPrivateUsage]
+    from daimon.core.turn_hold import TurnHold
+
+    from .harness import make_bot
+
+    reads: list[str] = []
+
+    async def fact(session: object, *, tenant_id: object, platform: str, channel_id: str) -> Any:
+        reads.append(channel_id)
+        return ChannelAudience(contained=contained, known=True, narrow=False, source="live")
+
+    monkeypatch.setattr(output_mod, "channel_has_outsiders", fact)
+    monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+
+    class _Sessions:
+        def __call__(self) -> Any:
+            return MagicMock(
+                __aenter__=AsyncMock(return_value=MagicMock()),
+                __aexit__=AsyncMock(return_value=False),
+            )
+
+    lifecycle = _AudienceLifecycle()
+    guard = _install_audience_gate(
+        SimpleNamespace(sessionmaker=_Sessions()),  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        admission=SimpleNamespace(  # type: ignore[arg-type]
+            private_dm_id=None,
+            origin_channel_id="123",
+            origin_thread_id=None,
+            hold=TurnHold("discord", "123", client=False) if held else None,
+            agent=SimpleNamespace(name="helper"),
+            audience_mode=mode,
+        ),
+        lifecycle=lifecycle,  # type: ignore[arg-type]
+        prior=None,
+    )
+    assert guard is not None
+    assert lifecycle.output_authorization is None, "no watch or direct message restricts it"
+
+    bot = make_bot(MagicMock())
+    bot._may_post_in = AsyncMock(return_value=True)  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sesn_1",
+        None,
+        False,
+        outputs=_runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
+    )
+    with patch("daimon.adapters.discord.bot.deliver_session_outputs") as deliver:
+        bot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            outcome,
+            thread=_thread(),
+            tenant_id=uuid.uuid4(),
+            lifecycle=lifecycle,  # type: ignore[arg-type]
+        )
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+    deliver.assert_awaited_once()
+    may_post = deliver.await_args.kwargs["may_post"]
+    assert await may_post() is files_go_out
+    assert len(reads) == fact_reads

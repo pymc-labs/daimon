@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import re
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 import httpx
@@ -32,7 +33,10 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl
 
-from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
+from .turn_io_support import HeadlessIdentity, TurnIOSpy
+
+_run_turn = partial(run_turn, agent_id="agent_x", environment_id="env_x")
+
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
 
@@ -153,24 +157,21 @@ def _confirmations(sends: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def test_routine_write_is_denied_when_the_policy_is_on(
-    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+    headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
 ) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
     client = build_fake_anthropic(_router(creates=creates, sends=sends).dispatch)
 
-    tail = await run_turn(
+    tail = await _run_turn(
         anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
         trigger_message="file tonight's bugs",
         tool_safety=ToolSafetyPolicy(enabled=True),
         tenant_id=headless_identity.tenant_id,
         account_id=headless_identity.account_id,
-        turn_path=turn_path,
     )
 
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
     assert tail == "I could not file it."
     (created,) = creates
     agent = created["agent"]
@@ -187,25 +188,22 @@ async def test_routine_write_is_denied_when_the_policy_is_on(
 
 
 async def test_routine_session_is_unchanged_when_the_policy_is_off(
-    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+    headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
 ) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
     client = build_fake_anthropic(_router(creates=creates, sends=sends, updates=updates).dispatch)
 
-    await run_turn(
+    await _run_turn(
         anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
         trigger_message="file tonight's bugs",
         tool_safety=OPEN_TOOL_SAFETY,
         tenant_id=headless_identity.tenant_id,
         account_id=headless_identity.account_id,
-        turn_path=turn_path,
     )
 
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
     # The fake keeps serving the frozen snapshot, so every gate rewrites it.
     assert updates
@@ -350,10 +348,8 @@ async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
     ]
     client = build_fake_anthropic(router.dispatch)
 
-    await run_turn(
+    await _run_turn(
         anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
         trigger_message="list the flags",
         tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
         tenant_id=headless_identity.tenant_id,
@@ -414,9 +410,9 @@ async def test_a_session_for_an_agent_with_daimon_rules_asks_on_call_tool_and_th
             "add_skill",
             "approve_reach",
             "call_tool",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "hubspot_update_objects",
             "resume_watch",
             "rotate_watch_key",
@@ -441,9 +437,9 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
             "add_server_skill",
             "add_skill",
             "approve_reach",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "resume_watch",
             "rotate_watch_key",
             "start_long_job",
@@ -504,10 +500,8 @@ async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(
             agent_servers=[daimon],
         ).dispatch
     )
-    await run_turn(
+    await _run_turn(
         anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
         trigger_message="mail the summary",
         mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
         tool_safety=ToolSafetyPolicy(enabled=enabled),
@@ -548,10 +542,8 @@ async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
     )
 
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await run_turn(
+        await _run_turn(
             anthropic=client,
-            agent_id="agent_x",
-            environment_id="env_x",
             trigger_message="file tonight's bugs",
             tool_safety=ToolSafetyPolicy(enabled=enabled),
             tenant_id=headless_identity.tenant_id,
@@ -573,10 +565,8 @@ async def test_a_routine_disables_its_sandbox_before_sending(
         _router(creates=creates, sends=sends, agent_tools=tools, updates=updates).dispatch
     )
 
-    await run_turn(
+    await _run_turn(
         anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
         trigger_message="write the report",
         tool_safety=ToolSafetyPolicy(enabled=True),
         tenant_id=headless_identity.tenant_id,
@@ -609,10 +599,8 @@ async def test_a_routines_own_daimon_tools_pause_for_the_decider(
         ).dispatch
     )
 
-    await run_turn(
+    await _run_turn(
         anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
         trigger_message="list them",
         tool_safety=ToolSafetyPolicy(enabled=enabled),
         mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),

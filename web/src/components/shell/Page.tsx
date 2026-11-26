@@ -24,7 +24,7 @@ export function Page({ crumbs: given, actions, tabs, children, className, flush 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4 lg:px-6">
-        <button className="-ml-1 rounded-md p-1 text-muted-foreground hover:bg-accent lg:hidden" onClick={openNav} aria-label="Menu">
+        <button className="-ml-1 rounded-md p-1 text-muted-foreground hover:bg-accent md:hidden" onClick={openNav} aria-label="Menu">
           <Menu className="size-4" />
         </button>
         <nav className="flex min-w-0 items-center gap-1.5 text-sm">
@@ -39,7 +39,7 @@ export function Page({ crumbs: given, actions, tabs, children, className, flush 
             </Fragment>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-2">{actions}</div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">{actions}</div>
       </header>
       {tabs && (
         <div ref={bar} className="flex shrink-0 gap-4 overflow-x-auto overflow-y-hidden px-4 shadow-[inset_0_-1px_0_var(--border)] [scrollbar-width:none] lg:px-6">
@@ -59,7 +59,7 @@ export function Page({ crumbs: given, actions, tabs, children, className, flush 
         </div>
       )}
       {/* No top padding on the scroller: a table header sticks to its very top, and the gap scrolls away with the content. */}
-      <main className={cn("min-h-0 flex-1 overflow-y-auto", !flush && "px-4 pb-6 lg:px-6", className)}>{flush ? children : <div className="pt-6">{children}</div>}</main>
+      <main className={cn("relative min-h-0 flex-1 overflow-y-auto", !flush && "px-4 pb-6 lg:px-6", className)}>{flush ? children : <div className="pt-6">{children}</div>}</main>
     </div>
   )
 }

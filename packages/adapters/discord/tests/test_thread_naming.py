@@ -26,14 +26,14 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.core.config import McpSettings, ThreadNamingSettings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.thread_naming import THREAD_NAMING_MODEL
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.builders import provision_workspace
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.membership import FixtureMembershipResolver
@@ -105,39 +105,18 @@ async def test_generate_thread_name_returns_title_and_meters_haiku_call_to_autho
         max_input_chars=2000,
         timeout_seconds=5.0,
         channel_id="chan-1",
+        agent_id="agent-1",
     )
 
     assert name == "PyMC Divergences on M2 Mac", "the model's title is what the thread opens under"
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
     assert [r.channel_id for r in rows] == ["chan-1"], "the title counts toward the channel"
+    assert [r.agent_id for r in rows] == ["agent-1"], "the title counts toward the agent"
     assert [(r.model, r.platform_user_id, r.input_tokens, r.managed_session_id) for r in rows] == [
         (THREAD_NAMING_MODEL, "555", 120, "thread-naming:4242")
     ], "the naming call must be metered to the tenant under the author, keyed on the message"
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
     assert balance < Decimal("5.00"), "the tenant ledger must carry the naming debit"
-
-
-async def test_generate_thread_name_never_names_another_chat_app(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-
-    name = await generate_thread_name(
-        fallback=_FALLBACK,
-        message_text="how do I move our Slack channels here?",
-        message_id=4243,
-        anthropic=build_fake_anthropic(_naming_router("Slack channel migration").dispatch),
-        sessionmaker=db_session_factory,
-        tenant_id=tenant.id,
-        platform_user_id="555",
-        markup=Decimal("1.0"),
-        max_input_chars=2000,
-        timeout_seconds=5.0,
-    )
-
-    assert name == "Another app channel migration"
 
 
 async def test_generate_thread_name_falls_back_but_still_meters_when_model_answers_blank(
@@ -303,12 +282,10 @@ def _runtime(
     anthropic = build_fake_anthropic(router.dispatch)
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
@@ -421,12 +398,7 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
     does with the answer.
     """
     guild_id = str(801000777 + len(content) * 10 + len(files) + (0 if enabled else 5))
-    await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id=guild_id,
-        signup_credit=Decimal("5.00"),
-    )
+    await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
     mock_resolve_config.return_value = ResolvedConfig(
         agent_name="test-agent",
@@ -552,9 +524,13 @@ async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
         patch("daimon.adapters.discord.bot.admit", AsyncMock(return_value=admission)),
         patch("daimon.adapters.discord.bot.bind_session", AsyncMock(side_effect=refused)) as bind,
         patch.object(bot, "_wait_for_orphan_recovery", AsyncMock()),
+        patch.object(bot, "_place_value", wraps=bot._place_value) as read,  # pyright: ignore[reportPrivateUsage]
     ):
         await bot._orchestrate_observed(message, "12345", tenant.id)  # pyright: ignore[reportPrivateUsage]
     message.create_thread.assert_awaited_once_with(
         name="Keep this private", auto_archive_duration=10080
     )
+    places = {c.args[1]: c.args[0] for c in read.await_args_list}
+    for key in ("thread_title_style", "thread_auto_archive"):
+        assert places[key].agent_id == "sh_agent_test", "read for the agent opening the thread"
     bind.assert_awaited_once()

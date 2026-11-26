@@ -13,15 +13,78 @@ Keep one logical change per PR, fill in the `## Summary` and `## Checklist`
 sections of the PR template, and make `pytest`, `pyright`, `ruff` and
 `lint-imports` pass locally before asking for review.
 
-## User-facing text
+## Make it dumb simple
 
-Anything a person reads in Discord, Slack or Teams (cards, buttons, refusals,
-notices, tool results the model relays) is dumb simple:
+The people who use Daimon are members of a team in a chat app. Most are not
+engineers, and all are busy. The bar: a tired person with no technical knowledge
+can start, get a useful result and continue.
 
-- One line for what is happening, one line for what to do.
-- A button over prose; never ask someone to type what a button can do.
-- Everyday words, the same on every platform: no internal terms, no " · " separators.
-- A refusal names who can help ("Ask an admin or an owner").
+Design the path before the screen. A path is all that a person does between
+wanting a thing and having it: each press, choice, typed command, wait, sign-in,
+visit to another page and new word. Plain words do not rescue a path that is
+long or that a person must learn. Decide the path when you design the feature.
+It comes before speed of build.
+
+1. **Make the first useful result easy.** Design so that, after Daimon is
+   installed, a new member can make a first request in their own words and get a
+   useful result. Keep shared setup with admins, who do it one time for all. Ask
+   a member only for the access or the choice that their task needs. Let Daimon
+   pick the agent, the tool and the settings, within what the admins allow.
+2. **Count the steps, then remove them.** List the path. Each press, choice,
+   command, wait, other page and new concept costs every person who takes it.
+   Remove it, give it a default that works for most people, or let Daimon do it.
+   Name each choice that stays by its effect, so a person can tell what changes.
+   Complexity does not go away: we carry it one time, or each person carries it
+   each time.
+3. **Ask late, in the place they are.** Ask for a sign-in, a permission or a
+   decision only when the task needs it, with one press in the same conversation
+   where one is possible. Say why in one line. Keep what the decision needs in
+   view: a cost, who receives it, whose account is used, what is deleted. Put
+   other detail behind a button. A person who has not met the problem does not
+   need its explanation.
+4. **Continue after a block.** When the access or the approval arrives, make
+   Daimon continue the waiting request by itself, within its current
+   permissions, so the person does not ask again. Do not restart work that was
+   cancelled, replaced or expired; say what to do next. When a different person
+   must act, give them the request and tell the requester who has it, as
+   `daimon.core.github_request_decisions` does. A new block does not get this by
+   itself: build it and test it.
+5. **End each path in view.** Deliver the result where the person asked, or in
+   the place they named. If it must go somewhere private, say so. End a problem
+   with what happened, as the person saw it, and a step that resolves it: a
+   button, a link, or who can help ("Ask an admin or an owner"). Work that ends
+   where nobody looks, and "That didn't work. Try again.", are not ends. The
+   rules below say who carries a problem to the person.
+6. **Then the words.** Use one name for one thing, the name a person would say
+   ("cloud computer"), on every platform. Keep names made for code out of what a
+   person reads: a tool name, an argument, a setting key, an id, a reason code,
+   JSON. Text that falls back to one is a bug. The model repeats our words, and
+   two names read as two things. In a card or a notice, use one line for what is
+   happening and one line for what to do, then the facts a decision needs. A
+   button over prose; never ask someone to type what a button can do. No " · "
+   separators: each fact gets its own line. A card is a piece of UI, not a
+   message from an assistant: no greeting, no filler, space between separate
+   facts. Send no card that repeats the agent's answer or reports a step nobody
+   must act on; update one progress card instead of adding more.
+
+Rule 6 covers what a person reads: cards, buttons, refusals, notices, the web
+app, the names of settings and their choices. It also covers the prose the model
+reads and repeats to a person: tool descriptions, tool results and notices to
+the agent. Tool names, arguments, and the ids and JSON the model needs stay as
+they are; put the person's word for the thing beside them. Operators who run
+Daimon (the CLI, environment settings, logs) are a different reader; exact
+technical words are right for them.
+
+Before you call it done, list each path you changed, from its start to its
+result, as a new person takes it. Count what they must learn, choose, type, wait
+for and do again. Then take the path in the app; if you cannot, say so in the PR.
+
+These are our rules. They apply "Start with user needs" and "Do the hard work to
+make it simple" from the GOV.UK Government Design Principles
+(<https://www.gov.uk/guidance/government-design-principles>) and Nielsen Norman
+Group's usability heuristics on familiar words, consistency, recognition over
+recall and recovery from errors
+(<https://www.nngroup.com/articles/ten-usability-heuristics/>).
 
 Errors and notices are never hardcoded text in or beside the agent's reply:
 
@@ -34,9 +97,12 @@ Errors and notices are never hardcoded text in or beside the agent's reply:
 
 `tests/parity/test_agent_notices.py` records the first rule.
 
-`tests/parity/test_plain_words.py` and `tests/parity/test_plain_words_parity.py`
-enforce the words and the separators; Daimon's own prompt carries the setup part
-(`defaults/agents/daimon.yaml`).
+`tests/parity/test_plain_words.py`, `tests/parity/test_plain_words_web.py` and
+`tests/parity/test_plain_words_parity.py` enforce a list of words and the
+separators; Daimon's own prompt carries the setup part
+(`defaults/agents/default.yaml`). These tests cover the listed words and
+selected messages. They do not read a tool docstring, and they do not prove that
+a flow is easy, so check those yourself.
 
 ## One rule, every path
 
@@ -121,7 +187,8 @@ docstrings and comments; history goes in `CHANGELOG.md` and the PR.
 | Area | Page |
 | --- | --- |
 | install, Compose, images, storage | `docs/self-hosting.md` |
-| model backends, harness, OpenAI, Gemini | `docs/providers.md` |
+| model backends, OpenAI, Gemini | `docs/providers.md` |
+| self-hosted harness | `docs/self-hosted-harness.md` |
 | upgrades, backups, logs, audit | `docs/operations.md` |
 | Slack, Teams, GitHub, MCP servers, plugin | the page under Connect |
 | `defaults/` and seeded agents | `docs/defaults.md`, `defaults/README.md` |

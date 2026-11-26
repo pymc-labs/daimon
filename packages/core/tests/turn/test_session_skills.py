@@ -1,0 +1,602 @@
+"""Reading a source's custom skills for a preview: sizes survive a timeout, and
+latest versions are remembered briefly, so a cold agent with many skills fits."""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import re
+import time
+import uuid
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import anthropic
+import httpx
+import pytest
+from daimon.core.channel_backend import transient_failure
+from daimon.core.errors import TurnError
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import publish_skill_version
+from daimon.core.skills.latest_versions import LATEST_VERSION_TTL_S, LatestVersionCache
+from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.stores.skill_copies import get_skill_sizes
+from daimon.core.turn import session_skills
+from daimon.core.turn.admission import PREVIEW_CAPTURE_BUDGET_S
+from daimon.testing.factories import make_tenant
+from mux.contracts.ids import SkillRef
+from mux.contracts.resources import SESSION_CREATED
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.isolated_sdk import build_async_anthropic
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_PACKED = io.BytesIO()
+with zipfile.ZipFile(_PACKED, "w") as _archive:
+    _archive.writestr("SKILL.md", "---\nname: helper\ndescription: Fixture.\n---\nUse it.\n")
+ARCHIVE = _PACKED.getvalue()
+#: The default agent's custom skills on the deployment where the preview timed out.
+DEFAULT_AGENT_SKILLS = 23
+#: Production paces 80 Skills requests a minute; this test runs that 20 times faster.
+SPEEDUP = 20
+PRODUCTION_RPM = 80
+
+
+def _skill(skill_id: str, version: str) -> dict[str, object]:
+    return {
+        "id": skill_id,
+        "created_at": "2026-01-02T00:00:00Z",
+        "display_title": skill_id,
+        "latest_version": version,
+        "source": "custom",
+        "type": "skill",
+        "updated_at": "2026-01-02T00:00:00Z",
+    }
+
+
+def _serve_skills(router: MARouter, versions: dict[str, str], hits: list[str]) -> None:
+    """Each skill's retrieve, version list and download, counting every request."""
+
+    def retrieve(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        hits.append(request.url.path)
+        return httpx.Response(200, json=_skill(match[1], versions[match[1]]))
+
+    def listing(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        hits.append(request.url.path)
+        row = {"id": f"v-{match[1]}", "version": versions[match[1]]}
+        return httpx.Response(200, json={"data": [row], "has_more": False})
+
+    def content(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        hits.append(request.url.path)
+        return httpx.Response(200, content=ARCHIVE)
+
+    router.add("GET", r"/v1/skills/([^/]+)", retrieve)
+    router.add("GET", r"/v1/skills/([^/]+)/versions", listing)
+    router.add("GET", r"/v1/skills/([^/]+)/versions/[^/]+/content", content)
+
+
+async def test_a_timed_out_measure_keeps_each_size_it_finished(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's timeout stops its wait, not the downloads: finished sizes are
+    stored at once, and a retry downloads only the one still unmeasured."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    slow = asyncio.Event()
+    downloads: list[str] = []
+
+    async def download(*_a: object, skill_id: str, **_k: object) -> bytes:
+        downloads.append(skill_id)
+        if skill_id == "s2":
+            await slow.wait()
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    pins = (("s0", "1"), ("s1", "1"), ("s2", "1"))
+
+    async def measure() -> dict[tuple[str, str], object]:
+        return dict(
+            await session_skills.measure_skills(
+                db_session_factory,
+                build_fake_anthropic(MARouter().dispatch),
+                scope=resource_scope(tenant_id=str(tenant.id)),
+                tenant_id=tenant.id,
+                pins=pins,
+            )
+        )
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(1):
+            await measure()
+    async with db_session_factory() as db:
+        stored = await get_skill_sizes(db, tenant_id=tenant.id, pins=pins)
+    assert set(stored) == {("s0", "1"), ("s1", "1")}, f"finished sizes are kept: {stored}"
+    slow.set()
+    assert set(await measure()) == set(pins), "the retry has every size"
+    assert sorted(downloads) == ["s0", "s1", "s2"], f"each version downloads once: {downloads}"
+
+
+async def test_two_measures_of_one_version_share_its_download(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second caller joins the measurement in flight instead of downloading again."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    gate = asyncio.Event()
+    downloads: list[str] = []
+
+    async def download(*_a: object, skill_id: str, **_k: object) -> bytes:
+        downloads.append(skill_id)
+        await gate.wait()
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    anthropic = build_fake_anthropic(MARouter().dispatch)
+    calls = [
+        asyncio.create_task(
+            session_skills.measure_skills(
+                db_session_factory,
+                anthropic,
+                scope=resource_scope(tenant_id=str(tenant.id)),
+                tenant_id=tenant.id,
+                pins=(("s0", "1"),),
+            )
+        )
+        for _ in range(2)
+    ]
+    await asyncio.sleep(0.05)
+    gate.set()
+    first, second = await asyncio.gather(*calls)
+    assert first == second and ("s0", "1") in first, "both callers get the size"
+    assert downloads == ["s0"], f"one download for both: {downloads}"
+
+
+def test_a_latest_version_is_remembered_until_its_ttl() -> None:
+    now = [0.0]
+    cache = LatestVersionCache(clock=lambda: now[0])
+    cache.put("t1", "s0", "3", generation=0)
+    assert cache.get("t1", "s0") == "3", "a hit inside the TTL"
+    assert cache.get("t2", "s0") is None, "another tenant asks for itself"
+    now[0] = LATEST_VERSION_TTL_S
+    assert cache.get("t1", "s0") is None, "expired at the TTL"
+    cache.put("t1", "s0", "3", generation=0)
+    cache.put("t2", "s0", "3", generation=0)
+    cache.forget("s0")
+    assert (cache.get("t1", "s0"), cache.get("t2", "s0")) == (None, None), "forgotten everywhere"
+
+
+def test_a_lookup_that_overlaps_a_publish_never_remembers_the_old_version() -> None:
+    """A read started before a publish here may return the old latest: never keep it."""
+    cache = LatestVersionCache()
+    started = cache.generation()
+    cache.forget("s0")  # published while the read was in flight
+    cache.put("t1", "s0", "2", generation=started)
+    assert cache.get("t1", "s0") is None, "the stale read is dropped, so the next one asks"
+    cache.put("t1", "s0", "3", generation=cache.generation())
+    assert cache.get("t1", "s0") == "3", "a read started after the publish is kept"
+
+
+async def test_a_version_daimon_publishes_is_seen_at_once_and_one_published_elsewhere_after_the_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberate difference: a skill version published by another process or the
+    console is seen within `LATEST_VERSION_TTL_S`, so that an agent with many skills
+    at `latest` doesn't pay one paced request per skill on every read. A version
+    this process publishes drops the remembered one at once."""
+    from daimon.core import mux_compat
+
+    now = [0.0]
+    cache = LatestVersionCache(clock=lambda: now[0])
+    monkeypatch.setattr(session_skills, "LATEST_VERSIONS", cache)
+    monkeypatch.setattr(mux_compat, "LATEST_VERSIONS", cache)
+    versions, hits = {"s0": "1"}, list[str]()
+    router = MARouter()
+    _serve_skills(router, versions, hits)
+    router.add(
+        "POST",
+        r"/v1/skills/s0/versions",
+        lambda _r, _m: httpx.Response(
+            200,
+            json={
+                "id": "v-s0-3",
+                "skill_id": "s0",
+                "version": "3",
+                "type": "skill_version",
+                "name": "helper",
+                "directory": "helper",
+                "description": "d",
+                "created_at": "2026-01-02T00:00:00Z",
+            },
+        ),
+    )
+    anthropic = build_fake_anthropic(router.dispatch)
+    scope = resource_scope(tenant_id=str(uuid.uuid4()))
+    attached = SkillRef(id="s0", version="latest", source="custom")
+
+    async def latest() -> str:
+        return await session_skills.latest_version(anthropic, scope, attached)
+
+    assert await latest() == "1", "looked up"
+    versions["s0"] = "2"  # published elsewhere
+    assert await latest() == "1", "remembered inside the TTL"
+    now[0] = LATEST_VERSION_TTL_S
+    assert await latest() == "2", "seen once the TTL runs out"
+    versions["s0"] = "3"
+    await publish_skill_version(anthropic, "s0", data=ARCHIVE, scope=scope)
+    assert await latest() == "3", "a version published here is seen at once"
+    assert len(hits) == 3, f"one lookup per miss: {hits}"
+
+
+def test_every_skill_version_daimon_publishes_forgets_its_remembered_latest() -> None:
+    """Each production call that publishes or deletes a skill version sits in a
+    function that drops the remembered latest version."""
+    root = Path(__file__).resolve().parents[4]
+    publishing = re.compile(r"\.(publish_version|versions\.create|delete_version)\(")
+    callers = {
+        path.relative_to(root).as_posix()
+        for package in ("packages/core/daimon", "packages/adapters")
+        for path in (root / package).rglob("*.py")
+        if publishing.search(path.read_text())
+    }
+    assert callers == {
+        "packages/core/daimon/core/mux_compat.py",
+        "packages/core/daimon/core/neutral_resources.py",
+    }, f"a new publish path must forget the remembered latest version: {callers}"
+    for caller in callers:
+        text = (root / caller).read_text()
+        assert text.count("LATEST_VERSIONS.forget(") >= len(publishing.findall(text)), caller
+
+
+async def test_a_cold_preview_of_the_default_agents_skills_fits_its_budget(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """23 skills at `latest`, none measured, through the production pacer sped up
+    20 times: the read outlasts the old 30 s budget and fits the preview's. A
+    second preview makes no Skills request at all."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    ids = [f"skill-{i}" for i in range(DEFAULT_AGENT_SKILLS)]
+    hits: list[str] = []
+    router = MARouter()
+    _serve_skills(router, dict.fromkeys(ids, "4"), hits)
+    transport = SkillsRateLimitedTransport(
+        PRODUCTION_RPM * SPEEDUP, inner=httpx.MockTransport(router.dispatch)
+    )
+    anthropic = build_async_anthropic(transport=transport)
+    carried = [SkillRef(id=skill_id, version="latest", source="custom") for skill_id in ids]
+
+    async def preview() -> dict[tuple[str, str], object]:
+        _, sizes = await session_skills.measure_carried_skills(
+            db_session_factory,
+            anthropic,
+            scope=resource_scope(tenant_id=str(tenant.id)),
+            tenant_id=tenant.id,
+            carried=carried,
+            record=None,
+        )
+        return dict(sizes)
+
+    started = time.monotonic()
+    async with asyncio.timeout(PREVIEW_CAPTURE_BUDGET_S / SPEEDUP):
+        sizes = await preview()
+    elapsed = time.monotonic() - started
+    assert set(sizes) == {(skill_id, "4") for skill_id in ids}, "every skill is measured"
+    assert len(hits) == 3 * DEFAULT_AGENT_SKILLS, f"a lookup, a list and a download each: {hits}"
+    assert elapsed > 30 / SPEEDUP, f"the old budget would have timed out: {elapsed:.2f}s"
+    hits.clear()
+    assert set(await preview()) == set(sizes), "the warm preview reads the same sizes"
+    assert hits == [], f"a warm preview asks the Skills API nothing: {hits}"
+
+
+def _api_error(status: int) -> anthropic.APIStatusError:
+    request = httpx.Request("GET", "https://api.example.com/v1/skills")
+    kind = {404: anthropic.NotFoundError, 429: anthropic.RateLimitError}.get(
+        status, anthropic.InternalServerError
+    )
+    return kind("upstream", response=httpx.Response(status, request=request), body=None)
+
+
+@pytest.mark.parametrize("version", ["1", "latest"])
+@pytest.mark.parametrize("status", [429, 503])
+async def test_a_blip_reading_a_skill_propagates_instead_of_dropping_it(
+    status: int,
+    version: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 429 or 5xx on the lookup or the download proves no loss: it reaches the
+    capture, which asks for a retry, instead of a bogus `skill:` drop."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+
+    async def blip(*_a: object, **_k: object) -> str:
+        raise _api_error(status)
+
+    monkeypatch.setattr(session_skills, "download_skill_version", blip)
+    monkeypatch.setattr(session_skills, "latest_version", blip)
+    with pytest.raises(TurnError) as raised:
+        await session_skills.measure_carried_skills(
+            db_session_factory,
+            build_fake_anthropic(MARouter().dispatch),
+            scope=resource_scope(tenant_id=str(tenant.id)),
+            tenant_id=tenant.id,
+            carried=[SkillRef(id="s0", version=version, source="custom")],
+            record=None,
+        )
+    assert isinstance(raised.value.__cause__, anthropic.APIStatusError)
+    assert transient_failure(raised.value), "a turn says try again, not not set up"
+
+
+async def test_a_missing_skill_is_its_own_named_loss(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 is permanent: that skill goes unmeasured, a loss of it alone."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+
+    async def gone(*_a: object, **_k: object) -> str:
+        raise _api_error(404)
+
+    monkeypatch.setattr(session_skills, "download_skill_version", gone)
+    monkeypatch.setattr(session_skills, "latest_version", gone)
+    pins, sizes = await session_skills.measure_carried_skills(
+        db_session_factory,
+        build_fake_anthropic(MARouter().dispatch),
+        scope=resource_scope(tenant_id=str(tenant.id)),
+        tenant_id=tenant.id,
+        carried=[
+            SkillRef(id="s0", version="1", source="custom"),
+            SkillRef(id="s1", version="latest", source="custom"),
+        ],
+        record=None,
+    )
+    assert sizes == {}, f"nothing measured: {sizes}"
+    assert session_skills.skill_losses(pins, ()) == ("skill:s0", "skill:s1"), "named losses"
+
+
+async def test_measures_read_with_different_scopes_never_share_a_download(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A joiner inherits the first caller's scope and record, so only a caller
+    reading the same way joins a measurement in flight."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    gate = asyncio.Event()
+    readers: list[str] = []
+
+    async def download(*_a: object, scope: Any, **_k: object) -> bytes:
+        readers.append(scope.account_id)
+        await gate.wait()
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    anthropic_client = build_fake_anthropic(MARouter().dispatch)
+    calls = [
+        asyncio.create_task(
+            session_skills.measure_skills(
+                db_session_factory,
+                anthropic_client,
+                scope=resource_scope(tenant_id=str(tenant.id), account_id=account),
+                tenant_id=tenant.id,
+                pins=(("s0", "1"),),
+            )
+        )
+        for account in ("a", "b")
+    ]
+    await asyncio.sleep(0.05)
+    gate.set()
+    await asyncio.gather(*calls)
+    assert sorted(readers) == ["a", "b"], f"each scope reads for itself: {readers}"
+
+
+async def test_a_remembered_latest_version_still_checks_the_skills_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hit is only for a ref whose source a lookup matched: one attached with
+    another source asks again and is refused, as a miss is."""
+    cache = LatestVersionCache()
+    monkeypatch.setattr(session_skills, "LATEST_VERSIONS", cache)
+    hits: list[str] = []
+    router = MARouter()
+    _serve_skills(router, {"s0": "1"}, hits)
+    client = build_fake_anthropic(router.dispatch)
+    scope = resource_scope(tenant_id=str(uuid.uuid4()))
+    custom = SkillRef(id="s0", version="latest", source="custom")
+    assert await session_skills.latest_version(client, scope, custom) == "1", "looked up"
+    with pytest.raises(ValueError, match="no concrete current version"):
+        await session_skills.latest_version(
+            client, scope, custom.model_copy(update={"source": "anthropic"})
+        )
+    assert len(hits) == 2, f"the other source asked again: {hits}"
+
+
+async def test_a_size_stored_without_its_manifest_is_measured_once_more(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row stored before SKILL.md sizes were kept can't place a large skill in
+    Gemini's upload tier, so it is read again; until that works, its size still counts."""
+    from daimon.core.stores.skill_copies import put_skill_size
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    measured = session_skills.measure_archive(tenant.id, "s0", "1", ARCHIVE)
+    legacy = measured.model_copy(update={"manifest_bytes": None})
+    async with db_session_factory.begin() as db:
+        await put_skill_size(db, legacy)
+    failures: list[Exception] = [_api_error(503), _api_error(404)]
+    downloads: list[str] = []
+
+    async def download(*_a: object, skill_id: str, **_k: object) -> bytes:
+        downloads.append(skill_id)
+        if failures:
+            raise failures.pop(0)
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+
+    async def measure() -> object:
+        sizes = await session_skills.measure_skills(
+            db_session_factory,
+            build_fake_anthropic(MARouter().dispatch),
+            scope=resource_scope(tenant_id=str(tenant.id)),
+            tenant_id=tenant.id,
+            pins=[("s0", "1")],
+        )
+        return sizes[("s0", "1")]
+
+    assert await measure() == legacy, "a blip keeps the stored size"
+    assert await measure() == legacy, "so does a failed read"
+    assert await measure() == measured and measured.manifest_bytes == 51
+    assert await measure() == measured, "stored: never read again"
+    assert downloads == ["s0"] * 3
+
+
+async def test_a_skill_md_that_is_not_text_is_checked_once_and_a_profile_without_uploads_never(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binary SKILL.md can't mount inline, so it never fits the upload tier; the
+    row says so, and neither it nor a legacy row is read again for a manifest
+    the profile has no use for."""
+    from daimon.core.stores.skill_copies import put_skill_size
+    from mux.profiles.gemini import INLINE_REUSE
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    binary = io.BytesIO()
+    with zipfile.ZipFile(binary, "w") as archive:
+        archive.writestr("SKILL.md", b"---\nname: x\n---\n\xff\xfe")
+    measured = session_skills.measure_archive(tenant.id, "s0", "1", binary.getvalue())
+    assert measured.manifest_bytes == session_skills.NOT_TEXT
+    assert session_skills.skill_spend(INLINE_REUSE, measured) is None
+    legacy = session_skills.measure_archive(tenant.id, "s1", "1", ARCHIVE)
+    async with db_session_factory.begin() as db:
+        await put_skill_size(db, measured)
+        await put_skill_size(db, legacy.model_copy(update={"manifest_bytes": None}))
+    downloads: list[str] = []
+
+    async def download(*_a: object, skill_id: str, **_k: object) -> bytes:
+        downloads.append(skill_id)
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+
+    async def measure(*, manifests: bool) -> None:
+        await session_skills.measure_skills(
+            db_session_factory,
+            build_fake_anthropic(MARouter().dispatch),
+            scope=resource_scope(tenant_id=str(tenant.id)),
+            tenant_id=tenant.id,
+            pins=[("s0", "1"), ("s1", "1")],
+            manifests=manifests,
+        )
+
+    await measure(manifests=False)
+    assert downloads == [], "no upload tier, no second look"
+    await measure(manifests=True)
+    assert downloads == ["s1"], "only the legacy row is read; the checked one is not"
+
+
+async def test_session_files_read_each_copys_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mux asks by copy; the bytes come from its source version. A blip retries the
+    session; anything else leaves that skill out."""
+    from typing import cast
+
+    from mux.errors import ProviderError
+
+    files = session_skills.SessionSkillFiles(
+        cast("async_sessionmaker[AsyncSession]", None), build_fake_anthropic(MARouter().dispatch)
+    )
+    files.sources[("copy-0", "7")] = SkillRef(id="s0", version="1")
+    scope, copy = resource_scope(tenant_id=str(uuid.uuid4())), SkillRef(id="copy-0", version="7")
+    reads: list[tuple[str, str]] = []
+
+    async def download(*_a: object, skill_id: str, version: str, **_k: object) -> bytes:
+        reads.append((skill_id, version))
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    upload = await files(scope, copy)
+    assert [f.path for f in upload.files] == ["SKILL.md"] and reads == [("s0", "1")]
+    with pytest.raises(ProviderError) as unknown:
+        await files(scope, SkillRef(id="copy-1", version="7"))
+    assert not unknown.value.retryable
+    for failure, retryable in ((_api_error(503), True), (_api_error(404), False), (None, False)):
+
+        async def failing(*_a: object, error: Exception | None = failure, **_k: object) -> bytes:
+            if error is not None:
+                raise error
+            return b"not an archive"
+
+        monkeypatch.setattr(session_skills, "download_skill_version", failing)
+        with pytest.raises(ProviderError) as raised:
+            await files(scope, copy)
+        assert raised.value.retryable is retryable, failure
+
+
+async def test_a_new_session_names_the_skills_it_went_without(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copy losses and failed uploads reach the agent in one notice, by source name."""
+    from typing import cast
+
+    told: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    async def tell(_request: object, losses: tuple[str, ...], names: dict[str, str]) -> None:
+        told.append((tuple(losses), dict(names)))
+
+    monkeypatch.setattr(session_skills, "_tell_missing_skills", tell)
+    files = session_skills.SessionSkillFiles(
+        cast("async_sessionmaker[AsyncSession]", None), build_fake_anthropic(MARouter().dispatch)
+    )
+    files.sources[("copy-0", "7")] = SkillRef(id="s0", version="1")
+    files.losses, files.names = ("skill:s1",), {"s0": "fonts", "s1": "pdf"}
+    request = cast("Any", object())
+    made = {"skills_left_out": ["copy-0"], SESSION_CREATED: True}
+    await session_skills.tell_left_out(request, files, made)
+    assert told == [(("skill:s1", "skill:s0"), {"s0": "fonts", "s1": "pdf"})]
+    await session_skills.tell_left_out(request, files, {"skills_left_out": ["copy-0"]})
+    assert len(told) == 1, "a replayed create (no created mark) tells nothing again"
+    files.losses = ()
+    await session_skills.tell_left_out(
+        request, files, {"skills_left_out": [], SESSION_CREATED: True}
+    )
+    await session_skills.tell_left_out(request, files, None)
+    assert len(told) == 1, "nothing left out, nothing told"
+
+
+async def test_builtin_skills_are_carried_as_their_open_copies(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A provider without Anthropic's docx and pdf gets the tenant's open copies instead;
+    a built-in with no copy seeded, or no open equivalent, adds nothing."""
+    from daimon.core.stores.seeded_skills import record_seeded_skill
+
+    root = Path(__file__).resolve().parents[4] / "defaults/skills"
+    for builtin, name in session_skills.OPEN_SKILLS.items():
+        text = (root / name / "SKILL.md").read_text()
+        assert f"name: {name}\n" in text, f"{builtin}: the open skill ships under its own name"
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        await record_seeded_skill(
+            session, tenant_id=tenant.id, name="open-docx", content_hash="h", anthropic_id="sk_d"
+        )
+    got, missing = await session_skills.open_skills(
+        db_session_factory, tenant.id, ("docx", "pdf", "brainstorm")
+    )
+
+    assert got == (SkillRef(id="sk_d", version="latest", source="custom"),), "only a seeded copy"
+    assert missing == ("skill:pdf", "skill:brainstorm"), "the rest are named losses"

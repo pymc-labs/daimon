@@ -44,7 +44,7 @@ from daimon.core.config import (
     Settings,
     TurnSettings,
 )
-from daimon.core.features.tool_gate import server_gate_key
+from daimon.core.features.tool_gate import gated_tools, server_gate_key
 from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
 from daimon.core.tool_safety import (
     REACH_APPROVAL_TOOLS,
@@ -53,7 +53,7 @@ from daimon.core.tool_safety import (
 )
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -181,16 +181,12 @@ def _build_client() -> AsyncAnthropic:
     router.add(
         "POST",
         r"/v1/agents",
-        lambda _r, _m: httpx.Response(
-            200, json=ma_agent(name="demo-new-agent").model_dump(mode="json")
-        ),
+        lambda _r, _m: httpx.Response(200, json=ma_agent_payload(name="demo-new-agent")),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _r, _m: httpx.Response(
-            200, json=ma_agent(name="demo-new-agent").model_dump(mode="json")
-        ),
+        lambda _r, _m: httpx.Response(200, json=ma_agent_payload(name="demo-new-agent")),
     )
     return build_fake_anthropic(router.dispatch)
 
@@ -354,9 +350,9 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
 
     plain_tools = {tool["name"]: tool for tool in plain["result"]["tools"]}
     chat_tools = {tool["name"]: tool for tool in chat["result"]["tools"]}
-    # The server hides a capability that is off or not set up from every caller but a
-    # chat-execution credential, whose native turn checks its catalogue against its
-    # allowlist; that credential is refused at call time instead.
+    # The server hides a capability that is off from every caller but a chat-execution
+    # credential, whose native turn checks its catalogue against its allowlist; that
+    # credential is refused at call time instead. One it isn't set up for leaves both.
     only_chat = set(chat_tools) - set(plain_tools)
     assert set(plain_tools) <= set(chat_tools), "the chat credential's list must hold every tool"
     assert only_chat and all(server_gate_key(name) is not None for name in only_chat), (
@@ -376,12 +372,15 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
         # Unregistered here: backend selection and Microsoft accounts are off.
         *(
             APPROVAL_TOOLS
-            - backend_switch_tools(enabled=True)
+            # The thread-model pick is registered with selection off; it asks only cross-provider.
+            - (backend_switch_tools(enabled=True) - {"set_thread_model"})
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
             - {"set_routine_sandbox_tools"}
             # Carded tools tagged admin stay hidden from a non-admin credential.
             - _ADMIN_CARDED_TOOLS
             # Posting tools are for platform-bound callers; this token has none.
             - REACH_APPROVAL_TOOLS
+            # This server has no cloud computer, notebook or report host setup.
+            - gated_tools(("compute", "notebooks", "report_publish"))
         ),
     }

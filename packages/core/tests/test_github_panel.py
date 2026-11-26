@@ -20,27 +20,16 @@ from daimon.core._models import (
 )
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token
-from daimon.core.github_new_repo_delivery import poll_new_repo_notices_once
 from daimon.core.github_panel import (
-    activate_grants,
     connect_link,
     pending_connect_link,
     safe_github_error,
-    stage_panel_grant,
     sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import github_access, github_app_installations, github_panel_grants
 from daimon.core.stores.github_connect import digest, get_invitation
-from daimon.core.stores.github_connected_repos import (
-    disconnect_repo,
-    set_repo_ability,
-)
-from daimon.core.stores.github_connected_repos import (
-    summary as connected_summary,
-)
 from daimon.core.stores.github_new_repo_notices import (
-    NewRepoNoticeGroup,
     claim_next_notice,
     claim_notice_group,
     dismiss_notice,
@@ -157,59 +146,6 @@ async def _setup(
 
 
 @pytest.mark.asyncio
-async def test_server_repo_settings_clamp_live_access_and_disconnect(
-    db_session: AsyncSession,
-) -> None:
-    tenant_id, agent_id = await _setup(db_session)
-    admin_id, member_id = uuid.uuid4(), uuid.uuid4()
-    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
-    db_session.add(Account(id=member_id, tenant_id=tenant_id, role="user"))
-    await db_session.flush()
-    await stage_panel_grant(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        repo_id=101,
-        baseline_access="write",
-        ceiling_access="write",
-        account_id=admin_id,
-        is_working_repo=True,
-    )
-    await activate_grants(
-        db_session, tenant_id=tenant_id, agent_id=agent_id, account_id=admin_id, agent_name="Helper"
-    )
-    overview = await connected_summary(db_session, tenant_id=tenant_id)
-    assert overview.count == 2 and overview.owners == ("example",)
-    assert overview.agent_count == 1
-    with pytest.raises(ValueError, match="Only an admin"):
-        await set_repo_ability(
-            db_session, tenant_id=tenant_id, repo_id=101, ability="read", account_id=member_id
-        )
-    with pytest.raises(ValueError, match="always include write"):
-        await set_repo_ability(
-            db_session,
-            tenant_id=tenant_id,
-            repo_id=101,
-            ability="read",
-            account_id=admin_id,
-        )
-    live = await github_access.list_live_grant_repositories(
-        db_session, tenant_id=tenant_id, agent_id=agent_id
-    )
-    assert len(live) == 1
-    assert live[0][0].baseline_access == "write"
-    assert live[0][0].ceiling_access == "write"
-    await disconnect_repo(db_session, tenant_id=tenant_id, repo_id=101, account_id=admin_id)
-    assert (
-        await github_access.list_live_grant_repositories(
-            db_session, tenant_id=tenant_id, agent_id=agent_id
-        )
-        == []
-    )
-    assert (await connected_summary(db_session, tenant_id=tenant_id)).count == 1
-
-
-@pytest.mark.asyncio
 async def test_new_repo_card_claim_release_and_one_delivery(db_session: AsyncSession) -> None:
     tenant_id, _ = await _setup(db_session)
     now = datetime.now(UTC)
@@ -265,74 +201,6 @@ async def test_new_repo_cards_group_one_day_and_release_each_on_failure(
     for notice in again.notices:
         assert await finish_notice(db_session, notice=notice, delivered=True, now=now)
     assert await claim_notice_group(db_session, tenant_id=tenant_id, now=now) is None
-
-
-@pytest.mark.asyncio
-async def test_new_repo_poller_delivers_daily_group_once(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant_id, _ = await _setup(db_session)
-    now = datetime.now(UTC)
-    for name in ("example/first", "example/second"):
-        db_session.add(
-            GitHubNewRepoNotice(
-                tenant_id=tenant_id,
-                installation_id=999,
-                repo_full_name=name,
-                queued_at=now - timedelta(days=1),
-            )
-        )
-    await db_session.flush()
-    posted: list[tuple[str, ...]] = []
-
-    async def deliver(group: object) -> bool:
-        assert isinstance(group, NewRepoNoticeGroup)
-        posted.append(group.repo_names)
-        return True
-
-    assert (
-        await poll_new_repo_notices_once(db_session_factory, platform="discord", deliver=deliver)
-        == 1
-    )
-    assert (
-        await poll_new_repo_notices_once(db_session_factory, platform="discord", deliver=deliver)
-        == 0
-    )
-    assert len(posted) == 1 and set(posted[0]) == {"example/first", "example/second"}
-
-
-@pytest.mark.asyncio
-async def test_new_repo_poller_retries_after_no_dm_lands(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant_id, _ = await _setup(db_session)
-    db_session.add(
-        GitHubNewRepoNotice(
-            tenant_id=tenant_id,
-            installation_id=999,
-            repo_full_name="example/new",
-            queued_at=datetime.now(UTC) - timedelta(days=1),
-        )
-    )
-    await db_session.flush()
-    attempts = 0
-
-    async def deliver(_group: NewRepoNoticeGroup) -> bool:
-        nonlocal attempts
-        attempts += 1
-        return attempts > 1
-
-    assert (
-        await poll_new_repo_notices_once(db_session_factory, platform="discord", deliver=deliver)
-        == 0
-    )
-    assert (
-        await poll_new_repo_notices_once(db_session_factory, platform="discord", deliver=deliver)
-        == 1
-    )
-    assert attempts == 2
 
 
 @pytest.mark.asyncio

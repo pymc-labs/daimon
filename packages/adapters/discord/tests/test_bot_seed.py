@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import replace
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,12 +20,12 @@ import httpx
 import structlog.testing
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
+from daimon.testing.builders import provision_workspace
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -52,7 +51,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(agent_name=agent_name),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # seed tests never run a turn
+        turn_deps=deps_for(),  # seed tests never run a turn
     )
 
 
@@ -99,11 +98,8 @@ async def _provision(
     workspace_id: str,
     signup_credit: Decimal = Decimal("0"),
 ) -> uuid.UUID:
-    result = await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id=workspace_id,
-        signup_credit=signup_credit,
+    result = await provision_workspace(
+        db_session_factory, workspace_id, signup_credit=signup_credit
     )
     await set_provision_status(db_session_factory, tenant_id=result.tenant_id, status="pending")
     return result.tenant_id

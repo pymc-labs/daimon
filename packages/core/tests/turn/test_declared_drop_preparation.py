@@ -1,4 +1,4 @@
-"""Original consent binds actual scoped source reads to one prepared target."""
+"""A switched agent's turn prepares its target from the source as it is now."""
 
 import json
 from dataclasses import replace
@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.channel_backend import (
     AgentBackendRefused,
     AgentBackendService,
@@ -39,19 +40,61 @@ from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
 
 
+def unprepared(losses: tuple[str, ...]) -> tuple[str, ...]:
+    """The stored revision carries no effort, so the prepared turn loses it on every backend."""
+    return tuple(sorted({*losses, "effort_setting"}))
+
+
+async def declared(switched) -> tuple[str, ...]:
+    """What the switch said is off on the picked provider, for the source as it is now."""
+    _, service, source, _, accepted, *_ = switched
+    return (await service.preview(source, accepted.backend, accepted.model)).declared_drops
+
+
+def model_losses(switched) -> tuple[str, ...]:
+    """The model settings a switch turns off: OpenAI carries the effort, Gemini offers none."""
+    return ("fast_mode",) if switched[4].backend == "openai" else ("effort_setting", "fast_mode")
+
+
+async def _as_record(native, sessions, tenant_id):
+    """`native` converted to a Daimon record born on Gemini, as `convert_agent_to_daimon` does."""
+    from daimon.core.defaults.owned import create_owned_record, owned_scope
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.mux_compat import source_agent_record
+    from mux.profiles import selectable_models
+
+    spec = source_agent_record(native, resource_scope(tenant_id=str(tenant_id))).spec
+    record = spec.model_copy(
+        update={
+            "model": ModelRef(provider="gemini", id=selectable_models("gemini")[0]),
+            "tools": None,
+            "skills": None,
+            "extensions": None,
+        }
+    )
+    return await create_owned_record(
+        sessions, record, scope=owned_scope(tenant_id, None), tenant_id=tenant_id
+    )
+
+
 @pytest.fixture
-async def consent_request(owned, request):
+async def switched_request(owned, request):
     params = getattr(request, "param", {})
     backend = params.get("backend", "openai")
     _, identity, actor, sessions = owned
     now = datetime(2026, 10, 14, tzinfo=UTC)
     native = ma_agent(
         tenant_id=identity.tenant_id,
-        system="Authoritative source instructions",
+        # `guided`: under the shipped guidance, as a default agent's prompt is.
+        system=apply_credential_guidance("Authoritative source instructions")
+        if params.get("guided")
+        else "Authoritative source instructions",
         tools=params.get("tools", ()),
         mcp_servers=params.get("mcp_servers", ()),
         skills=params.get("skills", ()),
     )
+    if params.get("record"):
+        native = await _as_record(native, sessions, identity.tenant_id)
     environment = ma_environment(tenant_id=identity.tenant_id)
     if "execution_identity" in params:
         from mux.testing.drivers.anthropic.ma_models import ma_model_config
@@ -132,6 +175,18 @@ async def consent_request(owned, request):
             deadline=now + timedelta(seconds=30),
             now=lambda: now,
         )
+        if params.get("keys"):  # a saved agent key, so the source needs a keys file
+            from daimon.core.stores.agent_files import put_agent_file
+
+            async with sessions.begin() as db:
+                await put_agent_file(
+                    db,
+                    tenant_id=identity.tenant_id,
+                    agent_id=derive_agent_uuid(tenant_id=identity.tenant_id, ma_agent_id=native.id),
+                    key="API_KEY",
+                    content="s3cret",
+                    set_by_account_id=None,
+                )
         source = await capture_preparation_source(request, fresh=True)
         assert source.agent_id == derive_agent_uuid(
             tenant_id=identity.tenant_id, ma_agent_id=native.id
@@ -143,14 +198,12 @@ async def consent_request(owned, request):
 
         service = AgentBackendService(sessions, enabled=True, capture_source=capture)
         await enable(service, source, actor)
-        quote = await service.preview(source, backend)
+        await service.preview(source, backend)
         accepted = await service.set_backend(
             source,
             backend,
-            0,
+            1 if params.get("record") else 0,  # a record's first revision is its birth
             actor,
-            accepted_drops=quote.declared_drops,
-            expected_preview_digest=quote.digest,
         )
         async with sessions.begin() as db:
             await mux_state.put_config_revision(
@@ -206,13 +259,14 @@ async def consent_request(owned, request):
         )
 
 
-async def test_real_preparation_uses_original_consent_after_latest_setting_changes(consent_request):
+async def test_real_preparation_uses_its_channel_revision_after_latest_setting_changes(
+    switched_request,
+):
     request, service, source, actor, accepted, _, reads, constructions, targets, lookup = (
-        consent_request
+        switched_request
     )
     await service.clear_backend(source, accepted.local, actor)
     selected = await read_preparation_counterpart(request)
-    assert selected.target_spec.declared_drops == accepted.declared_drops
     assert selected.target_spec.system.startswith("Authoritative source instructions\n\n")
     assert selected.verified_counterpart == selected.counterpart
     assert len(constructions) == len(targets) == 1
@@ -227,19 +281,32 @@ async def test_real_preparation_uses_original_consent_after_latest_setting_chang
         ("GET", "/v1/agents/ag_test"),
         ("GET", "/v1/environments/env_test"),
     ]
+    drops = await declared(switched_request)
+    assert selected.target_spec.declared_drops == drops, "what the switch said is off"
 
 
-@pytest.mark.parametrize("change", ["system", "version", "publishing"])
-async def test_real_source_drift_refuses_before_target_runtime(consent_request, change):
-    request, _, _, _, _, router, reads, constructions, targets, _ = consent_request
+async def test_new_instructions_keep_the_switch(switched_request):
+    """The model and the losses decide; an instruction edit asks no one again."""
+    request, _, _, _, _, router, _, constructions, _, _ = switched_request
+    router.routes.clear()
+    router.add_agent(request.admission.agent.model_copy(update={"system": "Changed"}))
+    router.add_environment(request.admission.environment)
+    await read_preparation_counterpart(request)
+    assert len(constructions) == 1
+
+
+@pytest.mark.parametrize("change", ["version", "publishing"])
+async def test_an_edit_after_admission_or_an_unmet_rule_refuses_before_target_runtime(
+    switched_request, change
+):
+    """An edit since admission asks for a retry; a rule the provider can't meet refuses."""
+    request, _, _, _, _, router, reads, constructions, targets, _ = switched_request
     if change == "publishing":
         request = replace(
             request, admission=replace(request.admission, asks_before_publishing=True)
         )
     else:
-        native = request.admission.agent.model_copy(
-            update={change: "Changed" if change == "system" else 2}
-        )
+        native = request.admission.agent.model_copy(update={change: 2})
         router.routes.clear()
         router.add_agent(native)
         router.add_environment(request.admission.environment)
@@ -248,23 +315,48 @@ async def test_real_source_drift_refuses_before_target_runtime(consent_request, 
     assert refused.value.reason == "backend_unsupported"
     assert not constructions and not targets
     assert all(r.method == "GET" for r in reads)
-    if change != "publishing":
+    if change == "publishing":
+        assert refused.value.cause == "preparation_failed", "the provider can't ask first"
+    else:
         assert isinstance(refused.value.__cause__, AgentBackendRefused)
-        assert refused.value.__cause__.reason == "re_confirm"
+        assert refused.value.__cause__.reason == "revision_busy", "the next message reads the edit"
+        assert refused.value.cause == "preparation_busy"
 
 
-async def test_a_caller_target_cannot_replace_the_confirmed_target(consent_request):
-    request, _, _, _, accepted, _, _, _, _, _ = consent_request
+async def test_a_setting_and_revision_on_different_providers_refuse_as_preparation_failed(
+    switched_request,
+):
+    """A revision on another provider than its agent's setting is no race a retry clears."""
+    request = switched_request[0]
+    other = backend_selection("gemini")
+    revision = request.admission.backend_revision
+    assert revision is not None and revision.backend != "gemini", "the setting is on another"
+    mismatched = replace(
+        request,
+        admission=replace(
+            request.admission,
+            backend_revision=ConfigRevision.create(revision.channel, revision.local, other),
+        ),
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(mismatched)
+    assert refused.value.reason == "backend_unsupported"
+    assert refused.value.cause == "preparation_failed", "not the busy retry of an edit"
+    assert getattr(refused.value.__cause__, "missing", None) == ("source_drift",), "the mismatch"
+
+
+async def test_a_caller_target_cannot_replace_the_prepared_target(switched_request):
+    request = switched_request[0]
     original = await prepare_source(request)
     selected = await prepare_source(
         replace(request, target_spec=original.target_spec.model_copy(update={"system": "Forged"}))
     )
-    assert selected.target_spec == original.target_spec
-    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert selected.target_spec == original.target_spec, "the caller's target is ignored"
+    assert selected.target_spec.declared_drops == await declared(switched_request)
 
 
-async def test_source_drift_during_counterpart_read_requires_reconfirmation(consent_request):
-    request, _, _, _, _, router, reads, constructions, targets, _ = consent_request
+async def test_source_drift_during_counterpart_read_asks_for_a_retry(switched_request):
+    request, _, _, _, _, router, reads, constructions, targets, _ = switched_request
     construct = request.deps.turn_runtime_factory
 
     def drifting(selected):
@@ -289,23 +381,24 @@ async def test_source_drift_during_counterpart_read_requires_reconfirmation(cons
     with pytest.raises(AdmissionDenied) as refused:
         await read_preparation_counterpart(request)
     assert isinstance(refused.value.__cause__, AgentBackendRefused)
-    assert refused.value.__cause__.reason == "re_confirm"
+    assert refused.value.__cause__.reason == "revision_busy"
+    assert refused.value.cause == "preparation_busy", "a retry reads the new setup"
     assert len(constructions) == len(targets) == 1
     assert len(reads) == 4 and all(r.method == "GET" for r in reads)
 
 
-async def test_expired_request_has_zero_native_source_or_target_reads(consent_request):
-    request, _, _, _, _, _, reads, constructions, targets, _ = consent_request
+async def test_expired_request_has_zero_native_source_or_target_reads(switched_request):
+    request, _, _, _, _, _, reads, constructions, targets, _ = switched_request
     with pytest.raises(AdmissionDenied):
         await read_preparation_counterpart(replace(request, deadline=request.now()))
     assert reads == constructions == targets == []
 
 
 @pytest.mark.parametrize("drift", [False, True])
-async def test_selector_passes_original_consent_to_the_existing_prewrite_proof(
-    consent_request, drift
+async def test_selector_passes_the_agent_revision_to_the_existing_prewrite_proof(
+    switched_request, drift
 ):
-    request, _, source, _, accepted, router, reads, _, _, _ = consent_request
+    request, _, source, _, accepted, router, reads, _, _, _ = switched_request
     channel = request.admission.backend_revision.channel.model_copy(update={"channel_id": "new"})
     checks = []
 
@@ -326,9 +419,9 @@ async def test_selector_passes_original_consent_to_the_existing_prewrite_proof(
 
     if drift:
         router.routes.clear()
-        router.add_agent(request.admission.agent.model_copy(update={"system": "Changed source"}))
+        router.add_agent(request.admission.agent.model_copy(update={"version": 2}))
         router.add_environment(request.admission.environment)
-        with pytest.raises(AgentBackendRefused, match="re confirm"):
+        with pytest.raises(AgentBackendRefused, match="revision busy"):
             async with request.deps.sessionmaker.begin() as db:
                 await resolve_turn_backend(
                     db, channel, source, enabled=True, validate_origin=validate
@@ -337,13 +430,14 @@ async def test_selector_passes_original_consent_to_the_existing_prewrite_proof(
             assert await mux_state.get_config_revision(db, channel, 1) is None
         assert checks == []
     else:
+        drops = await declared(switched_request)
         async with request.deps.sessionmaker.begin() as db:
             revision, shared, origin = await resolve_turn_backend(
                 db, channel, source, enabled=True, validate_origin=validate
             )
         assert not shared and origin == "agent"
         assert len(checks) == 2 and all(
-            value.target_spec.declared_drops == accepted.declared_drops for value in checks
+            value.target_spec.declared_drops == drops for value in checks
         )
         async with request.deps.sessionmaker() as db:
             assert (
@@ -354,9 +448,11 @@ async def test_selector_passes_original_consent_to_the_existing_prewrite_proof(
 
 
 @pytest.mark.parametrize("unknown", ["policy", "null_policy", "skill_policy", "mcp_policy"])
-async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consent_request, unknown):
+async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(
+    switched_request, unknown
+):
     request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
-        consent_request
+        switched_request
     )
     from anthropic.types.beta import (
         BetaManagedAgentsCustomSkill,
@@ -422,8 +518,6 @@ async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consen
             "openai",
             accepted.local,
             actor,
-            accepted_drops=accepted.declared_drops,
-            expected_preview_digest=accepted.preview_digest,
         )
     assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
@@ -431,16 +525,16 @@ async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consen
     with pytest.raises(AdmissionDenied) as refused:
         await read_preparation_counterpart(request)
     assert refused.value.reason == "backend_unsupported"
-    assert isinstance(refused.value.__cause__, AgentBackendRefused)
-    assert refused.value.__cause__.reason == "re_confirm"
+    # A source the provider refuses is a failure, not a retry.
+    assert refused.value.cause == "preparation_failed"
     assert not constructions and not targets
     assert all(call.method == "GET" for call in reads)
 
 
 @pytest.mark.parametrize("unknown", ["root", "null_config", "config"])
-async def test_unclassified_sdk_environment_refuses_consent_and_handoff(consent_request, unknown):
+async def test_unclassified_sdk_environment_refuses_switch_and_handoff(switched_request, unknown):
     request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
-        consent_request
+        switched_request
     )
     native = request.admission.environment
     if unknown == "config":
@@ -472,22 +566,20 @@ async def test_unclassified_sdk_environment_refuses_consent_and_handoff(consent_
             "openai",
             accepted.local,
             actor,
-            accepted_drops=accepted.declared_drops,
-            expected_preview_digest=accepted.preview_digest,
         )
     assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied) as refused:
         await read_preparation_counterpart(request)
-    assert isinstance(refused.value.__cause__, AgentBackendRefused)
-    assert refused.value.__cause__.reason == "re_confirm"
+    # A source the provider refuses is a failure, not a retry.
+    assert refused.value.cause == "preparation_failed"
     assert constructions == targets == []
     assert all(call.method == "GET" for call in reads)
 
 
-async def test_known_implicit_environment_policy_remains_an_explicit_sandbox_loss(consent_request):
-    request, service, source, _, _, router, _, _, _, _ = consent_request
+async def test_known_implicit_environment_policy_remains_an_explicit_sandbox_loss(switched_request):
+    request, service, source, _, _, router, _, _, _, _ = switched_request
     native = request.admission.environment.model_copy(update={"config": {"type": "cloud"}})
     router.routes.clear()
     router.add_agent(request.admission.agent)
@@ -606,7 +698,7 @@ async def test_known_implicit_environment_policy_remains_an_explicit_sandbox_los
         "missing.tools.hidden_mcp_root.type",
     ],
 )
-async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_request, surface):
+async def test_unknown_source_surface_cannot_be_switched_or_prepared(switched_request, surface):
     from uuid import uuid4
 
     import httpx
@@ -625,7 +717,7 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
     from ..test_sessions import _record_personal_sign_in
 
     request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
-        consent_request
+        switched_request
     )
     before = await service.audit(source.tenant_id)
     policy = {"requires_confirmation": True}
@@ -854,28 +946,26 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
             "openai",
             accepted.local,
             actor,
-            accepted_drops=accepted.declared_drops,
-            expected_preview_digest=accepted.preview_digest,
         )
     assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied) as handoff:
         await read_preparation_counterpart(request)
-    assert isinstance(handoff.value.__cause__, AgentBackendRefused)
-    assert handoff.value.__cause__.reason == "re_confirm"
+    # A source the provider refuses is a failure, not a retry.
+    assert handoff.value.cause == "preparation_failed"
     assert constructions == targets == []
     assert reads and all(call.method == "GET" for call in reads)
 
 
-async def test_known_hidden_oauth_toolset_keeps_existing_projection(consent_request):
+async def test_known_hidden_oauth_toolset_keeps_existing_projection(switched_request):
     from uuid import uuid4
 
     from anthropic.types.beta import BetaManagedAgentsAgent
 
     from ..test_sessions import _record_personal_sign_in
 
-    request, service, source, _, _, router, _, _, _, _ = consent_request
+    request, service, source, _, _, router, _, _, _, _ = switched_request
     async with request.deps.sessionmaker() as db:
         await _record_personal_sign_in(
             db, tenant_id=source.tenant_id, account_id=uuid4(), agent_uuid=source.agent_id
@@ -925,8 +1015,8 @@ async def test_known_hidden_oauth_toolset_keeps_existing_projection(consent_requ
         "new.skill_null",
     ],
 )
-async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
-    consent_request, surface
+async def test_raw_source_pipeline_discriminators_keep_the_public_switch_closed(
+    switched_request, surface
 ):
     from uuid import uuid4
 
@@ -935,7 +1025,7 @@ async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
     from ..test_sessions import _record_personal_sign_in
 
     request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
-        consent_request
+        switched_request
     )
     agent = request.admission.agent.model_dump(mode="json", exclude_unset=True)
     environment = request.admission.environment.model_dump(mode="json", exclude_unset=True)
@@ -1016,14 +1106,12 @@ async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
                 "openai",
                 accepted.local,
                 actor,
-                accepted_drops=accepted.declared_drops,
-                expected_preview_digest=accepted.preview_digest,
             )
         assert commit.value.reason == "source_unsupported"
         with pytest.raises(AdmissionDenied) as handoff:
             await read_preparation_counterpart(request)
-        assert isinstance(handoff.value.__cause__, AgentBackendRefused)
-        assert handoff.value.__cause__.reason == "re_confirm"
+        # A source the provider refuses is a failure, not a retry.
+        assert handoff.value.cause == "preparation_failed"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     assert constructions == targets == []
@@ -1033,10 +1121,10 @@ async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
 @pytest.mark.parametrize(
     "surface", ["agent.model.speed", "environment.scope", "environment.packages.type"]
 )
-async def test_schema_supported_null_enum_keeps_existing_consent(consent_request, surface):
+async def test_schema_supported_null_enum_keeps_the_existing_switch(switched_request, surface):
     import httpx
 
-    request, service, source, _, accepted, router, _, constructions, targets, _ = consent_request
+    request, service, source, _, accepted, router, _, constructions, targets, _ = switched_request
     agent = request.admission.agent.model_dump(mode="json", exclude_unset=True)
     environment = request.admission.environment.model_dump(mode="json", exclude_unset=True)
     if surface == "agent.model.speed":
@@ -1080,7 +1168,7 @@ DAIMON_MCP_TOOLSET = {
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {"backend": backend, "tools": [DAIMON_MCP_TOOLSET], "mcp_servers": [DAIMON_MCP_SERVER]}
         for backend in ("openai", "gemini")
@@ -1088,15 +1176,15 @@ DAIMON_MCP_TOOLSET = {
     indirect=True,
     ids=["openai", "gemini"],
 )
-async def test_chat_enabled_agent_confirms_daimon_mcp_drops_and_runs_without_them(
-    consent_request,
+async def test_chat_enabled_agent_switches_without_daimon_mcp_and_runs_without_it(
+    switched_request,
 ):
-    request, service, source, _, accepted, _, reads, constructions, targets, _ = consent_request
+    request, service, source, _, accepted, _, reads, constructions, targets, _ = switched_request
     backend = request.admission.backend_revision.backend
     assert accepted.backend == backend
-    assert accepted.declared_drops == ("mcp", "memory", "sandbox", "tools")
+    assert await declared(switched_request) == ("mcp", "memory", "sandbox", "tools")
     selected = await read_preparation_counterpart(request)
-    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert selected.target_spec.declared_drops == ("mcp", "memory", "sandbox", "tools")
     assert selected.target_spec.tools == selected.target_spec.mcp_servers == ()
     assert not selected.target_spec.extensions
     assert selected.target_spec.system.endswith(
@@ -1108,11 +1196,13 @@ async def test_chat_enabled_agent_confirms_daimon_mcp_drops_and_runs_without_the
 
 
 @pytest.mark.parametrize("unknown", ["toolset_field", "config_field", "policy_value", "server"])
-async def test_unclassified_daimon_mcp_entry_refuses_as_source_definition(consent_request, unknown):
+async def test_unclassified_daimon_mcp_entry_refuses_as_source_definition(
+    switched_request, unknown
+):
     import httpx
 
     request, service, source, actor, accepted, router, reads, constructions, targets, _ = (
-        consent_request
+        switched_request
     )
     agent = request.admission.agent.model_dump(mode="json", exclude_unset=True)
     toolset = json_copy(DAIMON_MCP_TOOLSET)
@@ -1146,8 +1236,6 @@ async def test_unclassified_daimon_mcp_entry_refuses_as_source_definition(consen
             "openai",
             accepted.local,
             actor,
-            accepted_drops=("mcp", "memory", "sandbox", "tools"),
-            expected_preview_digest=accepted.preview_digest,
         )
     assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
@@ -1168,39 +1256,35 @@ _LIVE_ROOT = json.loads(
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             "backend": backend,
             **_LIVE_ROOT,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
     indirect=True,
 )
-async def test_live_manifest_switch_preview_confirm_and_prepare_declare_exact_losses(
-    consent_request,
+async def test_live_manifest_switch_preview_and_prepare_declare_exact_losses(
+    switched_request,
 ):
-    request, _, source, _, accepted, _, reads, constructions, _, _ = consent_request
+    request, _, source, _, _, _, reads, constructions, _, _ = switched_request
     assert len(source.effective_spec.skills) == 11
     assert source.memory_required
-    assert accepted.declared_drops == (
-        "mcp",
-        "memory",
-        "model_controls",
-        "sandbox",
-        "skills",
-        "tools",
+    losses = tuple(
+        sorted((*model_losses(switched_request), "mcp", "memory", "sandbox", "skills", "tools"))
     )
+    assert await declared(switched_request) == losses, "the switch says what is off"
     prepared = await read_preparation_counterpart(request)
-    assert prepared.target_spec.declared_drops == accepted.declared_drops
+    assert prepared.target_spec.declared_drops == unprepared(losses), "the turn runs without them"
     assert not prepared.target_spec.tools and not prepared.target_spec.mcp_servers
     assert len(constructions) == 1 and all(call.method == "GET" for call in reads)
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             "backend": backend,
@@ -1229,22 +1313,24 @@ async def test_live_manifest_switch_preview_confirm_and_prepare_declare_exact_lo
     ],
     indirect=True,
 )
-async def test_unlisted_native_defaults_are_declared_through_switch_preparation(consent_request):
-    request, _, _, _, accepted, _, _, _, _, _ = consent_request
-    assert accepted.declared_drops == ("memory", "sandbox", "tools")
+async def test_unlisted_native_defaults_are_declared_through_switch_preparation(switched_request):
+    request = switched_request[0]
+    assert await declared(switched_request) == ("memory", "sandbox", "tools")
     prepared = await read_preparation_counterpart(request)
-    assert prepared.target_spec.declared_drops == accepted.declared_drops
+    assert prepared.target_spec.declared_drops == ("memory", "sandbox", "tools")
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 @pytest.mark.parametrize("change", ["unknown_field", "null_field", "unknown_type"])
 async def test_unknown_channel_skill_refuses_even_with_all_losses_declared(
-    consent_request, provider, change
+    switched_request, provider, change
 ):
     from anthropic.types.beta import BetaManagedAgentsCustomSkill
     from mux.contracts.resources import AgentSpec
 
-    request, service, source, actor, accepted, _, reads, constructions, targets, _ = consent_request
+    request, service, source, actor, accepted, _, reads, constructions, targets, _ = (
+        switched_request
+    )
     payload = {"type": "custom", "skill_id": "channel-skill", "version": "1"}
     if change != "unknown_type":
         payload["future_execution_policy"] = (
@@ -1280,8 +1366,6 @@ async def test_unknown_channel_skill_refuses_even_with_all_losses_declared(
             provider,
             accepted.local,
             actor,
-            accepted_drops=target.declared_drops,
-            expected_preview_digest=accepted.preview_digest,
         )
     assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
@@ -1295,13 +1379,13 @@ async def test_unknown_channel_skill_refuses_even_with_all_losses_declared(
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 @pytest.mark.parametrize("version", ["latest", "1"])
 async def test_well_formed_channel_skill_remains_a_declarable_loss(
-    consent_request, provider, version
+    switched_request, provider, version
 ):
     from anthropic.types.beta import BetaManagedAgentsCustomSkill
     from daimon.core.turn.runtime_manifest import preview_source_drops
     from mux.contracts.ids import SkillRef
 
-    request, _, _, _, _, _, _, _, _, _ = consent_request
+    request, _, _, _, _, _, _, _, _, _ = switched_request
     skill = BetaManagedAgentsCustomSkill(type="custom", skill_id="channel-skill", version=version)
     captured = await capture_preparation_source(
         replace(request, admission=replace(request.admission, channel_skills=(skill,))), fresh=True
@@ -1321,72 +1405,58 @@ async def test_well_formed_channel_skill_remains_a_declarable_loss(
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             "backend": backend,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
     indirect=True,
 )
-async def test_portable_recorded_model_controls_consent_apply_and_prepare(consent_request):
-    request, service, source, actor, accepted, _, _, constructions, _, _ = consent_request
-    assert accepted.declared_drops == ("memory", "model_controls", "sandbox")
-    quote = await service.preview(source, request.admission.backend_revision.backend)
-    with pytest.raises(AgentBackendRefused):
-        await service.set_backend(
-            source,
-            quote.target_backend,
-            accepted.local,
-            actor,
-            accepted_drops=("memory", "sandbox"),
-            expected_preview_digest=quote.digest,
-        )
+async def test_portable_recorded_model_controls_apply_and_prepare(switched_request):
+    request, _, _, _, _, _, _, constructions, _, _ = switched_request
+    losses = tuple(sorted((*model_losses(switched_request), "memory", "sandbox")))
+    assert await declared(switched_request) == losses
     selected = await read_preparation_counterpart(request)
-    assert selected.target_spec.declared_drops == accepted.declared_drops
-    assert "model_controls" in selected.target_spec.system
+    assert selected.target_spec.declared_drops == unprepared(losses), (
+        "the recorded controls are off"
+    )
+    assert "fast mode" in selected.target_spec.system
     assert not selected.target_spec.extensions
     assert len(constructions) == 1
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             "backend": backend,
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
     indirect=True,
 )
-async def test_captured_portable_caller_mcp_loss_reaches_retained_preparation(consent_request):
-    request, service, source, actor, accepted, _, _, constructions, _, _ = consent_request
+async def test_captured_portable_caller_mcp_loss_reaches_retained_preparation(switched_request):
+    request, _, source, _, _, _, _, constructions, _, _ = switched_request
     assert source.effective_spec.mcp_servers == ()
     assert len(source.resource_requirements) == 1
     assert source.resource_requirements[0].id.startswith("caller-mcp:")
-    assert accepted.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
-    quote = await service.preview(source, request.admission.backend_revision.backend)
-    with pytest.raises(AgentBackendRefused):
-        await service.set_backend(
-            source,
-            quote.target_backend,
-            accepted.local,
-            actor,
-            accepted_drops=("memory", "model_controls", "sandbox"),
-            expected_preview_digest=quote.digest,
-        )
+    losses = tuple(sorted((*model_losses(switched_request), "mcp", "memory", "sandbox")))
+    assert await declared(switched_request) == losses
     selected = await read_preparation_counterpart(request)
-    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert selected.target_spec.declared_drops == unprepared(losses), (
+        "the caller's MCP is off there"
+    )
     assert not selected.target_spec.mcp_servers
     assert len(constructions) == 1
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             "backend": "anthropic",
@@ -1396,14 +1466,13 @@ async def test_captured_portable_caller_mcp_loss_reaches_retained_preparation(co
     ],
     indirect=True,
 )
-async def test_portable_native_no_drop_consent_survives_store_and_retained_prepare(consent_request):
+async def test_portable_native_switch_survives_store_and_retained_prepare(switched_request):
     from mux.drivers.anthropic.resources.agents import agent_payload
 
-    request, service, source, actor, accepted, router, reads, _, _, _ = consent_request
-    assert accepted.drop_consent is not None
-    assert accepted.declared_drops == ()
+    request, service, source, actor, accepted, router, reads, _, _, _ = switched_request
+    assert await declared(switched_request) == (), "nothing is off on its own provider"
     assert request.admission.backend_revision.model is None
-    assert (await service.revision(source, accepted.local)).drop_consent == accepted.drop_consent
+    assert await service.revision(source, accepted.local) == accepted, "stored as written"
     await service.clear_backend(source, accepted.local, actor)
     prepared = await prepare_source(request)
     assert prepared.target_spec == source.effective_spec
@@ -1419,25 +1488,33 @@ async def test_portable_native_no_drop_consent_survives_store_and_retained_prepa
     router.routes.clear()
     router.add_agent(request.admission.agent.model_copy(update={"model": changed}))
     router.add_environment(request.admission.environment)
-    with pytest.raises(AgentBackendRefused, match="confirm"):
-        await prepare_source(request)
+    # The owner's own edit on the agent's own provider: no card, the edit applies.
+    prepared = await prepare_source(request)
+    assert agent_payload(prepared.target_spec)["model"]["effort"] == {"type": "high"}
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             "backend": "openai",
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
     ],
     indirect=True,
 )
 @pytest.mark.parametrize("fault", [None, "foreign_agent", "missing_association", "origin"])
-async def test_agent_origin_openai_host_preserves_original_consent_before_paid_request(
-    consent_request, fault
+async def test_agent_origin_openai_host_preserves_its_switch_before_paid_request(
+    switched_request, fault
 ):
+    """The OpenAI host runs a counterpart proven against the agent's switch, so a row
+    that lost that switch's association is refused before the paid request.
+
+    Only a record born on OpenAI stores none and runs
+    (`tests/simulated/test_without_anthropic.py`), as on the self-hosted host
+    (`test_an_agent_saved_on_a_selfhosted_model_runs_a_reply`).
+    """
     import httpx
     from daimon.core._models import ChannelConfigRevision
     from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai
@@ -1449,14 +1526,20 @@ async def test_agent_origin_openai_host_preserves_original_consent_before_paid_r
     from openai import AsyncOpenAI
     from sqlalchemy import update
 
-    request, service, source, actor, accepted, *_ = consent_request
+    request, service, source, actor, accepted, *_ = switched_request
     await service.clear_backend(source, accepted.local, actor)
     selected = await read_preparation_counterpart(request)
     selected = replace(
         selected, now=lambda: datetime.now(UTC), deadline=datetime.now(UTC) + timedelta(seconds=30)
     )
     revision = selected.admission.backend_revision
-    assert selected.target_spec.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    assert selected.target_spec.declared_drops == (
+        "effort_setting",
+        "fast_mode",
+        "mcp",
+        "memory",
+        "sandbox",
+    )
     assert selected.verified_counterpart == selected.counterpart
     if fault == "foreign_agent":
         selected = replace(
@@ -1555,23 +1638,69 @@ async def test_agent_origin_openai_host_preserves_original_consent_before_paid_r
         )
 
 
-async def test_a_stale_switch_consent_names_reconfirm_not_missing_provider(monkeypatch):
-    """SMOKE 42591c55 J6g: a keyless preview's consent came back as "not set up".
-
-    The provider is fine; the stored switch consent needs a fresh preview. The
-    generic `backend_unsupported` path used to make admission say "runs on Gemini,
-    which isn't set up here yet", a dead end. Preserve the re-confirm word.
-    """
-    from daimon.core.channel_backend import AgentBackendRefused
+@pytest.mark.parametrize(
+    ("refusal", "cause"), [("revision_busy", "preparation_busy"), ("backend_not_allowed", None)]
+)
+async def test_a_race_asks_for_a_retry_and_nothing_asks_to_confirm(monkeypatch, refusal, cause):
+    """A setup changed since admission clears on retry; no refusal asks to confirm a switch."""
     from daimon.core.turn import runtime_manifest
-    from daimon.core.turn.errors import AdmissionDenied
 
     async def refuse(_request):
-        raise AgentBackendRefused("re_confirm")
+        raise AgentBackendRefused(refusal)
 
     monkeypatch.setattr(runtime_manifest, "prepare_source", refuse)
     with pytest.raises(AdmissionDenied) as refused:
         await runtime_manifest.read_preparation_counterpart(object())  # type: ignore[arg-type]
-    assert refused.value.reason == "backend_unsupported"
-    assert refused.value.cause == "re_confirm", "never the generic agent_backend cause"
-    assert isinstance(refused.value.__cause__, AgentBackendRefused)
+    assert refused.value.cause == cause, f"{refusal} must say {cause}"
+
+
+@pytest.mark.parametrize(
+    ("switched_request", "place"),
+    [
+        ({}, {"memory_read_only": True}),
+        ({"caller_mcp": True}, {"memory_read_only": True}),
+        (
+            {"caller_mcp": True},
+            {"slack_turn_context_id": __import__("uuid").UUID(int=7)},
+        ),
+    ],
+    indirect=["switched_request"],
+)
+async def test_a_switch_made_in_one_place_holds_in_another(switched_request, place):
+    """A sealed channel, a DM or a read-only channel is a place, not the owner's setup:
+    the switch made elsewhere still holds there."""
+    request = switched_request[0]
+    elsewhere = replace(request, admission=replace(request.admission, **place))
+    prepared = await prepare_source(elsewhere)
+    assert prepared.target_spec is not None, "the switch runs in the other place"
+
+
+async def test_a_gain_or_loss_just_applies_and_the_source_keeps_it(switched_request):
+    """A skill added after the switch is off on the new provider at once, with no refusal.
+
+    Removed again, nothing is off. A channel's own skill counts per turn the same way.
+    The source keeps every part, so a switch back runs it natively, nothing lost.
+    """
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+
+    request, _, _, _, _, router, reads, *_ = switched_request
+    before = (await prepare_source(request)).target_spec.declared_drops
+    skill = BetaManagedAgentsCustomSkill(type="custom", skill_id="added", version="1")
+
+    def edited(version, skills):
+        agent = request.admission.agent.model_copy(update={"version": version, "skills": skills})
+        router.routes.clear()
+        router.add_agent(agent)
+        router.add_environment(request.admission.environment)
+        return replace(request, admission=replace(request.admission, agent=agent))
+
+    gained = await prepare_source(edited(2, [skill]))
+    assert "skills" in gained.target_spec.declared_drops, "the added skill is off there"
+    assert "skills" not in before, "it was not off before"
+    assert gained.source.effective_spec.skills, "the source keeps the skill for a switch back"
+    lost = await prepare_source(edited(3, []))
+    assert lost.target_spec.declared_drops == before, "removed again, nothing extra is off"
+    channel = BetaManagedAgentsCustomSkill(type="custom", skill_id="channel-skill", version="1")
+    here = replace(lost, admission=replace(lost.admission, channel_skills=(channel,)))
+    assert "skills" in (await prepare_source(here)).target_spec.declared_drops
+    assert all(r.method == "GET" for r in reads), "a turn never edits the source"

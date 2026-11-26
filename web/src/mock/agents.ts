@@ -2,8 +2,8 @@
 import { http, HttpResponse } from "msw"
 
 import type {
-  Agent, AgentConfig, AgentSummary, AgentVersion, Backend, BuiltinTool, Catalog, CatalogModel, Change, Draft,
-  DataServerAgent, DataServerStatus, DataServerTools, Effect, McpServer, ModelChoice, PersonRef, Place, Skill, Template,
+  Agent, AgentConfig, AgentSummary, AgentVersion, Backend, BuiltinTool, Catalog, CatalogModel, Change, Draft, Effort,
+  DataServerAgent, DataServerStatus, DataServerTools, Effect, McpServer, ModelChoice, ModelPreview, PersonRef, Place, Skill, Template,
 } from "@/modules/agents/types"
 import { notFound, unauthorized, wait } from "./util"
 import { me, PEOPLE } from "./world"
@@ -15,13 +15,23 @@ const clone = <T,>(x: T): T => structuredClone(x)
 
 // ---------- Catalog ----------
 
+// Ids, prices and order follow the core catalog.
+const LEVELS: Effort[] = ["low", "medium", "high"]
 const MODELS: CatalogModel[] = [
-  { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 5, out_usd: 25, fast: true },
-  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", backend: "anthropic", in_usd: 3, out_usd: 15 },
-  { id: "claude-haiku-5-5", label: "Haiku 5.5", backend: "anthropic", in_usd: 1, out_usd: 5 },
-  { id: "gpt-5.5", label: "GPT-5.5", backend: "openai", in_usd: 2.5, out_usd: 15 },
-  { id: "gpt-5.5-mini", label: "GPT-5.5 mini", backend: "openai", in_usd: 0.4, out_usd: 2 },
-  { id: "gemini-3-pro", label: "Gemini 3 Pro", backend: "gemini", in_usd: 2, out_usd: 12 },
+  { id: "claude-fable-5-2", label: "Fable 5.2", backend: "anthropic", in_usd: 8, out_usd: 40 },
+  { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 4, out_usd: 20, fast: true },
+  { id: "claude-opus-4-8", label: "Opus 4.8", backend: "anthropic", in_usd: 5, out_usd: 25 },
+  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", backend: "anthropic", in_usd: 2, out_usd: 10 },
+  { id: "claude-haiku-5-5", label: "Haiku 5.5", backend: "anthropic", in_usd: 0.1, out_usd: 0.5 },
+  { id: "gpt-6.2-astra", label: "GPT-6.2 Astra", backend: "openai", in_usd: 8, out_usd: 40, efforts: LEVELS },
+  { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "openai", in_usd: 10, out_usd: 50, efforts: LEVELS },
+  { id: "gpt-6.2-sol", label: "GPT-6.2 Sol", backend: "openai", in_usd: 2, out_usd: 10, efforts: LEVELS },
+  { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5, efforts: LEVELS },
+  { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
+  { id: "gemini-4-carbon", label: "Gemini 4 Carbon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
+  { id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", backend: "gemini", in_usd: 1.5, out_usd: 7.5, efforts: LEVELS },
+  { id: "gemini-4-neon", label: "Gemini 4 Neon", backend: "gemini", in_usd: 3, out_usd: 15, efforts: LEVELS },
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75, efforts: LEVELS },
 ]
 const modelLabel = (m: ModelChoice) => {
   const c = MODELS.find((x) => x.id === m.id)
@@ -133,6 +143,13 @@ const SERVERS: Record<string, McpServer> = {
       { name: "merge_pull_request", description: "Merge a pull request", effect: "write", rule: "deny" },
     ],
   },
+  daimon: {
+    key: "daimon", name: "Daimon", url: "https://daimon.example.com/mcp", auth: "none", credential: null,
+    tools: [
+      { name: "read_thread", description: "Read a thread the agent is in", effect: "read", rule: "allow" },
+      { name: "schedule_routine", description: "Schedule a routine", effect: "write", rule: "ask" },
+    ],
+  },
   hubspot: {
     key: "hubspot", name: "HubSpot", url: "https://mcp.hubspot.com/", auth: "oauth", credential: "expired",
     tools: [
@@ -149,7 +166,6 @@ const CHANNELS: Place[] = [
   CH("general"), CH("analytics"), CH("mmm-larkspur"), CH("pricing"), CH("eng-reviews"), CH("sales"), CH("support"),
   CH("client-cobalt", { confidential: true }),
 ]
-const DM: Place = { id: "dm", kind: "dm", platform: "discord", name: "Direct messages" }
 const WEB: Place = { id: "web", kind: "web", platform: "web", name: "Web chat" }
 const place = (name: string, extra: Partial<Place> = {}) => ({ ...clone(CHANNELS.find((c) => c.name === name)!), ...extra })
 
@@ -277,13 +293,13 @@ function seed(): Rec[] {
     name: "MMM Analyst", purpose: "Media mix models with PyMC-Marketing", avatar: face(4), model: m("claude-sonnet-5-5"),
     system: MMM_SYSTEM.replace("\n- Log open questions as Linear issues in the client's project.", "").replace("Pull spend and outcomes with the warehouse-pulls skill. Never invent spend.", "Never invent spend."),
     skills: ["data-validation", "exploratory-data-analysis", "pymc-artifact-style"].map(skill),
-    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac")], places: [place("mmm-larkspur", { default: true })],
+    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac"), server("daimon")], places: [place("mmm-larkspur", { default: true })],
   }, "p_maya", 960, [
     [720, "p_priya", "Warehouse access", (c) => {
       c.mcp_servers.push(server("bigquery")); c.skills.push(skill("warehouse-pulls"), skill("pymc-marketing"))
       c.system = c.system!.replace("Never invent spend.", "Pull spend and outcomes with the warehouse-pulls skill. Never invent spend.")
     }],
-    [600, "p_maya", null, (c) => { c.places!.push(place("analytics"), clone(DM)) }],
+    [600, "p_maya", null, (c) => { c.places!.push(place("analytics")) }],
     [504, "p_maya", "Opus for model fits", (c) => { c.model = m("claude-opus-5-5") }],
     [300, "p_priya", null, (c) => { c.skills.push(skill("eda-storytelling")); c.tools = toolset(...CODE_TOOLS, "web_fetch") }],
     [216, "p_jonas", "Linear for open questions", (c) => {
@@ -302,7 +318,7 @@ function seed(): Rec[] {
   const daimon = history({
     name: "Daimon", purpose: "General assistant", avatar: face(11), model: m("claude-sonnet-5-5"), system: DAIMON_SYSTEM,
     skills: ["file-handling", "marimo_notebooks", "pymc-artifact-style", "data-validation", "data-cleaning", "exploratory-data-analysis", "eda-storytelling"].map(skill),
-    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac")], places: [place("general", { default: true }), clone(DM), clone(WEB)],
+    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac")], places: [place("general", { default: true }), clone(WEB)],
   }, "p_maya", 2400, [
     [1200, "p_jonas", null, (c) => { c.skills.push(skill("report-publish")) }],
     [600, "p_maya", null, (c) => { c.skills.push(skill("churn-model")) }],
@@ -330,10 +346,10 @@ function seed(): Rec[] {
     name: "Sales Desk", purpose: "Account briefs from the CRM", avatar: face(14), model: m("claude-haiku-5-5", "low"),
     system: "# Sales Desk\n\nWrite account briefs for Fernhill's sales team from HubSpot and Almanac. One page, no speculation.",
     skills: [skill("account-brief"), skill("pptx")], tools: toolset("read", "write"), mcp_servers: [server("almanac"), server("hubspot")],
-    places: [place("sales", { default: true }), clone(DM), clone(WEB)],
+    places: [place("sales", { default: true }), clone(WEB)],
   }, "p_maya", 900, [[120, "p_maya", null, (c) => { c.skills.push(skill("docx")) }]])
   const support = history({
-    name: "Support Triage", purpose: "Labels and routes support tickets", avatar: face(39), model: m("gpt-5.5", "medium"),
+    name: "Support Triage", purpose: "Labels and routes support tickets", avatar: face(39), model: m("gpt-6-luna", "medium"),
     system: "# Support Triage\n\nLabel every new ticket in #support, set a priority, and file it in the owning team's Linear project.",
     skills: [skill("triage")], tools: toolset("read"), mcp_servers: [server("linear")], places: [place("support", { default: true })],
   }, "p_jonas", 500, [[30, "p_jonas", "Comments need approval", (c) => { c.mcp_servers[0]!.tools[3]!.rule = "ask" }]])
@@ -341,7 +357,7 @@ function seed(): Rec[] {
     id, owner, co_owners: co, versions, last_used_at: used == null ? null : ago(used), spend_usd: usd, drafts: {},
   })
   return [
-    rec("ag_daimon", "p_maya", ["p_jonas"], daimon, 0.2, 412.6),
+    rec("ag_default", "p_maya", ["p_jonas"], daimon, 0.2, 412.6),
     rec("ag_mmm", "p_maya", ["p_priya"], mmm, 0.3, 286.15),
     rec("ag_pricing", "p_priya", [], pricing, 1, 64.9),
     rec("ag_review", "p_jonas", [], review, 26, 38.4),
@@ -392,13 +408,13 @@ function summary(r: Rec, v: Viewer): AgentSummary {
   const a = view(r, v)
   const c = current(r).config
   const runs = new Set<AgentSummary["runs_in"][number]>()
-  for (const p of c.places ?? []) runs.add(p.kind === "channel" ? (p.platform as "discord") : p.kind)
+  for (const p of c.places ?? []) runs.add(p.kind === "web" ? "web" : (p.platform as "discord"))
   return {
     id: a.id, name: a.name, purpose: a.purpose, avatar: a.avatar, version: a.version, owner: a.owner, updated_at: a.updated_at,
     updated_by: a.updated_by, last_used_at: a.last_used_at, spend_usd: a.spend_usd, can_edit: a.can_edit, co_owners: a.co_owners,
     draft_changes: draftView(r, v.id)?.changes.length ?? 0,
     model_label: MODELS.find((x) => x.id === c.model.id)?.label ?? c.model.id, backend: c.model.backend,
-    runs_in: (["discord", "slack", "teams", "dm", "web"] as const).filter((k) => runs.has(k)),
+    runs_in: (["discord", "slack", "teams", "web"] as const).filter((k) => runs.has(k)),
   }
 }
 
@@ -433,8 +449,8 @@ const TEMPLATES: (Template & { config: () => Omit<AgentConfig, "name" | "avatar"
     config: () => ({ purpose: "Client briefs from the CRM", model: m("claude-haiku-5-5", "low"),
       system: "# Account briefs\n\nOne-page briefs from HubSpot and Almanac. No speculation.", skills: [skill("account-brief"), skill("docx")],
       tools: toolset("read", "write"), mcp_servers: [server("almanac"), server("hubspot")], places: [] }) },
-  { id: "triage", name: "Support triage", purpose: "Labels and routes tickets", icon: "inbox", skills: 1, servers: 1, model: "GPT-5.5",
-    config: () => ({ purpose: "Labels and routes tickets", model: m("gpt-5.5", "medium"),
+  { id: "triage", name: "Support triage", purpose: "Labels and routes tickets", icon: "inbox", skills: 1, servers: 1, model: "GPT-6 Luna",
+    config: () => ({ purpose: "Labels and routes tickets", model: m("gpt-6-luna", "medium"),
       system: "# Support triage\n\nLabel, prioritise and route every new ticket.", skills: [skill("triage")], tools: toolset("read"),
       mcp_servers: [server("linear")], places: [] }) },
 ]
@@ -500,6 +516,23 @@ const dataStatus = (id: string): DataServerStatus => ({
 })
 const DATA = "/api/agents/:id/nodes/data_server"
 
+const PREVIEW_BASE: ModelPreview = {
+  moves: false, allowed: true, skills: [], servers: [], capabilities: [], lines: [], drops: [], refusal: null,
+}
+const REFUSED = "gemini:gemini-4-argon"
+
+/** The preview of a pick: no change within a provider, a refusal for one model, what is off for the rest. */
+function previewOf(from: Backend, value: string): ModelPreview {
+  const [to] = value.split(":") as [Backend, string]
+  if (to === from) return PREVIEW_BASE
+  if (value === REFUSED) return { ...PREVIEW_BASE, moves: true, allowed: false, refusal: { line: "Gemini 4 Argon can't run this agent here. Ask an admin.", action: null } }
+  if (to === "openai") return { ...PREVIEW_BASE, moves: true }
+  return {
+    ...PREVIEW_BASE, moves: true, drops: ["memory", "skill:sk_pricing"], skills: ["Pricing playbook"],
+    lines: ["Stops working: memory and Pricing playbook skill"],
+  }
+}
+
 export const agentsHandlers = [
   http.get("/api/agents", async () => {
     await wait()
@@ -509,6 +542,13 @@ export const agentsHandlers = [
   http.get("/api/agents/catalog", async () => {
     await wait(120)
     return HttpResponse.json(CATALOG)
+  }),
+  http.get("/api/agents/:id/model-preview", async ({ params, request }) => {
+    await wait(200)
+    const v = viewer(), r = find(String(params.id))
+    if (!v) return unauthorized()
+    if (!r) return notFound()
+    return HttpResponse.json(previewOf(current(r).config.model.backend, new URL(request.url).searchParams.get("value") ?? ""))
   }),
   http.get("/api/agents/templates", async () => {
     await wait(120)
@@ -521,7 +561,7 @@ export const agentsHandlers = [
     const { name, template, model } = (await request.json()) as { name: string; template: string; model?: string }
     const t = TEMPLATES.find((x) => x.id === template) ?? TEMPLATES[0]!
     const config: AgentConfig = { ...t.config(), name, avatar: face(FACES[DB.length % FACES.length]!) }
-    if (model) config.model = m(model, config.model.effort)
+    if (model) config.model = m(model.split(":").at(-1)!, config.model.effort)
     const id = `ag_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}_${Date.now().toString(36).slice(-4)}`
     DB.push({
       id, owner: v.id, co_owners: [], last_used_at: null, spend_usd: 0, drafts: {},

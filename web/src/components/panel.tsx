@@ -66,12 +66,12 @@ export function PanelSection({ title, children, className }: { title?: string; c
   )
 }
 
-/** Label and value rows of a detail panel; rows without a value are left out. Keep it to about five rows. */
-export function Facts({ rows }: { rows: [string, React.ReactNode][] }) {
+/** Label and value rows of a detail panel; rows without a value are left out. Keep it to about five rows. `wide` fits longer labels. */
+export function Facts({ rows, wide }: { rows: [string, React.ReactNode][]; wide?: boolean }) {
   return (
     <dl className="space-y-1.5 text-sm">
       {rows.filter(([, v]) => v != null && v !== "" && v !== false).map(([k, v]) => (
-        <div key={k} className="grid grid-cols-[112px_1fr] gap-3 max-sm:grid-cols-1 max-sm:gap-0.5"><dt className="text-muted-foreground">{k}</dt><dd className="min-w-0 break-words">{v}</dd></div>
+        <div key={k} className={cn("grid grid-cols-[112px_1fr] gap-3 max-sm:grid-cols-1 max-sm:gap-0.5", wide && "grid-cols-[152px_1fr] max-sm:grid-cols-[136px_1fr] max-sm:gap-3")}><dt className="text-muted-foreground">{k}</dt><dd className="min-w-0 break-words">{v}</dd></div>
       ))}
     </dl>
   )

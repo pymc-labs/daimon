@@ -9,21 +9,30 @@ import { AgentAccessView } from "./AgentAccess"
 import { Audit } from "./Audit"
 import { Feedback } from "./Feedback"
 import { Invites, NewInvite } from "./Invites"
+import { Issues } from "./Issues"
+import { Monitoring } from "./Monitoring"
+import { Overview } from "./Overview"
 import { People } from "./People"
+import { Support } from "./support/Support"
 import { Workspace } from "./Workspace"
 
 const TABS: { label: string; to: string; end?: boolean; cap: Capability }[] = [
-  { label: "People", to: "/admin", end: true, cap: "people.manage" }, { label: "Invites", to: "/admin/invites", cap: "people.manage" },
+  { label: "Overview", to: "/admin", end: true, cap: "audit.view" }, { label: "Issues", to: "/admin/issues", cap: "audit.view" },
+  { label: "People", to: "/admin/people", cap: "people.manage" }, { label: "Invites", to: "/admin/invites", cap: "people.manage" },
   { label: "Agent access", to: "/admin/agents", cap: "workspace.manage" }, { label: "Audit log", to: "/admin/audit", cap: "audit.view" }, { label: "Feedback", to: "/admin/feedback", cap: "audit.view" },
-  { label: "Settings", to: "/admin/settings", cap: "workspace.manage" },
+  { label: "Monitoring", to: "/admin/monitoring", cap: "workspace.manage" },
+  { label: "Support", to: "/admin/support", cap: "workspace.manage" }, { label: "Settings", to: "/admin/settings", cap: "workspace.manage" },
 ]
 
 export function Admin() {
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
   const can = useCan()
   const [, setDialog] = useParam("dialog")
   const tabs = TABS.filter((t) => can(t.cap))
   const first = tabs[0]?.to
+  // People moved from /admin; links in old messages carry ?person= or ?group=.
+  const old = new URLSearchParams(search)
+  if (pathname.replace(/\/$/, "") === "/admin" && (old.has("person") || old.has("group"))) return <Navigate to={`/admin/people${search}`} replace />
   // A tab this person may not open leads to the first one they may.
   const here = TABS.find((t) => t.to === pathname.replace(/\/$/, ""))
   if (first && here && !can(here.cap)) return <Navigate to={first} replace />
@@ -33,14 +42,18 @@ export function Admin() {
     <Page
       crumbs={[{ label: "Admin", to: "/admin" }]}
       tabs={tabs}
-      actions={can("people.manage") && !pathname.startsWith("/admin/settings") ? <Button size="sm" onClick={() => setDialog("invite")}><Plus />Invite</Button> : null}
+      actions={can("people.manage") && !pathname.startsWith("/admin/settings") && !pathname.startsWith("/admin/support") ? <Button size="sm" onClick={() => setDialog("invite")}><Plus />Invite</Button> : null}
     >
       <Routes>
-        {page("", "people.manage", <People />)}
+        {page("", "audit.view", <Overview />)}
+        {page("issues", "audit.view", <Issues />)}
+        {page("people", "people.manage", <People />)}
         {page("invites", "people.manage", <Invites />)}
         {page("agents", "workspace.manage", <AgentAccessView />)}
         {page("audit", "audit.view", <Audit />)}
         {page("feedback", "audit.view", <Feedback />)}
+        {page("monitoring", "workspace.manage", <Monitoring />)}
+        {page("support", "workspace.manage", <Support />)}
         {page("settings", "workspace.manage", <Workspace />)}
         <Route path="*" element={<Navigate to={first ?? "/chat"} replace />} />
       </Routes>

@@ -9,7 +9,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
+from daimon.adapters.mcp.auth.resolver import Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agent_removal import (
     _detach_mcp_server_impl,
@@ -25,7 +25,7 @@ from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -35,6 +35,8 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _ALLOW_ALL: dict[str, Any] = {"enabled": True, "permission_policy": {"type": "always_allow"}}
 
@@ -102,14 +104,14 @@ def _spec_agent_router(
         metadata["daimon_managed"] = "true"
 
     def _agent_payload() -> dict[str, Any]:
-        return ma_agent(
+        return ma_agent_payload(
             id=agent_id,
             name=agent_name,
             mcp_servers=mcp_servers or [],
             tools=tools or [],
             skills=skills or [],
             metadata=metadata,
-        ).model_dump(mode="json")
+        )
 
     def on_list(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         request_log.append("GET /v1/agents")
@@ -122,9 +124,7 @@ def _spec_agent_router(
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         request_log.append("POST /v1/agents/{id}")
         captured.update(json_body(req))
-        return httpx.Response(
-            200, json=ma_agent(id=agent_id, name=agent_name).model_dump(mode="json")
-        )
+        return httpx.Response(200, json=ma_agent_payload(id=agent_id, name=agent_name))
 
     def on_list_vaults(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         rows = [
@@ -228,14 +228,7 @@ async def test_detach_mcp_server_impl_removes_server_and_matching_toolset(
         ],
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     result = await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -266,14 +259,7 @@ async def test_detach_mcp_server_impl_raises_when_not_attached_and_issues_no_upd
         mcp_servers=[{"name": "other", "type": "url", "url": "https://other.example/mcp"}],
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     with pytest.raises(ToolError, match="other"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -291,14 +277,7 @@ async def test_detach_mcp_server_impl_rejects_reserved_server_before_any_request
         tenant_id=uuid.uuid4(), account_id=uuid.uuid4(), agent_name="demo"
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), token_kind="cli")
     with pytest.raises(ToolError, match="reserved"):
         await _detach_mcp_server_impl(
             _runtime(client), auth, agent_name="demo", server_name=DAIMON_MCP_SERVER_NAME
@@ -321,14 +300,7 @@ async def test_detach_mcp_server_impl_lets_an_admin_detach_from_the_seeded_agent
         managed=True,
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
     await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -350,9 +322,7 @@ async def test_detach_mcp_server_impl_refuses_non_admin_on_the_seeded_agent(
         managed=True,
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="needs an admin"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -393,14 +363,7 @@ async def test_detach_mcp_server_impl_forgets_the_shared_token_for_that_url(
         plaintext_token="ntn_rejected",
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -438,14 +401,7 @@ async def test_detach_mcp_server_impl_removes_the_tokens_copies_from_callers_vau
         mcp_servers=[{"name": "bridge", "type": "url", "url": bridge}],
         vaults=vaults,
     )
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
 
     await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -474,7 +430,7 @@ async def test_detach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
         mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="needs an admin"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -496,7 +452,7 @@ async def test_detach_mcp_server_impl_refuses_non_admin_when_agent_unreachable(
         mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="admin"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -522,27 +478,27 @@ async def test_detach_mcp_server_impl_retries_once_on_version_conflict(
     def on_list(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_conflict",
                     name="demo",
                     mcp_servers=[
                         {"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}
                     ],
                     metadata=metadata,
-                ).model_dump(mode="json")
+                )
             ]
         )
 
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_conflict",
                 name="demo",
                 mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}],
                 version=1,
                 metadata=metadata,
-            ).model_dump(mode="json"),
+            ),
         )
 
     def on_update(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -551,7 +507,7 @@ async def test_detach_mcp_server_impl_retries_once_on_version_conflict(
             return _conflict_response()
         return httpx.Response(
             200,
-            json=ma_agent(id="ag_conflict", name="demo", version=2).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_conflict", name="demo", version=2),
         )
 
     router = MARouter()
@@ -561,14 +517,7 @@ async def test_detach_mcp_server_impl_retries_once_on_version_conflict(
     router.add("GET", r"/v1/vaults$", lambda _r, _m: list_response([]))
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     result = await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -599,14 +548,7 @@ async def test_remove_skill_impl_detaches_by_raw_skill_id_preserving_others(
         ],
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     result = await _remove_skill_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -636,12 +578,12 @@ async def test_remove_skill_impl_detaches_by_resolved_display_name(
         r"/v1/agents",
         lambda _r, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_removal",
                     name="demo",
                     skills=[{"type": "custom", "skill_id": "skill_build", "version": "1"}],
                     metadata=metadata,
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -666,34 +608,25 @@ async def test_remove_skill_impl_detaches_by_resolved_display_name(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(
-            200, json=ma_agent(id="ag_removal", name="demo").model_dump(mode="json")
-        )
+        return httpx.Response(200, json=ma_agent_payload(id="ag_removal", name="demo"))
 
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _r, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_removal",
                 name="demo",
                 skills=[{"type": "custom", "skill_id": "skill_build", "version": "1"}],
                 metadata=metadata,
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     result = await _remove_skill_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -747,7 +680,7 @@ async def test_remove_skill_impl_refuses_a_name_two_attached_skills_share(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     with pytest.raises(ToolError, match="more than one skill"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -769,14 +702,7 @@ async def test_remove_skill_impl_raises_when_nothing_matches_listing_attached(
         skills=[{"type": "anthropic", "skill_id": "skill_x", "version": "1"}],
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     with pytest.raises(ToolError, match="skill_x"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -797,14 +723,7 @@ async def test_remove_skill_impl_rejects_system_agent_no_daimon_account(
         skills=[{"type": "anthropic", "skill_id": "skill_x", "version": "1"}],
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
     with pytest.raises(ToolError, match="system agent"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -826,7 +745,7 @@ async def test_remove_skill_impl_rejects_non_admin_when_agent_reachable(
         skills=[{"type": "anthropic", "skill_id": "skill_x", "version": "1"}],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="needs its owner or an admin"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -848,7 +767,7 @@ async def test_remove_skill_impl_refuses_non_admin_when_agent_unreachable(
         skills=[{"type": "anthropic", "skill_id": "skill_x", "version": "1"}],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="admin"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -870,14 +789,7 @@ async def test_remove_skill_impl_refuses_a_built_in_agent_even_for_an_admin(
         skills=[{"type": "anthropic", "skill_id": "skill_x", "version": "1"}],
         managed=True,
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
     with pytest.raises(ToolError, match="fork_agent"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -917,14 +829,7 @@ async def test_remove_skill_impl_forgets_a_skill_added_by_hand(
             source="upload",
         )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     await _remove_skill_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -959,7 +864,7 @@ def _agent_only_router(
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [ma_agent(id=agent_id, name=agent_name, metadata=metadata).model_dump(mode="json")]
+            [ma_agent_payload(id=agent_id, name=agent_name, metadata=metadata)]
         ),
     )
     return build_fake_anthropic(router.dispatch)
@@ -974,9 +879,7 @@ def _multi_agent_router(
         metadata = {"daimon_tenant": str(tenant_id), "daimon_name": agent_name}
         if account_id is not None:
             metadata["daimon_account"] = str(account_id)
-        payloads.append(
-            ma_agent(id=agent_id, name=agent_name, metadata=metadata).model_dump(mode="json")
-        )
+        payloads.append(ma_agent_payload(id=agent_id, name=agent_name, metadata=metadata))
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response(payloads))
     return build_fake_anthropic(router.dispatch)
@@ -1025,13 +928,8 @@ async def test_list_agent_keys_impl_returns_sorted_key_names_only(
             set_by_account_id=None,
         )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-        bound_channel_id="C_KEYS",
-        agent_id=agent_uuid,
+    auth = auth_identity(
+        uuid.uuid4(), tenant_id, role=Role.USER, bound_channel_id="C_KEYS", agent_id=agent_uuid
     )
     result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
@@ -1047,11 +945,10 @@ async def test_list_agent_keys_impl_returns_empty_list_when_none_set(
         tenant_id=tenant_id, agent_name="demo", agent_id="ag_empty", account_id=uuid.uuid4()
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
+    auth = auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         role=Role.USER,
-        is_admin=False,
         bound_channel_id="C_KEYS",
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_empty"),
     )
@@ -1069,9 +966,7 @@ async def test_list_agent_keys_impl_raises_when_agent_not_found(
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="not found"):
         await _list_agent_keys_impl(
             _runtime(client, session_factory=db_session_factory), auth, agent_name="ghost"
@@ -1106,13 +1001,8 @@ async def test_list_agent_keys_impl_never_returns_a_stored_value(
             set_by_account_id=None,
         )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-        bound_channel_id="C_KEYS",
-        agent_id=agent_uuid,
+    auth = auth_identity(
+        uuid.uuid4(), tenant_id, role=Role.USER, bound_channel_id="C_KEYS", agent_id=agent_uuid
     )
     result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="demo"
@@ -1132,13 +1022,8 @@ async def test_list_agent_keys_impl_callable_by_non_admin_on_default_agent(
         tenant_id=tenant_id, agent_name="scoped-agent", agent_id="ag_scoped", account_id=account_id
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-        bound_channel_id="C_KEYS",
-        agent_id=uuid.uuid4(),
+    auth = auth_identity(
+        account_id, tenant_id, role=Role.USER, bound_channel_id="C_KEYS", agent_id=uuid.uuid4()
     )
     result = await _list_agent_keys_impl(
         _runtime(client, session_factory=db_session_factory), auth, agent_name="scoped-agent"
@@ -1166,28 +1051,14 @@ async def test_remove_agent_key_impl_removes_existing_key(
             set_by_account_id=None,
         )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
     runtime = _runtime(client, session_factory=db_session_factory)
     result = await _remove_agent_key_impl(runtime, auth, agent_name="demo", key="API_KEY")
     assert result.removed is True
     assert result.agent_name == "demo"
     assert result.key == "API_KEY"
 
-    admin = AuthIdentity(
-        account_id=auth.account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    admin = auth_identity(auth.account_id, tenant_id, token_kind="cli")
     remaining = await _list_agent_keys_impl(runtime, admin, agent_name="demo")
     assert remaining == [], "a follow-up listing must no longer contain the removed key"
 
@@ -1200,14 +1071,7 @@ async def test_remove_agent_key_impl_is_idempotent_when_key_absent(
         tenant_id=tenant_id, agent_name="demo", agent_id="ag_env2", account_id=uuid.uuid4()
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -1225,9 +1089,7 @@ async def test_remove_agent_key_impl_raises_when_agent_not_found(
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="not found"):
         await _remove_agent_key_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -1270,19 +1132,12 @@ async def test_remove_agent_key_impl_refuses_non_admin_on_default_agent_and_dele
         tenant_id=tenant_id, agent_name="scoped-agent", agent_id="ag_scoped2", account_id=account_id
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     runtime = _runtime(client, session_factory=db_session_factory)
     with pytest.raises(ToolError, match="needs an admin"):
         await _remove_agent_key_impl(runtime, auth, agent_name="scoped-agent", key="SHARED_KEY")
 
-    admin = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    admin = auth_identity(account_id, tenant_id, token_kind="cli")
     assert await _list_agent_keys_impl(runtime, admin, agent_name="scoped-agent") == [
         "SHARED_KEY"
     ], "a refused removal must leave the stored key exactly where it was"
@@ -1299,14 +1154,7 @@ async def test_remove_agent_key_impl_allows_admin_on_default_agent(
         tenant_id=tenant_id, agent_name="scoped-agent", agent_id="ag_scoped3", account_id=account_id
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(account_id, tenant_id, token_kind="cli")
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -1342,7 +1190,7 @@ async def test_remove_agent_key_impl_refuses_non_admin_when_agent_unreachable(
         account_id=account_id,
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="admin"):
         await _remove_agent_key_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -1372,14 +1220,7 @@ async def test_remove_agent_key_impl_succeeds_against_seeded_agent_with_no_daimo
             set_by_account_id=None,
         )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -1422,26 +1263,12 @@ async def test_remove_agent_key_impl_isolates_between_agents_in_same_tenant(
             set_by_account_id=None,
         )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
     runtime = _runtime(client, session_factory=db_session_factory)
     result = await _remove_agent_key_impl(runtime, auth, agent_name="agent-a", key="SHARED")
     assert result.removed is True
 
-    admin = AuthIdentity(
-        account_id=auth.account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    admin = auth_identity(auth.account_id, tenant_id, token_kind="cli")
     remaining = await _list_agent_keys_impl(runtime, admin, agent_name="agent-b")
     assert remaining == ["SHARED"], "removing from agent-a must not affect agent-b's SHARED key"
 
@@ -1488,9 +1315,7 @@ async def _assert_remove_then_add_refused(
             set_by_account_id=None,
         )
     runtime = _runtime(client, session_factory=db_session_factory)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
 
     with pytest.raises(ToolError, match="needs an admin"):
         await _remove_agent_key_impl(runtime, auth, agent_name=agent_name, key="GITLAB_TOKEN")
@@ -1595,9 +1420,7 @@ async def test_detach_mcp_server_refused_when_display_and_routing_names_differ(
     )
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="needs an admin"):
         await _detach_mcp_server_impl(
             _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),

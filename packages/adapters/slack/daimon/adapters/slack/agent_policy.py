@@ -33,6 +33,7 @@ pin_refusal`, the private forms' rule) with the panel's channel as the place.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Final
 
 import structlog
@@ -44,7 +45,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
-from daimon.core.authz import Place, Subject
+from daimon.core.authz import Place, Subject, origin_ids
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.native_admins import AdminCaller, load_live_subject
@@ -190,7 +191,7 @@ async def refuse_unless_allowed(
         return False
 
     agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id, records=runtime.sessionmaker
     )
     if agent is None:
         log.warning(
@@ -276,7 +277,7 @@ async def refuse_unless_allowed_for_agent_name(
 
     if agent is None:
         agent = await find_agent_by_daimon_tag(
-            runtime.anthropic, tenant_id=tenant_id, name=agent_name
+            runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
         )
     facts = await gather_target_facts(
         runtime,
@@ -323,18 +324,21 @@ async def refuse_unless_pin_allows(
         if agent is not None:
             return agent
         return await find_agent_by_daimon_tag(
-            runtime.anthropic, tenant_id=tenant_id, name=agent_name
+            runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
         )
 
     async with runtime.sessionmaker() as session:
 
         async def live_subject() -> Subject:
-            return await load_live_subject(
-                session,
-                tenant_id=tenant_id,
-                platform="slack",
-                caller=caller,
-                action=DelegatedAction.CHANNEL_PERMISSIONS,
+            return replace(
+                await load_live_subject(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    caller=caller,
+                    action=DelegatedAction.CHANNEL_PERMISSIONS,
+                ),
+                origin_channel_ids=origin_ids(channel_id or None),
             )
 
         refusal = await pin_refusal(

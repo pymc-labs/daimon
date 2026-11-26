@@ -20,7 +20,6 @@ futures, which is fine — the turn waiting on them died with the process.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import secrets
@@ -28,7 +27,7 @@ import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import unquote
@@ -39,30 +38,29 @@ from daimon.core.agent_configuration import (
     provider_preview_digest,
 )
 from daimon.core.features.registry import DEFAULT, FEATURES
+from daimon.core.finer_drops import MODEL_SETTING_DROPS
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.outbound.reach import ReachPlan, card_title
 from daimon.core.server_skills.gate import may_run
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
+    COMPUTE_APPROVAL_TOOLS,
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
     REACH_APPROVAL_TOOLS,
+    WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     ToolCall,
     microsoft_send_tools,
 )
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.config import ThreadMode
-from mux.contracts.ids import ChannelRef, Provider
-from mux.contracts.profile import Capability
-from mux.contracts.resources import AgentSpec
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from mux.contracts.ids import ChannelRef
+from mux.contracts.profile import Capability, Effort
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if TYPE_CHECKING:
-    from anthropic import AsyncAnthropic
     from daimon.core.channel_backend import AgentBackendService, AgentSettings
-    from daimon.core.neutral_resources import NeutralResourceHost
-    from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
     from daimon.core.turn.deps import TurnDeps
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -73,7 +71,6 @@ __all__ = [
     "ApprovedConfirmation",
     "ConfirmationHook",
     "ConfirmationPrompt",
-    "BackendSwitchReference",
     "ToolRuleCardReference",
     "ServerSkillUpdateCard",
     "PendingConfirmations",
@@ -108,94 +105,6 @@ WRITE_BODY_BYTES: Final[int] = 14000
 SEND_HEADER_BYTES: Final[int] = 3000
 #: Longest `microsoft_write` path the card shows before Details.
 _WRITE_PATH_PREVIEW: Final[int] = 120
-
-
-class BackendSwitchReference(BaseModel):
-    """Untrusted tool reference; hosts reload the bound server-side preview."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    agent: str = Field(min_length=1)
-    target_backend: Provider
-    model: str | None = Field(default=None, min_length=1, exclude_if=lambda value: value is None)
-    expected_revision: int = Field(ge=0, strict=True)
-    preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    accepted_drops: tuple[str, ...] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    # The agent's own settings, when the request states them: both together,
-    # an unset one returning to the backend's default.
-    thread_mode: ThreadMode | None = Field(default=None, exclude_if=lambda value: value is None)
-    required_capabilities: tuple[Capability, ...] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    # The person said the switch is for everyone: needed for the server's default agent.
-    for_everyone: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
-    # The person's answer to the uncommitted-work question, when the switch also hands
-    # this conversation to the switched copy (J1). Bound into `preview_digest`.
-    unsaved_work: Literal["copy", "leave"] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    # The summary of this conversation the switch hands the copy (J2), as the model
-    # sent it. Bound into `preview_digest`, and shown on the card.
-    handoff_summary: str | None = Field(
-        default=None, max_length=2000, exclude_if=lambda value: value is None
-    )
-    # Set only by the card (never a tool argument): the stale preview digest this card
-    # re-previewed (J5). Its Confirm approves that one refresh (`approve_refresh`).
-    refreshed_from: str | None = Field(default=None, exclude_if=lambda value: value is None)
-
-    @field_validator("accepted_drops", mode="before")
-    @classmethod
-    def _accepted_drops(cls, value: object) -> tuple[str, ...] | None:
-        if value is None:
-            return None
-        return TypeAdapter(
-            AgentSpec.model_fields["declared_drops"].rebuild_annotation()
-        ).validate_python(value)
-
-
-def _forked_copy(agent: BackendAgent) -> bool:
-    """A copy fork_agent made in a conversation: its switch may hand it that
-    conversation (J1), so its answers are bound to the preview they answered."""
-    from daimon.core.defaults.metadata import MA_METADATA_KEY_FORKED_FROM, MA_METADATA_KEY_FORKED_IN
-
-    stamp = (agent.source.spec.metadata if agent.source is not None else None) or {}
-    return MA_METADATA_KEY_FORKED_FROM in stamp and MA_METADATA_KEY_FORKED_IN in stamp
-
-
-def switch_preview_digest(
-    digest: str,
-    unsaved_work: Literal["copy", "leave"] | None,
-    handoff_summary: str | None = None,
-) -> str:
-    """A switch preview's digest as the tool returns it and its card checks it: bound to
-    the uncommitted-work answer and the hand-off summary the switch carries (the raw
-    argument, as the card sees it), so none of them can change in between."""
-    if unsaved_work is None and handoff_summary is None:
-        return digest
-    bound = digest
-    if unsaved_work is not None:
-        bound += f"\nunsaved_work={unsaved_work}"
-    if handoff_summary is not None:
-        bound += f"\nhandoff_summary={handoff_summary}"
-    return hashlib.sha256(bound.encode()).hexdigest()
-
-
-#: How much of a hand-off summary the switch card shows (cards have small limits).
-_SUMMARY_SHOWN: Final = 600
-
-
-def _clipped(text: str, limit: int) -> str:
-    """`text` cut at `limit` characters, marked when cut."""
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
-
-
-#: What the card says each uncommitted-work answer does.
-_UNSAVED_WORK_WORDS: Final[Mapping[str, str]] = {
-    "copy": "copied into the working files first",
-    "leave": "left where they are",
-}
 
 
 class ToolRuleCardReference(BaseModel):
@@ -240,9 +149,6 @@ class ConfirmationPrompt(BaseModel):
     expires_at: datetime
     # Opt-in only: legacy prompts and their rendered cards stay unchanged.
     admin: bool = Field(default=False, exclude_if=lambda value: not value)
-    backend_switch: BackendSwitchReference | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
     configuration: ConfigurationReference | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -626,6 +532,22 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "request_channel_pin" and own_server:
+        reference = ConfigurationReference.model_validate(
+            {
+                "operation": "channel_pin",
+                "model": data.get("model"),
+                "expected_revision": data.get("expected_revision"),
+                "preview_digest": data.get("preview_digest"),
+            }
+        )
+        return ConfirmationPrompt(
+            title="Pin this channel to a model?",
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+            admin=True,
+            configuration=reference,
+        )
     if call.tool_name == "request_channel_pin_clear" and own_server:
         reference = ConfigurationReference.model_validate(
             {
@@ -641,35 +563,12 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "request_agent_backend_switch" and own_server:
+        return _backend_switch_prompt(data, requester_platform_user_id, now + timeout)
+    if call.tool_name == "set_thread_model" and own_server:
+        return _thread_move_prompt(data, requester_platform_user_id, now + timeout)
     if call.tool_name == "approve_reach" and own_server:
         return _reach_prompt(data, requester_platform_user_id, now + timeout)
-    if call.tool_name == "request_agent_backend_switch" and own_server:
-        reference = BackendSwitchReference.model_validate(
-            {
-                "agent": data.get("agent_name"),
-                "target_backend": data.get("target_backend"),
-                # As the tool resolved it ("argon" -> its id), or the card's
-                # preview names a model no agent can select.
-                "model": _switch_model(data.get("target_backend"), data.get("model")),
-                "expected_revision": data.get("expected_revision"),
-                "preview_digest": data.get("preview_digest"),
-                "accepted_drops": data.get("accepted_drops"),
-                "thread_mode": data.get("thread_mode"),
-                "required_capabilities": data.get("required_capabilities"),
-                "for_everyone": data.get("for_everyone") or False,
-                "unsaved_work": data.get("unsaved_work"),
-                "handoff_summary": data.get("handoff_summary"),
-            }
-        )
-        # No model-supplied compatibility text is accepted. The host hook must
-        # reload and verify the preview before displaying this opt-in prompt.
-        return ConfirmationPrompt(
-            title="Change the model provider?",
-            requester_platform_user_id=requester_platform_user_id,
-            expires_at=now + timeout,
-            admin=True,
-            backend_switch=reference,
-        )
     if call.tool_name == "create_notebook_upload_url" and publishing:
         action = f"Publish {notebook}"
         title = f"{action}?"
@@ -881,15 +780,65 @@ def prompt_for_tool_call(
     )
 
 
+def reach_title(data: Mapping[str, object]) -> str:
+    """An approve_reach card's question; raises on a plan approve_reach would refuse."""
+    # The same validation approve_reach stores, so the card never understates it.
+    plan = ReachPlan.from_args(data)
+    return _one_line(card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200)
+
+
+def _backend_switch_prompt(
+    data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
+) -> ConfirmationPrompt:
+    """The card for moving an agent to another provider; everyone in the thread sees it."""
+    from daimon.core.turn.notices import provider_name
+
+    agent = _one_line(data.get("agent_name") or "the agent", limit=64)
+    provider = provider_name(str(data.get("target_backend") or ""))
+    scope = (
+        f"{agent} answers everyone here, so this moves everyone to {provider}."
+        if data.get("for_everyone") is True
+        else f"New conversations with {agent} use {provider}, and each person's own "
+        "conversation with it follows on their next message."
+    )
+    return ConfirmationPrompt(
+        title=f"Move {agent} to {provider}?",
+        consequence=f"{scope} {provider} receives those conversations and the connector data "
+        "they use.",
+        action=f"Move {agent} to {provider}",
+        denied_action=f"{agent} not moved",
+        detail_lines=(f"Agent: {agent}", f"Provider: {provider}"),
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at=expires_at,
+    )
+
+
+def _thread_move_prompt(
+    data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
+) -> ConfirmationPrompt:
+    """The card for moving one conversation to another provider's model."""
+    from daimon.core.thread_model_switch import pick_value
+    from daimon.core.turn.notices import provider_name
+
+    value = pick_value(str(data.get("model") or ""))
+    provider = provider_name(value.partition(":")[0] if ":" in value else None)
+    return ConfirmationPrompt(
+        title=f"Move this conversation to {provider}?",
+        consequence=f"Its next replies use {provider}. {provider} receives this conversation "
+        "and the connector data it uses.",
+        action=f"Move to {provider}",
+        denied_action="Conversation not moved",
+        detail_lines=(f"Model: {_one_line(value, limit=64)}", f"Provider: {provider}"),
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at=expires_at,
+    )
+
+
 def _reach_prompt(
     data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
 ) -> ConfirmationPrompt:
-    # The same validation approve_reach stores, so the card never understates it.
-    plan = ReachPlan.from_args(data)
     return ConfirmationPrompt(
-        title=_one_line(
-            card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200
-        ),
+        title=reach_title(data),
         denied_action="Nothing posted",
         requester_platform_user_id=requester_platform_user_id,
         expires_at=expires_at,
@@ -907,46 +856,80 @@ def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     )
 
 
-async def confirmed_tools_for_tenant(deps: TurnDeps, tenant_id: uuid.UUID) -> frozenset[str]:
+async def _card_skipped(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent_id: str | None,
+    platform: str,
+    key: str,
+) -> bool:
+    """Whether the approval setting `key` is skip for this agent. A failed read keeps the card."""
+    if agent_id is None:
+        return False
+    from daimon.core.features.snapshot import FeaturePlace, place_guardrail
+
+    place = FeaturePlace.of(tenant_id, platform, None, agent_id=agent_id)
+    found = await place_guardrail(sessions, None, place, key)
+    return found.value == "skip"
+
+
+async def watch_card_skipped(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent_id: str | None,
+    platform: str = "*",
+) -> bool:
+    """Whether `watch_approval` is skip for this agent. A failed read keeps the card."""
+    return await _card_skipped(sessions, tenant_id, agent_id, platform, "watch_approval")
+
+
+async def compute_card_skipped(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent_id: str | None,
+    platform: str = "*",
+) -> bool:
+    """Whether `compute_approval` is skip for this agent. A failed read keeps the card."""
+    return await _card_skipped(sessions, tenant_id, agent_id, platform, "compute_approval")
+
+
+async def confirmed_tools_for_tenant(
+    deps: TurnDeps, tenant_id: uuid.UUID, agent_id: str | None = None
+) -> frozenset[str]:
+    """`confirmed_tools_for_turn` plus the tenant's own gates, less the watch tools the
+    agent's `watch_approval` setting skips and the cloud computer tools its
+    `compute_approval` setting skips. Long jobs and key rotation still ask."""
     from daimon.core.stores.lead_intake import confirmation_tools
 
     base = confirmed_tools_for_turn(deps)
+    if await watch_card_skipped(deps.sessionmaker, tenant_id, agent_id):
+        base -= WATCH_APPROVAL_TOOLS
+    if await compute_card_skipped(deps.sessionmaker, tenant_id, agent_id):
+        base -= COMPUTE_APPROVAL_TOOLS
     if not deps.public_url:
         return base
     return base | await confirmation_tools(deps.sessionmaker, tenant_id)
 
 
 def stated_settings(
-    thread_mode: ThreadMode | None, required_capabilities: tuple[Capability, ...] | None
+    thread_mode: ThreadMode | None,
+    required_capabilities: tuple[Capability, ...] | None,
+    effort: Effort | None = None,
+    profile: str | None = None,
 ) -> AgentSettings | None:
     """The settings a request states, or None to keep the agent's own."""
     from daimon.core.channel_backend import AgentSettings
     from mux.contracts.config import CapabilityRequirement
 
-    if thread_mode is None and required_capabilities is None:
+    if thread_mode is None and required_capabilities is None and effort is None:
         return None
     required = CapabilityRequirement(level="required")
     return AgentSettings(
+        profile=profile,
         requires={cap: required for cap in required_capabilities or ()} or None,
         thread_mode=thread_mode,
+        effort=effort,
     )
-
-
-def _switch_model(backend: object, model: object) -> object:
-    """The tool call's model resolved as the tool resolves it; as sent when it can't be."""
-    from daimon.core.agent_model_names import resolve_switch_model
-    from mux.contracts.ids import PROVIDERS
-
-    if backend not in PROVIDERS or not (model is None or isinstance(model, str)):
-        return model
-    try:
-        return resolve_switch_model(backend, model)
-    except ValueError:
-        return model
-
-
-def reference_settings(reference: BackendSwitchReference) -> AgentSettings | None:
-    return stated_settings(reference.thread_mode, reference.required_capabilities)
 
 
 #: Plain words for a declared loss on a provider-switch card.
@@ -959,23 +942,48 @@ _DROP_WORDS: Mapping[str, str] = {
     "tools": "its tools",
     "files": "its files",
     "repository": "its repository",
-    "model_controls": "its model settings",
+    "model_controls": "its fast mode and inference region",
+    "fast_mode": "its fast mode",
+    "inference_region": "its inference region",
+    "effort_setting": "its effort setting",
+    "installed_packages": "its installed packages",
+    "network_rules": "its network rules",
+    "workspace_files": "its sandbox files",
     "builtin_tool:web_fetch": "web fetch",
     "builtin_tool:web_search": "web search",
 }
 
 
-def drop_words(drops: Sequence[str]) -> str:
+def drop_word(drop: str, names: Mapping[str, str] | None = None) -> str:
+    """Plain words for one declared loss: 'web search', 'its linear connector'.
+
+    `names` gives a skill's own name by id; a skill without one shows its id.
+    """
+    if drop.startswith("mcp_tool:"):
+        _, server, tool = drop.split(":", 2)
+        return f"the {tool} tool of {server}"
+    if drop.startswith("mcp_server:"):
+        return f"its {drop.removeprefix('mcp_server:')} connector"
+    if drop.startswith("skill:"):
+        skill = drop.removeprefix("skill:")
+        return f"its {(names or {}).get(skill, skill)} skill"
+    return _DROP_WORDS.get(drop, drop.replace("_", " "))
+
+
+def loss_word(drop: str, names: Mapping[str, str] | None = None) -> str:
+    """A declared loss in a list of what stops working: 'memory', 'pricing skill'."""
+    return drop_word(drop, names).removeprefix("its ")
+
+
+def agent_loss_word(drop: str) -> str:
+    """A loss as the agent reads it: a model setting in plain words, anything else by its id."""
+    return loss_word(drop) if drop in MODEL_SETTING_DROPS else drop
+
+
+def drop_words(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
     """'its saved keys, its memory and its sandbox': saved keys first, as the costliest."""
-    words: list[str] = []
-    for drop in sorted(drops, key=lambda item: (item != "credentials", item)):
-        if drop.startswith("mcp_tool:"):
-            _, server, tool = drop.split(":", 2)
-            words.append(f"the {tool} tool of {server}")
-        elif drop.startswith("mcp_server:"):
-            words.append(f"its {drop.removeprefix('mcp_server:')} connector")
-        else:
-            words.append(_DROP_WORDS.get(drop, drop.replace("_", " ")))
+    ordered = sorted(drops, key=lambda item: (item != "credentials", item))
+    words = [drop_word(d, names) for d in ordered]
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
 
 
@@ -990,6 +998,8 @@ def settings_line(settings: Mapping[str, object]) -> str:
     if isinstance(requires, Mapping) and requires:
         names = cast(Mapping[str, object], requires)
         parts.append("requires " + ", ".join(sorted(names)))
+    if settings.get("effort"):
+        parts.append(f"{settings['effort']} effort")
     if settings.get("profile"):
         parts.append(f"profile {settings['profile']}")
     return "; ".join(parts) or "the model provider's defaults"
@@ -999,12 +1009,6 @@ class CardRefusal(ValueError):
     """A card refused for a reason worded for the person; its text is shown as is."""
 
 
-#: The agent or setting moved between the preview and the confirm (another change in
-#: the same turn): a new preview fixes it, so the model is told to redo it, not to stop.
-STALE_SWITCH_TEXT: Final[str] = (
-    "The agent changed since the preview (for example, a tool was turned off). Preview "
-    "the switch again, then confirm. Nothing changed."
-)
 #: A settings card whose confirm doesn't match its preview: something changed since,
 #: or the confirm carries other settings than the preview did (a digest from reading
 #: the current limits, say). Retryable, worded for the person and the model alike.
@@ -1022,133 +1026,19 @@ def backend_switch_callbacks(
     service: AgentBackendService,
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
-    anthropic: AsyncAnthropic,
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
-    current_admin: Callable[[str], Awaitable[bool]],
     current_platform_admin: Callable[[str], Awaitable[bool]],
-    resource_host: NeutralResourceHost | None = None,
-    default_agent_name: str | None = None,
-    place_word: str = "server",
     pin_channel: ChannelRef | None = None,
-    answering_agent_name: str | None = None,
-    handoff_thread: tuple[str, str, str] | None = None,
 ) -> tuple[
     Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
     Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
 ]:
-    """Bind the existing card hook to trusted current identity and preview facts.
-
-    Only the loader reads agent configuration. The UI never treats a model's
-    compatibility claims or digest as authority; application remains the
-    shared service's compare-and-set after the approved tool call.
+    """Bind the admin settings cards (allowed providers, channel pins) to trusted current
+    identity and preview facts. A model switch needs no card: it applies like any change.
     """
     from daimon.core.authz import build_subject
-    from daimon.core.channel_backend import BackendActor, answers_for_everyone, load_backend_agent
     from daimon.core.stores.accounts import get_account_with_tenant
-
-    async def verified(
-        prompt: ConfirmationPrompt, clicker: str, *, refresh: bool = False
-    ) -> tuple[BackendAgent, CompatibilityPreview, BackendSwitchReference]:
-        """The card's checks, re-run. With `refresh` (preparing the card), a preview
-        that went stale because the agent changed (J5: "switch it to GPT and turn off
-        web search" in one turn) is replaced by the current one, which the card then
-        shows; a click (no `refresh`) still needs exactly what the card showed."""
-        reference = prompt.backend_switch
-        if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
-            raise ValueError("This confirmation is unavailable. Preview again.")
-        async with sessionmaker() as session:
-            identity = await get_account_with_tenant(session, account_id=account_id)
-        if (
-            identity is None
-            or identity.tenant_id != tenant_id
-            or identity.platform_user_id != clicker
-        ):
-            raise ValueError("This confirmation is unavailable. Preview again.")
-        agent = await load_backend_agent(
-            anthropic,
-            sessionmaker,
-            tenant_id=tenant_id,
-            agent_name=reference.agent,
-            resource_host=resource_host,
-        )
-        if not reference.for_everyone and await answers_for_everyone(
-            sessionmaker, agent, default_agent_name=default_agent_name
-        ):
-            from daimon.core.turn.notices import default_agent_switch_text
-
-            raise CardRefusal(
-                default_agent_switch_text(
-                    agent.name,
-                    reference.target_backend,
-                    place=place_word,
-                    me=answering_agent_name == agent.name,
-                )
-            )
-        preview = await service.preview(
-            agent, reference.target_backend, reference.model, reference_settings(reference)
-        )
-        if (
-            preview.tenant_id == tenant_id
-            and preview.agent_id == agent.agent_id
-            and preview.setting_revision != reference.expected_revision
-        ):
-            # Another switch of this agent landed after this card was posted.
-            from daimon.core.turn.notices import switched_meanwhile_text
-            from mux.contracts.config import DEFAULT_BACKEND
-
-            setting = await service.current(agent)
-            raise CardRefusal(
-                switched_meanwhile_text(
-                    reference.agent,
-                    (setting.backend if setting is not None else None) or DEFAULT_BACKEND,
-                    reference.target_backend,
-                )
-            )
-        if (
-            preview.tenant_id != tenant_id
-            or preview.agent_id != agent.agent_id
-            or preview.target_backend != reference.target_backend
-            or not preview.allowed
-        ):
-            raise StalePreview(STALE_SWITCH_TEXT)
-        current_digest = switch_preview_digest(
-            preview.digest, reference.unsaved_work, reference.handoff_summary
-        )
-        if current_digest != reference.preview_digest:
-            # A hand-off answer (unsaved work, summary) is bound to the preview it
-            # answered: one changed after it is another request, never re-previewed.
-            # A copy made in a conversation can be handed it by its switch, with
-            # or without answers: never re-previewed either (fails closed).
-            answered = reference.unsaved_work is not None or reference.handoff_summary is not None
-            if not refresh or answered or _forked_copy(agent):
-                raise StalePreview(STALE_SWITCH_TEXT)
-            # The agent changed since the preview. The same request (agent, provider,
-            # model, settings, answers) against what it is now: the card shows these
-            # drops and this cost, and the person approves what they see.
-            reference = reference.model_copy(
-                update={
-                    "expected_revision": preview.setting_revision,
-                    "preview_digest": current_digest,
-                    "accepted_drops": tuple(preview.declared_drops) or None,
-                    "refreshed_from": reference.preview_digest,
-                }
-            )
-        elif (preview.declared_drops and reference.accepted_drops != preview.declared_drops) or (
-            not preview.declared_drops and reference.accepted_drops not in (None, ())
-        ):
-            # The same preview, but the confirm named other losses: not a stale preview.
-            raise ValueError("This preview changed. Preview and confirm again.")
-        subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
-        # The agent's owner or a current workspace admin, as the write re-checks.
-        if not await service.may_edit(agent, BackendActor(tenant_id, account_id, subject)):
-            raise ValueError("This change needs the agent's owner or a current workspace admin.")
-        # Recheck the scoped identity after the platform lookup has yielded.
-        async with sessionmaker() as session:
-            current = await get_account_with_tenant(session, account_id=account_id)
-        if current != identity:
-            raise ValueError("This permission changed. Preview and confirm again.")
-        return agent, preview, reference
 
     async def verified_configuration(
         prompt: ConfirmationPrompt, clicker: str
@@ -1174,7 +1064,36 @@ def backend_switch_callbacks(
             raise ValueError("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:
-            if reference.operation == "channel_pin_clear":
+            if reference.operation == "channel_pin":
+                # Only the chat this card is posted in: the reference names no channel.
+                if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
+                    raise ValueError("This confirmation is unavailable. Preview again.")
+                from daimon.core.channel_changes import ChannelChangeRefused
+                from daimon.core.channel_settings import preview_provider_pin
+
+                assert reference.model is not None
+                if not service.enabled:
+                    raise ValueError(configuration_refusal("feature_disabled"))
+                policy = await service.tenant_policy(tenant_id)
+                try:
+                    async with sessionmaker() as session:
+                        shown = await preview_provider_pin(
+                            session,
+                            tenant_id=tenant_id,
+                            platform=pin_channel.platform,
+                            channel_id=pin_channel.channel_id,
+                            value=reference.model,
+                            policy=policy,
+                        )
+                except ChannelChangeRefused as exc:
+                    raise ValueError(str(exc)) from exc
+                if (
+                    shown.expected_local or 0
+                ) != reference.expected_revision or shown.digest != reference.preview_digest:
+                    raise StalePreview(STALE_SETTING_TEXT)
+                action = "Pin this channel to a model"
+                details = (f"Every agent answers here on {shown.named} until the pin is cleared.",)
+            elif reference.operation == "channel_pin_clear":
                 # Only the chat this card is posted in: the reference names no channel.
                 if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
                     raise ValueError("This confirmation is unavailable. Preview again.")
@@ -1219,8 +1138,8 @@ def backend_switch_callbacks(
                 action = "Change allowed providers"
                 details = (
                     "Allowed providers: " + (", ".join(reference.providers) or "none"),
-                    "Applies to this server. Saving makes this list the server's own choice: "
-                    "it stops following the providers this Daimon install has keys for.",
+                    "Applies to this server. Any provider other than Anthropic receives this "
+                    "server's conversations and the connector data they use.",
                 )
         except AgentBackendRefused as exc:
             if exc.reason in ("stale_preview", "stale_revision"):
@@ -1233,35 +1152,7 @@ def backend_switch_callbacks(
             raise ValueError("This permission changed. Preview and confirm again.")
         return action, details
 
-    async def _answering_here(turn_agent: str | None) -> str | None:
-        """Who answers this conversation next: a hand-off's agent, else this turn's.
-
-        The approved switch moves the conversation of the agent answering here (the
-        hand-off's, once one was made), so the card must say so for that agent. A
-        setup conversation never moves (`_move_this_thread`), so nobody does there.
-        """
-        if handoff_thread is None:
-            return turn_agent
-        from daimon.core.stores import thread_agent_bindings
-
-        platform, parent_channel_id, thread_id = handoff_thread
-        async with sessionmaker() as session:
-            handed = await thread_agent_bindings.get_binding(
-                session,
-                tenant_id=tenant_id,
-                platform=platform,
-                parent_channel_id=parent_channel_id,
-                thread_id=thread_id,
-            )
-        if handed is not None and handed.kind == "setup":
-            return None
-        if handed is not None and handed.kind == "handoff":
-            return handed.responder_name
-        return turn_agent
-
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
-        from daimon.core.handoff_context import redact_handoff_summary
-
         if prompt.configuration is not None:
             action, details = await verified_configuration(
                 prompt, prompt.requester_platform_user_id
@@ -1275,146 +1166,14 @@ def backend_switch_callbacks(
                     "consequence": "\n".join(details),
                 }
             )
-        agent, preview, fresh = await verified(
-            prompt, prompt.requester_platform_user_id, refresh=True
-        )
-        stale = prompt.backend_switch
-        if stale is not None and fresh != stale:
-            # The approved call still carries the old preview: record what this card
-            # shows, so that call (and only it, unchanged since) applies it.
-            from daimon.core.stores import backend_switch_cards as cards
-
-            platform, channel, thread = handoff_thread or (
-                (pin_channel.platform, pin_channel.channel_id, "")
-                if pin_channel is not None
-                else (place_word, "", "")
-            )
-            async with sessionmaker.begin() as session:
-                await cards.record_refresh(
-                    session,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    platform=platform,
-                    channel_id=channel,
-                    thread_id=thread,
-                    requester_platform_user_id=prompt.requester_platform_user_id,
-                    agent_name=agent.name,
-                    stale_digest=stale.preview_digest,
-                    fresh=fresh,
-                    expires_at=prompt.expires_at,
-                )
-            prompt = prompt.model_copy(update={"backend_switch": fresh})
-        details = (
-            *(
-                ("Agent settings: " + settings_line(preview.target_settings),)
-                if preview.target_settings
-                else ()
-            ),
-            "Unsupported skills: " + (", ".join(preview.unsupported_skills) or "None"),
-            "Unsupported connections: " + (", ".join(preview.unsupported_mcps) or "None"),
-            "Unsupported capabilities: " + (", ".join(preview.unsupported_capabilities) or "None"),
-            "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
-            preview.cost_line,
-            *(
-                ("Uncommitted changes: " + _UNSAVED_WORK_WORDS[prompt.backend_switch.unsaved_work],)
-                if prompt.backend_switch is not None
-                and prompt.backend_switch.unsaved_work is not None
-                else ()
-            ),
-            *(
-                (
-                    f"Carries a summary of this conversation to {agent.name}: "
-                    # Redacted as the copy will get it: the card is posted in the channel.
-                    + _clipped(
-                        redact_handoff_summary(prompt.backend_switch.handoff_summary),
-                        _SUMMARY_SHOWN,
-                    ),
-                )
-                if prompt.backend_switch is not None
-                and prompt.backend_switch.handoff_summary is not None
-                else ()
-            ),
-        )
-        from daimon.core.turn.notices import conversations_follow_line, provider_name
-        from mux.contracts.config import DEFAULT_BACKEND
-
-        provider = provider_name(preview.target_backend)
-        target = provider + (f" ({preview.target_model})" if preview.target_model else "")
-        action = f"Switch {agent.name} to {target}"
-        # Read before the switch is applied: the provider its shared threads stay on.
-        setting = await service.current(agent)
-        before = (setting.backend if setting is not None else None) or DEFAULT_BACKEND
-        unavailable = (
-            f"On {provider} it won't have {drop_words(preview.declared_drops)}"
-            if preview.declared_drops
-            else ""
-        )
-        answering = await _answering_here(answering_agent_name)
-        reach = (
-            f"Affects new conversations for everyone on this {place_word}"
-            if await answers_for_everyone(
-                sessionmaker, agent, default_agent_name=default_agent_name
-            )
-            else f"Affects new conversations wherever {agent.name} answers"
-        )
-        return prompt.model_copy(
-            update={
-                "title": action + "?",
-                "action": action,
-                "denied_action": "Model provider unchanged",
-                "detail_lines": details,
-                "consequence": (
-                    reach
-                    + ". "
-                    + conversations_follow_line(agent.name, preview.target_backend, before)
-                    + (
-                        f" This conversation moves to {provider} from your next message "
-                        "(unless it's shared or this channel pins its provider); earlier "
-                        "messages here aren't carried over."
-                        if answering == agent.name
-                        else ""
-                    )
-                    + (
-                        f"\n{unavailable}. Nothing is deleted; switch back any time."
-                        if unavailable
-                        else ""
-                    )
-                    + (
-                        "\nUncommitted changes in the repo are "
-                        + _UNSAVED_WORK_WORDS[prompt.backend_switch.unsaved_work]
-                        + "; nothing is committed or pushed."
-                        if prompt.backend_switch is not None
-                        and prompt.backend_switch.unsaved_work is not None
-                        else ""
-                    )
-                ),
-            }
-        )
+        raise ValueError("This confirmation is unavailable. Preview again.")
 
     async def check(prompt: ConfirmationPrompt, clicker: str) -> str | None:
         try:
             if prompt.configuration is not None:
                 await verified_configuration(prompt, clicker)
             else:
-                agent, _, reference = await verified(prompt, clicker)
-                if reference.refreshed_from is not None:
-                    # Confirm on this card (a click that passed every check; a Deny
-                    # never gets here) is what lets the approved call apply it.
-                    from daimon.core.stores import backend_switch_cards as cards
-
-                    async with sessionmaker.begin() as session:
-                        approved = await cards.approve_refresh(
-                            session,
-                            tenant_id=tenant_id,
-                            account_id=account_id,
-                            agent_name=agent.name,
-                            stale_digest=reference.refreshed_from,
-                            fresh_digest=reference.preview_digest,
-                            fresh_revision=reference.expected_revision,
-                            now=datetime.now(UTC),
-                        )
-                    if not approved:
-                        raise StalePreview(STALE_SWITCH_TEXT)
+                raise ValueError("This confirmation is unavailable.")
         except CardRefusal as exc:
             return str(exc)
         except ValueError:

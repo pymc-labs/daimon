@@ -19,16 +19,13 @@ owner so a process that lost its lease can change nothing.
 from __future__ import annotations
 
 import uuid as _uuid
-from collections.abc import Collection
 from datetime import datetime, timedelta
 from typing import Literal, get_args
 
-from daimon.core._models import Account, CredentialRequest, TaskContinuation, ThreadSession
+from daimon.core._models import TaskContinuation
 from daimon.core.stores.domain import (
     ContinuationReason,
-    Role,
     TaskContinuationRow,
-    UnattendedRequester,
 )
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -306,6 +303,33 @@ async def start_wake_row(
     return started is not None
 
 
+async def renew_wake_row(
+    session: AsyncSession,
+    *,
+    idempotency_key: _uuid.UUID,
+    owner: str,
+    now: datetime,
+    lease: timedelta,
+) -> bool:
+    """Extend a started claim this owner still holds; False once it lost the row."""
+    renewed = (
+        await session.execute(
+            update(TaskContinuation)
+            .where(
+                _READABLE_REASON,
+                TaskContinuation.idempotency_key == idempotency_key,
+                TaskContinuation.status == "claimed",
+                TaskContinuation.lease_owner == owner,
+                TaskContinuation.started_at.is_not(None),
+            )
+            .values(lease_expires_at=now + lease)
+            .returning(TaskContinuation.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    return renewed is not None
+
+
 async def settle_wake_row(
     session: AsyncSession,
     *,
@@ -346,6 +370,7 @@ async def release_wake_row(
     idempotency_key: _uuid.UUID,
     owner: str,
     retry_at: datetime | None,
+    refund: bool = True,
 ) -> bool:
     """Hand a claim back because its turn could not run yet; False if the claim was lost.
 
@@ -355,15 +380,17 @@ async def release_wake_row(
     so a thread that stays busy for a long time never uses up the budget that
     is kept for crashes. `retry_at=None` keeps the row's `available_at` as it
     is, so a handoff (NULL) waits for the next turn in its thread exactly as it
-    always did; a wake passes the instant to retry at.
+    always did; a wake passes the instant to retry at. `refund=False` keeps the claim
+    counted, for a retry that must run out (a delivery that keeps failing).
     """
     values: dict[str, object] = {
         "status": "pending",
         "lease_owner": None,
         "lease_expires_at": None,
         "started_at": None,
-        "attempts": TaskContinuation.attempts - 1,
     }
+    if refund:
+        values["attempts"] = TaskContinuation.attempts - 1
     if retry_at is not None:
         values["available_at"] = retry_at
     released = (
@@ -388,11 +415,13 @@ async def cancel_wake_row(
     *,
     tenant_id: _uuid.UUID,
     idempotency_key: _uuid.UUID,
+    skip_reason: str = "cancelled",
 ) -> bool:
     """Withdraw a wake nobody has claimed yet; False once it is claimed or settled.
 
     A status flip, never a delete: a claim is a conditional UPDATE on
     `status = 'pending'`, so a cancelled row can never be claimed afterwards.
+    `skip_reason` says why, for the record.
     """
     cancelled = (
         await session.execute(
@@ -403,7 +432,7 @@ async def cancel_wake_row(
                 TaskContinuation.idempotency_key == idempotency_key,
                 TaskContinuation.status == "pending",
             )
-            .values(status="cancelled", skip_reason="cancelled")
+            .values(status="cancelled", skip_reason=skip_reason)
             .returning(TaskContinuation.id)
         )
     ).scalar_one_or_none()
@@ -648,61 +677,3 @@ async def count_pending_timer_rows(
             )
         )
     ).scalar_one()
-
-
-async def list_waiting_requesters(
-    session: AsyncSession,
-    *,
-    tenant_id: _uuid.UUID,
-    target_names: Collection[str],
-    target_ma_agent_id: str | None = None,
-) -> list[UnattendedRequester]:
-    """Who queued the pending or claimed wakes that will run the agent unattended.
-
-    A wake counts when it targets any of `target_names` or `target_ma_agent_id`.
-    An applied private input also counts against the agent that asked for it,
-    which it may resume instead (`daimon.core.continuity.continuation.
-    load_asking_agent_id`): the agent of the requester's session in the thread
-    when the request was made.
-    """
-    targets: list[ColumnElement[bool]] = [TaskContinuation.target_name.in_(target_names)]
-    if target_ma_agent_id is not None:
-        asking_ma_agent_id = (
-            select(ThreadSession.ma_agent_id)
-            .where(
-                CredentialRequest.idempotency_key == TaskContinuation.idempotency_key,
-                ThreadSession.tenant_id == TaskContinuation.tenant_id,
-                ThreadSession.platform == TaskContinuation.platform,
-                ThreadSession.thread_id == TaskContinuation.thread_id,
-                ThreadSession.account_id == TaskContinuation.requester_account_id,
-                ThreadSession.created_at <= CredentialRequest.created_at,
-            )
-            .order_by(ThreadSession.created_at.desc())
-            .limit(1)
-            .correlate(TaskContinuation)
-            .scalar_subquery()
-        )
-        targets += [
-            TaskContinuation.target_ma_agent_id == target_ma_agent_id,
-            and_(
-                TaskContinuation.reason == "private_input_applied",
-                asking_ma_agent_id == target_ma_agent_id,
-            ),
-        ]
-    rows = await session.execute(
-        select(TaskContinuation.requester_external_user_id, Account.role, Account.platform_role_ids)
-        .outerjoin(Account, Account.id == TaskContinuation.requester_account_id)
-        .where(
-            _READABLE_REASON,
-            TaskContinuation.tenant_id == tenant_id,
-            or_(*targets),
-            TaskContinuation.status.in_(("pending", "claimed")),
-        )
-        .distinct()
-    )
-    return [
-        UnattendedRequester(
-            platform_user_id=user_id, is_admin=role == Role.ADMIN, role_ids=tuple(role_ids or ())
-        )
-        for user_id, role, role_ids in rows.tuples()
-    ]

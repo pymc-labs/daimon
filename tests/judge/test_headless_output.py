@@ -35,8 +35,8 @@ async def test_captures_actual_headless_host_return_not_pretool_text_or_truncate
 ) -> None:
     # Exercise the real host function and driver through SDK HTTP/SSE. This is
     # boundary validation on the legacy path, not a mux/default admission cert.
-    monkeypatch.setattr(headless_runner, "load_turn_settings", lambda: TurnSettings(path="legacy"))
-    monkeypatch.setattr(driver, "load_turn_settings", lambda: TurnSettings(path="legacy"))
+    monkeypatch.setattr(headless_runner, "load_turn_settings", lambda: TurnSettings())
+    monkeypatch.setattr(driver, "load_turn_settings", lambda: TurnSettings())
     agent = ma_agent(id="agent_x", model="claude-haiku-5-5")
     environment = ma_environment(id="env_x")
     session = ma_session(

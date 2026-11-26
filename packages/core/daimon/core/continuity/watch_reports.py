@@ -21,12 +21,17 @@ from daimon.core.anthropic_guard import (
     guard_selfhosted_channel,
     independent_wake_provider_context,
 )
+from daimon.core.bot_access import BOT_ACCESS_RETRY_DELAY, BotAccessUnavailable
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.wakes import (
     WAKE_MAX_ATTEMPTS,
     WAKE_POLL_INTERVAL_S,
     busy_retry_at,
     claim_wake,
+    is_transient_denial,
+    keep_wake,
     release_wake,
+    report_wake_failed,
     settle_wake,
     start_wake,
 )
@@ -95,21 +100,43 @@ async def dispatch_watch_report(
         if seed is None:
             # Paused, deleted, revoked or changed since it fired: nobody is waiting.
             await settle_wake(
-                sessionmaker, claim, status="skipped", now=now(), skip_reason="skip_target_changed"
+                sessionmaker,
+                claim,
+                status="skipped",
+                now=now(),
+                skip_reason="skip_target_changed",
+                row=row,
             )
             return
         if not await start_wake(sessionmaker, claim, now=now()):
             return
         skip_reason: str | None = None
+        error_class: str | None = None
         try:
-            await run_report(row, seed)
+            async with keep_wake(
+                sessionmaker, claim, now=now, tenant_id=row.tenant_id, kind=row.reason
+            ):
+                await run_report(row, seed)
         except AnthropicDisabled:
             log.warning("watch_report.provider_guard_denied", row_id=str(row.id))
+            report_wake_failed(
+                sessionmaker,
+                row.tenant_id,
+                row.reason,
+                "provider_guard_denied",
+                thread_id=row.thread_id,
+            )
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
             return
         except SessionBusyError as busy:
             # Nothing ran: the row goes back to pending with its claim refunded.
             retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
+            await release_wake(sessionmaker, claim, retry_at=retry_at)
+            return
+        except BotAccessUnavailable:
+            # The bot cannot reach the reporting channel yet: wait instead of pausing the watch.
+            log.info("watch_report.bot_access_unavailable", row_id=str(row.id))
+            retry_at = busy_retry_at(row, now=now(), delay=BOT_ACCESS_RETRY_DELAY)
             await release_wake(sessionmaker, claim, retry_at=retry_at)
             return
         except TurnNotStarted as exc:
@@ -120,18 +147,28 @@ async def dispatch_watch_report(
         except SessionPreparationFailed:
             skip_reason = "blocked_preparation_failed"
         except AdmissionDenied as exc:
+            if is_transient_denial(exc):
+                await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+                return
             skip_reason = f"admission_denied:{exc.reason}"
         except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
             log.warning(
-                "watch_report.dispatch_failed", row_id=str(row.id), error_type=type(exc).__name__
+                "watch_report.dispatch_failed",
+                row_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                kind=row.reason,
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
             )
-            skip_reason = "dispatch_failed"
+            skip_reason, error_class = "dispatch_failed", type(exc).__name__
         await settle_wake(
             sessionmaker,
             claim,
             status="delivered" if skip_reason is None else "skipped",
             now=now(),
             skip_reason=skip_reason,
+            row=row,
+            error_class=error_class,
         )
 
 

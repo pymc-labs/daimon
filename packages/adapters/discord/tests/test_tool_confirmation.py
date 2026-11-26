@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -32,6 +33,14 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+
+_tool_rule_card_reference = partial(
+    ToolRuleCardReference,
+    agent_id="ma-1",
+    agent_name="Helper",
+    tool_key="linear/create_issue",
+    server_url="https://example.test/mcp",
+)
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -196,13 +205,7 @@ async def test_always_button_allows_admin_and_names_the_clicker(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
@@ -230,13 +233,7 @@ async def test_always_button_refuses_requester_without_admin_rights(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
@@ -265,13 +262,7 @@ async def test_always_defers_before_live_admin_check(monkeypatch: pytest.MonkeyP
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     order: list[str] = []
@@ -302,13 +293,7 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
@@ -340,13 +325,7 @@ async def test_blocked_always_save_does_not_block_retirement(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     channel = MagicMock()
@@ -386,13 +365,7 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     channel = MagicMock()
@@ -439,13 +412,7 @@ async def test_always_edit_after_discord_token_lifetime_stays_approved_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
@@ -756,7 +723,7 @@ async def test_runtime_hook_reuses_live_guild_admin_lookup(
     tenant, account = tenant_row.id, uuid4()
     runtime = MagicMock()
     runtime.sessionmaker = db_session_factory
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     channel = MagicMock(spec=discord.TextChannel)
     channel.guild.owner_id = 999
     member = MagicMock(spec=discord.Member)
@@ -769,17 +736,17 @@ async def test_runtime_hook_reuses_live_guild_admin_lookup(
     discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
     kwargs = factory.call_args.kwargs
     assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
-    check = kwargs["current_admin"]
+    check = kwargs["current_platform_admin"]
     assert await check("111") is True
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert channel.guild.fetch_member.await_count == 2
 
 
-async def test_runtime_hook_current_admin_refuses_outside_a_thread_or_text_channel(
+async def test_runtime_hook_platform_admin_refuses_outside_a_thread_or_text_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The backend-switch admin recheck is scoped to threads/text channels: a voice
+    """The admin cards' recheck is scoped to threads/text channels: a voice
     channel with the same guild and an administrator clicker must still refuse,
     not merely inherit whatever `requester_role` says about the guild member.
     """
@@ -790,7 +757,7 @@ async def test_runtime_hook_current_admin_refuses_outside_a_thread_or_text_chann
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     channel = MagicMock(spec=discord.VoiceChannel)
     channel.guild.owner_id = 999
     member = MagicMock(spec=discord.Member)
@@ -801,7 +768,7 @@ async def test_runtime_hook_current_admin_refuses_outside_a_thread_or_text_chann
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
     discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
-    check = factory.call_args.kwargs["current_admin"]
+    check = factory.call_args.kwargs["current_platform_admin"]
     assert await check("111") is False
     channel.guild.fetch_member.assert_not_awaited()
 
@@ -813,7 +780,7 @@ async def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model provider unchanged",
+            "denied_action": "Model unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -947,10 +914,8 @@ async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines
     assert load.await_count == 2
 
 
-def test_an_approval_card_shows_the_call_exactly_even_when_it_names_another_app() -> None:
-    """The one text left unscrubbed: the card must show what will run, not a reworded copy.
-
-    A scrubbed card over an unscrubbed call would misstate what the person approves."""
+def test_an_approval_card_shows_the_call_exactly() -> None:
+    """The card must show what will run, not a reworded copy of the call."""
     call = ToolCall(
         tool_use_id="tu_1",
         server_name="linear",
@@ -980,7 +945,7 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     channel = MagicMock(spec=discord.TextChannel)
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
@@ -997,6 +962,42 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
     )
     discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
     assert factory.call_args.kwargs["pin_channel"] is None, "no admitted channel, no pin card"
+
+
+async def test_the_admin_cards_capture_no_agent_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The allowlist and pin cards change no agent, so no source is read in a thread or channel."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.core import channel_backend, confirmation
+    from daimon.core.config import TurnSettings
+
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(channel_backends=True)
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", lambda *_a, **_k: (None, None))
+    made = MagicMock()
+    monkeypatch.setattr(channel_backend, "make_backend_service", made)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 222, 111
+    discord_confirmation_hook(
+        thread,
+        runtime=runtime,
+        admission=SimpleNamespace(origin_channel_id="111"),  # pyright: ignore[reportArgumentType]
+        tenant_id=uuid4(),
+        account_id=uuid4(),
+    )
+    assert made.call_args.kwargs["capture_source"] is channel_backend.NO_CAPTURE, "in a thread"
+    made.reset_mock()
+    discord_confirmation_hook(
+        MagicMock(spec=discord.TextChannel),
+        runtime=runtime,
+        admission=SimpleNamespace(origin_channel_id="111"),  # pyright: ignore[reportArgumentType]
+        tenant_id=uuid4(),
+        account_id=uuid4(),
+    )
+    assert made.call_args.kwargs["capture_source"] is channel_backend.NO_CAPTURE, "in a channel"
 
 
 async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monkeypatch) -> None:
@@ -1028,7 +1029,7 @@ def _dm_runtime_hook(
     from daimon.core.config import TurnSettings
 
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
     lookup = AsyncMock(return_value=guild)
@@ -1046,7 +1047,7 @@ def _dm_runtime_hook(
 async def test_dm_admin_card_checks_the_tenants_server_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Friction #36: a DM has no guild, so the admin re-check uses the turn's tenant server."""
+    """A DM has no guild, so the admin re-check reads the turn's tenant server live."""
     guild = MagicMock(spec=discord.Guild)
     guild.owner_id = 999
     member = MagicMock(spec=discord.Member)
@@ -1054,18 +1055,9 @@ async def test_dm_admin_card_checks_the_tenants_server_live(
     member.roles = []
     member.guild_permissions = discord.Permissions(manage_guild=True)
     guild.fetch_member = AsyncMock(return_value=member)
-    callers = []
-
-    async def live_subject(_session, *, caller, **_kwargs):  # type: ignore[no-untyped-def]
-        # No Daimon admin grants: only the live server role counts.
-        callers.append(caller)
-        return SimpleNamespace(is_admin=caller.is_server_admin)
-
-    monkeypatch.setattr(confirmation_module, "load_live_subject", live_subject)
     factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=guild)
-    check = factory.call_args.kwargs["current_admin"]
+    check = factory.call_args.kwargs["current_platform_admin"]
     assert await check("111") is True
-    assert callers[-1].platform_user_id == "111"
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert guild.fetch_member.await_count == 2
@@ -1076,10 +1068,10 @@ async def test_dm_admin_card_without_a_client_or_server_refuses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factory, lookup = _dm_runtime_hook(monkeypatch, client=None, guild=MagicMock())
-    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    assert await factory.call_args.kwargs["current_platform_admin"]("111") is False
     lookup.assert_not_awaited()
     factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=None)
-    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    assert await factory.call_args.kwargs["current_platform_admin"]("111") is False
     lookup.assert_awaited_once()
 
 
@@ -1144,3 +1136,180 @@ def test_an_admin_card_shows_its_details_once_without_a_details_button() -> None
     )
     assert [b.label for b in _buttons(view)] == ["Confirm", "Deny"]
     assert _texts(view).count("Model: gpt-6-luna") == 1
+
+
+@pytest.mark.parametrize(("channel", "inside"), [(777, True), (888, False)])
+async def test_always_click_carries_the_clicks_own_channel_as_its_origin(
+    monkeypatch: pytest.MonkeyPatch, channel: int, inside: bool
+) -> None:
+    """A sealed channel's agent takes the rule from a click inside it, not from elsewhere."""
+    from types import SimpleNamespace
+
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize
+
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
+    view = confirmation_module._ConfirmationView(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh", allow_always=True),
+        prompt,
+        answer,
+        rule_factory=MagicMock(),
+        rule_subject=AsyncMock(return_value=Subject(is_admin=True, platform_user_id="222")),
+    )
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    click = _interaction(222)
+    click.channel_id = channel
+    click.channel = SimpleNamespace(parent_id=None)
+    await view._on_always(click)
+    subject = save.call_args.kwargs["subject"]
+    sealed = TenantAccessPolicy(
+        channel_rules={"777": ChannelRule(readers="own", writers="own")},
+        agent_rules={"Helper": AgentRule(runs_in=("777",))},
+    )
+    decision = authorize(
+        sealed,
+        subject=subject,
+        action=Action.SET_AGENT_TOOL_RULE,
+        agent=AgentRef.of("Helper"),
+        place=Place(),
+    )
+    assert bool(decision) is inside, decision.reason
+
+
+# ── The room audience (`audience_hold`): a card carries what the agent wrote ──
+
+
+class _RoomWorld:
+    """The audience of the card's room, changeable between the card and the click."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, mode: str = "on") -> None:
+        from daimon.core import audience_gate
+        from daimon.core.channel_audience import ChannelAudience
+        from daimon.core.turn import output as output_mod
+
+        self.contained = False
+        self.mode = mode
+
+        async def fact(
+            session: object, *, tenant_id: object, platform: str, channel_id: str
+        ) -> Any:
+            return ChannelAudience(
+                contained=self.contained, known=True, narrow=False, source="live"
+            )
+
+        monkeypatch.setattr(output_mod, "channel_has_outsiders", fact)
+        monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+
+    def hook_channel(self) -> tuple[Any, Any]:
+        from daimon.adapters.discord.tool_confirmation import (
+            _card_audience_check,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        class _Sessions:
+            def __call__(self) -> Any:
+                return MagicMock(
+                    __aenter__=AsyncMock(return_value=MagicMock()),
+                    __aexit__=AsyncMock(return_value=False),
+                )
+
+        channel = MagicMock(spec=discord.Thread)
+        channel.id = 900
+        channel.parent_id = 800
+        channel.send = AsyncMock(return_value=SimpleNamespace(id=5, edit=AsyncMock()))
+        admission = SimpleNamespace(
+            hold=None, agent=SimpleNamespace(name="helper"), audience_mode=self.mode
+        )
+        check = _card_audience_check(
+            channel,
+            SimpleNamespace(sessionmaker=_Sessions()),  # type: ignore[arg-type]
+            uuid.uuid4(),
+            admission,  # type: ignore[arg-type]
+        )
+        return channel, check
+
+
+def _agent_written_prompt() -> ConfirmationPrompt:
+    return _prompt().model_copy(
+        update={
+            "title": 'Send "Q3 numbers for ACME" to ceo@example.test?',
+            "visible_lines": ("Body preview: the churn figures are ...",),
+        }
+    )
+
+
+async def test_a_card_with_agent_written_text_is_not_posted_into_a_contained_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.turn.errors import AdmissionDenied
+
+    world = _RoomWorld(monkeypatch)
+    channel, check = world.hook_channel()
+    world.contained = True
+    monkeypatch.setattr(confirmation_module, "_card_audience_check", lambda *a, **k: check)
+    with pytest.raises(AdmissionDenied):
+        await discord_confirmation_hook(channel)(_agent_written_prompt())
+    channel.send.assert_not_awaited()
+
+    world.contained = False  # the same card posts where nobody outside can read
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(_agent_written_prompt()))
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    assert "ceo@example.test" in _texts(channel.send.await_args.kwargs["view"])[0]
+    waiting.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiting
+
+
+async def test_a_card_in_mode_off_or_shadow_posts_in_a_contained_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for mode in ("off", "shadow"):
+        world = _RoomWorld(monkeypatch, mode=mode)
+        channel, check = world.hook_channel()
+        world.contained = True
+        monkeypatch.setattr(
+            confirmation_module, "_card_audience_check", lambda *a, _c=check, **k: _c
+        )
+        hook = discord_confirmation_hook(channel)
+        waiting = asyncio.create_task(hook(_agent_written_prompt()))
+        while not channel.send.await_count:
+            await asyncio.sleep(0)
+        waiting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiting
+
+
+async def test_the_answer_and_the_retire_edits_of_a_card_are_gated_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _RoomWorld(monkeypatch)
+    channel, check = world.hook_channel()
+    monkeypatch.setattr(confirmation_module, "_card_audience_check", lambda *a, **k: check)
+    message = channel.send.return_value
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(_agent_written_prompt()))
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    view = channel.send.await_args.kwargs["view"]
+    world.contained = True  # an outsider joined while the card waited
+    click = _interaction(111)
+    await _buttons(view)[0].callback(click)
+    click.response.edit_message.assert_not_awaited()
+    notice = click.response.send_message.await_args.kwargs
+    assert notice["ephemeral"] is True
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation), "the person's answer still counts"
+    await result.retire_unsent()
+    message.edit.assert_not_awaited()

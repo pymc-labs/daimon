@@ -7,14 +7,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import httpx
 from daimon.adapters.web import channel_visibility
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import platform_names
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
-from daimon.core.config import DiscordSettings, Settings
+from daimon.core.config import DiscordSettings, Settings, SupportSettings, TurnSettings
 from daimon.core.platform_names import ChannelSighting
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import FeatureTarget
@@ -45,13 +45,25 @@ _ROUTES: list[tuple[str, str, dict[str, object] | None]] = [
 ]
 
 
+_SUPPORTED = Settings(
+    _env_file=None,  # pyright: ignore[reportCallIssue]
+    database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+    turn=TurnSettings(channel_backends=True),
+    support=SupportSettings(escalation_channel_id="c9"),
+)
+"""A deployment support channel, where an alert budget with no channel of its own alerts."""
+
+
 @asynccontextmanager
 async def _channels(
-    web_client: WebClientFactory, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    web_client: WebClientFactory,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    **extra: Any,
 ) -> AsyncIterator[Admin]:
     """The admin fixture with two named channels, one of them only its own agents read."""
     channel_visibility.forget_visibility()
-    async with signed_in_admin(web_client, factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, factory, tmp_path, **extra) as admin:
         tenant_id = admin.ws.tenant_id
         async with factory.begin() as db:
             await upsert_channel_names(
@@ -194,6 +206,65 @@ async def test_a_stale_value_is_a_409_and_a_change_is_audited_and_in_history(
         ("budget", "web", "Ada")
     ]
     assert trail[-1] == ("Changed channel", "#general", "Budget")
+
+
+async def test_an_alert_budget_reads_back_its_mode_and_needs_alert_for_a_channel(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    budget = {"action": "set", "limit_usd": "10", "window": "monthly", "expected": None}
+    async with _channels(web_client, db_session_factory, tmp_path, settings=_SUPPORTED) as admin:
+        stop_with_channel = await admin.client.put(
+            "/api/channels/c1/budget", json={**budget, "alert_channel_id": "c2"}
+        )
+        alert = await admin.client.put(
+            "/api/channels/c1/budget", json={**budget, "on_limit": "alert"}
+        )
+
+    assert stop_with_channel.status_code == 422, "a stop budget has nowhere to alert"
+    saved = alert.json()["channel"]["budget"]
+    assert (saved["on_limit"], saved["alert_channel_id"], saved["exceeded"]) == (
+        "alert",
+        None,
+        False,
+    ), "the default alert channel is the support channel"
+
+
+async def test_an_alert_budget_with_nowhere_to_post_is_refused(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """No alert channel and no support channel: the budget would never alert, silently."""
+    budget = {"action": "set", "limit_usd": "10", "window": "monthly", "expected": None}
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        refused = await admin.client.put(
+            "/api/channels/c1/budget", json={**budget, "on_limit": "alert"}
+        )
+        saved = await admin.client.get("/api/channels/c1")
+
+    assert refused.status_code == 422, refused.text
+    assert saved.json()["budget"] is None, "nothing was saved"
+
+
+async def test_editing_a_budget_without_on_limit_keeps_its_mode(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A limit-only edit must not turn an alert budget into a stop one."""
+    budget = {"action": "set", "limit_usd": "10", "window": "monthly", "expected": None}
+    async with _channels(web_client, db_session_factory, tmp_path, settings=_SUPPORTED) as admin:
+        await admin.client.put("/api/channels/c1/budget", json={**budget, "on_limit": "alert"})
+        current = {"limit_usd": "10.00", "window": "monthly", "on_limit": "alert"}
+        edited = await admin.client.put(
+            "/api/channels/c1/budget",
+            json={**budget, "limit_usd": "20", "expected": current},
+        )
+
+    saved = edited.json()["channel"]["budget"]
+    assert (saved["limit_usd"], saved["on_limit"]) == ("20.00", "alert"), edited.text
 
 
 async def test_the_member_list_needs_the_module(

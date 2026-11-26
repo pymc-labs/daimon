@@ -7,15 +7,16 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 import structlog
-from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.ma_index import (
     _SKILLS_PAGE_LIMIT,  # pyright: ignore[reportPrivateUsage]
+    agent_id_in_tenant,
     find_agent_by_daimon_tag,
     find_skill_by_display_title,
     list_skills_lenient,
     list_skills_strict,
 )
 from daimon.core.errors import SkillsListTruncatedError
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -245,15 +246,7 @@ async def test_find_skill_by_display_title() -> None:
         r"/v1/skills",
         lambda req, _m: list_response(
             [
-                SkillListResponse(
-                    id="sk_1",
-                    type="custom",
-                    display_title="brainstorming",
-                    latest_version="1",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    source="custom",
-                ).model_dump(mode="json"),
+                skill_listed(id="sk_1", display_title="brainstorming").model_dump(mode="json"),
             ]
         ),
     )
@@ -291,15 +284,7 @@ async def test_find_skill_by_display_title_warns_when_ceiling_hit() -> None:
 
 def _make_filler_skills(count: int) -> list[dict[str, object]]:
     return [
-        SkillListResponse(
-            id=f"sk_{i}",
-            type="custom",
-            display_title=f"unrelated-{i}",
-            latest_version="1",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-            source="custom",
-        ).model_dump(mode="json")
+        skill_listed(id=f"sk_{i}", display_title=f"unrelated-{i}").model_dump(mode="json")
         for i in range(count)
     ]
 
@@ -389,15 +374,7 @@ async def test_list_skills_lenient_truncated_flag_is_false_on_partial_page() -> 
 
 async def test_find_skill_by_display_title_raises_on_full_page_even_when_match_found() -> None:
     """on_truncation="raise" must raise even when the target title IS in the page."""
-    target = SkillListResponse(
-        id="sk_target",
-        type="custom",
-        display_title="target-skill",
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    target = skill_listed(id="sk_target", display_title="target-skill").model_dump(mode="json")
     # one short of the limit, plus the target = exactly a full page
     skills = _make_filler_skills(_SKILLS_PAGE_LIMIT - 1) + [target]
     router = MARouter()
@@ -411,15 +388,7 @@ async def test_find_skill_by_display_title_raises_on_full_page_even_when_match_f
 
 async def test_find_skill_by_display_title_degrade_returns_match_on_full_page() -> None:
     """on_truncation="degrade" must return the match even when the page is full."""
-    target = SkillListResponse(
-        id="sk_target",
-        type="custom",
-        display_title="target-skill",
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    target = skill_listed(id="sk_target", display_title="target-skill").model_dump(mode="json")
     skills = _make_filler_skills(99) + [target]
     router = MARouter()
     router.add("GET", r"/v1/skills", lambda req, _m: list_response(skills))
@@ -428,3 +397,22 @@ async def test_find_skill_by_display_title_degrade_returns_match_on_full_page() 
     assert match is not None and match.id == "sk_target", (
         "degrade mode must return the match from a full page"
     )
+
+
+async def test_agent_id_in_tenant_when_named_by_id_or_name_then_only_the_tenants_resolve() -> None:
+    mine = ma_agent(id="agent_mine", name="daimon", tenant_id=_TENANT).model_dump(mode="json")
+    theirs = ma_agent(id="agent_theirs", name="other", tenant_id=_OTHER_TENANT).model_dump(
+        mode="json"
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([mine, theirs]))
+    client = build_fake_anthropic_http(router.dispatch)
+
+    async def resolve(ref: str) -> str | None:
+        return await agent_id_in_tenant(client, tenant_id=_TENANT, ref=ref)
+
+    assert await resolve("agent_mine") == "agent_mine", "an id of the tenant's agent"
+    assert await resolve("agent_nope") is None, "an id nobody has"
+    assert await resolve("agent_theirs") is None, "another tenant's agent"
+    assert await resolve("daimon") == "agent_mine", "a name resolves to its id"
+    assert await resolve("ghost") is None, "an unknown name"

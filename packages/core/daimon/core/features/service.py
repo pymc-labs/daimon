@@ -11,15 +11,15 @@ drops the resolver's cache. Approvals are written to the access policy
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Literal, cast
 
 from daimon.core.access_policy import Approvals, TenantAccessPolicy
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.approval_admin import approval_admin
 from daimon.core.approval_gate import ApprovalChange, resolve_approval_gate, set_approval_gate
-from daimon.core.authz import Subject
+from daimon.core.authz import Action, Subject
 from daimon.core.channel_changes import (
     ChannelActor,
     ChannelChangeRefused,
@@ -48,22 +48,41 @@ from daimon.core.features.snapshot import (
     CACHE,
     FeaturePlace,
     approvals_from_gate,
+    env_map_values,
+    lacks_only_server_setup,
     resolve_one,
+    support_setup,
     tier_values,
     unavailable_reason,
 )
+from daimon.core.permissions import SEALED_REFUSAL, any_own_readers, sealed_outside
 from daimon.core.platform_words import NEUTRAL_ADMIN, space_for, words_for
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.agent_avatars import avatar_names, normalize_agent_name
 from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
-from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface, ChannelSetting, FeatureTarget
+from daimon.core.stores.domain import (
+    CHAT_PLATFORMS,
+    AgentSandboxPin,
+    AnySandboxPin,
+    ChangeSurface,
+    ChannelSetting,
+    FeatureTarget,
+    FeatureValueRow,
+    SandboxPin,
+    pin_json,
+)
 from daimon.core.stores.feature_values import (
     clear_feature_value,
+    get_feature_value,
     list_feature_values,
     lock_tenant,
     place_values,
     replace_agent_values,
     set_feature_value,
 )
+from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.support_rows import SupportSetup
+from daimon.core.stores.tenants import get_tenant
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -94,6 +113,35 @@ class FeatureActor:
     owns_agent: Callable[[str], Awaitable[bool]] | None = None
     write_builtin: Callable[[str, bool | None], Awaitable[bool | None]] | None = None
     read_builtins: Callable[[], Awaitable[Mapping[str, bool | None]]] | None = None
+    inside: frozenset[str] = frozenset()
+    """Where the request verifiably started (`Subject.origin_channel_ids`); none from the
+    web app, the hub or a DM."""
+    operator: bool = False
+    """The deployment operator's CLI, which is never held to a channel."""
+    agent_names: Callable[[str], Awaitable[Sequence[str | None]]] | None = None
+    """The names an agent answers to, from its id: how a change at the agent tier finds out
+    whether it is a private channel's own agent. Without it, such a change is refused while
+    any channel is kept to its own agents."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class OperatorActor(FeatureActor):
+    """The deployment operator at the CLI, who holds the database and has no chat identity.
+
+    A distinct type, not a flag on `FeatureActor`: only `_native_admin` accepts it for a
+    setting that needs a native admin (approvals, approvals in direct messages), and only the
+    CLI entrypoint builds one (`test_operator_actor.py` checks that). It names the operator
+    and carries the stated reason, which the audit row records."""
+
+    operator_name: str
+    reason: str
+    operator: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.operator_name.strip() or not self.reason.strip():
+            raise ValueError("an operator change names the operator and gives a reason")
+        if self.via_agent_key or self.surface != "cli":
+            raise ValueError("an operator acts from the CLI, never through an agent key")
 
 
 @dataclass(frozen=True)
@@ -139,6 +187,7 @@ def place_tiers(spec: FeatureSpec, place: FeaturePlace) -> tuple[Tier, ...]:
         "agent": place.agent_id is not None,
         "channel": place.channel_id is not None,
         "thread": place.thread_id is not None,
+        "routine": place.routine_id is not None,
     }
     return tuple(tier for tier in spec.tiers_on(place.backend) if present[tier])
 
@@ -164,11 +213,20 @@ def _approvals_view(policy: TenantAccessPolicy, place: FeaturePlace) -> FeatureV
     rules = policy.channel_rules
     found = {
         "workspace": own(policy.approvals),
+        "agent": own(
+            policy.agent_approvals[place.agent_id].approvals
+            if place.agent_id in policy.agent_approvals
+            else None
+        ),
         "channel": own(rules[place.channel_id].approvals if place.channel_id in rules else None),
         "thread": own(rules[place.thread_key].approvals if place.thread_key in rules else None),
     }
     gate = resolve_approval_gate(
-        policy, platform=place.platform, channel_id=place.channel_id, thread_id=place.thread_id
+        policy,
+        platform=place.platform,
+        channel_id=place.channel_id,
+        thread_id=place.thread_id,
+        agent_id=place.agent_id,
     )
     tiers = tuple(TierSetting(tier, found[tier]) for tier in place_tiers(spec, place))
     return FeatureView(spec, tiers, approvals_from_gate(gate.value, gate.scope))
@@ -192,12 +250,14 @@ async def read_features(
             agent_id=place.agent_id,
             channel_id=place.channel_id,
             thread_key=place.thread_key,
+            routine_id=place.routine_id,
         )
         policy = (
             await load_access_policy(session, tenant_id=place.tenant_id)
             if any(spec.key == "approvals" for spec in specs)
             else None
         )
+        support = await support_setup(session, settings, place, specs)
     wanted = {spec.key for spec in specs}
     resolved: dict[str, ResolvedFeature] = {}
     views: dict[str, FeatureView] = {}
@@ -210,7 +270,7 @@ async def read_features(
             view = FeatureView(
                 spec,
                 _own(spec, place, values),
-                resolve_one(spec, settings, place, rows, resolved, agent_builtins),
+                resolve_one(spec, settings, place, rows, resolved, agent_builtins, support),
             )
         resolved[spec.key] = view.resolved
         views[spec.key] = view
@@ -267,7 +327,9 @@ def needs_admin(spec: FeatureSpec, platform: str) -> ChannelChangeRefused:
     admin = admin_word(platform)
     if spec.authority.native:
         return _refused(
-            f"Only {admin} can change approvals. Ask {admin}.", "native_admin_required", "forbidden"
+            f"Only {admin} can change {spec.name.lower()}. Ask {admin}.",
+            "native_admin_required",
+            "forbidden",
         )
     return _refused(
         f"Only {admin} can change {spec.name.lower()} here. Ask {admin}.",
@@ -285,6 +347,19 @@ def backend_note(spec: FeatureSpec, backend: str | None) -> str:
     return f"{spec.name} can't be set here for {name} agents, so nothing was changed."
 
 
+def unseen_setup_allows(
+    spec: FeatureSpec,
+    value: str,
+    settings: Settings | None,
+    place: FeaturePlace,
+    support: SupportSetup | None = None,
+) -> bool:
+    """Whether a change to `value` goes through though `spec` reads as not set up here: only
+    setup the MCP server may carry is missing (`lacks_only_server_setup`), and the change turns
+    it Off or clears a tier, which still decides what a session gets. On waits for setup seen."""
+    return value in (spec.off, DEFAULT) and lacks_only_server_setup(spec, settings, place, support)
+
+
 def feature_refusal(
     key: str,
     tier: str,
@@ -293,19 +368,29 @@ def feature_refusal(
     locked: bool,
     place: FeaturePlace,
     settings: Settings | None,
+    support: SupportSetup | None = None,
 ) -> ChannelChangeRefused | None:
-    """Why the names, place or lock rule out the change, before any read; None if not. Pure."""
+    """Why the names, place or lock rule out the change, before any read; None if not. Pure;
+    `support` is the workspace's own support setup (`support_setup`)."""
     spec = FEATURES.get(key)
     if spec is None:
         return _refused(
             f"There is no such setting. Open {_settings_pointer(place.platform)} to see them.",
             "unknown_key",
         )
-    reason = unavailable_reason(spec, settings, place)
+    reason = unavailable_reason(spec, settings, place, support)
+    if reason == "requires" and unseen_setup_allows(spec, value, settings, place, support):
+        reason = None
     for failed, message, code in (
         (
-            value != DEFAULT and value not in spec.values,
+            value != DEFAULT and value not in spec.values and not spec.max_length,
             f"{spec.name} can be {_joined([*(spec.label(v) for v in spec.values), 'Default'])}.",
+            "bad_value",
+        ),
+        (
+            value != DEFAULT and not spec.accepts(value, "agent"),
+            f"{spec.name} can be {spec.label(spec.default)}, Default, or one line of up to "
+            f"{spec.max_length} characters of plain words, with no marks like @ # : or *.",
             "bad_value",
         ),
         (
@@ -343,16 +428,19 @@ def feature_refusal(
 
 
 async def _native_admin(
-    sessions: Sessions, settings: Settings, actor: FeatureActor, platform: str
+    sessions: Sessions, settings: Settings, actor: FeatureActor, spec: FeatureSpec, platform: str
 ) -> Subject:
-    """A live, uncached native admin check of the actor's chat identity, or a refusal."""
+    """A live, uncached native admin check of the actor's chat identity, or a refusal.
+    The operator at the CLI is the one other admin; it is checked by type, nothing else."""
+    if isinstance(actor, OperatorActor):
+        return Subject(is_admin=True, platform_user_id=f"operator:{actor.operator_name}")
     if not actor.via_agent_key and actor.native_user_id:
         subject = await approval_admin(
             sessions, settings, tenant_id=actor.tenant_id, user_id=actor.native_user_id
         )
         if subject.is_admin:
             return subject
-    raise needs_admin(FEATURES["approvals"], platform)
+    raise needs_admin(spec, platform)
 
 
 def thread_open_to_anyone(key: str, *, locked: bool = False) -> bool:
@@ -401,7 +489,7 @@ async def change_refusal(
     spec = FEATURES[key]
     try:
         if spec.authority.native:
-            await _native_admin(sessions, settings, actor, place.platform)
+            await _native_admin(sessions, settings, actor, spec, place.platform)
         elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
         async with sessions() as session:
@@ -426,6 +514,7 @@ async def _values_at(
         agent_id=place.agent_id,
         channel_id=place.channel_id,
         thread_key=place.thread_key,
+        routine_id=place.routine_id,
         keys=(spec.key,),
     )
     return tier_values(spec, settings, place, rows)
@@ -438,19 +527,65 @@ def _target(tier: Tier, place: FeaturePlace) -> FeatureTarget:
         agent_id=place.agent_id if tier == "agent" else None,
         channel_id=place.channel_id if tier in ("channel", "thread") else None,
         thread_key=place.thread_key if tier == "thread" else None,
+        routine_id=place.routine_id if tier == "routine" else None,
     )
 
 
-def _history(setting: TierSetting, place: FeaturePlace) -> JsonValue:
-    """A tier's value as `channel_changes` records it; the legacy `disabled` is Off+Lock."""
+def _history(setting: TierSetting, place: FeaturePlace, pin: JsonValue = None) -> JsonValue:
+    """A tier's value as `channel_changes` records it; the legacy `disabled` is Off+Lock.
+    A pinned On also records what it covers."""
     if setting.value == DEFAULT:
         return None
     value = "disabled" if setting.locked and setting.value == "off" else setting.text
     if setting.tier == "thread":
         return {"thread": place.thread_key, "mode": value}
     if setting.tier == "agent":
-        return {"agent": place.agent_id, "value": value}
-    return value
+        found: dict[str, JsonValue] = {"agent": place.agent_id, "value": value}
+    elif setting.tier == "routine":
+        found = {"routine": str(place.routine_id), "value": value}
+    else:
+        return value
+    if pin is not None:
+        found["pin"] = pin
+    return found
+
+
+def _pin_refusal(
+    spec: FeatureSpec, tier: Tier, value: str, pin: AnySandboxPin | None, place: FeaturePlace
+) -> ChannelChangeRefused | None:
+    """A pinned On needs the pin of its own tier; nothing else takes one."""
+    if not spec.pinned:
+        if pin is not None:
+            raise ValueError(f"{spec.key} takes no pin")
+        return None
+    if value != "on":
+        return None
+    wants = {"agent": AgentSandboxPin, "routine": SandboxPin}.get(tier)
+    if wants is None or not isinstance(pin, wants):
+        return _refused(
+            f"{spec.name} can't be turned on {_where_set(tier, place.platform)} from here, as "
+            "each On covers one agent and environment. Turn it on for an agent or one routine "
+            "with `daimon routines sandbox-tools`.",
+            "needs_pin",
+        )
+    if not _pin_fits(pin, place):
+        return _refused(
+            f"{spec.name} can only be turned on with the agent and environment it runs in, so "
+            "this On was not saved. Nothing was changed.",
+            "pin_mismatch",
+        )
+    return None
+
+
+def _pin_fits(pin: AnySandboxPin, place: FeaturePlace) -> bool:
+    """Whether a pin names the agent of the place it is stored at and an environment, so a stored
+    On always reads back (`stored_pin`). An agent's version and an environment's revision are
+    only known to the provider; each run checks those."""
+    if pin.agent_id != place.agent_id:
+        return False
+    if isinstance(pin, AgentSandboxPin):
+        return bool(pin.environment_name)
+    return bool(pin.environment_id)
 
 
 async def _change_approvals(
@@ -462,7 +597,11 @@ async def _change_approvals(
     place: FeaturePlace,
     expected: Expected[str] | None,
 ) -> TierSetting:
-    subject = await _native_admin(sessions, settings, actor, place.platform)
+    subject = replace(
+        await _native_admin(sessions, settings, actor, FEATURES["approvals"], place.platform),
+        origin_channel_ids=actor.inside,
+        operator=actor.operator,
+    )
 
     def raw(text: str) -> Approvals:
         return cast(Approvals, "inherit" if text == DEFAULT else text)
@@ -471,17 +610,20 @@ async def _change_approvals(
         sessions,
         tenant_id=actor.tenant_id,
         platform=place.platform,
-        target={"workspace": None, "channel": place.channel_id, "thread": place.thread_key}[tier],
+        target={"channel": place.channel_id, "thread": place.thread_key}.get(tier),
         value=raw(value),
         subject=subject,
         record=ApprovalChange(
-            place.channel_id if tier != "workspace" else None,
+            place.channel_id if tier in ("channel", "thread") else None,
             place.thread_key if tier == "thread" else None,
             actor.account_id,
             actor.surface,
             actor.on_write,
+            place.agent_id if tier == "agent" else None,
         ),
         expected=raw(expected.value) if expected is not None else None,
+        note=actor.reason if isinstance(actor, OperatorActor) else None,
+        agent_id=place.agent_id if tier == "agent" else None,
     )
     before = gate.before or "inherit"
     return TierSetting(tier, DEFAULT if before == "inherit" else before)
@@ -566,25 +708,45 @@ async def change_feature(
     place: FeaturePlace,
     locked: bool = False,
     expected: Expected[str] | None = None,
+    pin: AnySandboxPin | None = None,
 ) -> FeatureChange:
     """Set (`DEFAULT`: clear) `key` at `tier` of `place`; refused before any write.
 
-    Raises `ChannelChangeRefused` (its message is for people) or `StaleChannelValue` when
-    `expected` is not the tier's own `TierSetting.text` now."""
-    refusal = feature_refusal(key, tier, value, locked=locked, place=place, settings=settings)
+    A pinned feature's On carries the `pin` it covers, written with it; any other value
+    drops the tier's pin. Raises `ChannelChangeRefused` (its message is for people) or
+    `StaleChannelValue` when `expected` is not the tier's own `TierSetting.text` now."""
+    support = None
+    if key in FEATURES:
+        async with sessions() as session:
+            support = await support_setup(session, settings, place, (FEATURES[key],))
+    refusal = feature_refusal(
+        key, tier, value, locked=locked, place=place, settings=settings, support=support
+    )
+    if refusal is None:
+        refusal = _pin_refusal(FEATURES[key], tier, value, pin, place)
     if refusal is not None:
         raise refusal
     spec = FEATURES[key]
+    if spec.connect_only and value == "on" and not actor.operator:
+        raise _refused(CONNECT_ONLY, "connect_only", "forbidden")
+    if key == "display_name" and value != DEFAULT and value not in spec.values:
+        await _refuse_taken_name(sessions, actor, place, value)
+    await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)
-    if spec.authority.native:
+    if key == "approvals":  # the one native feature kept in the approval gate, not feature storage
         before = await _change_approvals(sessions, settings, actor, tier, value, place, expected)
     else:
-        if not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
+        admin = None
+        if spec.authority.native:
+            admin = await _native_admin(sessions, settings, actor, spec, place.platform)
+        elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
         if tier == "agent" and key.startswith("tool."):
             before = await _write_builtin(sessions, settings, actor, spec, after, place, expected)
         else:
-            before = await _write(sessions, settings, actor, spec, after, place, expected)
+            before = await _write(
+                sessions, settings, actor, spec, after, place, expected, pin, audit=admin
+            )
     CACHE.clear()
     builtins = (
         await actor.read_builtins()
@@ -595,6 +757,67 @@ async def change_feature(
     return FeatureChange(key, tier, before, after, view)
 
 
+CONNECT_ONLY = (
+    "This can only be turned on from the agent's GitHub connect page, by an admin of the "
+    "org. Open that page and tick the box to follow the org."
+)
+
+NAME_TAKEN = "That name belongs to Daimon or another agent. Pick another one."
+
+
+async def _refuse_taken_name(
+    sessions: Sessions, actor: FeatureActor, place: FeaturePlace, value: str
+) -> None:
+    """A display name may not pass for another agent (its slug or display name), nor for
+    Daimon itself unless the operator gives it, so one agent can show as the bot."""
+    wanted = normalize_agent_name(value)
+    if wanted == "daimon":
+        if actor.operator:
+            return
+        raise _refused(NAME_TAKEN, "name_taken")
+    own = (
+        await actor.agent_names(place.agent_id)
+        if place.agent_id and actor.agent_names is not None
+        else ()
+    )
+    mine = {normalize_agent_name(name) for name in own if name}
+    async with sessions() as session:
+        slugs = await avatar_names(session, tenant_id=place.tenant_id)
+        rows = await list_feature_values(
+            session, tenant_id=place.tenant_id, keys=("display_name",), tier="agent"
+        )
+    names = {slug for slug in slugs if slug not in mine} | {
+        normalize_agent_name(row.value) for row in rows if row.agent_id != place.agent_id
+    }
+    if wanted in names:
+        raise _refused(NAME_TAKEN, "name_taken")
+
+
+async def _require_inside(
+    sessions: Sessions, actor: FeatureActor, spec: FeatureSpec, tier: Tier, place: FeaturePlace
+) -> None:
+    """A private channel's switches, and its own agent's, change only from inside the channel
+    (`sealed_outside`), for admins too. Whoever is not an admin here is held as before."""
+    if actor.operator or tier in ("deployment", "workspace"):
+        return
+    if actor.via_agent_key or not await actor.admin_for(spec.authority.action):
+        return
+    async with sessions() as session:
+        policy = await load_access_policy(session, tenant_id=place.tenant_id)
+    names: Sequence[str | None] = ()
+    if tier == "agent" and place.agent_id is not None and any_own_readers(policy):
+        if actor.agent_names is None:
+            raise _sealed_refused()
+        names = await actor.agent_names(place.agent_id)
+    channels = (place.channel_id,) if tier in ("channel", "thread") else ()
+    if sealed_outside(policy, actor.inside, channel_ids=channels, agent_names=names):
+        raise _sealed_refused()
+
+
+def _sealed_refused() -> ChannelChangeRefused:
+    return _refused(SEALED_REFUSAL, "sealed_channel", "forbidden")
+
+
 async def _write(
     sessions: Sessions,
     settings: Settings,
@@ -603,9 +826,13 @@ async def _write(
     after: TierSetting,
     place: FeaturePlace,
     expected: Expected[str] | None,
+    pin: AnySandboxPin | None = None,
+    audit: Subject | None = None,
 ) -> TierSetting:
     async with sessions.begin() as session:
-        return await _write_in(session, settings, actor, spec, after, place, expected)
+        return await _write_in(
+            session, settings, actor, spec, after, place, expected, pin=pin, audit=audit
+        )
 
 
 async def _write_in(
@@ -618,11 +845,25 @@ async def _write_in(
     expected: Expected[str] | None,
     *,
     check_own_lock: bool = True,
+    pin: AnySandboxPin | None = None,
+    audit: Subject | None = None,
 ) -> TierSetting:
-    """One tier's write in the caller's transaction: the lock checks, the row, the record.
-    A row already locked at this tier is only changed by someone who may lock; callers that
-    have checked their admin themselves pass `check_own_lock=False`."""
+    """One tier's write in the caller's transaction: the lock checks, the row, its pin, the
+    record. A row already locked at this tier is only changed by someone who may lock;
+    callers that have checked their admin themselves pass `check_own_lock=False`.
+    A native admin's change (`audit`) also writes a security audit event, as approvals do."""
     tier = after.tier
+    if (refused := _pin_refusal(spec, tier, after.value, pin, place)) is not None:
+        raise refused
+    if spec.key == "audience_hold" and after.value == "on":
+        policy = await load_access_policy(session, tenant_id=place.tenant_id)
+        if not policy.internal_role_ids:
+            # Without internal roles every asker counts as outside, so On would hold every
+            # turn on the server (`requester_standing`).
+            raise _refused(
+                "Set the server's internal roles before you turn this on.",
+                "audience_hold_needs_internal_roles",
+            )
     await lock_tenant(session, place.tenant_id)  # the `expected` check below is then atomic
     values = await _values_at(session, settings, spec, place)
     before = _before(spec, place, values, tier)
@@ -636,6 +877,13 @@ async def _write_in(
     if _loosens(spec, after, above):
         raise _looser_than_above(spec, above, place, tier)
     target = _target(tier, place)
+    pin_before = None
+    if spec.pinned:
+        row = await get_feature_value(
+            session, tenant_id=place.tenant_id, target=target, key=spec.key
+        )
+        pin_before = None if row is None else row.pin
+    pin_after = pin_json(pin) if pin is not None and after.value == "on" else None
     if after.value == DEFAULT:
         await clear_feature_value(session, tenant_id=place.tenant_id, target=target, key=spec.key)
     else:
@@ -648,6 +896,7 @@ async def _write_in(
             locked=after.locked,
             set_by=actor.account_id,
             surface=actor.surface,
+            pin=pin_after,
         )
     await record_change(
         session,
@@ -657,11 +906,25 @@ async def _write_in(
         if tier in ("channel", "thread") and place.channel_id
         else WORKSPACE_ID,
         setting=_THREAD_SETTING.get(spec.key, spec.key) if tier == "thread" else spec.key,
-        before=_history(before, place),
-        after=_history(after, place),
+        before=_history(before, place, pin_before),
+        after=_history(after, place, pin_after),
         actor_account_id=actor.account_id,
         surface=actor.surface,
     )
+    if audit is not None:
+        await append_event(
+            session,
+            tenant_id=place.tenant_id,
+            account_id=None,
+            agent_id=None,
+            platform=place.platform,
+            platform_user_id=audit.platform_user_id,
+            tool_name=spec.key,
+            operation=Action.SET_WORKSPACE_SETTINGS,
+            outcome="allowed",
+            reason=f"{tier}:{before.text}->{after.text}"
+            + (f" ({actor.reason})" if isinstance(actor, OperatorActor) else ""),
+        )
     channel_actor = ChannelActor(
         actor.tenant_id, actor.account_id, Subject(), actor.surface, actor.on_write
     )
@@ -684,7 +947,11 @@ async def set_workspace_feature(
     settings writers (typed mentions, direct messages, web modules) that have already
     checked their admin. Same refusals and records as `change_feature`; returns what it was."""
     place = FeaturePlace(tenant_id, platform)
-    refusal = feature_refusal(key, "workspace", value, locked=False, place=place, settings=settings)
+    specs = (FEATURES[key],) if key in FEATURES else ()
+    support = await support_setup(session, settings, place, specs)
+    refusal = feature_refusal(
+        key, "workspace", value, locked=False, place=place, settings=settings, support=support
+    )
     if refusal is not None:
         raise refusal
 
@@ -704,15 +971,96 @@ async def set_workspace_feature(
     )
 
 
+async def set_agent_feature(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    ma_agent_id: str,
+    key: str,
+    value: str,
+    account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+) -> TierSetting:
+    """Set `key` at the agent tier of one agent inside the caller's transaction, for a
+    surface that has already checked its admin (the GitHub connect page, the operator CLI).
+    Same refusals and records as `change_feature`; returns what it was."""
+    place = FeaturePlace(tenant_id, platform, agent_id=ma_agent_id)
+    specs = (FEATURES[key],) if key in FEATURES else ()
+    support = await support_setup(session, settings, place, specs)
+    refusal = feature_refusal(
+        key, "agent", value, locked=False, place=place, settings=settings, support=support
+    )
+    if refusal is not None:
+        raise refusal
+
+    async def _nobody(_: DelegatedAction | None) -> bool:
+        return False
+
+    actor = FeatureActor(tenant_id, account_id, surface, None, _nobody)
+    return await _write_in(
+        session,
+        settings,
+        actor,
+        FEATURES[key],
+        TierSetting("agent", value),
+        place,
+        None,
+        check_own_lock=False,
+    )
+
+
+async def clear_pinned_on(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    key: str,
+    target: FeatureTarget,
+    seen: FeatureValueRow | None = None,
+) -> bool:
+    """Clear a pinned feature's On at an agent or routine `target` in the caller's
+    transaction, once what it covered changed: an edit, a drift, a move to another agent id.
+    An Off stays. With `seen`, only while the row still has its revision and pin: a revision
+    restarts at 1 when the row is deleted and set again, so the pin tells a fresh opt-in from
+    the one `seen` read, which is kept. Recorded as a `system` change; returns whether it
+    cleared one."""
+    spec = FEATURES[key]
+    assert spec.pinned, f"{key} has no pin"
+    # Most edits touch no opt-in: look before taking the tenant lock, then read again under it.
+    found = await get_feature_value(session, tenant_id=tenant_id, target=target, key=key)
+    if found is None or found.value != "on":
+        return False
+    await lock_tenant(session, tenant_id)
+    found = await get_feature_value(session, tenant_id=tenant_id, target=target, key=key)
+    if found is None or found.value != "on":
+        return False
+    if seen is not None and (found.revision, found.pin) != (seen.revision, seen.pin):
+        return False
+    tenant = await get_tenant(session, tenant_id)
+    place = FeaturePlace(
+        tenant_id,
+        "" if tenant is None else tenant.platform,
+        agent_id=target.agent_id,
+        routine_id=target.routine_id,
+    )
+
+    async def _nobody(_: DelegatedAction | None) -> bool:
+        return False
+
+    actor = FeatureActor(tenant_id, None, "system", None, _nobody)
+    after = TierSetting(target.tier, DEFAULT)
+    await _write_in(session, settings, actor, spec, after, place, None, check_own_lock=False)
+    return True
+
+
 async def import_env(session: AsyncSession, settings: Settings) -> int:
     """Write each deprecated per-workspace env value as a workspace-tier row. A value
     already stored is kept. Returns how many rows were written."""
     workspace = FeatureTarget("workspace")
     specs = [spec for spec in FEATURES.values() if spec.env_map is not None]
-    maps = {
-        spec.key: cast("Mapping[uuid.UUID, bool]", getattr(settings, cast(str, spec.env_map)))
-        for spec in specs
-    }
+    maps = {spec.key: env_map_values(settings, cast(str, spec.env_map)) for spec in specs}
     written = 0
     for tenant_id in sorted({tenant for values in maps.values() for tenant in values}, key=str):
         stored = await list_feature_values(
@@ -768,6 +1116,7 @@ async def _write_builtin(
             agent_id=place.agent_id,
             channel_id=place.channel_id,
             thread_key=place.thread_key,
+            routine_id=place.routine_id,
             keys=(spec.key,),
         )
     above = resolve_above(spec, tier_values(spec, settings, place, rows), "agent")

@@ -11,7 +11,14 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
 from daimon.core.channel_changes import Expected
-from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
+from daimon.core.config import (
+    AnthropicSettings,
+    ComputeProfile,
+    ComputeSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    Settings,
+)
 from daimon.core.errors import StaleChannelValue
 from daimon.core.features.model_input import (
     DEFAULT_TOOLSET,
@@ -21,21 +28,34 @@ from daimon.core.features.model_input import (
     builtin_enabled,
     with_builtin,
 )
-from daimon.core.features.registry import DEFAULT, FEATURES
+from daimon.core.features.registry import DEFAULT, FEATURES, Tier
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import (
     FeatureActor,
     change_feature,
     read_features,
 )
-from daimon.core.features.snapshot import CACHE, FeaturePlace, FeatureSnapshot, resolve_one
-from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
-from daimon.core.features.toolset import place_toolset
+from daimon.core.features.snapshot import (
+    CACHE,
+    SERVER_SETUP,
+    FeaturePlace,
+    FeatureSnapshot,
+    place_feature,
+    resolve_one,
+)
+from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS, gated_tools
+from daimon.core.features.toolset import place_session, place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
-from daimon.core.session_snapshot import desired_snapshot, session_mcp_servers, session_tools
+from daimon.core.session_snapshot import (
+    desired_snapshot,
+    hash_tools,
+    session_mcp_servers,
+    session_tools,
+)
+from daimon.core.stores.agent_daimon_tools import enabled_daimon_tools
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import place_values, set_feature_value
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, RENAMED_DAIMON_TOOLS
 from daimon.core.turn.selfhosted_tools import build_turn_tools
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -50,6 +70,17 @@ SETTINGS = Settings.model_validate(
     }
 )
 PUBLIC = "https://daimon.example/mcp"
+#: Cloud computers set up, so their Off comes from the default and not from a missing setup.
+_COMPUTE_READY = ComputeSettings(
+    enabled=True,
+    deployment_id="test-deployment",
+    cloud_run_project="test-project",
+    cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
+    session_auth_key=SecretStr("session-secret-test-only"),
+    profiles={
+        "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+    },
+)
 
 
 def _agent(*, isolated: bool = False) -> BetaManagedAgentsAgent:
@@ -79,13 +110,18 @@ def _dicts(tools: Any) -> list[Any]:
     return [tool.model_dump(mode="json") for tool in tools]
 
 
+#: The capabilities Off until a server admin turns them on, which a web place offers.
+_OFF_BY_DEFAULT = ("compute", "long_jobs")
+
+
 def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
-    """A web place with nothing set but long jobs turned On, so the baseline hides nothing;
-    `plain` leaves long jobs at its default (Off)."""
+    """A web place with nothing set but the default-Off capabilities turned On, so the
+    baseline hides nothing; `plain` leaves them at their default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
     if not plain:
-        features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+        for key in _OFF_BY_DEFAULT:
+            features[key] = ResolvedFeature(key, "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
         features[name] = features[name].__class__(name, value, "channel")
@@ -214,8 +250,9 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
     """No tier set: every capability's tools stay offered, set up or not, except the ones
     that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
+    assert all(FEATURES[key].default == "off" for key in _OFF_BY_DEFAULT)
     plain = agent_toolset(_snapshot(plain=True), _agent())
-    assert plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "long jobs are Off"
+    assert plain.hidden_daimon_tools == gated_tools(_OFF_BY_DEFAULT), "they are Off"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)
@@ -235,12 +272,12 @@ def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
 def test_compute_off_keeps_the_stop_tools_and_long_jobs_off_hides_its_own() -> None:
     """A deliberate difference: a running sandbox session stays stoppable from chat with
     compute Off, while the long job tools all go with their feature."""
-    assert {"fly_stop_session", "fly_list_sessions"} == SESSION_KEPT_TOOLS, "the allow-list"
+    assert {"compute_stop_session", "compute_list_sessions"} == SESSION_KEPT_TOOLS, "the allow-list"
     assert CAPABILITY_TOOLS["compute"] > SESSION_KEPT_TOOLS, "kept tools belong to compute"
     assert not SESSION_KEPT_TOOLS & CAPABILITY_TOOLS["long_jobs"], "long jobs keep none"
     compute = agent_toolset(_snapshot(compute="off"), _agent())
     assert not SESSION_KEPT_TOOLS & compute.hidden_daimon_tools, "stop tools stay offered"
-    assert "fly_launch_session" in compute.hidden_daimon_tools, "the rest still goes"
+    assert "compute_launch_session" in compute.hidden_daimon_tools, "the rest still goes"
     jobs = agent_toolset(_snapshot(long_jobs="off"), _agent())
     assert jobs.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "all long job tools go"
 
@@ -269,24 +306,80 @@ def test_a_capability_without_setup_is_unavailable_with_a_reason() -> None:
     assert resolve_one(FEATURES["notebooks"], ready, place, []).on
 
 
-def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
-    """Display and behaviour agree: unmet setup resolves Off and the tools are not offered."""
+@pytest.mark.parametrize("server_setup", [True, False])
+def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_judged(
+    server_setup: bool,
+) -> None:
+    """The MCP server judges `SERVER_SETUP` and hides exactly those tools; a session's toolset
+    elsewhere leaves it to that server, so only a capability Off by default leaves."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
-    features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
+    features = {
+        key: resolve_one(spec, SETTINGS, place, [], server_setup=server_setup)
+        for key, spec in FEATURES.items()
+    }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
-    assert toolset.off_capabilities == unset | {"long_jobs"}, "setup missing, or Off by default"
+    expected = (unset if server_setup else set()) | set(_OFF_BY_DEFAULT)
+    assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"
 
 
-def test_long_jobs_tools_return_when_a_workspace_turns_them_on() -> None:
+async def test_a_worker_without_the_mcp_servers_setup_keeps_its_tools_in_the_session(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Only the MCP server carries the notebook and report host settings: the worker's session
+    keeps their tools for the MCP server to judge, a session that server starts itself (agent
+    chat) judges its own settings, and an Off still hides them."""
+    tenant = await make_tenant(db_session)
+    # Cloud computers are Off until a server admin turns them on, as here.
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="compute",
+        value="on",
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    CACHE.clear()
+    place = FeaturePlace(tenant.id, "web", agent_id="agent_tools")
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    server_set_up = {k for k, spec in FEATURES.items() if set(spec.requires) & SERVER_SETUP}
+    assert not toolset.off_capabilities & server_set_up, "the worker judged the server's setup"
+    kept = CAPABILITY_TOOLS["notebooks"] | CAPABILITY_TOOLS["report_publish"]
+    assert not kept & toolset.hidden_daimon_tools, "notebook or report tools left the session"
+    own, _ = await place_session(db_session_factory, SETTINGS, place, _agent(), server_setup=True)
+    assert kept <= own.hidden_daimon_tools, "the MCP server's own session kept unset tools"
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="notebooks",
+        value="off",
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    CACHE.clear()
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    assert "notebooks" in toolset.off_capabilities, "a workspace Off still hides the tools"
+
+
+@pytest.mark.parametrize("tier", ["workspace", "agent"])
+@pytest.mark.parametrize("key", _OFF_BY_DEFAULT)
+def test_default_off_tools_return_when_a_workspace_or_agent_turns_them_on(
+    key: str, tier: Tier
+) -> None:
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
-    features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
-    features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+    ready = SETTINGS.model_copy(update={"compute": _COMPUTE_READY})
+    features = {key: resolve_one(spec, ready, place, []) for key, spec in FEATURES.items()}
+    assert not features[key].on and features[key].tier == "default", "Off with nothing set"
+    features[key] = ResolvedFeature(key, "on", tier)
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
-    assert "long_jobs" not in toolset.off_capabilities
-    assert not CAPABILITY_TOOLS["long_jobs"] & toolset.hidden_daimon_tools
+    assert key not in toolset.off_capabilities
+    assert not CAPABILITY_TOOLS[key] & toolset.hidden_daimon_tools
 
 
 def test_support_escalation_needs_the_platforms_own_channel() -> None:
@@ -299,6 +392,60 @@ def test_support_escalation_needs_the_platforms_own_channel() -> None:
     teams = resolve_one(FEATURES["support_escalation"], ready, FeaturePlace(tenant, "teams"), [])
     assert slack.on, "Slack has its channel"
     assert (teams.on, teams.unavailable) == (False, "requires"), "Teams has none"
+
+
+async def test_support_escalation_when_off_at_an_agent_or_channel_then_off_only_there(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Ask a person is set where a support plan applies; a workspace lock binds them all."""
+    support = SETTINGS.support.model_copy(
+        update={"slack_escalation_channel_id": "C123", "credits_per_user": 5}
+    )
+    ready = SETTINGS.model_copy(update={"support": support})
+    tenant = await make_tenant(db_session)
+    off = (FeatureTarget("agent", agent_id="a1"), FeatureTarget("channel", channel_id="C1"))
+    for target in off:
+        await set_feature_value(
+            db_session,
+            tenant_id=tenant.id,
+            target=target,
+            key="support_escalation",
+            value="off",
+            set_by=None,
+            surface="web",
+        )
+    await db_session.commit()
+    CACHE.clear()
+
+    async def on(channel: str, agent: str) -> bool:
+        place = FeaturePlace(tenant.id, "slack", channel_id=channel, agent_id=agent)
+        return (await place_feature(db_session_factory, ready, place, "support_escalation")).on
+
+    assert not await on("C1", "a2"), "off in its channel"
+    assert not await on("C2", "a1"), "off for its agent"
+    assert await on("C2", "a2"), "on everywhere else"
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("channel", channel_id="C2"),
+        key="support_escalation",
+        value="on",
+        set_by=None,
+        surface="web",
+    )
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="support_escalation",
+        value="off",
+        locked=True,
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    CACHE.clear()
+    assert not await on("C2", "a2"), "a workspace lock beats the channel's On"
 
 
 def test_the_old_enabled_variables_are_the_deployment_tier() -> None:
@@ -475,3 +622,80 @@ async def test_a_workspace_value_reaches_tools_the_agent_left_unset(
     CACHE.clear()
     toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
     assert toolset.builtins == {"bash": False, "grep": False}, "a lock beats the agent's entry"
+
+
+def _renamed_agent(configs: list[dict[str, Any]], *, default_on: bool) -> BetaManagedAgentsAgent:
+    return ma_agent(
+        id="agent_tools",
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": {
+                    "enabled": default_on,
+                    "permission_policy": {"type": "always_allow"},
+                },
+                "configs": configs,
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "internal",
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_ask"}},
+                "configs": [
+                    {
+                        "name": "fly_run_bash",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_ask"},
+                    }
+                ],
+            },
+        ],
+        mcp_servers=[
+            {"name": "daimon-mcp", "type": "url", "url": PUBLIC},
+            {"name": "internal", "type": "url", "url": "https://old.example/mcp"},
+        ],
+    )
+
+
+def test_an_agent_that_names_a_renamed_tool_keeps_it_in_every_session() -> None:
+    """An agent's own tool list is kept by the provider, so no migration reaches it.
+
+    The session builder is the one definition a new session, the drift check and the
+    in-place update share: a session that began before the rename is updated on its
+    next turn, because its tools no longer hash the same.
+    """
+    assert set(RENAMED_DAIMON_TOOLS.values()) == CAPABILITY_TOOLS["compute"], "every tool moved"
+    assert not set(RENAMED_DAIMON_TOOLS) & set().union(*CAPABILITY_TOOLS.values())
+    allow, ask = {"type": "always_allow"}, {"type": "always_ask"}
+    agent = _renamed_agent(
+        [
+            {"name": "fly_run_bash", "enabled": True, "permission_policy": ask},
+            {"name": "fly_read_file", "enabled": True, "permission_policy": allow},
+            # The author already wrote the new name: it wins over the old entry.
+            {"name": "fly_list_files", "enabled": True, "permission_policy": allow},
+            {"name": "compute_list_files", "enabled": False, "permission_policy": allow},
+            {"name": "search_tools", "enabled": True, "permission_policy": allow},
+        ],
+        default_on=False,
+    )
+    tools = session_tools(agent, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC)
+    daimon, relayed = _dicts(tools)
+    assert {c["name"]: (c["enabled"], c["permission_policy"]) for c in daimon["configs"]} == {
+        "compute_run_bash": (True, ask),
+        "compute_read_file": (True, allow),
+        "compute_list_files": (False, allow),
+        "search_tools": (True, allow),
+    }
+    assert enabled_daimon_tools(_dicts(tools)) == {
+        "compute_run_bash",
+        "compute_read_file",
+        "search_tools",
+    }
+    # Another server's tool of the same name is not Daimon's to rename.
+    assert [c["name"] for c in relayed["configs"]] == ["fly_run_bash"]
+    assert hash_tools(tools) != hash_tools(agent.tools), "an earlier session reads as drifted"
+    # An agent that names no renamed tool gets back the very tools it had.
+    plain = _agent()
+    assert session_tools(
+        plain, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC
+    ) == list(plain.tools)

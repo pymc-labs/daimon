@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,6 @@ import httpx
 import pytest
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
-    SkillListResponse,
 )
 from daimon.core.defaults import apply_defaults
 from daimon.core.defaults.metadata import (
@@ -18,10 +18,14 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.report import Action
 from daimon.core.errors import DefaultsError
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, json_body, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_apply_defaults = partial(apply_defaults, dry_run=False, run_preflight=False)
+
 
 _CREATED_AT = datetime(2026, 4, 21, 0, 0, 0, tzinfo=UTC)
 _AGENT_MODEL = BetaManagedAgentsModelConfig(id="claude-opus-4-7")
@@ -128,9 +132,7 @@ async def test_apply_creates_all_on_fresh_db(
     router.add("POST", r"/v1/agents", on_agent_create)
     client = build_fake_anthropic_http(router.dispatch)
 
-    report = await apply_defaults(
-        db_session_factory, client, tmp_path, dry_run=False, run_preflight=False
-    )
+    report = await _apply_defaults(db_session_factory, client, tmp_path)
 
     assert report.skills == []
     assert [o.action for o in report.environments] == [Action.CREATED]
@@ -163,12 +165,8 @@ async def test_apply_second_run_skips_everything(
             ).model_dump(mode="json"),
         ),
     )
-    first = await apply_defaults(
-        db_session_factory,
-        build_fake_anthropic_http(router1.dispatch),
-        tmp_path,
-        dry_run=False,
-        run_preflight=False,
+    first = await _apply_defaults(
+        db_session_factory, build_fake_anthropic_http(router1.dispatch), tmp_path
     )
     assert first.skills == []
     assert [o.action for o in first.environments] == [Action.CREATED]
@@ -204,9 +202,7 @@ async def test_apply_second_run_skips_everything(
     )
     client2 = build_fake_anthropic_http(router2.dispatch)
 
-    second = await apply_defaults(
-        db_session_factory, client2, tmp_path, dry_run=False, run_preflight=False
-    )
+    second = await _apply_defaults(db_session_factory, client2, tmp_path)
 
     assert second.skills == []
     assert [o.action for o in second.environments] == [Action.UPDATED]
@@ -226,9 +222,7 @@ async def test_apply_hard_fails_when_agent_references_unknown_skill(
     client = build_fake_anthropic_http(MARouter().dispatch)
 
     with pytest.raises(DefaultsError, match="unknown skill"):
-        await apply_defaults(
-            db_session_factory, client, tmp_path, dry_run=False, run_preflight=False
-        )
+        await _apply_defaults(db_session_factory, client, tmp_path)
 
 
 async def test_apply_dry_run_reports_actions_without_writes(
@@ -277,9 +271,7 @@ async def test_apply_without_config_yaml_reports_empty_system_config(
     )
     client = build_fake_anthropic_http(router.dispatch)
 
-    report = await apply_defaults(
-        db_session_factory, client, tmp_path, dry_run=False, run_preflight=False
-    )
+    report = await _apply_defaults(db_session_factory, client, tmp_path)
 
     assert report.system_config == []
 
@@ -317,9 +309,7 @@ async def test_apply_reports_failed_without_traceback_when_reconcile_raises_daim
     client = build_fake_anthropic_http(router.dispatch)
 
     with structlog.testing.capture_logs() as logs:
-        report = await apply_defaults(
-            db_session_factory, client, tmp_path, dry_run=False, run_preflight=False
-        )
+        report = await _apply_defaults(db_session_factory, client, tmp_path)
 
     assert [o.action for o in report.environments] == [Action.FAILED]
     assert report.environments[0].error == "environment blew up on purpose"
@@ -370,9 +360,7 @@ async def test_apply_reports_failed_with_scrubbed_error_when_reconcile_raises_ty
     client = build_fake_anthropic_http(router.dispatch)
 
     with structlog.testing.capture_logs() as logs:
-        report = await apply_defaults(
-            db_session_factory, client, tmp_path, dry_run=False, run_preflight=False
-        )
+        report = await _apply_defaults(db_session_factory, client, tmp_path)
 
     assert [o.action for o in report.environments] == [Action.FAILED]
     assert report.environments[0].error == "internal error: TypeError"
@@ -405,15 +393,9 @@ async def test_apply_sweeps_previously_seeded_brainstorming_skill(
     tenant_id_str = str(tenant_id)
     brainstorming_title = tenant_scoped_display_title(tenant_id=tenant_id, name="brainstorming")
 
-    existing_skill = SkillListResponse(
-        id="sk_old",
-        type="custom",
-        display_title=brainstorming_title,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    existing_skill = skill_listed(id="sk_old", display_title=brainstorming_title).model_dump(
+        mode="json"
+    )
     existing_agent = ma_agent(
         id="ag_old",
         name="daimon",
@@ -464,9 +446,7 @@ async def test_apply_sweeps_previously_seeded_brainstorming_skill(
 
     client = build_fake_anthropic_http(router.dispatch)
 
-    report = await apply_defaults(
-        db_session_factory, client, tmp_path, dry_run=False, run_preflight=False
-    )
+    report = await _apply_defaults(db_session_factory, client, tmp_path)
 
     assert [o.action for o in report.agents] == [Action.UPDATED]
     assert len(update_requests) == 1, "agent update must be called exactly once"
@@ -501,10 +481,9 @@ async def test_sweep_spares_a_skill_only_a_channel_rule_adds(
             actor_account_id=None,
         )
     title = tenant_scoped_display_title(tenant_id=tenant_id, name="qa-haiku-canary")
-    skill = SkillListResponse(
+    skill = skill_listed(
         id="sk_chan",
         display_title=title,
-        source="custom",
         type="skill",
         created_at="2026-01-01T00:00:00Z",
         updated_at="2026-01-01T00:00:00Z",
@@ -519,9 +498,7 @@ async def test_sweep_spares_a_skill_only_a_channel_rule_adds(
     )
     client = build_fake_anthropic_http(router.dispatch)
 
-    report = await apply_defaults(
-        db_session_factory, client, tmp_path, dry_run=dry_run, run_preflight=False
-    )
+    report = await _apply_defaults(db_session_factory, client, tmp_path, dry_run=dry_run)
 
     assert not report.is_failure(), report
     assert [o for o in report.skills if o.action is Action.DELETED] == []
@@ -554,8 +531,6 @@ async def test_a_failed_channel_skills_read_reports_the_skill_sweep_failed(
     monkeypatch.setattr(_reconcile, "sweep_removed_skills", sweep_must_not_run)
     client = build_fake_anthropic_http(_full_router().dispatch)
 
-    report = await apply_defaults(
-        db_session_factory, client, tmp_path, dry_run=dry_run, run_preflight=False
-    )
+    report = await _apply_defaults(db_session_factory, client, tmp_path, dry_run=dry_run)
 
     assert any(o.action is Action.FAILED and o.name == "<sweep>" for o in report.skills)

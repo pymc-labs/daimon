@@ -17,8 +17,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
-from email.parser import BytesParser
-from email.policy import default
+from functools import partial
 
 import httpx
 import pytest
@@ -46,6 +45,7 @@ from daimon.core.stores.user_skills import (
     upsert_user_skill,
 )
 from daimon.testing.archives import make_tarball
+from daimon.testing.builders import skill_listed
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_cli_principal
 from daimon.testing.ma_models import ma_agent
@@ -57,21 +57,15 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..shared_fakes import assert_skill_multipart as _assert_skill_multipart
 
-def _assert_skill_multipart(request: httpx.Request) -> bytes:
-    """Pin the old SDK file tuple at the actual host upload call site."""
-    message = BytesParser(policy=default).parsebytes(
-        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
-    )
-    files = [part for part in message.iter_parts() if part.get_filename() is not None]
-    assert len(files) == 1
-    part = files[0]
-    assert part.get_param("name", header="content-disposition") == "files[]"
-    assert part.get_filename() == "SKILL.zip"
-    assert part.get_content_type() == "application/zip"
-    data = part.get_payload(decode=True)
-    assert isinstance(data, bytes)
-    return data
+_upsert_user_skill = partial(
+    upsert_user_skill,
+    agent_name="agent",
+    source_repo_branch="main",
+    source_path="",
+    anthropic_latest_version="1",
+)
 
 
 async def test_bound_sync_target_rejects_archived_or_foreign_agent() -> None:
@@ -199,15 +193,7 @@ async def test_first_sync_creates_new_skill(
         create_calls.append(req)
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="anything",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="anything").model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -257,18 +243,14 @@ async def test_subsequent_sync_with_changed_content_uploads_new_version(
     # Seed an existing row with a stale content_hash.
     # Bundled name is owner-qualified: github.com/o/r → "o-r".
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="o-r",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_old_does_not_match",
             anthropic_id="sk_old",
-            anthropic_latest_version="1",
         )
 
     tarball = make_tarball(
@@ -363,18 +345,14 @@ async def test_dedup_skips_upload_when_content_hash_matches(
     seed_hash = hashlib.sha256(zip_bytes).hexdigest()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name=entry.name,
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash=seed_hash,
             anthropic_id="sk_existing",
-            anthropic_latest_version="1",
         )
 
     http_client = httpx.AsyncClient(
@@ -435,15 +413,7 @@ async def test_re_run_no_changes_yields_zero_synced_zero_updated(
         create_count += 1
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_first",
-                type="custom",
-                display_title="anything",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_first", display_title="anything").model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -506,15 +476,7 @@ async def test_upload_concurrency_capped_at_six(
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_x",
-                type="custom",
-                display_title="x",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_x", display_title="x").model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -714,17 +676,7 @@ async def test_duplicate_display_title_recovery_lands_a_new_version(
     def on_list(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         list_calls.append(req)
         return _list_envelope(
-            [
-                SkillListResponse(
-                    id="sk_orphan",
-                    type="custom",
-                    display_title=formatted_title,
-                    latest_version="3",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    source="custom",
-                )
-            ]
+            [skill_listed(id="sk_orphan", display_title=formatted_title, latest_version="3")]
         )
 
     def on_version(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -802,15 +754,7 @@ async def test_recovery_raises_skills_list_truncated_error_on_full_page(
     # A full page — triggers SkillsListTruncatedError in strict mode. Sized off
     # the constant so raising the limit cannot turn this into a partial page.
     full_page = [
-        SkillListResponse(
-            id=f"sk_{i:03d}",
-            type="custom",
-            display_title=f"unrelated-{i}",
-            latest_version="1",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-            source="custom",
-        )
+        skill_listed(id=f"sk_{i:03d}", display_title=f"unrelated-{i}")
         for i in range(_SKILLS_PAGE_LIMIT)
     ]
 
@@ -988,31 +932,23 @@ async def test_orphan_delete_only_fires_for_successfully_fetched_repos(
 
     # Seed two existing rows: one for r1 (will be orphaned), one for r2 (untouched).
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="orphan_from_r1",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_r1",
-            anthropic_latest_version="1",
         )
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="kept_from_r2",
             source_repo_url="https://github.com/o/r2",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r2",
             anthropic_id="sk_r2",
-            anthropic_latest_version="1",
         )
 
     # r1 fetches an empty tarball — no SKILL.md, split=True → bundler returns [].
@@ -1081,18 +1017,14 @@ async def test_orphan_delete_skipped_when_repo_fetch_failed(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="transient_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_transient",
-            anthropic_latest_version="1",
         )
 
     http_client = httpx.AsyncClient(
@@ -1153,18 +1085,14 @@ async def test_orphan_delete_local_row_survives_when_ma_delete_fails(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="doomed_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_doomed",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1235,18 +1163,14 @@ async def test_orphan_delete_retries_and_succeeds_on_second_sync(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="retry_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_retry",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1336,18 +1260,14 @@ async def test_orphan_delete_404_treated_as_already_deleted(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="gone_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_gone",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1423,18 +1343,14 @@ async def test_orphan_delete_transient_failure_retains_row_without_poisoning_att
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_transient")
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="transient_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_transient",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1550,18 +1466,14 @@ async def test_orphan_delete_lingering_row_dedups_readded_skill(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="collision_skill",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_collision",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1630,15 +1542,7 @@ async def test_sync_agent_skills_attaches_uploaded_skills_to_ma_agent(
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="agent/r",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="agent/r").model_dump(mode="json"),
         )
 
     def on_list_agents(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -1748,18 +1652,14 @@ async def test_sync_agent_skills_attach_is_noop_when_skill_already_attached(
     seed_hash = hashlib.sha256(zip_bytes).hexdigest()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name=entry.name,
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash=seed_hash,
             anthropic_id="sk_existing",
-            anthropic_latest_version="1",
         )
 
     http_client = httpx.AsyncClient(
@@ -1836,15 +1736,7 @@ async def test_sync_agent_skills_skips_attach_when_agent_not_found(
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="agent/r",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="agent/r").model_dump(mode="json"),
         )
 
     # MA list_agents returns no match for this tenant/name.
@@ -1959,15 +1851,7 @@ async def test_bundled_sync_two_repos_same_trailing_segment_keeps_both_skills(
             display_title = "agent/orgb-skills"
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id=sk_id,
-                type="custom",
-                display_title=display_title,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=sk_id, display_title=display_title).model_dump(mode="json"),
         )
 
     delete_calls: list[httpx.Request] = []
@@ -2112,15 +1996,7 @@ async def test_sync_creates_two_distinct_skills_when_two_tenants_sync_same_named
         sk_id = f"sk_{_create_id_counter[0]:03d}"
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id=sk_id,
-                type="custom",
-                display_title="placeholder",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=sk_id, display_title="placeholder").model_dump(mode="json"),
         )
 
     def on_version(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -2244,15 +2120,7 @@ async def test_recovery_refuses_to_push_version_onto_foreign_tenant_skill(
         "test setup: foreign title must not share caller tenant prefix"
     )
 
-    foreign_skill = SkillListResponse(
-        id="sk_foreign",
-        type="custom",
-        display_title=foreign_title,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    )
+    foreign_skill = skill_listed(id="sk_foreign", display_title=foreign_title)
 
     version_calls: list[httpx.Request] = []
 
@@ -2334,18 +2202,14 @@ async def test_attach_adds_base_toolset_when_agent_lacks_it(
 
     # Seed a user_skills row so the attach step fires.
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_new",
-            anthropic_latest_version="1",
         )
 
     # Toolless agent — no tools at all.
@@ -2421,18 +2285,14 @@ async def test_attach_sends_skills_only_when_agent_has_base_toolset(
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_with_toolset")
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_new",
-            anthropic_latest_version="1",
         )
 
     from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -2534,18 +2394,14 @@ async def test_attach_retries_once_on_version_conflict(
 
     # Row to attach.
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_target",
-            anthropic_latest_version="1",
         )
 
     # Initial list response: agent has no skills yet.
@@ -2666,18 +2522,14 @@ async def test_attach_over_cap_records_failure_instead_of_raising(
 
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_cap")
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_target",
-            anthropic_latest_version="1",
         )
 
     agent_payload = ma_agent(
@@ -2757,15 +2609,7 @@ async def test_first_sync_refuses_create_when_registry_skill_takes_the_mount_nam
     )
 
     registry_title = tenant_scoped_display_title(tenant_id=cli.tenant_id, name="o-r")
-    registry_skill = SkillListResponse(
-        id="sk_registry",
-        type="custom",
-        display_title=registry_title,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    )
+    registry_skill = skill_listed(id="sk_registry", display_title=registry_title)
 
     create_calls: list[httpx.Request] = []
 
@@ -2818,18 +2662,14 @@ async def test_attach_refuses_union_when_legacy_registry_skill_shares_mount_name
 
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_coll")
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_scoped",
-            anthropic_latest_version="1",
         )
 
     agent_payload = ma_agent(
@@ -2841,25 +2681,15 @@ async def test_attach_refuses_union_when_legacy_registry_skill_shares_mount_name
         version=10,
     ).model_dump(mode="json")
 
-    registry_skill = SkillListResponse(
+    registry_skill = skill_listed(
         id="sk_registry",
-        type="custom",
         display_title=tenant_scoped_display_title(tenant_id=cli.tenant_id, name="my-skill"),
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
     )
-    scoped_skill = SkillListResponse(
+    scoped_skill = skill_listed(
         id="sk_scoped",
-        type="custom",
         display_title=tenant_scoped_display_title(
             tenant_id=cli.tenant_id, name="my-skill", agent_name="agent"
         ),
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
     )
 
     update_calls: list[httpx.Request] = []
@@ -2957,15 +2787,9 @@ async def test_sync_duplicate_name_across_repos_still_uploads_every_other_skill(
         created_titles.append(title)
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id=f"sk_{len(created_titles)}",
-                type="custom",
-                display_title=title,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=f"sk_{len(created_titles)}", display_title=title).model_dump(
+                mode="json"
+            ),
         )
 
     router = MARouter()
@@ -3022,18 +2846,15 @@ async def test_sync_never_replaces_a_skill_added_by_hand(
     await db_session.commit()
     fernet = make_fernet()
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="o-r",
             source_repo_url="",
             source_repo_branch="",
-            source_path="",
             content_hash="uploaded",
             anthropic_id="sk_up",
-            anthropic_latest_version="1",
             source="upload",
         )
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
@@ -3091,15 +2912,7 @@ async def test_sync_never_reattaches_a_detached_upload(
     http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
     )
-    created = SkillListResponse(
-        id="sk_new",
-        type="custom",
-        display_title="agent/r",
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    created = skill_listed(id="sk_new", display_title="agent/r").model_dump(mode="json")
     agent = ma_agent(id="ag_target", name="agent", tenant_id=cli.tenant_id, version=7)
     updates: list[dict[str, object]] = []
 

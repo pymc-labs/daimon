@@ -285,11 +285,12 @@ agent.
 | `setup` | Manage agents and who answers where; connect coding tools and mint operator tokens (admins). |
 | `here` | Show who answers here, what it can read and whether publishing needs approval. |
 | `settings` | In a channel post, see and change every feature for the post, its channel or the organisation; see [features](features.md). |
+| `model` | Pick the model for the conversation you send it in. A different provider shows what changes and asks once. |
 | `routines` | List routines (admins see all); admins create, and admins and creators pause, resume or delete. |
 | `memory` | Show what the agent remembers here. `memory mine` shows your personal memory, and `memory forget-mine` clears it after a code. |
 | `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
 | `billing` | Your usage and credit left. Admins also see spend, channel budgets and can add credit. |
-| `support` | Ask a person, spending one support credit. |
+| `support` | Ask a person; the [limits and menu](support.md) set the cost. |
 
 Platform admins are the owners of the admin team. The app must be
 installed in that team so Daimon can read its owners. See

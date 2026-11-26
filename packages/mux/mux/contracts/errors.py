@@ -8,6 +8,9 @@ comes back as a receipt whose status is `outcome_unknown`.
 
 from __future__ import annotations
 
+import math
+import re
+from collections.abc import Collection
 from typing import Literal
 
 ProviderErrorCategory = Literal[
@@ -125,6 +128,17 @@ class MigrationUnsupported(MuxError):
         self.thread_id = thread_id
 
 
+DEFAULT_RETRY_AFTER_S = 30.0
+MAX_RETRY_AFTER_S = 600.0
+
+
+def bounded_retry_after(seconds: float | None) -> float:
+    """A 429's wait: the provider's own hint, else 30 s, never more than 10 minutes."""
+    if seconds is None or not math.isfinite(seconds):
+        return DEFAULT_RETRY_AFTER_S
+    return min(max(seconds, 0.0), MAX_RETRY_AFTER_S)
+
+
 class ProviderError(MuxError):
     """A provider call failed, normalized. `native_code` is the provider's own code."""
 
@@ -138,6 +152,7 @@ class ProviderError(MuxError):
         native_message: str | None = None,
         native_error_code: str | None = None,
         native_param: str | None = None,
+        retry_after_s: float | None = None,
     ) -> None:
         super().__init__(
             f"provider error: {category}" + (f" ({native_code})" if native_code else "")
@@ -149,9 +164,79 @@ class ProviderError(MuxError):
         self.native_message = native_message
         self.native_error_code = native_error_code
         self.native_param = native_param
+        # A rate limit that refills: seconds until the provider will accept calls again.
+        self.retry_after_s = retry_after_s
+
+
+_TOKENS = re.compile(
+    r"\0+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+"
+    r"|AIza[A-Za-z0-9_-]{20,}|Bearer\s+[^\s\"']+",
+    re.IGNORECASE,
+)
+# A quoted span in a provider's message usually echoes a request value. An escaped
+# quote stays inside its span; an unclosed quote masks to the end. A single quote
+# opens a span only after a non-word character, so an apostrophe never does.
+_QUOTED = re.compile(r"""(?:"|(?<!\w)')""")
+_SPAN = {'"': re.compile(r'"(?:[^"\\]|\\.)*(?:"|$)', re.DOTALL)}
+_SPAN["'"] = re.compile(r"'(?:[^'\\]|\\.)*(?:'|$)", re.DOTALL)
+# A field name Google quotes (`'last_event_id'`) says where, never what: kept.
+_FIELD = re.compile(r"[A-Za-z0-9_.\[\]-]{1,64}")
+
+
+def _mask_quoted(value: str) -> str:
+    out: list[str] = []
+    at = 0
+    while (start := _QUOTED.search(value, at)) is not None:
+        quote = start.group()
+        span = _SPAN[quote].match(value, start.start())
+        assert span is not None  # the opening quote always matches
+        inner = span.group()[1:]
+        inner = inner[:-1] if inner.endswith(quote) and len(span.group()) > 1 else inner
+        kept = quote == "'" and _FIELD.fullmatch(inner) is not None
+        out += [value[at : start.start()], quote, inner if kept else "[redacted]", quote]
+        at = span.end()
+    return "".join(out) + value[at:]
+
+
+def redact_native_text(
+    value: object,
+    secrets: Collection[str] = (),
+    *,
+    identifier: bool = False,
+    values: bool = False,
+    limit: int = 512,
+) -> str | None:
+    """A provider's error text that is safe to log, or None.
+
+    Masks known secrets, any 8+ character fragment of one, tokens, API keys and
+    URLs. `values` also masks quoted spans, which echo request values
+    (prompt text among them), except a quoted field name. `identifier` keeps
+    only a bare identifier. The result is one line of at most `limit`
+    characters.
+    """
+    if not isinstance(value, str):
+        return None
+    masked = [False] * len(value)
+    for secret in filter(None, secrets):
+        size = min(len(secret), 8)
+        for part in {secret[i : i + size] for i in range(len(secret) - size + 1)}:
+            start = value.find(part)
+            while start >= 0:
+                masked[start : start + size] = [True] * size
+                start = value.find(part, start + 1)
+    value = "".join("\0" if hidden else char for char, hidden in zip(value, masked, strict=True))
+    value = _TOKENS.sub("[redacted]", value)
+    value = re.sub(r"https?://[^\s\"']+", "[redacted URL]", value)
+    if values:
+        value = _mask_quoted(value)
+    if identifier and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,128}", value) is None:
+        return None
+    return " ".join(value.split())[:limit]
 
 
 __all__ = [
+    "DEFAULT_RETRY_AFTER_S",
+    "MAX_RETRY_AFTER_S",
     "BindingConflict",
     "ContinuityLost",
     "ExtensionVersionError",
@@ -164,4 +249,6 @@ __all__ = [
     "ProviderErrorCategory",
     "ScopeViolation",
     "UnsupportedCapability",
+    "bounded_retry_after",
+    "redact_native_text",
 ]

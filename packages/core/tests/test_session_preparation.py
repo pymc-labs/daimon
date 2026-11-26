@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -41,14 +41,13 @@ from daimon.adapters.mcp.tools._ctx import _admission_recheck
 from daimon.adapters.mcp.tools.agent_chat import _continue_turn_impl
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings, load_turn_settings
+from daimon.core.config import McpSettings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ResolvedConfig
+from daimon.core.scope import ChannelScopeRef, ResolvedConfig
 from daimon.core.session_preparation import (
     PreparationBusy,
     PreparationDeferred,
@@ -61,7 +60,7 @@ from daimon.core.session_snapshot import hash_env_bytes, hash_tools
 from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import (
     get_memory_store_id,
     get_personal_memory_store_id,
@@ -83,6 +82,7 @@ from daimon.core.stores.thread_sessions import (
 )
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, has_confirmation_gate
 from daimon.core.turn.admission import Admission
+from daimon.core.turn.carry_over import adoption_predecessor
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
@@ -93,12 +93,19 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
-from daimon.core.turn_hold import RequesterOrg, TurnHold
+from daimon.core.turn_hold import TurnHold
 from daimon.core.usage_sweep import settle_stamped_session
+from daimon.testing.builders import admit_chat, new_agent_file, new_thread_session, plain_turn_deps
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.membership import FixtureMembershipResolver
+from daimon.testing.turn_fakes import run_prepared
+from mux.contracts.ids import ChannelRef, ThreadRef
+from mux.contracts.resources import ProviderBinding
+from mux.state.lease import Slot
+from mux.state.memory import MemoryStateStore
+from mux.state.store import released_successor
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
@@ -118,6 +125,21 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import QueuePool
 from structlog.testing import capture_logs
+
+_binding = partial(
+    create_binding,
+    platform="discord",
+    thread_id="thread-1",
+    responder_ma_agent_id="ag_successor",
+    responder_name="research-bot",
+    kind="handoff",
+)
+
+
+_prepared_replacement = partial(
+    PreparedReplacement, extra_resources=(), transfer_file_id=None, transfer_kind="transcript"
+)
+
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _AGENT_ID = "ag_prep"
@@ -188,6 +210,8 @@ class _Transport:
         self.refuse_skill: str | None = None
         self.fail_shared_memory_create = False
         self.retrieve_error: int | None = None
+        # Extra transport handlers, tried after the recorder and before the stock fakes.
+        self.extra_handlers: list[Any] = []
         _register(self.state, _agent())
 
     @property
@@ -267,6 +291,7 @@ class _Transport:
         return build_fake_anthropic(
             combine_handlers(
                 _record,
+                *self.extra_handlers,
                 make_fake_sessions_handler(self.state),
                 make_fake_memory_store_handler(),
                 make_fake_ma_handler(self.state.ma),
@@ -288,22 +313,8 @@ async def _settle_every_session(
 
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
-    return TurnDeps(
-        membership_resolver=FixtureMembershipResolver("user-1"),
-        anthropic=transport.client(),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
+    return plain_turn_deps(
+        transport.client(), sessionmaker, membership_resolver=FixtureMembershipResolver("user-1")
     )
 
 
@@ -524,14 +535,10 @@ class _SendGates:
         if len(self.arrived) >= self.threshold:
             self.reached.set()
 
-    def assert_turn_path(self, deps: TurnDeps, *, prepared_entry: bool) -> None:
-        """A prepared turn took the lease exactly when the mux path ran it."""
+    def assert_turn_path(self, *, prepared_entry: bool) -> None:
+        """A prepared turn took the binding lease."""
         if prepared_entry:
-            on_mux = (deps.turn_path or load_turn_settings().path) == "mux"
-            assert bool(self.lease_tasks) == on_mux, (
-                f"turn path {deps.turn_path or load_turn_settings().path!r}: "
-                f"{len(self.lease_tasks)} sends took the binding lease"
-            )
+            assert self.lease_tasks, "no send took the binding lease"
 
 
 def _observe_send_gates(monkeypatch: pytest.MonkeyPatch, *, threshold: int) -> _SendGates:
@@ -639,6 +646,59 @@ async def test_a_foreign_daimon_server_is_healed_at_the_bind_and_in_the_update(
     ] == [_PUBLIC_URL], "the update pushes the healed server"
     fourth = await prepare(changed)
     assert fourth.continuity == ContinuityOutcome(), "and that reads as current after"
+
+
+@pytest.mark.parametrize("held", [True, False])
+async def test_a_session_does_not_keep_identity_servers_for_a_turn_in_a_contained_room(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    held: bool,
+) -> None:
+    """A room that became contained drops the signed-identity servers: the reused provider
+    session loses them too (an update or a replacement), not only the admission's agent."""
+    from daimon.core.relay_scope import without_identity_relays
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    payload = _agent_with_servers().model_dump(mode="json")
+    payload["mcp_servers"].append(
+        {"type": "url", "name": "grove", "url": "https://daimon.example/mcp-identity/grove"}
+    )
+    payload["tools"].append(_toolset("grove"))
+    agent = BetaManagedAgentsAgent.model_validate(payload)
+    _register(transport.state, agent)
+    deps = _gated_deps(db_session_factory, transport)
+    stripped, names = without_identity_relays(agent, public_url=_PUBLIC_URL)
+    assert names == {"grove"}
+
+    first = await _prepare(
+        deps, _admission(account=account, agent=agent), tenant=tenant, account=account
+    )
+    assert isinstance(first, PreparedTurn)
+    assert "grove" in {
+        s.name for s in transport.state.sessions[first.ma_session_id].agent.mcp_servers
+    }
+
+    hold = TurnHold(platform="discord", channel_id="C-1", client=False)
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account, agent=stripped), hold=hold if held else None),
+        tenant=tenant,
+        account=account,
+    )
+
+    assert isinstance(second, PreparedTurn)
+    assert second.continuity != ContinuityOutcome(), "the session is not reused unchanged"
+    if second.ma_session_id == first.ma_session_id:
+        # Reused: the provider session is updated in place, without the identity server.
+        [update] = transport.updates
+        assert {s["name"] for s in update["agent"]["mcp_servers"]} == {"daimon-mcp", "linear"}
+        assert "grove" not in {t.get("mcp_server_name") for t in update["agent"]["tools"]}
+    else:
+        live = transport.state.sessions[second.ma_session_id].agent.mcp_servers
+        assert "grove" not in {s.name for s in live}
 
 
 @pytest.mark.parametrize("first_held", [False, True])
@@ -945,9 +1005,7 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         await recorder(event=event)
         missed = event.model_copy(update={"id": "evt_checkpoint_missed"})
         transport.state.events[old_session_id].append(missed.model_dump(mode="json"))
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="history", user_prefix=""
-        )
+        return _prepared_replacement(transfer_kind="history", user_prefix="")
 
     monkeypatch.setattr(WorkspaceTransferRunner, "__call__", checkpoint)
     runner = WorkspaceTransferRunner(
@@ -1166,14 +1224,7 @@ async def test_a_new_key_is_swapped_into_the_live_session_without_replacing_it(
     assert row is not None
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID)
     async with db_session_factory() as session, session.begin():
-        await put_agent_file(
-            session,
-            tenant_id=tenant.id,
-            agent_id=agent_uuid,
-            key="TOGGL_TOKEN",
-            content="tok",
-            set_by_account_id=None,
-        )
+        await new_agent_file(session, tenant, agent_id=agent_uuid, key="TOGGL_TOKEN", content="tok")
 
     second = await _prepare(deps, admission, tenant=tenant, account=account)
 
@@ -1250,13 +1301,12 @@ async def test_an_in_place_change_is_deferred_while_a_turn_is_running(
     assert row is not None
 
     async with db_session_factory() as session, session.begin():
-        await put_agent_file(
+        await new_agent_file(
             session,
-            tenant_id=tenant.id,
+            tenant,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID),
             key="KEY",
             content="v",
-            set_by_account_id=None,
         )
         await mark_turn_active(session, id=row.id, active_turn_message_id="msg-in-flight", now=_NOW)
     before = len(transport.calls)
@@ -1485,6 +1535,113 @@ async def test_a_fresh_start_retires_the_old_row_and_carries_nothing(
     assert retired.status == "retired", "a fresh start retires the old row, it is not superseded"
     assert retired.fresh_start_requested_at is None, "the request is cleared once honoured"
     assert second.continuity.applied == (), "a fresh start is not a configuration change"
+
+
+async def _released_openai(store: MemoryStateStore, slot: Slot, *, at: datetime) -> None:
+    old = ProviderBinding(
+        id=f"binding-{slot.thread.thread_id}",
+        thread=slot.thread,
+        provider="openai",
+        profile="openai.persistent_workspace",
+        native_refs={"session": f"openai-{slot.thread.thread_id}", "account_scope": "scope-1"},
+        generation=1,
+        config_revision=1,
+        legacy_account_id=slot.account_id,
+    )
+    await store.put_binding(old, expected_generation=0)
+    await store.put_binding(released_successor(old, released_at=at), expected_generation=1)
+
+
+def _carry_finder(
+    deps: TurnDeps, store: MemoryStateStore, slot: Slot, *, tenant: TenantRow, account: AccountRow
+) -> Any:
+    """A `find_carry_over` that looks the predecessor up as the bind does."""
+    request = SimpleNamespace(
+        deps=deps,
+        admission=SimpleNamespace(backend_revision=None),
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=slot.thread.thread_id,
+        session_account_id=account.id,
+        reuse_existing=True,
+        now=lambda: datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    async def find() -> Any:
+        found = await adoption_predecessor(cast(Any, request), store, slot)
+        if found is None:
+            return None
+
+        async def seed(session_id: str) -> ContinuityOutcome:
+            return ContinuityOutcome(
+                state="replaced", user_prefix=f"carried {found.native_refs['session']}"
+            )
+
+        return seed
+
+    return find
+
+
+async def test_a_move_back_to_claude_carries_the_earlier_provider_on_both_create_paths(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The predecessor is found before the new row commits: found after, the new row is
+    newer than the release and the move from OpenAI would carry nothing."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    admission = _admission(account=account)
+    store = MemoryStateStore()
+
+    def slot(thread_id: str) -> Slot:
+        channel = ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="c")
+        return Slot(thread=ThreadRef(channel=channel, thread_id=thread_id), account_id="a")
+
+    await _released_openai(store, slot("thread-1"), at=datetime.now(UTC) - timedelta(minutes=1))
+    first = await prepare_session_for_turn(
+        deps,
+        admission,
+        ops=_OPS,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-1",
+        session_account_id=account.id,
+        reuse_existing=True,
+        now=lambda: _NOW,
+        find_carry_over=_carry_finder(
+            deps, store, slot("thread-1"), tenant=tenant, account=account
+        ),
+    )
+    assert isinstance(first, PreparedTurn), first
+    assert first.continuity.user_prefix == "carried openai-thread-1", "new thread carried nothing"
+
+    # A thread that ran on Claude, moved to OpenAI, and is now back: a fresh start.
+    earlier = await _prepare(deps, admission, tenant=tenant, account=account, thread_id="t-2")
+    assert isinstance(earlier, PreparedTurn), earlier
+    await _released_openai(store, slot("t-2"), at=datetime.now(UTC))
+    row = await _live_row(db_session_factory, tenant=tenant, account=account, thread_id="t-2")
+    assert row is not None, "the earlier Claude session is live"
+    async with db_session_factory() as session, session.begin():
+        await request_fresh_start(session, id=row.id, at=_NOW)
+    back = await prepare_session_for_turn(
+        deps,
+        admission,
+        ops=_OPS,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="t-2",
+        session_account_id=account.id,
+        reuse_existing=True,
+        now=lambda: _NOW,
+        find_carry_over=_carry_finder(deps, store, slot("t-2"), tenant=tenant, account=account),
+    )
+    assert isinstance(back, PreparedTurn), back
+    assert back.ma_session_id != earlier.ma_session_id, "the fresh start makes a new session"
+    assert back.continuity.user_prefix == "carried openai-t-2", "fresh start carried nothing"
 
 
 async def test_a_marked_active_session_is_not_returned_for_reuse(
@@ -2054,13 +2211,12 @@ async def test_two_callers_in_one_thread_each_refresh_only_their_own_session(
     their_resources_before = list(transport.state.resources[theirs.ma_session_id])
 
     async with db_session_factory() as session, session.begin():
-        await put_agent_file(
+        await new_agent_file(
             session,
-            tenant_id=tenant.id,
+            tenant,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID),
             key="KEY",
             content="v",
-            set_by_account_id=None,
         )
 
     refreshed = await _prepare(
@@ -2092,10 +2248,9 @@ async def test_a_legacy_row_without_a_snapshot_is_backfilled_and_reused(
     created = await client.beta.sessions.create(agent=_AGENT_ID, environment_id=_ENV_ID)
 
     async with db_session_factory() as session, session.begin():
-        legacy = await create_thread_session(
+        legacy = await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id=created.id,
@@ -2141,10 +2296,9 @@ async def test_retired_github_key_session_starts_fresh_without_its_env_mount(
     assert any(resource.type == "file" for resource in transport.state.resources[created.id])
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID)
     async with db_session_factory() as session, session.begin():
-        mapping = await create_thread_session(
+        mapping = await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id=created.id,
@@ -2235,16 +2389,7 @@ async def test_a_responder_change_authorized_by_a_handoff_binding_replaces_the_s
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel-1",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="channel-1")
 
     handed = await _prepare(
         deps,
@@ -2285,16 +2430,7 @@ async def test_a_responder_change_does_not_run_the_new_agent_on_the_old_agents_s
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel-1",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="channel-1")
         await mark_turn_active(
             session, id=old_row.id, active_turn_message_id="msg-in-flight", now=_NOW
         )
@@ -2340,16 +2476,7 @@ async def test_a_responder_change_proceeds_once_the_turn_marker_has_gone_stale(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel-1",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="channel-1")
         await mark_turn_active(
             session,
             id=old_row.id,
@@ -2395,12 +2522,7 @@ async def test_the_callers_unsaved_work_answer_reaches_the_transfer_hook_once(
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         seen.append(kwargs["unsaved_work"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="",
-        )
+        return _prepared_replacement(user_prefix="")
 
     moved = _agent(model_id="claude-opus-5")
     _register(transport.state, moved)
@@ -2437,12 +2559,7 @@ async def test_a_caller_who_was_never_asked_carries_no_unsaved_work_answer(
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         seen.append(kwargs["unsaved_work"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="",
-        )
+        return _prepared_replacement(user_prefix="")
 
     moved = _agent(model_id="claude-opus-5")
     _register(transport.state, moved)
@@ -2630,24 +2747,25 @@ def test_only_a_mounted_store_that_changes_is_a_memory_boundary(
 
 
 @pytest.mark.parametrize(
-    ("sealed", "is_dm", "dm_read_only", "expected"),
+    ("sealed", "is_dm", "dm_read_only", "expected", "platform"),
     [
-        (False, False, False, False),
-        (True, False, False, True),
-        (False, True, False, False),
-        (False, True, True, True),
+        (False, False, False, False, "discord"),
+        (True, False, False, True, "discord"),
+        (False, True, False, False, "discord"),
+        (False, True, True, True, "discord"),
+        (False, True, True, True, "teams"),
     ],
-    ids=["open-channel", "sealed-thread", "open-dm", "restricted-dm"],
+    ids=["open-channel", "sealed-thread", "open-dm", "restricted-dm", "restricted-teams-chat"],
 )
 async def test_admission_origin_controls_the_actual_memory_mount(
     sealed: bool,
     is_dm: bool,
     dm_read_only: bool,
     expected: bool,
+    platform: str,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.core.turn.admission import admit
     from daimon.testing.factories import make_ledger_entry, make_tenant_config
     from daimon.testing.ma import resolved_agent_env_router
 
@@ -2667,7 +2785,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
         db_session,
         None,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         key="dm_memory_read_only",
         value="on" if dm_read_only else "off",
         account_id=None,
@@ -2682,13 +2800,10 @@ async def test_admission_origin_controls_the_actual_memory_mount(
     admission_deps = replace(
         deps, anthropic=build_fake_anthropic(resolved_agent_env_router(agent, environment).dispatch)
     )
-    admission = await admit(
+    admission = await admit_chat(
         admission_deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="user-1",
+        tenant,
+        platform=platform,
         channel_id="channel-1",
         thread_id="thread-1",
         is_dm=is_dm,
@@ -2698,7 +2813,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id="thread-1",
         session_account_id=admission.account_id,
     )
@@ -2715,10 +2830,9 @@ async def test_restricted_turn_replaces_a_missing_legacy_session_safely(
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    legacy = await create_thread_session(
+    legacy = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-1",
         account_id=account.id,
         ma_session_id="ses_gone",
@@ -2840,12 +2954,7 @@ async def test_a_transcript_or_bundle_transfer_keeps_the_predecessors_seal(
     assert isinstance(first, PreparedTurn)
 
     async def _transfer(**_kwargs: Any) -> PreparedReplacement:
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="Carrying the transcript over.",
-        )
+        return _prepared_replacement(user_prefix="Carrying the transcript over.")
 
     moved = _agent(model_id="claude-opus-5")
     _register(transport.state, moved)
@@ -2880,16 +2989,7 @@ async def test_a_handoff_successor_keeps_the_predecessors_seal(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="vault",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="vault")
 
     handed = await _prepare(
         deps,
@@ -2947,10 +3047,9 @@ async def test_a_successor_of_an_unreadable_predecessor_is_sealed_to_its_thread(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     async with db_session_factory() as session, session.begin():
-        gone = await create_thread_session(
+        gone = await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id="sess_gone",
@@ -3005,7 +3104,6 @@ async def _changed_channel_agent(
     Returns the tenant, the sessions transport, the prepare deps, the admission
     deps (whose MA serves both agents) and the first prepared turn.
     """
-    from daimon.core.turn.admission import admit
     from daimon.testing.factories import make_ledger_entry, make_tenant_config
     from daimon.testing.ma import resolved_agent_env_router
     from mux.testing.drivers.anthropic.ma import MARouter
@@ -3034,16 +3132,8 @@ async def _changed_channel_agent(
     resolved_agent_env_router(daimon, environment, router=router)
     router.add_agent(research)
     admission_deps = replace(deps, anthropic=build_fake_anthropic(router.dispatch))
-    first_admission = await admit(
-        admission_deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="user-1",
-        channel_id="channel-1",
-        thread_id="thread-1",
-        now=_NOW,
+    first_admission = await admit_chat(
+        admission_deps, tenant, channel_id="channel-1", thread_id="thread-1", now=_NOW
     )
     account = await _account_of(db_session_factory, first_admission.account_id)
     first = await _prepare(deps, first_admission, tenant=tenant, account=account)
@@ -3070,18 +3160,9 @@ async def _account_of(
 
 
 async def _admit_next(admission_deps: TurnDeps, tenant: TenantRow) -> Admission:
-    from daimon.core.turn.admission import admit
 
-    return await admit(
-        admission_deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="user-1",
-        channel_id="channel-1",
-        thread_id="thread-1",
-        now=_NOW,
+    return await admit_chat(
+        admission_deps, tenant, channel_id="channel-1", thread_id="thread-1", now=_NOW
     )
 
 
@@ -3114,23 +3195,12 @@ async def test_a_handoff_carries_the_old_work_only_to_an_agent_inside_its_seal(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="vault",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="vault")
     calls: list[str] = []
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         calls.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix="x"
-        )
+        return _prepared_replacement(user_prefix="x")
 
     handed = await _prepare(
         deps,
@@ -3205,10 +3275,9 @@ async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replaceme
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     async with db_session_factory.begin() as session:
-        await create_thread_session(
+        await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id="sess_missing",
@@ -3386,7 +3455,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         assert all(isinstance(r, PreparedTurn) for r in results[15:]), results[15:]
         assert transport.state.sessions[first.ma_session_id].archived_at is not None
         assert any(e["type"] == "user.message" for e in transport.state.events[first.ma_session_id])
-        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
+        gates.assert_turn_path(prepared_entry=entry == "prepared")
     finally:
         release.set()
         for task in tasks:
@@ -3468,9 +3537,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         if checkpoints == 2:
             checkpoint_entered.set()
         await checkpoint_release.wait()
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
-        )
+        return _prepared_replacement(user_prefix="")
 
     auth = AuthIdentity(
         account_id=account.id,
@@ -3557,7 +3624,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
             release.set()
         results = await asyncio.wait_for(asyncio.gather(*tasks), 5)
         assert all(isinstance(result, PreparedTurn) for result in results)
-        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
+        gates.assert_turn_path(prepared_entry=entry == "prepared")
     finally:
         checkpoint_release.set()
         create_release.set()
@@ -3655,9 +3722,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         if checkpoints == 2:
             checkpoint_entered.set()
         await checkpoint_release.wait()
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
-        )
+        return _prepared_replacement(user_prefix="")
 
     auth = AuthIdentity(
         account_id=account.id,
@@ -3772,7 +3837,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         from daimon.core.session_mutation import SessionRetired
 
         assert all(isinstance(result, SessionRetired) for result in retired), retired
-        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
+        gates.assert_turn_path(prepared_entry=entry == "prepared")
     finally:
         checkpoint_release.set()
         create_release.set()
@@ -3880,9 +3945,7 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         if count == 2:
             entered.set()
         await release.wait()
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
-        )
+        return _prepared_replacement(user_prefix="")
 
     from daimon.core import session_preparation_stages
     from daimon.core.session_fence_retry import FenceUnavailable
@@ -4150,12 +4213,7 @@ async def test_a_member_hands_the_thread_to_the_channels_new_agent_in_place(
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         carried.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="<previous_session>...</previous_session>",
-        )
+        return _prepared_replacement(user_prefix="<previous_session>...</previous_session>")
 
     handed = await _prepare(
         deps,
@@ -4309,12 +4367,7 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
     monkeypatch.setattr(session_preparation, "reauthorize", pause)
 
     async def carry(**_kwargs):
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="sealed history",
-        )
+        return _prepared_replacement(user_prefix="sealed history")
 
     task = asyncio.create_task(
         _prepare(deps, queued, tenant=tenant, account=account, transfer=carry)
@@ -4338,7 +4391,6 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
 async def test_prepared_turn_cannot_resume_retired_session(
     db_session, db_committing_engine, monkeypatch
 ):
-    from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.turn_fakes import RecordingLifecycle
 
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
@@ -4357,26 +4409,19 @@ async def test_prepared_turn_cannot_resume_retired_session(
     from daimon.core.session_mutation import SessionRetired
 
     with pytest.raises(SessionRetired):
-        await run_prepared_turn(
+        await run_prepared(
             deps,
             first,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
-            external_user_id="user-1",
             user_message="stale prepared turn",
             lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
             reseed_user_message=reseed,
             recovery_lifecycle=lambda _: RecordingLifecycle(),
-            render_interval_s=0.001,
         )
     assert len(transport.state.events.get(first.ma_session_id, [])) == before
-    # Which path refused it: the mux binding check answers before the turn
-    # takes its lease or reaches the fence; the legacy turn is refused at the
-    # session-mutation fence (`require_writable_session`) and never leases.
-    on_mux = (deps.turn_path or load_turn_settings().path) == "mux"
-    assert (len(gates.lease_tasks), len(gates.arrived)) == ((0, 0) if on_mux else (0, 1))
+    # The binding check answers before the turn takes its lease or reaches the fence.
+    assert (len(gates.lease_tasks), len(gates.arrived)) == (0, 0)
     async with factory() as db:
         live = await get_live_thread_session(
             db,
@@ -4623,12 +4668,7 @@ async def _review_replacement(db, factory, *, sealed=False, lift=False):
 
     async def carry(**kw):
         transfers.append(kw["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="SEALED_WORK",
-        )
+        return _prepared_replacement(user_prefix="SEALED_WORK")
 
     handed = await _prepare(
         deps,
@@ -4945,23 +4985,12 @@ async def test_a_handoff_carries_nothing_across_the_isolation_boundary(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="vault",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="vault")
     calls: list[str] = []
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         calls.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix="x"
-        )
+        return _prepared_replacement(user_prefix="x")
 
     handed = await _prepare(
         deps,
@@ -5053,3 +5082,338 @@ def test_an_unscoped_snapshot_serialises_without_a_scope() -> None:
     assert "memory_scope" not in snapshot.model_dump(mode="json")
     scoped = snapshot.model_copy(update={"memory_scope": "channel:slack:C-SYN-1"})
     assert scoped.model_dump(mode="json")["memory_scope"] == "channel:slack:C-SYN-1"
+
+
+_NO_MEMORY = {"memory_personal": "off", "memory_shared": "off", "memory_channel": "off"}
+
+
+async def test_a_relay_agents_channel_turns_never_reuse_a_session_or_carry_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each relay channel turn is a new session with no transfer, built without memory;
+    an agent with no relay server keeps its session (`daimon.core.relay_scope`)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    relay = _with_features(
+        replace(
+            _admission(account=account),
+            relay_scoped=True,
+            hold=TurnHold(platform="discord", channel_id="c1", client=False),
+        ),
+        **_NO_MEMORY,
+    )
+
+    async def _transfer(**_kwargs: Any) -> PreparedReplacement:
+        raise AssertionError("a relay turn carries nothing from the earlier session")
+
+    first = await _prepare(deps, relay, tenant=tenant, account=account, transfer=_transfer)
+    second = await _prepare(deps, relay, tenant=tenant, account=account, transfer=_transfer)
+    assert isinstance(first, PreparedTurn) and isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id
+    carried = second.continuity
+    assert second.reused is False and carried.transfer_kind is None
+    assert carried.user_prefix == "" and not carried.system_blocks
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None and row.effective_config is not None
+    assert dict(row.effective_config.identity_features) == _NO_MEMORY
+
+    plain = _admission(account=account)
+    kept = await _prepare(deps, plain, tenant=tenant, account=account)
+    again = await _prepare(deps, plain, tenant=tenant, account=account)
+    assert isinstance(kept, PreparedTurn) and isinstance(again, PreparedTurn)
+    assert again.ma_session_id == kept.ma_session_id and again.reused is True
+
+
+async def test_a_relay_dm_replaces_a_session_recorded_with_memory_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A relay DM (no hold) may continue its own session, but never one built with memory on."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    before = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(before, PreparedTurn)
+    relay_dm = _with_features(replace(_admission(account=account), relay_scoped=True), **_NO_MEMORY)
+
+    first = await _prepare(deps, relay_dm, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    assert first.ma_session_id != before.ma_session_id, "the memory-on session is replaced"
+    same = await _prepare(deps, relay_dm, tenant=tenant, account=account)
+    assert isinstance(same, PreparedTurn) and same.ma_session_id == first.ma_session_id
+
+
+@pytest.mark.parametrize("relay", [False, True])
+async def test_a_session_with_no_readable_configuration_is_kept_unless_the_agent_is_relay(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    relay: bool,
+) -> None:
+    """An unheld turn binds a session whose configuration cannot be read, as before; a
+    relay agent's turn replaces it, never reusing a session it cannot inspect."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    legacy = await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        account_id=account.id,
+        ma_session_id="ses_gone",
+    )
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    admission = _admission(account=account)
+    if relay:
+        admission = _with_features(replace(admission, relay_scoped=True), **_NO_MEMORY)
+    prepared = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(prepared, PreparedTurn)
+    assert (prepared.ma_session_id == legacy.ma_session_id) is (not relay)
+
+
+@pytest.mark.parametrize("direction", ["from_relay", "to_relay", "neither"])
+async def test_a_handoff_carries_nothing_out_of_or_into_a_relay_agents_turn(
+    direction: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A relay turn's work never moves to another session or agent, and a relay agent
+    takes none in; a handoff between agents with no relay server carries as before."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    held = TurnHold(platform="discord", channel_id="vault", client=False, relay=True)
+    old = _sealed(_admission(account=account), seal_id="vault")
+    if direction == "from_relay":
+        old = _with_features(replace(old, relay_scoped=True, hold=held), **_NO_MEMORY)
+    first = await _prepare(deps, old, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    successor_agent = _agent(agent_id="ag_successor")
+    _register(transport.state, successor_agent)
+    async with db_session_factory() as session, session.begin():
+        binding = await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="vault",
+            thread_id="thread-1",
+            responder_ma_agent_id="ag_successor",
+            responder_name="research-bot",
+            kind="handoff",
+        )
+    calls: list[str] = []
+
+    async def _transfer(**kwargs: Any) -> PreparedReplacement:
+        calls.append(kwargs["old_session_id"])
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix="x"
+        )
+
+    new = _sealed(
+        _admission(account=account, agent=successor_agent, thread_binding_id=binding.id),
+        seal_id="vault",
+    )
+    if direction == "to_relay":
+        new = _with_features(replace(new, relay_scoped=True, hold=held), **_NO_MEMORY)
+    handed = await _prepare(deps, new, tenant=tenant, account=account, transfer=_transfer)
+
+    assert isinstance(handed, PreparedTurn) and handed.continuity.state == "replaced"
+    if direction == "neither":
+        assert calls == [first.ma_session_id]
+    else:
+        assert calls == []
+        assert handed.continuity.transfer_kind is None and handed.continuity.user_prefix == ""
+
+
+@pytest.mark.parametrize("change", ["servers", "hold"])
+async def test_a_reused_session_is_refused_when_the_room_turned_contained_after_admission(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """The session was prepared with the identity server and no hold. If the decision made
+    again at reuse (`reauthorize`) strips the server or adds a hold, the turn waits so the
+    next one rebuilds the session; it never keeps the servers in a contained room."""
+    from daimon.core.relay_scope import without_identity_relays
+    from daimon.core.turn import prepare as prepare_module
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    payload = _agent_with_servers().model_dump(mode="json")
+    payload["mcp_servers"].append(
+        {"type": "url", "name": "grove", "url": "https://daimon.example/mcp-identity/grove"}
+    )
+    payload["tools"].append(_toolset("grove"))
+    agent = BetaManagedAgentsAgent.model_validate(payload)
+    _register(transport.state, agent)
+    deps = _gated_deps(db_session_factory, transport)
+    first = await _prepare(
+        deps, _admission(account=account, agent=agent), tenant=tenant, account=account
+    )
+    assert isinstance(first, PreparedTurn)
+    reused = replace(first, reused=True)
+
+    stripped = without_identity_relays(agent, public_url=_PUBLIC_URL)[0]
+    hold = TurnHold(platform="discord", channel_id="C-1", client=False)
+    now_contained = (
+        replace(reused.admission, agent=stripped)
+        if change == "servers"
+        else replace(reused.admission, hold=hold)
+    )
+
+    async def contained(_deps: object, _admission: object) -> object:
+        return now_contained
+
+    monkeypatch.setattr(prepare_module, "reauthorize", contained)
+    with pytest.raises(SessionBusyError):
+        await prepare_module._decide_reuse_again(  # pyright: ignore[reportPrivateUsage]
+            deps, reused, now=lambda: datetime.now(UTC)
+        )
+
+    async def unchanged(_deps: object, admission: object) -> object:
+        return admission
+
+    monkeypatch.setattr(prepare_module, "reauthorize", unchanged)
+    same = await prepare_module._decide_reuse_again(  # pyright: ignore[reportPrivateUsage]
+        deps, reused, now=lambda: datetime.now(UTC)
+    )
+    assert same is reused
+
+
+class _FakeVaults:
+    """The vault surface a held session's credentials touch: vaults by name, credentials by vault."""
+
+    def __init__(self) -> None:
+        self.names: dict[str, str] = {}
+        self.credentials: dict[str, list[dict[str, Any]]] = {}
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        parts = request.url.path.strip("/").split("/")
+        if parts[:2] != ["v1", "vaults"]:
+            raise NotHandled
+        method = request.method
+        if len(parts) == 2 and method == "GET":
+            data = [
+                {
+                    "id": vault_id,
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                }
+                for vault_id, name in self.names.items()
+            ]
+            return httpx.Response(200, json={"data": data, "has_more": False})
+        if len(parts) == 2 and method == "POST":
+            name = json.loads(request.content)["display_name"]
+            vault_id = f"vlt_{len(self.names)}"
+            self.names[vault_id] = name
+            self.credentials[vault_id] = []
+            return httpx.Response(
+                200,
+                json={
+                    "id": vault_id,
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            )
+        vault_id = parts[2]
+        if len(parts) == 4 and parts[3] == "credentials" and method == "GET":
+            return httpx.Response(200, json={"data": self.credentials[vault_id], "has_more": False})
+        if len(parts) == 4 and parts[3] == "credentials" and method == "POST":
+            body = json.loads(request.content)
+            slot = self._slot(vault_id, f"vcrd_{len(self.credentials[vault_id])}", body)
+            self.credentials[vault_id].append(slot)
+            return httpx.Response(200, json=slot)
+        if len(parts) == 5 and parts[3] == "credentials" and method == "POST":
+            body = json.loads(request.content)
+            old = next(c for c in self.credentials[vault_id] if c["id"] == parts[4])
+            slot = self._slot(
+                vault_id, old["id"], {**old, **body, "auth": {**old["auth"], **body["auth"]}}
+            )
+            self.credentials[vault_id][self.credentials[vault_id].index(old)] = slot
+            return httpx.Response(200, json=slot)
+        raise AssertionError(f"unexpected vault call: {method} {request.url.path}")
+
+    @staticmethod
+    def _slot(vault_id: str, credential_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": credential_id,
+            "type": "vault_credential",
+            "vault_id": vault_id,
+            "metadata": body.get("metadata") or {},
+            "auth": {
+                "type": "static_bearer",
+                "mcp_server_url": body["auth"]["mcp_server_url"],
+                "token": body["auth"].get("token"),
+            },
+            "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-01T00:00:00Z",
+        }
+
+    def session_credentials(self) -> list[dict[str, Any]]:
+        return [
+            slot
+            for slots in self.credentials.values()
+            for slot in slots
+            if "daimon_chat_session" in slot["metadata"]
+        ]
+
+
+async def test_a_reused_held_session_gets_its_hold_back_on_a_credential_minted_without_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The real preparation and update path hands the turn's hold to the vault refresh: a reused
+    held session whose mounted session credential lacks the hold is refreshed with it."""
+    import jwt as pyjwt
+    from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
+    from daimon.core.mcp_vault import HOLD_METADATA_KEY
+    from pydantic import SecretStr
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    vaults = _FakeVaults()
+    transport.extra_handlers.append(vaults.handler)
+    agent = _agent_with_servers()
+    _register(transport.state, agent)
+    deps = replace(
+        _gated_deps(db_session_factory, transport),
+        mcp=McpSettings(public_url=_PUBLIC_URL, jwt_secret=SecretStr("s" * 32)),  # pyright: ignore[reportArgumentType]
+    )
+    held = replace(_admission(account=account, agent=agent), hold=_HELD)
+
+    first = await _prepare(deps, held, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    (minted,) = vaults.session_credentials()
+    assert minted["metadata"][HOLD_METADATA_KEY], "a new held session mounts a held credential"
+
+    # What a session created before the fix mounted: the same slot, no hold.
+    del minted["metadata"][HOLD_METADATA_KEY]
+
+    second = await _prepare(deps, held, tenant=tenant, account=account)
+
+    assert isinstance(second, PreparedTurn) and second.ma_session_id == first.ma_session_id
+    (refreshed,) = vaults.session_credentials()
+    assert parse_hold_claim(json.loads(refreshed["metadata"][HOLD_METADATA_KEY])) == _HELD
+    claims = pyjwt.decode(
+        refreshed["auth"]["token"], "s" * 32, algorithms=["HS256"], options={"verify_exp": False}
+    )
+    assert parse_hold_claim(claims[HOLD_CLAIM]) == _HELD

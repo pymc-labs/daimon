@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import anthropic as _anthropic
 import discord
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -27,9 +27,7 @@ from daimon.core import allowance_limits
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.ma_resolver import ResolverCache
-from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.scope import DeploymentDefault, ResolvedConfig, ScopeContext
+from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     fingerprint_identity,
@@ -38,16 +36,15 @@ from daimon.core.session_snapshot import (
 )
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import FeatureTarget
-from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_card_intents import (
     TurnCardIntentRow,
     list_recoverable_turn_card_intents,
 )
-from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.protection import ConfirmedProtection, ProtectionState
 from daimon.core.turn_queue import TurnTicket
+from daimon.testing.builders import new_thread_session
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_channel_budget
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import mock_settings
@@ -57,6 +54,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_tenant
 from .harness import make_bot
+from .shared_fakes import make_channel_message as _make_channel_message
+from .shared_fakes import make_turn_deps as _make_turn_deps
 
 
 def _snapshot_of(session: BetaManagedAgentsSession) -> SessionSnapshot:
@@ -117,12 +116,10 @@ def _make_runtime(
 
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=_make_turn_deps(
@@ -132,29 +129,6 @@ def _make_runtime(
             resolver_cache=resolver_cache,
             deployment_default=deployment_default,
         ),
-    )
-
-
-def _make_turn_deps(
-    settings: MagicMock,
-    anthropic: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    resolver_cache: ResolverCache,
-    deployment_default: DeploymentDefault,
-) -> TurnDeps:
-    """Build the TurnDeps a DiscordRuntime carries via the production
-    `build_turn_deps` helper, so tests see the same derivation build_runtime
-    does. `settings.crypto.keys` on an unconfigured MagicMock iterates empty
-    (MagicMock auto-specs `__iter__`), so fernet is None here as in the
-    pre-cutover tests."""
-    return build_turn_deps(
-        settings,
-        anthropic,
-        sessionmaker,
-        deployment_default=deployment_default,
-        resolver_cache=resolver_cache,
-        billing_config=None,
     )
 
 
@@ -182,54 +156,6 @@ class _EmptyEventList:
             return _EmptyEventPage()
 
         return _first().__await__()
-
-
-class _AsyncIter:
-    """Async iterator adapter for mocked channel/thread history."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
-
-
-def _make_channel_message(
-    *,
-    content: str = "<@999> hello",
-    guild_id: int = 123456,
-    channel_id: int = 789,
-    author_id: int = 111,
-) -> discord.Message:
-    """Mock a message in a regular text channel (not a thread)."""
-    message = MagicMock(spec=discord.Message)
-    message.content = content
-    message.author = MagicMock()
-    message.author.bot = False
-    message.author.id = author_id
-    message.guild = MagicMock(spec=discord.Guild)
-    message.guild.id = guild_id
-    # Channel is a regular text channel (not a Thread)
-    message.channel = MagicMock()
-    # Make isinstance(message.channel, discord.Thread) return False
-    # and isinstance(message.channel, discord.TextChannel) return True
-    message.channel.__class__ = discord.TextChannel
-    message.channel.id = channel_id
-    message.channel.send = AsyncMock()
-    # Stub channel.history so build_channel_context_xml can be called; empty list
-    # produces a valid <channel_context count="0"> envelope.
-    message.channel.history = MagicMock(return_value=_AsyncIter([]))
-    message.create_thread = AsyncMock()
-    message.add_reaction = AsyncMock()
-    message.attachments = []
-    message.mentions = [types.SimpleNamespace(id=999)]
-    return message
 
 
 def _make_thread_message(
@@ -325,8 +251,10 @@ class TestNewThreadCreation:
         message.create_thread = AsyncMock(side_effect=RuntimeError("Discord unavailable"))  # pyright: ignore[reportAttributeAccessIssue]
         # Typing is best effort: a dropped connection must not stop the open.
         message.channel.typing = MagicMock(side_effect=ConnectionResetError("reset"))
+        unreachable = AsyncMock(side_effect=aiohttp.ClientConnectionError("Discord unavailable"))
 
-        await bot.on_message(message)
+        with patch.object(bot, "fetch_channel", unreachable):
+            await bot.on_message(message)
 
         # The failure is answered with exactly one red card reply, never a
         # channel-level "opening your chat" notice or a second error.
@@ -338,6 +266,80 @@ class TestNewThreadCreation:
         message.channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert bot.turn_queue.in_flight() == 0
         assert bot.turn_queue.depth() == 0
+        assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.parametrize(
+        ("lookup", "reused"),
+        [
+            ("own_parent", True),
+            ("other_parent", False),
+            ("not_found", False),
+            ("lookup_error", False),
+        ],
+    )
+    @patch("daimon.adapters.discord.bot.TurnPostRecorder.opened_thread", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_thread_another_bot_opened_on_the_message_is_reused(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        mock_opened_thread: AsyncMock,
+        lookup: str,
+        reused: bool,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """When creating a thread fails, the thread already on the message is answered in.
+
+        Only a thread under this channel counts; it is not recorded as ours.
+        Otherwise the asker gets the usual notice.
+        """
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-foreign")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        assert runtime.settings.discord is not None
+        runtime.settings.discord.thread_open_notice_after_s = 0
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        message.id = 9999
+        message.reply = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.add_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.create_thread = AsyncMock(side_effect=RuntimeError("thread already exists"))  # pyright: ignore[reportAttributeAccessIssue]
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 9999
+        thread.parent_id = 789 if lookup == "own_parent" else 555
+        thread.send = AsyncMock()
+        fetch = AsyncMock(return_value=thread)
+        if lookup == "not_found":
+            fetch = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown"))
+        elif lookup == "lookup_error":
+            fetch = AsyncMock(side_effect=aiohttp.ClientConnectionError("lookup failed"))
+
+        with (
+            patch.object(bot, "get_channel", MagicMock(return_value=None)),
+            patch.object(bot, "fetch_channel", fetch),
+        ):
+            await bot.on_message(message)
+
+        assert mock_run_turn.await_count == (1 if reused else 0), (
+            f"the turn runs in the other bot's thread only when it is ours to use ({lookup})"
+        )
+        assert message.reply.await_count == (0 if reused else 1), (
+            f"the asker is told the thread could not open only when none can be used ({lookup})"
+        )
+        mock_opened_thread.assert_not_awaited()
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
 
     @patch(
@@ -378,188 +380,7 @@ class TestNewThreadCreation:
         message.reply.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
 
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_tool_turn_starts_output_sweep_in_its_thread(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-output")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
-        message = _make_channel_message()
-        thread = MagicMock(spec=discord.Thread)
-        thread.id = 9999
-        thread.send = AsyncMock(
-            return_value=types.SimpleNamespace(
-                id=1000, edit=AsyncMock(), webhook_id=None, application_id=None
-            )
-        )
-        message.create_thread.return_value = thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        from daimon.core.turn.lifecycle import acknowledge
-        from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-
-        async def finish_turn(*, lifecycle, **kwargs):
-            await acknowledge(lifecycle, "accepted")
-            state = TurnState(
-                content=[
-                    ToolUseBlock(
-                        kind="tool_use",
-                        id="tu_output",
-                        type="agent.tool_use",
-                        name="bash",
-                        input={},
-                    ),
-                    TextBlock(kind="text", text="Done"),
-                ]
-            )
-            await lifecycle.on_terminal_success(state)
-            await acknowledge(lifecycle, "done")
-            return state
-
-        mock_run_turn.side_effect = finish_turn
-        with patch(
-            "daimon.adapters.discord.bot.deliver_session_outputs", new_callable=AsyncMock
-        ) as deliver:
-            await bot.on_message(message)
-            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
-
-        deliver.assert_awaited_once()
-        assert deliver.await_args.args[1] is thread
-        assert deliver.await_args.kwargs["session_id"] == "sess-output"
-        answer = deliver.await_args.kwargs["answer"]
-        assert answer is not None and answer.message_id == 1000, (
-            "the files go onto the answer that carries the summary"
-        )
-        assert "posted" not in deliver.await_args.kwargs
-
     # TODO: migrate to MARouter transport-level fake
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    @pytest.mark.parametrize("completion_enabled", [False, True])
-    async def test_mention_in_channel_creates_thread_and_runs_turn(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        completion_enabled: bool,
-        monkeypatch,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-abc")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        if completion_enabled:
-            async with db_session_factory() as session:
-                await set_feature_value(
-                    session,
-                    tenant_id=tenant.id,
-                    target=FeatureTarget("workspace"),
-                    key="completion_pings",
-                    value="on",
-                    set_by=None,
-                    surface="cli",
-                )
-                await session.commit()
-        bot = make_bot(runtime)
-        from daimon.adapters.discord import bot as bot_module
-
-        prepared_entry = AsyncMock(wraps=bot_module.run_prepared_turn)
-        monkeypatch.setattr(bot_module, "run_prepared_turn", prepared_entry)
-        message = _make_channel_message()
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 9999
-        mock_thread.send = AsyncMock(
-            side_effect=[
-                types.SimpleNamespace(id=1000, edit=AsyncMock()),
-                types.SimpleNamespace(id=1001, edit=AsyncMock()),
-            ]
-        )
-        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
-        from daimon.core.turn.lifecycle import acknowledge
-        from daimon.core.turn.state import TextBlock, TurnState
-
-        async def finish_turn(*, lifecycle, **kwargs):
-            await acknowledge(lifecycle, "accepted")
-            state = TurnState(content=[TextBlock(kind="text", text="Done")])
-            await lifecycle.on_terminal_success(state)
-            await acknowledge(lifecycle, "done")
-            return state
-
-        mock_run_turn.side_effect = finish_turn
-        await bot.on_message(message)
-        from daimon.core.stores.turn_card_intents import get_turn_card_intent
-
-        prepared_entry.assert_awaited_once()
-        async with db_session_factory() as session:
-            intent = await get_turn_card_intent(
-                session, id=prepared_entry.await_args.kwargs["turn_card_intent_id"]
-            )
-        assert intent is not None
-        assert (intent.tenant_id, intent.platform, intent.channel_id, intent.thread_id) == (
-            tenant.id,
-            "discord",
-            str(message.channel.id),
-            str(mock_thread.id),
-        )
-        assert mock_thread.send.await_count == (2 if completion_enabled else 1)
-        assert [call.args[0] for call in message.add_reaction.await_args_list] == (
-            ["👀", "✅"] if completion_enabled else ["👀"]
-        )
-        message.remove_reaction.assert_awaited_once_with("👀", bot.user)
-        async with db_session_factory() as session:
-            assert not await list_recoverable_turn_card_intents(session, platform="discord")
-
-        message.create_thread.assert_called_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            name="Chat with daimon",  # a bare greeting; never the agent's slug
-            auto_archive_duration=10080,
-        )
-        mock_create_session.assert_called_once()
-        mock_run_turn.assert_called_once()
-        call_kwargs = mock_run_turn.call_args.kwargs
-        assert call_kwargs["render_interval_s"] == 2.0, "render interval should be 2s for Discord"
-        user_message: str = call_kwargs["user_message"]
-        assert "<channel_context" in user_message, (
-            "channel mention must produce a <channel_context> envelope, not raw message content"
-        )
-        # Trigger content appears in <user_query>, not the raw message
-        assert "<user_query" in user_message, "channel context must include a <user_query> element"
-        assert "hello" in user_message, "trigger content must appear somewhere in the user message"
-        assert '"handle": "@' in user_message, (
-            "the turn controls must carry the handle people mention beside the agent name, so a "
-            "renamed bot account is never read as a second agent "
-            "(the exact name comes from settings; see test_branding.TestResponderHandle)"
-        )
-        assert call_kwargs["session_id"] == "sess-abc", "should use ma_session.id"
-
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
@@ -641,162 +462,6 @@ class TestNewThreadCreation:
                 assert not await turn_card_intent_is_active(session, id=row.turn_card_intent_id), (
                     "and that turn is over once the mention is handled"
                 )
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    @pytest.mark.parametrize(
-        ("asked", "with_files", "newer_turn"),
-        [(True, True, False), (True, False, False), (False, True, False), (True, True, True)],
-    )
-    async def test_an_archive_asked_during_the_turn_happens_after_its_last_post(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        asked: bool,
-        with_files: bool,
-        newer_turn: bool,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """archive_thread on the turn's own thread is carried out after the card and files."""
-        from daimon.core.stores.turn_origins import request_thread_archive
-        from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-        from sqlalchemy import text
-
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-archive")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
-        message = _make_channel_message(channel_id=789, author_id=111)
-        order: list[str] = []
-        card = types.SimpleNamespace(
-            id=1000, edit=AsyncMock(side_effect=lambda **_: order.append("card_edit"))
-        )
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 9999
-        mock_thread.parent_id = 789
-        mock_thread.send = AsyncMock(return_value=card)
-        mock_thread.edit = AsyncMock(side_effect=lambda **kw: order.append(f"thread_edit:{kw}"))
-        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        async def finish_turn(*, lifecycle, **kwargs):
-            if asked:
-                # What archive_thread writes when called from inside this thread.
-                async with db_session_factory.begin() as session:
-                    origin_id = (
-                        await session.execute(
-                            text("SELECT id FROM turn_origins WHERE thread_id = '9999'")
-                        )
-                    ).scalar_one()
-                    assert await request_thread_archive(
-                        session, origin_id=origin_id, thread_id="9999", now=datetime.now(UTC)
-                    )
-            tool = ToolUseBlock(
-                kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
-            )
-            text_block = TextBlock(kind="text", text="Archiving this thread.")
-            state = TurnState(content=[tool, text_block] if with_files else [text_block])
-            await lifecycle.on_terminal_success(state)
-            return state
-
-        async def deliver(*_args: object, **_kwargs: object) -> None:
-            await asyncio.sleep(0)
-            order.append("file_posted")
-            if newer_turn:
-                # The sweep takes seconds; a queued mention's turn has the thread now.
-                bot._processing.add(9999)  # pyright: ignore[reportPrivateUsage]
-
-        mock_run_turn.side_effect = finish_turn
-        with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=deliver):
-            await bot.on_message(message)
-            await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
-
-        archived = "thread_edit:{'archived': True}"
-        if newer_turn:
-            assert archived not in order, "archiving under a newer turn would break its card"
-        elif asked:
-            assert order[-1] == archived, f"the archive comes after every post, got {order}"
-            assert order.count(archived) == 1 and "card_edit" in order
-            if with_files:
-                assert order.index("file_posted") < order.index(archived), (
-                    "a delivered file would reopen the thread, so the archive waits for it"
-                )
-        else:
-            assert archived not in order, "no archive without a request"
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_thread_and_status_embed_posted_before_session_create(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """sessions.create can hold its response for minutes (MA-side provisioning);
-        the thread and a thinking embed must already be visible before that await."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_channel_message()
-
-        order: list[str] = []
-        first_send_kwargs: dict[str, object] = {}
-
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 9999
-
-        async def _record_thread_send(*args: object, **kwargs: object) -> MagicMock:
-            if not order or order[-1] != "embed_posted":
-                first_send_kwargs.update(kwargs)
-            order.append("embed_posted")
-            return MagicMock()
-
-        mock_thread.send = AsyncMock(side_effect=_record_thread_send)
-
-        async def _record_create_thread(*args: object, **kwargs: object) -> MagicMock:
-            order.append("thread_created")
-            return mock_thread
-
-        message.create_thread = AsyncMock(side_effect=_record_create_thread)  # pyright: ignore[reportAttributeAccessIssue]
-
-        async def _record_create_session(
-            *args: object, **kwargs: object
-        ) -> BetaManagedAgentsSession:
-            order.append("session_created")
-            return ma_session(id="sess-order")
-
-        mock_create_session.side_effect = _record_create_session
-
-        await bot.on_message(message)
-
-        assert order[:3] == ["thread_created", "embed_posted", "session_created"], (
-            f"thread + status embed must precede sessions.create, got {order}"
-        )
-        assert "embeds" in first_send_kwargs, "instant feedback should be an embed, not text"
-        embed = cast("list[discord.Embed]", first_send_kwargs["embeds"])[0]
-        assert embed.title == "Working on it…", "initial embed should show the thinking phase"
 
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_missing_config_sends_error_no_thread(
@@ -1058,227 +723,6 @@ class TestNewThreadCreation:
         retire.assert_not_awaited()
 
 
-class TestThreadMention:
-    """Thread mentions respond in-place with XML history context."""
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_mention_in_thread_responds_in_place(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_xml: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Thread mentions run a turn without creating a new thread."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-thread")
-        mock_build_xml.return_value = (
-            "<context><thread_history></thread_history></context>\n\n<user_query>hello</user_query>",
-            [],
-        )
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_thread_message()
-
-        from daimon.adapters.discord import bot as bot_module
-        from daimon.core.stores.turn_card_intents import get_turn_card_intent
-
-        prepared_entry = AsyncMock(wraps=bot_module.run_prepared_turn)
-        monkeypatch.setattr(bot_module, "run_prepared_turn", prepared_entry)
-
-        await bot.on_message(message)
-
-        mock_create_session.assert_called_once()
-        mock_build_xml.assert_called_once()
-        mock_run_turn.assert_called_once()
-
-        prepared_entry.assert_awaited_once()
-        async with db_session_factory() as session:
-            intent = await get_turn_card_intent(
-                session, id=prepared_entry.await_args.kwargs["turn_card_intent_id"]
-            )
-        assert intent is not None
-        assert (intent.channel_id, intent.thread_id) == (
-            str(message.channel.parent_id),
-            str(message.channel.id),
-        )
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_mention_in_thread_passes_xml_context_to_run_turn(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_xml: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """Thread mention passes XML history as user_message to run_turn."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-xml")
-        fake_xml = (
-            "<context><thread_history><message>prior</message></thread_history></context>"
-            "\n\n<user_query>trigger</user_query>"
-        )
-        mock_build_xml.return_value = (fake_xml, [])
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_thread_message()
-
-        await bot.on_message(message)
-
-        call_kwargs = mock_run_turn.call_args.kwargs
-        assert call_kwargs["user_message"].endswith(fake_xml), (
-            "platform history should supplement the trusted per-turn control context"
-        )
-        assert call_kwargs["session_id"] == "sess-xml", "should use ma_session.id"
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_scope_context_uses_parent_channel_id(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_xml: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session()
-        mock_build_xml.return_value = ("<context></context>", [])
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_thread_message(parent_id=789)
-
-        await bot.on_message(message)
-
-        mock_resolve.assert_called_once()
-        call_kwargs = mock_resolve.call_args.kwargs
-        context: ScopeContext = call_kwargs["context"]
-        assert context.channel_id == "789", "should use parent_id, not thread_id"
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_config_change_affects_next_turn(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_xml: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """Config is resolved per turn for thread mentions."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session()
-        mock_build_xml.return_value = ("<context></context>", [])
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_thread_message()
-
-        await bot.on_message(message)
-
-        # resolve_config is called on every turn
-        mock_resolve.assert_called_once()
-        mock_run_turn.assert_called_once()
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_each_thread_mention_creates_fresh_session(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_xml: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """Every mention creates a new session (session-per-turn)."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session()
-        mock_build_xml.return_value = ("<context></context>", [])
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_thread_message()
-
-        await bot.on_message(message)
-
-        mock_create_session.assert_called_once()
-        # Verify new signature: no sessionmaker, no tenant_id
-        call_args = mock_create_session.call_args
-        assert call_args[0][0] is runtime.anthropic, (
-            "first positional arg should be anthropic client"
-        )
-        assert "agent" in call_args.kwargs, "should pass agent kwarg"
-        assert "environment" in call_args.kwargs, "should pass environment kwarg"
-
-
 class TestConcurrentTurnProtection:
     """Follow-up mentions in a thread that already has a turn in-flight get
     queued, not dropped. (Channel-level mentions run in parallel instead — see
@@ -1305,48 +749,6 @@ class TestConcurrentTurnProtection:
         message.add_reaction.assert_called_once_with("⌛")
         assert bot._pending[thread_id] == [message], (  # pyright: ignore[reportPrivateUsage]
             "concurrent thread mention must be queued for drain after the current turn finishes"
-        )
-
-
-class TestAutoArchive:
-    """Thread auto-archive duration."""
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_thread_created_with_7_day_archive(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-auto-archive")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_channel_message()
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 9999
-        mock_thread.send = AsyncMock()
-        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        await bot.on_message(message)
-
-        message.create_thread.assert_called_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            name="Chat with daimon",  # a bare greeting; never the agent's slug
-            auto_archive_duration=10080,
         )
 
 
@@ -1398,55 +800,6 @@ class TestHandleMentionErrorBoundary:
         error_text: str = card.edit.call_args.kwargs["embed"].description
         assert "rid:" not in error_text, (
             f"error boundary must not publish trace ids; got: {error_text!r}"
-        )
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_turn_error_message_has_structured_format(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """A connection error must offer a plain retry instruction."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-err2")
-        mock_run_turn.side_effect = _anthropic.APIConnectionError(request=MagicMock())
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_channel_message()
-        card = MagicMock(spec=discord.Message)
-        card.id = 4242
-        card.webhook_id = None
-        card.edit = AsyncMock(return_value=card)
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 9998
-        mock_thread.send = AsyncMock(return_value=card)
-        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        await bot.on_message(message)
-
-        # The error lands on the turn's own card in its thread, not the channel.
-        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = card.edit.call_args.kwargs["embed"].description
-        assert "couldn't reach its AI service" in error_text, (
-            f"the connection failure should have a plain retry instruction; got: {error_text!r}"
-        )
-        assert "An error occurred. Please try again." not in error_text, (
-            f"should not use legacy hardcoded error string; got: {error_text!r}"
         )
 
 
@@ -1521,7 +874,7 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 13, "setup_hook should add exactly 13 Cogs"
+        assert len(add_cog_calls) == 14, "setup_hook should add exactly 14 Cogs"
         assert sum(type(cog).__name__ == "LeadsCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "SettingsCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "ModelCog" for cog in add_cog_calls) == 1
@@ -2485,42 +1838,6 @@ class TestBillingAdmissionGate:
             == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
         )
 
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_under_the_allowance_proceeds_normally(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """A person with allowance left: create_session + run_turn fire normally."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-undercap")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_channel_message()
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 9999
-        mock_thread.send = AsyncMock()
-        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        await bot.on_message(message)
-        mock_create_session.assert_called_once()
-        mock_run_turn.assert_called_once()
-
     @patch("daimon.core.turn.admission.spend_gate", new_callable=AsyncMock)
     async def test_dm_no_gate_short_circuit(
         self,
@@ -2599,99 +1916,6 @@ class TestBillingAdmissionGate:
 
 class TestResolverSelfHeal:
     """Real ma_resolver runs end-to-end; archived cached id self-heals to live tag-matched id."""
-
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_discord_resolves_via_ma_resolver_end_to_end(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        """When MA archives the resource that would normally be returned,
-        resolve_agent / resolve_environment fall through to tag lookup and
-        return the live id. Discord replies (no 'no longer exists' error)."""
-        import httpx
-        from daimon.core.ma_resolver import new_resolver_cache
-        from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
-
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-        await db_session.commit()
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-heal")
-
-        live_agent = ma_agent(id="ag_live", tenant_id=tenant.id).model_dump(mode="json")
-        live_env = ma_environment(id="env_live", tenant_id=tenant.id).model_dump(mode="json")
-
-        router = MARouter()
-        router.add(
-            "GET", r"/v1/agents/ag_live", lambda req, _m: httpx.Response(200, json=live_agent)
-        )
-        router.add(
-            "GET",
-            r"/v1/environments/env_live",
-            lambda req, _m: httpx.Response(200, json=live_env),
-        )
-        router.add("GET", r"/v1/agents", lambda req, _m: list_response([live_agent]))
-        router.add("GET", r"/v1/environments", lambda req, _m: list_response([live_env]))
-
-        anthropic = build_fake_anthropic(router.dispatch)
-        # Override runtime with the real fake_anthropic for this test.
-        settings = MagicMock()
-        settings.mcp = McpSettings()
-        settings.defaults_root = tmp_path
-        settings.billing.markup = Decimal("1.0")
-        settings.billing.signup_credit = Decimal("0")
-        discord_settings = MagicMock()
-        discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
-        discord_settings.thread_open_notice_after_s = 3.0
-        settings.discord = discord_settings
-        settings.thread_naming = ThreadNamingSettings(enabled=False)
-        resolver_cache = new_resolver_cache()
-        deployment_default = DeploymentDefault()
-        runtime = DiscordRuntime(
-            settings=settings,
-            anthropic=anthropic,
-            sessionmaker=db_session_factory,
-            notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
-            deployment_default=deployment_default,
-            resolver_cache=resolver_cache,
-            turn_deps=_make_turn_deps(
-                settings,
-                anthropic,
-                db_session_factory,
-                resolver_cache=resolver_cache,
-                deployment_default=deployment_default,
-            ),
-        )
-
-        bot = make_bot(runtime)
-        message = _make_channel_message()
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 7777
-        mock_thread.send = AsyncMock()
-        message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
-
-        await bot.on_message(message)
-
-        # Self-heal: bot found the live agent/env via tag lookup; create_session
-        # was called (resolver returned a live id, retrieve succeeded), and the
-        # bot ran a turn rather than sending the "no longer exists" error.
-        message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        mock_create_session.assert_called_once()
-        mock_run_turn.assert_called_once()
-        # The retrieve-by-id path returned the live agent (id starts with ag_live).
-        agent_kwarg = mock_create_session.call_args.kwargs["agent"]
-        env_kwarg = mock_create_session.call_args.kwargs["environment"]
-        assert agent_kwarg.id == "ag_live", "resolver returned live id, re-retrieve loaded it"
-        assert env_kwarg.id == "env_live", "resolver returned live env id, re-retrieve loaded it"
 
     @patch("daimon.core.turn.admission.reconcile_tenant_defaults", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
@@ -2784,12 +2008,10 @@ class TestResolverSelfHeal:
         settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault()
-        runtime = DiscordRuntime(
+        runtime = discord_runtime(
             settings=settings,
             anthropic=anthropic,
             sessionmaker=db_session_factory,
-            notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
             deployment_default=deployment_default,
             resolver_cache=resolver_cache,
             turn_deps=_make_turn_deps(
@@ -2821,137 +2043,6 @@ class TestResolverSelfHeal:
             )
 
 
-class TestAttachmentOrchestration:
-    """Non-image attachments surface their signed CDN URL in the user message."""
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_data_attachment_cdn_url_prefix_prepended_to_user_message(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-attach")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_channel_message()
-        # A non-image attachment routes to the data path → signed CDN URL prefix.
-        fake_attachment = MagicMock(spec=discord.Attachment)
-        fake_attachment.filename = "x.csv"
-        fake_attachment.size = 5
-        fake_attachment.url = "https://cdn.discord/x.csv?ex=1&is=2&hm=3"
-        fake_attachment.content_type = "text/csv"
-        fake_attachment.width = None
-        fake_attachment.height = None
-        message.attachments = [fake_attachment]
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 5050
-        mock_thread.send = AsyncMock()
-        message.create_thread.return_value = mock_thread
-
-        await bot.on_message(message)
-
-        mock_run_turn.assert_called_once()
-        user_msg: str = mock_run_turn.call_args.kwargs["user_message"]
-        assert "[attachment] `x.csv`" in user_msg, (
-            "data attachment CDN-URL prefix must be prepended to the user message"
-        )
-        assert "https://cdn.discord/x.csv" in user_msg, "the signed CDN URL must be surfaced"
-        # Channel mentions now produce a <channel_context> envelope; trigger content appears
-        # in <user_query> at the end, not as raw message.content
-        assert "<channel_context" in user_msg, (
-            "channel mention wraps context in <channel_context> envelope"
-        )
-        assert "hello" in user_msg, "trigger content must be preserved in user_query"
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_trigger_image_cdn_url_prefix_prepended_to_user_message(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """A trigger image rides along as a vision block AND its signed CDN URL
-        lands in the user message — the URL is the agent's only byte-level
-        handle for forwarding the image to external APIs."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_create_session.return_value = ma_session(id="sess-image-url")
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        @dataclass
-        class FakeImageAttachment:
-            filename: str
-            content_type: str
-            size: int
-            url: str
-            id: int = 42
-            width: int | None = 800
-            height: int | None = 600
-
-            async def read(self) -> bytes:
-                return b"\x89PNG\r\n\x1a\n"
-
-        signed_url = "https://cdn.discordapp.com/attachments/789/42/chart.png?ex=a&is=b&hm=c"
-        attachment = FakeImageAttachment(
-            filename="chart.png", content_type="image/png", size=4, url=signed_url
-        )
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_channel_message()
-        message.attachments = [cast(discord.Attachment, attachment)]
-        mock_thread = MagicMock(spec=discord.Thread)
-        mock_thread.id = 5053
-        mock_thread.send = AsyncMock()
-        message.create_thread.return_value = mock_thread
-
-        await bot.on_message(message)
-
-        mock_run_turn.assert_called_once()
-        user_msg: str = mock_run_turn.call_args.kwargs["user_message"]
-        assert "[attachment] image `chart.png`" in user_msg, (
-            "image URL prefix must be prepended to user message"
-        )
-        assert signed_url in user_msg, "full signed CDN URL must reach the agent"
-        # Channel mentions now produce a <channel_context> envelope; trigger content appears
-        # in <user_query> at the end, not as raw message.content
-        assert "<channel_context" in user_msg, (
-            "channel mention wraps context in <channel_context> envelope"
-        )
-        assert "hello" in user_msg, "trigger content must be preserved in user_query"
-        image_blocks = mock_run_turn.call_args.kwargs["image_blocks"]
-        assert image_blocks is not None and len(image_blocks) == 1, (
-            "image must still be forwarded as a vision block alongside the URL line"
-        )
-
-
 class TestSessionReuse:
     """SC-1 and SC-4: session-per-thread reuse + 404 recreate."""
 
@@ -2974,7 +2065,6 @@ class TestSessionReuse:
     ) -> None:
         """The drain's content override must reach a reused thread session."""
         from daimon.core.stores.identity import get_or_create_platform_principal
-        from daimon.core.stores.thread_sessions import create_thread_session
 
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
@@ -2984,11 +2074,10 @@ class TestSessionReuse:
         await db_session.commit()
         async with db_session_factory() as seed_session:
             snapshot = _snapshot_of(ma_session(id="sesn_queued_existing"))
-            await create_thread_session(
+            await new_thread_session(
                 seed_session,
                 ma_agent_id="ag_test",
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="5555",
                 account_id=principal.account_id,
                 ma_session_id="sesn_queued_existing",
@@ -3029,84 +2118,6 @@ class TestSessionReuse:
             "first queued question\n\nsecond queued question"
         )
         assert "second queued question" in mock_run_turn.call_args.kwargs["user_message"]
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_delta_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_second_thread_mention_reuses_session_no_second_create(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_delta: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """SC-1: second mention on an existing thread reuses the session — no create_session call."""
-        from daimon.core.stores.identity import get_or_create_platform_principal
-        from daimon.core.stores.thread_sessions import create_thread_session
-
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-        # Pre-create the principal so we know account_id before seeding the thread row.
-        # The bot uses external_id=str(message.author.id); _make_thread_message default is 111.
-        principal = await get_or_create_platform_principal(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            external_id="111",
-        )
-        await db_session.commit()
-
-        # Seed a live thread_sessions row so the second mention finds it.
-        existing_session_id = "sesn_existing_001"
-        watermark_msg_id = "111222333"
-        async with db_session_factory() as seed_session:
-            snapshot = _snapshot_of(ma_session(id=existing_session_id))
-            await create_thread_session(
-                seed_session,
-                ma_agent_id="ag_test",
-                tenant_id=tenant.id,
-                platform="discord",
-                thread_id="5555",  # matches _make_thread_message default thread_id
-                account_id=principal.account_id,
-                ma_session_id=existing_session_id,
-                budget_channel_id="789",
-                watermark_message_id=watermark_msg_id,
-                effective_config=snapshot,
-                identity_fingerprint=fingerprint_identity(snapshot),
-                mutable_fingerprint=fingerprint_mutable(snapshot),
-            )
-            await seed_session.commit()
-
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-        mock_build_delta.return_value = (
-            "<context><thread_delta></thread_delta></context>\n\n<user_query>hello</user_query>",
-            [],
-        )
-
-        runtime = _make_runtime(tenant.id, db_session_factory)
-        bot = make_bot(runtime)
-        message = _make_thread_message(thread_id=5555)
-
-        await bot.on_message(message)
-
-        mock_create_session.assert_not_called()
-        mock_run_turn.assert_called_once()
-        call_kwargs = mock_run_turn.call_args.kwargs
-        assert call_kwargs["session_id"] == existing_session_id, (
-            "run_turn must receive the reused ma_session_id"
-        )
-        assert "<thread_delta>" in call_kwargs["user_message"], (
-            "continuation turn must use delta context, not full history"
-        )
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
@@ -3211,7 +2222,6 @@ class TestSessionReuse:
         from daimon.core.errors import TurnError
         from daimon.core.stores.identity import get_or_create_platform_principal
         from daimon.core.stores.thread_sessions import (
-            create_thread_session,
             get_live_thread_session,
         )
         from daimon.core.turn.state import TurnState
@@ -3231,11 +2241,10 @@ class TestSessionReuse:
         old_session_id = "sesn_old_dead_001"
         async with db_session_factory() as seed_session:
             snapshot = _snapshot_of(ma_session(id=old_session_id))
-            await create_thread_session(
+            await new_thread_session(
                 seed_session,
                 ma_agent_id="ag_test",
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="5557",
                 account_id=principal.account_id,
                 ma_session_id=old_session_id,
@@ -3612,114 +2621,6 @@ class TestOverCapQueue:
         mock_create_session.assert_not_called()
         assert bot.turn_queue.depth() == 0
 
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_a_mention_waiting_on_the_tenant_cap_shows_the_queued_hourglass(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        """Cap 1, two mentions: the second gets ⌛ while it waits, then the normal lifecycle."""
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-        mock_create_session.side_effect = [ma_session(id="sess-cap-1"), ma_session(id="sess-cap-2")]
-        first_running = asyncio.Event()
-        finish_first = asyncio.Event()
-
-        async def run_turn(*_args: object, **_kwargs: object) -> MagicMock:
-            if not first_running.is_set():
-                first_running.set()
-                await finish_first.wait()
-            return MagicMock()
-
-        mock_run_turn.side_effect = run_turn
-        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
-        bot.runtime.settings.discord.max_concurrent_turns_per_tenant = 1  # pyright: ignore[reportOptionalMemberAccess]
-        first = _make_channel_message(channel_id=789)
-        second = _make_channel_message(channel_id=790)
-        first_calls = _record_reactions(first)
-        second_calls = _record_reactions(second)
-        for index, message in enumerate((first, second)):
-            _give_thread(message, thread_id=6000 + index, card_id=5000 + index)
-
-        first_turn = asyncio.create_task(bot.on_message(first))
-        await asyncio.wait_for(first_running.wait(), 5)
-        second_turn = asyncio.create_task(bot.on_message(second))
-        await _until(lambda: ("+", "⌛") in second_calls)
-        assert bot.turn_queue.depth(tenant.id) == 1
-        assert second_calls == [("+", "👀"), ("+", "⌛")]
-
-        finish_first.set()
-        await asyncio.wait_for(asyncio.gather(first_turn, second_turn), 5)
-        await _settle_background(bot)
-        assert second_calls == [("+", "👀"), ("+", "⌛"), ("-", "⌛"), ("-", "👀")]
-        assert first_calls == [("+", "👀"), ("-", "👀")], "a turn that never waited: no ⌛"
-        assert bot.turn_queue.in_flight() == 0
-
-    @pytest.mark.parametrize(
-        "exit_kind", ["start", "stop", "timeout", "balance", "cancel", "add_fails", "no_wait"]
-    )
-    async def test_the_hourglass_clears_on_every_end_of_the_wait(
-        self,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        exit_kind: str,
-    ) -> None:
-        calls = 0
-
-        async def balance_gone_after_admission(**_kwargs: object) -> bool:
-            # Fine at admission (the first call), depleted at the re-check after the wait.
-            nonlocal calls
-            calls += 1
-            return exit_kind == "balance" and calls > 1
-
-        with patch(
-            "daimon.core.spend_gate.is_over_balance",
-            AsyncMock(side_effect=balance_gone_after_admission),
-        ):
-            async with _over_cap_turn(
-                db_session,
-                db_session_factory,
-                queued=exit_kind != "no_wait",
-                max_wait_s=1.0 if exit_kind == "timeout" else 300,
-                add_fails=exit_kind == "add_fails",
-            ) as ctx:
-                if exit_kind in ("start", "balance", "add_fails"):
-                    assert ctx.held is not None
-                    ctx.held.release()
-                elif exit_kind == "stop":
-                    ctx.stop()
-                elif exit_kind == "cancel":
-                    ctx.turn.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.wait_for(ctx.turn, 5)
-                await _settle_background(ctx.bot)
-                if exit_kind == "no_wait":
-                    assert ctx.calls == [("+", "👀"), ("-", "👀")]
-                else:
-                    assert ctx.calls[:2] == [("+", "👀"), ("+", "⌛")]
-                    assert sorted(ctx.calls[2:]) == sorted([("-", "⌛"), ("-", "👀")])
-                if exit_kind in ("stop", "timeout", "balance", "cancel"):
-                    ctx.create_session.assert_not_called()
-                else:
-                    ctx.create_session.assert_awaited_once()
-                if exit_kind == "stop":
-                    assert ctx.card.edit.await_args.kwargs["embed"].title == "Stopped.", (
-                        "the stopped wait ends on the Stopped card"
-                    )
-                assert ctx.bot.turn_queue.depth() == 0
-
     @pytest.mark.parametrize("exit_kind", ["stop", "timeout", "grant"])
     async def test_a_slow_hourglass_add_never_holds_up_the_wait(
         self,
@@ -3766,21 +2667,6 @@ class TestOverCapQueue:
             assert ctx.bot.turn_queue.in_flight() == 0
             gate.set()
             await _settle_background(ctx.bot)
-
-
-def _record_reactions(message: discord.Message) -> list[tuple[str, str]]:
-    """One chronological list of the reaction calls made on `message`."""
-    calls: list[tuple[str, str]] = []
-
-    async def add(emoji: str) -> None:
-        calls.append(("+", emoji))
-
-    async def remove(emoji: str, _user: object) -> None:
-        calls.append(("-", emoji))
-
-    message.add_reaction = AsyncMock(side_effect=add)  # pyright: ignore[reportAttributeAccessIssue]
-    message.remove_reaction = AsyncMock(side_effect=remove)  # pyright: ignore[reportAttributeAccessIssue]
-    return calls
 
 
 def _give_thread(message: discord.Message, *, thread_id: int, card_id: int) -> MagicMock:
@@ -3896,123 +2782,3 @@ async def _over_cap_turn(
             await _settle_background(bot)
             if held is not None:
                 held.release()
-
-
-class TestOwnCardIsNotContext:
-    """The turn's own status card is posted before the context is built; it is not conversation."""
-
-    @staticmethod
-    async def _run(
-        mock_resolve: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-        *,
-        seeded_watermark: str | None,
-    ) -> None:
-        from daimon.core.stores.identity import get_or_create_platform_principal
-        from daimon.core.stores.thread_sessions import create_thread_session
-
-        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
-        await _setup_workspace_and_config(db_session, tenant.id)
-        principal = await get_or_create_platform_principal(
-            db_session, tenant_id=tenant.id, platform="discord", external_id="111"
-        )
-        await db_session.commit()
-        if seeded_watermark is not None:
-            async with db_session_factory() as seed_session:
-                snapshot = _snapshot_of(ma_session(id="sesn_card_existing"))
-                await create_thread_session(
-                    seed_session,
-                    ma_agent_id="ag_test",
-                    tenant_id=tenant.id,
-                    platform="discord",
-                    thread_id="5557",
-                    account_id=principal.account_id,
-                    ma_session_id="sesn_card_existing",
-                    budget_channel_id="789",
-                    watermark_message_id=seeded_watermark,
-                    effective_config=snapshot,
-                    identity_fingerprint=fingerprint_identity(snapshot),
-                    mutable_fingerprint=fingerprint_mutable(snapshot),
-                )
-                await seed_session.commit()
-        mock_resolve.return_value = _stub_resolved_config()
-        mock_find_agent.return_value = "ag_test"
-        mock_find_env.return_value = "env_test"
-
-        bot = make_bot(_make_runtime(tenant.id, db_session_factory))
-        message = _make_thread_message(thread_id=5557)
-        card = MagicMock(spec=discord.Message)
-        card.id = 777888999
-        message.channel.send = AsyncMock(return_value=card)
-        await bot.on_message(message)
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_first_turn_excludes_its_own_card_from_history(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_xml: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        mock_create_session.return_value = ma_session(id="sesn_card_first")
-        mock_build_xml.return_value = ("<context></context>\n\n<user_query>hi</user_query>", [])
-
-        await self._run(
-            mock_resolve,
-            mock_find_env,
-            mock_find_agent,
-            db_session,
-            db_session_factory,
-            seeded_watermark=None,
-        )
-
-        mock_build_xml.assert_awaited()
-        assert mock_build_xml.await_args is not None
-        assert "777888999" in mock_build_xml.await_args.kwargs["excluded_message_ids"]
-
-    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
-    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
-    @patch("daimon.adapters.discord.bot.build_delta_xml", new_callable=AsyncMock)
-    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_delta_turn_excludes_its_own_card_and_keeps_delivered_chunks_out(
-        self,
-        mock_resolve: AsyncMock,
-        mock_create_session: AsyncMock,
-        mock_build_delta: AsyncMock,
-        mock_run_turn: AsyncMock,
-        mock_find_env: AsyncMock,
-        mock_find_agent: AsyncMock,
-        db_session: AsyncSession,
-        db_session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        mock_build_delta.return_value = (
-            "<context></context>\n\n<user_query>hi</user_query>",
-            [],
-        )
-
-        await self._run(
-            mock_resolve,
-            mock_find_env,
-            mock_find_agent,
-            db_session,
-            db_session_factory,
-            seeded_watermark="111222333",
-        )
-
-        mock_create_session.assert_not_called()
-        assert mock_build_delta.await_args is not None
-        assert "777888999" in mock_build_delta.await_args.kwargs["excluded_message_ids"]

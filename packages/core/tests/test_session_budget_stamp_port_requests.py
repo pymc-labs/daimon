@@ -1,11 +1,9 @@
 """Budget-stamp extraction keeps actual SDK requests and partial-record semantics."""
 
-import contextlib
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Self, cast
-from unittest.mock import AsyncMock, Mock
+from typing import cast
+from unittest.mock import ANY, AsyncMock, Mock
 
 import anthropic
 import httpx
@@ -23,17 +21,11 @@ from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTr
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .shared_fakes import SessionFactory
+
 TENANT, ACCOUNT = uuid.UUID(int=901), uuid.UUID(int=902)
 SESSION = "sess_budget_stamp"
 PATH = f"/v1/sessions/{SESSION}"
-
-
-class SessionFactory:
-    def __call__(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
-
-    def begin(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
 
 
 def mapping(*, stamp: str | None = "") -> ThreadSessionRow:
@@ -61,7 +53,7 @@ def host(
     monkeypatch.setattr(session_preparation, "get_live_thread_session", lookup)
     monkeypatch.setattr(session_preparation, "set_budget_channel_stamp", write)
     monkeypatch.setattr(session_preparation.log, "warning", warning)
-    deps = replace(deps_for(client, factory), turn_path=None)
+    deps = deps_for(client, factory)
     return deps, lookup, write, warning
 
 
@@ -187,7 +179,9 @@ async def test_budget_native_read_preserves_sdk_failure_retry_marker_and_notice(
         "session_preparation.budget_stamp_unreadable",
         session_id=SESSION,
         error=type(before.value).__name__,
+        causes=ANY,
     )
+    assert warning.call_args.kwargs["causes"][0]["status"] == status, "the cause names its status"
     assert row.budget_channel_id == ""
 
 

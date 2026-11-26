@@ -11,18 +11,26 @@ from mux.contracts import ports
 from mux.contracts.extensions import ExtensionConfig, ExtensionRef
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.profile import CORE_CAPABILITIES, Profile
-from mux.contracts.resources import AgentSpec, ToolSpec
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    NetworkPolicy,
+    ToolSpec,
+    WorkspaceSource,
+)
 from mux.errors import ExtensionVersionError, InvalidConfig, UnsupportedCapability
 from mux.profiles import (
     INLINE_REUSE,
     MANAGED_AGENTS,
     PERSISTENT_WORKSPACE,
     PROFILES,
+    carried_environment,
     emits_legacy_events_for,
     get_profile,
     native_agent_tools,
     neutral_catalog_profile_for,
 )
+from mux.profiles.gemini import OPT_IN_MODELS
 from pydantic import ValidationError
 
 
@@ -40,7 +48,18 @@ def test_declared_profiles_and_their_core_status() -> None:
 def test_legacy_rendering_declarations_round_trip(profile: Profile) -> None:
     assert profile.emits_legacy_events == (profile.provider == "anthropic")
     assert emits_legacy_events_for(profile.provider) is profile.emits_legacy_events
-    assert Profile.model_validate_json(profile.model_dump_json()) == profile
+    # The credential-carrier flag, effort map, skill limits and copy format are code-declared,
+    # never dumped.
+    restored = Profile.model_validate_json(profile.model_dump_json())
+    assert restored == profile.model_copy(
+        update={
+            "carries_caller_resources": False,
+            "effort_map": {},
+            "skill_limits": None,
+            "skill_upload_limits": None,
+            "skill_copy_format": None,
+        }
+    )
     assert pickle.loads(pickle.dumps(profile)) == profile
 
 
@@ -59,6 +78,15 @@ def test_conflicting_rendering_declarations_are_refused(
     )
     with pytest.raises(InvalidConfig, match="unambiguous"):
         emits_legacy_events_for("openai")
+
+
+def test_caller_resources_ride_the_credential_off_managed_agents() -> None:
+    carriers = {
+        pid for pid, profile in profiles.PROFILES.items() if profile.carries_caller_resources
+    }
+    assert carriers == {pid for pid in profiles.PROFILES if not pid.startswith("anthropic.")}
+    # Excluded from every dump, so existing profile digests hold.
+    assert all("carries_caller_resources" not in p.model_dump() for p in profiles.PROFILES.values())
 
 
 def test_old_profile_defaults_to_normalized_rendering() -> None:
@@ -316,6 +344,17 @@ def test_execution_mapping_requires_complete_automatic_authority():
             )
 
 
+def test_web_tools_map_without_filesystem_tools():
+    from mux.profiles import represented_execution_tools
+
+    search = (ToolSpec(name="web_search", kind="builtin"),)
+    assert represented_execution_tools(INLINE_REUSE, search) == (
+        ToolSpec(name="google_search", kind="builtin"),
+    )
+    with pytest.raises(InvalidConfig):
+        represented_execution_tools(INLINE_REUSE, ())
+
+
 @pytest.mark.parametrize("disabled", ["bash", "write", "edit"])
 def test_native_disabled_capability_cannot_acquire_general_execution(disabled):
     from mux.drivers.anthropic.schemas import AgentToolsConfig
@@ -375,6 +414,90 @@ def test_builtin_bare_id_fallback_only_without_source(
 def test_selectable_models_list_the_default_first_and_never_pro() -> None:
     from mux.profiles import selectable_models
 
-    assert selectable_models("gemini") == ("gemini-3.8-flash", "gemini-4-argon")
-    assert selectable_models("openai") == ("gpt-6-luna", "gpt-6-astra")
+    assert selectable_models("gemini") == (
+        "gemini-3.8-flash",
+        *OPT_IN_MODELS,
+    )
+    assert OPT_IN_MODELS == (
+        "gemini-4-argon",
+        "gemini-4-carbon",
+        "gemini-4-hydrogen",
+        "gemini-4-neon",
+    )
+    assert selectable_models("openai") == (
+        "gpt-6-luna",
+        "gpt-6-astra",
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+    ), "Luna stays the default; both Astras and Sol are allowed"
     assert not any("pro" in model for model in selectable_models("gemini"))
+
+
+@pytest.mark.parametrize("profile", [PERSISTENT_WORKSPACE, INLINE_REUSE, MANAGED_AGENTS])
+def test_only_openai_and_gemini_profiles_declare_effort(profile: Profile) -> None:
+    declared = profile.provider in ("openai", "gemini")
+    assert bool(profile.effort_map) is declared
+
+
+def test_resolved_backend_refuses_effort_the_profile_does_not_declare() -> None:
+    from mux.contracts.config import ResolvedBackend
+
+    ResolvedBackend(
+        backend="openai", profile="openai.persistent_workspace", model="m", effort="low"
+    )
+    with pytest.raises(InvalidConfig):
+        ResolvedBackend(
+            backend="anthropic", profile="anthropic.managed_agents", model=None, effort="low"
+        )
+
+
+_PACKAGES = {"system": ("gh",), "python": ("duckdb",), "npm": ()}
+_LIMITED = NetworkPolicy(mode="limited", allowed_hosts=("api.example.com",))
+_MANY = NetworkPolicy(mode="limited", allowed_hosts=tuple(f"h{i}.example.com" for i in range(101)))
+
+
+@pytest.mark.parametrize(
+    ("profile", "network", "carried_network", "carried_packages"),
+    [
+        (PERSISTENT_WORKSPACE, NetworkPolicy(), NetworkPolicy(), True),
+        (PERSISTENT_WORKSPACE, _LIMITED, _LIMITED, True),
+        (PERSISTENT_WORKSPACE, _MANY, None, True),
+        (INLINE_REUSE, NetworkPolicy(), NetworkPolicy(), True),
+        (INLINE_REUSE, _LIMITED, _LIMITED, False),
+        (INLINE_REUSE, _MANY, _MANY, False),
+        (
+            INLINE_REUSE,
+            NetworkPolicy(mode="limited"),
+            NetworkPolicy(mode="none"),
+            False,
+        ),
+    ],
+)
+def test_carried_environment_by_profile_keeps_what_the_sandbox_recreates(
+    profile: Profile,
+    network: NetworkPolicy,
+    carried_network: NetworkPolicy | None,
+    carried_packages: bool,
+) -> None:
+    """OpenAI carries packages and up to 100 hosts; Gemini packages need open egress."""
+    source = EnvironmentSpec(
+        name="env",
+        network=network,
+        packages=_PACKAGES,
+        sources=(WorkspaceSource(kind="repository", target_path="r", repository_url="https://g"),),
+    )
+    carried = carried_environment(profile, source)
+    packages = {"system": ("gh",), "python": ("duckdb",)} if carried_packages else None
+    assert carried == EnvironmentSpec(name="env", network=carried_network, packages=packages), (
+        "the carried part differs from the profile's sandbox limits"
+    )
+
+
+def test_carried_environment_for_native_config_or_other_profiles_when_unmapped_then_bare() -> None:
+    """A native or self-hosted environment carries nothing; Anthropic has no mapping."""
+    native = EnvironmentSpec(name="env", execution="self_hosted", packages=_PACKAGES)
+    assert carried_environment(INLINE_REUSE, native) == EnvironmentSpec(name="env"), (
+        "a self-hosted environment must not carry"
+    )
+    with pytest.raises(InvalidConfig):
+        carried_environment(MANAGED_AGENTS, native)

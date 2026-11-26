@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from mux.contracts.actions import NativeInput, UserMessage, UserToolResult
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.events import NativePart, TextPart, ToolResultPayload
+from mux.contracts.events import ImagePart, NativePart, TextPart, ToolResultPayload
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, ResourceRef, Scope, ThreadRef
 from mux.contracts.ports import ManagedAgents, Steering
@@ -21,6 +21,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import compile_agent
+from mux.drivers.gemini.storage import ALL, Keys
 from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, close_iterator
 from mux.errors import (
     ContinuityLost,
@@ -30,6 +31,7 @@ from mux.errors import (
     ScopeViolation,
     UnsupportedCapability,
 )
+from mux.profiles.gemini import OPT_IN_MODELS
 from mux.state.memory import MemoryStateStore
 from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from pydantic import JsonValue
@@ -119,6 +121,23 @@ async def test_two_turns_reuse_history_environment_and_immutable_default(setup: 
     )
     assert "usage_observations" in ma.admit(config).satisfied
     assert not ma.capabilities().core
+
+
+@pytest.mark.asyncio
+async def test_a_message_with_an_image_sends_the_image_inline_after_its_text(setup: Setup) -> None:
+    """An inline image rides along as an image block; a type Gemini cannot take is refused."""
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native())
+    picture = ImagePart(media_type="image/png", data_base64="aGk=")
+    message = UserMessage(content=(TextPart(text="what is this?"), picture))
+    await ma.events.send(SCOPE, s.ref, (message,), key="image")
+    assert t.requests[0]["input"] == [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image", "data": "aGk=", "mime_type": "image/png"},
+    ], "the text block should come first, then the image with its media type"
+    odd = UserMessage(content=(ImagePart(media_type="image/svg+xml", data_base64="aGk="),))
+    with pytest.raises(UnsupportedCapability, match="input_modality"):
+        await ma.events.send(SCOPE, s.ref, (odd,), key="svg")
 
 
 @pytest.mark.asyncio
@@ -688,17 +707,19 @@ def test_removed_model_preserves_default_selections_and_thread_mode() -> None:
     )
 
 
-def test_argon_is_an_opt_in_gemini_selection_that_never_changes_the_default() -> None:
-    from mux.profiles import backend_selection, runnable_selection
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_opt_in_model_is_an_opt_in_gemini_selection_that_never_changes_the_default(
+    model: str,
+) -> None:
+    from mux.profiles import backend_selection, runnable_selection, tariff_gated
 
     assert backend_selection("gemini").model == "gemini-3.8-flash"
-    argon = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-4-argon")
-    assert runnable_selection(resolve_default(argon))
-    assert not runnable_selection(
-        resolve_default(argon.model_copy(update={"thread_mode": "shared"}))
-    )
-    for near in ("gemini-4-argon-preview", "gemini-4", "Gemini-4-Argon"):
-        assert not runnable_selection(resolve_default(argon.model_copy(update={"model": near})))
+    opted = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model=model)
+    assert runnable_selection(resolve_default(opted))
+    assert runnable_selection(resolve_default(opted.model_copy(update={"thread_mode": "shared"})))
+    assert tariff_gated(resolve_default(opted)), "an opt-in model needs a current price"
+    for near in (f"{model}-preview", "gemini-4", model.title()):
+        assert not runnable_selection(resolve_default(opted.model_copy(update={"model": near})))
 
 
 @pytest.mark.parametrize("ceiling", (False, 0, -1, 65_537, "4096"))
@@ -965,14 +986,14 @@ async def test_a_completed_interactions_events_are_delivered_while_a_writer_hold
     """J6g PAKM6G failed busy right after `interaction.completed`: the stream reconciled,
     then read the turn's events through the account's write transaction again. Another
     copy's writer taking the records row the moment the reconcile commits must not stop
-    the events it just committed from being delivered."""
+    the events it just committed from being delivered, nor read them again."""
     ma, t, storage, _, s, _ = setup
     t.responses.append(native(status="in_progress", steps=[]))
     await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
     t.saved["i1"] = native()
     t.streams["i1"] = [{"event_type": "interaction.completed"}]
-    real_reconcile = ma.events.reconcile
-    real_transaction = storage.transaction
+    real_reconcile = ma.events._reconciled  # pyright: ignore[reportPrivateUsage]
+    real_transaction, real_read = storage.transaction, storage.read
     held = False
 
     async def reconcile_then_a_writer_takes_the_row(scope: Scope, session: ResourceRef):
@@ -981,15 +1002,64 @@ async def test_a_completed_interactions_events_are_delivered_while_a_writer_hold
         held = True
         return result
 
-    def transaction(*, after_dispatch: bool = False):
+    def transaction(keys: Keys = ALL, *, after_dispatch: bool = False):
         if held:
             raise RuntimeError("records row held by another copy's writer")
-        return real_transaction(after_dispatch=after_dispatch)
+        return real_transaction(keys, after_dispatch=after_dispatch)
 
-    ma.events.reconcile = reconcile_then_a_writer_takes_the_row  # type: ignore[method-assign]
+    def read(keys: Keys = ALL):
+        if held:
+            raise RuntimeError("the stream read the records again")
+        return real_read(keys)
+
+    ma.events._reconciled = reconcile_then_a_writer_takes_the_row  # type: ignore[method-assign]
     storage.transaction = transaction  # type: ignore[method-assign]
+    storage.read = read  # type: ignore[method-assign]
     streamed = [e async for e in ma.events.stream(SCOPE, s.ref)]
     assert held, "the writer took the row after the reconcile"
+    assert any(e.type == "session.turn_ended" for e in streamed), [e.type for e in streamed]
+
+
+async def test_an_unchanged_poll_writes_nothing_and_an_older_final_turn_is_not_read(
+    setup: Setup,
+) -> None:
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native(status="in_progress", steps=[])
+    await ma.events.reconcile(SCOPE, s.ref)
+    real_transaction, writes = storage.transaction, 0
+
+    def counted(keys: Keys = ALL, *, after_dispatch: bool = False):
+        nonlocal writes
+        writes += 1
+        return real_transaction(keys, after_dispatch=after_dispatch)
+
+    storage.transaction = counted  # type: ignore[method-assign]
+    await ma.events.reconcile(SCOPE, s.ref)
+    assert writes == 0, "a poll that changes nothing writes nothing"
+    t.saved["i1"] = native()
+    await ma.events.reconcile(SCOPE, s.ref)
+    assert writes == 1, "the finished read is written"
+    t.responses.append(native("i2", status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="second")
+    reads = len(t.read_requests)
+    await ma.events.reconcile(SCOPE, s.ref)
+    assert t.read_requests[reads:] == ["i2"], "an older finished turn is never read again"
+
+
+async def test_the_stream_reconciles_only_on_an_ending_status(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native()
+    t.streams["i1"] = [
+        {"event_type": "interaction.status_update", "status": "in_progress"},
+        {"event_type": "interaction.status_update", "status": "completed"},
+    ]
+    reads = len(t.read_requests)
+    streamed = [e async for e in ma.events.stream(SCOPE, s.ref)]
+    assert len(t.read_requests) == reads + 1, "a progress update reads nothing"
     assert any(e.type == "session.turn_ended" for e in streamed), [e.type for e in streamed]
 
 
@@ -1087,7 +1157,9 @@ async def test_a_read_from_a_workspace_replaced_meanwhile_is_refused(setup: Setu
     real_get = t.get
 
     async def get_while_the_workspace_changes(interaction: str) -> Object:
-        raw = await real_get(interaction)
+        # A newer read, so it is applied (an unchanged one writes nothing).
+        later = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
+        raw = {**await real_get(interaction), "updated": later}
         async with storage.transaction() as records:
             records.sessions[s.ref.id].environment_id = "e2"
         return raw
@@ -1123,3 +1195,15 @@ async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
     assert wrote and stop.stopped and stop.outcome == "interrupted"
     t.get = real_get  # type: ignore[method-assign]  # retrieve still reads under the lock
     assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+
+def test_thinking_level_when_compiled_then_only_a_model_interaction_carries_it() -> None:
+    """The API rejects agent_config.thinking_level, so an agent interaction refuses it."""
+    spec = AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
+    assert "thinking_level" not in str(compile_agent(spec)), "no effort, no thinking level"
+    with pytest.raises(UnsupportedCapability, match="agent_thinking_level"):
+        compile_agent(spec, thinking_level="low")
+    model = compile_agent(spec, max_output_tokens=64, thinking_level="high")
+    assert model["generation_config"] == {"max_output_tokens": 64, "thinking_level": "high"}, (
+        "a model interaction sends effort in generation_config"
+    )

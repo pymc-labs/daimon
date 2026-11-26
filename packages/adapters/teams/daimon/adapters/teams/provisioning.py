@@ -20,7 +20,7 @@ from pathlib import Path
 import anthropic as _anthropic
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError
@@ -91,8 +91,12 @@ async def provision_configured_tenant(
         if report.is_failure():
             reason = compose_failure_reason(report)
         elif deployment_default.agent_name is not None:
-            agent = await find_agent_by_daimon_tag(
-                anthropic, tenant_id=tenant_id, name=deployment_default.agent_name
+            agent = await find_agent_or_builtin(
+                anthropic,
+                tenant_id=tenant_id,
+                name=deployment_default.agent_name,
+                records=sessionmaker,
+                surface="teams_roster",
             )
             if agent is None:
                 reason = (

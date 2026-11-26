@@ -27,34 +27,26 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import auth_identity
+
 _ADMIN_REQUIRED = "requires an admin"
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        client=MagicMock(spec=AsyncAnthropic, api_key="sk-test"),  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
 
 
 def _admin_auth(*, tenant_id: uuid.UUID, account_id: uuid.UUID | None = None) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=account_id or uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-    )
+    return auth_identity(account_id or uuid.uuid4(), tenant_id, is_platform_admin=False)
 
 
 def _non_admin_auth(*, tenant_id: uuid.UUID) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-    )
+    return auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
 
 
 async def _seed(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[uuid.UUID, uuid.UUID]:
@@ -237,7 +229,7 @@ def _runtime_with_default(
 ) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        client=MagicMock(spec=AsyncAnthropic, api_key="sk-test"),  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(agent_name=agent_name),
     )
@@ -326,7 +318,7 @@ async def test_explain_says_so_when_nothing_resolves(
     tenant_id, _ = await _seed(committing_sessionmaker)
     runtime = McpRuntime(
         session_factory=committing_sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        client=MagicMock(spec=AsyncAnthropic, api_key="sk-test"),  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
@@ -382,13 +374,7 @@ async def test_explanation_separates_setup_responder_target_and_parent_defaults(
             responder_ma_agent_id="agent_daimon",
             responder_name="Daimon",
         )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        platform="discord",
-        is_admin=True,
-    )
+    auth = auth_identity(account.id, tenant.id, is_platform_admin=False, platform="discord")
     explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "thread-0")
     assert explained.effective_agent_name == "Daimon", "thread binding determines who answers"
     assert explained.winning_tier == "thread", "the setup responder outranks parent routing"
@@ -437,13 +423,7 @@ async def test_explanation_reports_deleted_setup_without_parent_fallback(
             deleted=True,
         )
     runtime = _runtime_with_default(committing_sessionmaker, "parent-responder")
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        platform=platform,
-        is_admin=True,
-    )
+    auth = auth_identity(account.id, tenant.id, is_platform_admin=False, platform=platform)
     with pytest.raises(ToolError, match="deleted-thread.*was deleted") as error:
         await _explain_agent_resolution_impl(runtime, auth, "parent", "deleted-thread")
     explanation = str(error.value)
@@ -482,13 +462,7 @@ async def test_explanation_calls_a_handed_over_thread_a_handoff_not_a_setup(
             responder_name="research-bot",
             kind="handoff",
         )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        platform="discord",
-        is_admin=True,
-    )
+    auth = auth_identity(account.id, tenant.id, is_platform_admin=False, platform="discord")
 
     explained = await _explain_agent_resolution_impl(runtime, auth, "parent", "handed-over")
 
@@ -520,7 +494,9 @@ async def test_set_agent_default_says_the_agents_repos_come_too(
 
     tenant_id, account_id = await _seed(committing_sessionmaker)
 
-    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
+    async def find(
+        _client: object, *, tenant_id: uuid.UUID, name: str, records: object = None
+    ) -> object:
         return SimpleNamespace(id="ag_writer", metadata={})
 
     async def summary(_session: object, *, tenant_id: uuid.UUID) -> AgentRepoSummary:

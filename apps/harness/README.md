@@ -115,6 +115,12 @@ Sequence numbers are per session and strictly increase. Repeating a key with
 the same request replays records; conflicting key/turn payloads return 409.
 Only one turn runs per session.
 
+Since 0.2.0, `GET /v0/sessions/{id}/outputs` lists the regular files under the
+session's `work/outputs` (500 files), `GET .../outputs/{output_id}` returns one
+as base64 (32 MiB), and `POST .../outputs/{output_id}/delete` removes it. They
+run as the tool user, never follow symlinks or hard links, and an id whose file
+changed since listing returns 409.
+
 `$HOME/.daimon/turns.sqlite3` owns unique turn/key claims; each session's
 `$HOME/.daimon/sessions/<id>/journal.sqlite3` holds its event log and conversation
 history. Writes use SQLite WAL with synchronous FULL. All runtime SQLite operations run

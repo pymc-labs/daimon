@@ -14,10 +14,12 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     HubSettings,
+    McpIdentitySettings,
     McpOAuthClientSettings,
     McpOAuthSettings,
     McpSettings,
     Settings,
+    SignedIdentityServer,
     SlackSettings,
     TeamsSettings,
     load_settings,
@@ -68,23 +70,20 @@ def test_private_channel_messages_is_on_by_default_and_needs_a_teams_public_url(
 
 
 def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() -> None:
-    from daimon.core.turn.ceiling import TURN_CEILING_S
+    from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 
+    floor = int(LONGEST_TURN_CEILING_S) + 900
     defaults = DiscordSettings(bot_token=SecretStr("test"))
-    assert defaults.startup_replay_minutes == 0
-    assert defaults.turn_card_unrecoverable_after_s == 86400
-    assert defaults.turn_card_unrecoverable_after_attempts == 3
+    assert defaults.startup_replay_minutes == 0, "no replay by default"
+    assert defaults.turn_card_unrecoverable_after_s == 86400, "a day by default"
+    assert defaults.turn_card_unrecoverable_after_attempts == 3, "three passes by default"
     with pytest.raises(ValidationError):
-        DiscordSettings(
-            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 899
-        )
+        DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=floor - 1)
     with pytest.raises(ValidationError):
         DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_attempts=1)
-    assert (
-        DiscordSettings(
-            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 900
-        ).turn_card_unrecoverable_after_s
-        == int(TURN_CEILING_S) + 900
+    settings = DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=floor)
+    assert settings.turn_card_unrecoverable_after_s == floor, (
+        "the longest turn time limit plus 15 minutes is allowed"
     )
 
 
@@ -1113,23 +1112,18 @@ def test_slack_settings_history_page_limit_rejects_above_slack_maximum() -> None
         SlackSettings(signing_secret="s" * 32, app_token="xapp-test", history_page_limit=1001)
 
 
-def test_feedback_to_support_is_off_by_default_and_reads_a_per_tenant_map(monkeypatch):
+def test_feedback_to_support_still_parses_a_per_tenant_map(monkeypatch):
+    """Deprecated for `support_feedback`, read until `daimon features import-env` stores it."""
     import uuid
 
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     on = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
-    off = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000002")
-    assert load_settings(_env_file=None).support.routes_feedback(on) is False
+    assert load_settings(_env_file=None).support.feedback_to_support == {}
     monkeypatch.setenv(
-        "DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT",
-        '{"AAAAAAAA-0000-0000-0000-000000000001": true, '
-        '"aaaaaaaa-0000-0000-0000-000000000002": false}',
+        "DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT", '{"AAAAAAAA-0000-0000-0000-000000000001": true}'
     )
-    support = load_settings(_env_file=None).support
-    assert support.routes_feedback(on) is True
-    assert support.routes_feedback(off) is False
-    assert support.routes_feedback(uuid.uuid4()) is False
+    assert load_settings(_env_file=None).support.feedback_to_support == {on: True}
     monkeypatch.setenv("DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT", '{"typo": true}')
     with pytest.raises(ValidationError):
         load_settings(_env_file=None)
@@ -1371,3 +1365,49 @@ def test_terms_url_is_unset_by_default_and_reads_from_env(monkeypatch: pytest.Mo
     assert str(load_settings(_env_file=None).terms_url) == "https://example.com/terms", (
         "DAIMON_TERMS_URL must set terms_url"
     )
+
+
+@pytest.mark.parametrize(
+    "url", ["http://tools.example.com/mcp", "https://user:pw@tools.example.com/mcp", "tools"]
+)
+def test_a_bearer_identity_server_must_be_plain_https(url: str) -> None:
+    with pytest.raises(ValidationError, match="https URL"):
+        SignedIdentityServer(
+            name="tools",
+            url=url,
+            auth="bearer",
+            requester_meta=True,
+            workspaces=frozenset({"discord:1"}),
+            agents=("Agent A",),
+        )
+
+
+def _bearer_server() -> SignedIdentityServer:
+    return SignedIdentityServer(
+        name="tools",
+        url="https://tools.example.com/mcp",
+        auth="bearer",
+        requester_meta=True,
+        workspaces=frozenset({"discord:1"}),
+        agents=("Agent A",),
+    )
+
+
+def test_a_bearer_server_without_a_key_still_loads_off_the_mcp_service() -> None:
+    settings = McpIdentitySettings(servers=[_bearer_server()])
+    assert settings.names_requester
+    assert not McpIdentitySettings().names_requester
+
+
+def test_unscoped_names_holds_only_the_servers_that_opted_out_of_channel_scoping() -> None:
+    """`channel_scoped` defaults to True, so only an explicit false lists a server."""
+    scoped = _bearer_server()
+    open_one = scoped.model_copy(update={"name": "open", "channel_scoped": False})
+    settings = McpIdentitySettings(servers=[scoped, open_one])
+    assert settings.unscoped_names == frozenset({"open"}), "only the opted-out server"
+    assert McpIdentitySettings(servers=[scoped]).unscoped_names == frozenset()
+
+
+def test_a_key_must_name_a_bearer_server() -> None:
+    with pytest.raises(ValidationError, match="only servers whose auth is bearer"):
+        McpIdentitySettings(servers=[_bearer_server()], bearers={"other": SecretStr("key")})

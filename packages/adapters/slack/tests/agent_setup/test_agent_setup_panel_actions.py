@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -71,9 +70,9 @@ from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.slack_notices import shown_text
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -187,7 +186,7 @@ def _build_runtime(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
         deployment_default=deployment_default or DeploymentDefault(),
     )
 

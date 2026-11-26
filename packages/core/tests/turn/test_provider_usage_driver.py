@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Literal, cast
 
@@ -17,10 +18,11 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.turn import driver
-from daimon.core.turn.io import LegacyTurnIO, TurnEvent, TurnStream
+from daimon.core.turn.io import TurnEvent, TurnIO, TurnStream, turn_io
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.usage_billing import ObservationBilled
 from daimon.testing.turn_fakes import BlockForever, FakeAnthropic, RecordingLifecycle, YieldEvent
+from daimon.testing.turn_leg import LEG_SCOPE
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import StopObservation
 from mux.contracts.resources import ProviderBinding
@@ -31,6 +33,10 @@ from mux.state.store import binding_slot
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
+
+_run_turn = partial(
+    driver.run_turn, session_id="sess_1", user_message="hi", render_interval_s=0.001
+)
 
 
 def usage(provider: Literal["openai", "gemini"], revision: int = 1) -> UsageObservation:
@@ -80,7 +86,7 @@ class NativeStream:
 
 class Codec:
     def __init__(self, fake: FakeAnthropic, observations: Sequence[UsageObservation]) -> None:
-        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.source = turn_io(cast(AsyncAnthropic, fake), "sess_1", scope=LEG_SCOPE)
         self.live = deque(observations)
         self.reconciled = list(observations[-1:])
         self.opened = asyncio.Event()
@@ -142,13 +148,10 @@ async def test_revisions_survive_duplicate_display_ids_and_postrun_replay(
         recorded.append(observation)
         return True
 
-    final = await driver.run_turn(
+    final = await _run_turn(
         anthropic=cast(AsyncAnthropic, fake),
-        session_id="sess_1",
-        user_message="hi",
         lifecycle=RecordingLifecycle(),
         cancel=asyncio.Event(),
-        render_interval_s=0.001,
         billing=ObservationBilled(record),
     )
     assert {value.revision for value in recorded} == {1, 2}
@@ -173,13 +176,10 @@ async def test_pending_same_revision_is_retried_after_run(monkeypatch: pytest.Mo
         recorded.append(observation)
         return len(recorded) > 1
 
-    final = await driver.run_turn(
+    final = await _run_turn(
         anthropic=cast(AsyncAnthropic, fake),
-        session_id="sess_1",
-        user_message="hi",
         lifecycle=RecordingLifecycle(),
         cancel=asyncio.Event(),
-        render_interval_s=0.001,
         billing=ObservationBilled(record),
     )
     assert len(recorded) == 2 and recorded[0] == recorded[1]
@@ -246,15 +246,11 @@ async def test_persisted_provider_pump_keeps_lease_through_usage_reconciliation(
         return True
 
     with persistence.activate():
-        run = driver.run_turn(
+        run = _run_turn(
             anthropic=cast(AsyncAnthropic, fake),
-            session_id="sess_1",
-            user_message="hi",
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
-            render_interval_s=0.001,
             billing=ObservationBilled(record),
-            path="mux",
         )
         if failed:
             with pytest.raises(RuntimeError, match="codec failure"):
@@ -290,13 +286,10 @@ async def test_failed_or_cancelled_pump_fetches_native_usage(
         return False  # captured durably, actual infrastructure still unknown
 
     task = asyncio.create_task(
-        driver.run_turn(
+        _run_turn(
             anthropic=cast(AsyncAnthropic, fake),
-            session_id="sess_1",
-            user_message="hi",
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
-            render_interval_s=0.001,
             billing=ObservationBilled(record),
         )
     )
@@ -312,9 +305,9 @@ async def test_billed_codec_without_reconciliation_refuses_before_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeAnthropic()
-    source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+    source = turn_io(cast(AsyncAnthropic, fake), "sess_1", scope=LEG_SCOPE)
 
-    def factory(*args: object, **kwargs: object) -> LegacyTurnIO:
+    def factory(*args: object, **kwargs: object) -> TurnIO:
         return source
 
     monkeypatch.setattr(driver, "turn_io", factory)
@@ -323,13 +316,12 @@ async def test_billed_codec_without_reconciliation_refuses_before_send(
         raise AssertionError("must not bill")
 
     with pytest.raises(ValueError, match="before sending"):
-        await driver.run_turn(
+        await _run_turn(
             anthropic=cast(AsyncAnthropic, fake),
-            session_id="sess_1",
-            user_message="hi",
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
             billing=ObservationBilled(record),
+            render_interval_s=0.05,
         )
     assert not fake.beta.sessions.events.sent_events
 
@@ -353,13 +345,10 @@ async def test_usage_only_native_frame_is_folded_without_an_sdk_meter(
         recorded.append(observation)
         return True
 
-    final = await driver.run_turn(
+    final = await _run_turn(
         anthropic=cast(AsyncAnthropic, fake),
-        session_id="sess_1",
-        user_message="hi",
         lifecycle=RecordingLifecycle(),
         cancel=asyncio.Event(),
-        render_interval_s=0.001,
         billing=ObservationBilled(record),
     )
     assert final.usage_totals.output_tokens == 101 and final.content == []

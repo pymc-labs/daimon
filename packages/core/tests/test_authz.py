@@ -10,11 +10,18 @@ The channel default and channel environment rows have no guard in the model yet.
 from __future__ import annotations
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import (
+    CHANNEL_SCOPE_PREFIX,
+    AgentRule,
+    ChannelRule,
+    TenantAccessPolicy,
+    attach_automatic_rules,
+)
 from daimon.core.authz import (
     Action,
     AgentRef,
     Decision,
+    OwnDmRead,
     Place,
     SessionFacts,
     Subject,
@@ -33,6 +40,9 @@ OPEN = TenantAccessPolicy()
 
 MEMBER = Subject(is_admin=False, platform_user_id="U_MEM")
 ADMIN = Subject(is_admin=True, platform_user_id="U_ADM")
+ADMIN_INSIDE = Subject(
+    is_admin=True, platform_user_id="U_ADM", origin_channel_ids=frozenset({"C_ACME"})
+)
 BEARER = Subject(is_admin=True, platform_user_id=None)
 TWO_CHANNELS = TenantAccessPolicy(agent_channel_pins={"acme": ("C_ACME", "C_OPS")})
 AGENT_KEY_ADMIN = Subject(is_admin=True, platform_user_id="U_ADM", via_agent_key=True)
@@ -270,10 +280,21 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "server admin mints bound anywhere, as before",
+        "server admin mints bound from inside the channel",
+        ACME_SEALED,
+        {
+            "subject": ADMIN_INSIDE,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        ALLOW,
+    ),
+    (
+        "server admin outside a sealed channel mints nothing for its agent",
         ACME_SEALED,
         {"subject": ADMIN, "action": Action.MINT_CODING_TOKEN, "agent": ACME, "place": INSIDE},
-        ALLOW,
+        Decision(False, "sealed_channel"),
     ),
     # --- channel default: nobody binds a pinned agent outside its pin ---
     (
@@ -578,7 +599,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
     ),
     # --- Session reads (G_seal_session_read, admin trust model) ---
     (
-        "admin_trust admin reads another account's sealed channel session from the hub",
+        "admin_trust admin never reads another account's sealed channel session from the hub",
         SEALED,
         {
             "subject": ADMIN,
@@ -586,7 +607,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"}), owned=False),
         },
-        ALLOW,
+        _deny("not_owner"),
     ),
     (
         "admin_trust admin never reads another member's private DM",
@@ -692,10 +713,19 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "isolation server admin in their own DM",
+        "isolation server admin never runs a home agent in web chat, even with web in its rule",
+        TenantAccessPolicy(
+            channel_rules={"C_ACME": ChannelRule(readers="own", writers="own")},
+            agent_rules={"acme": AgentRule(runs_in=("C_ACME", "web"))},
+        ),
+        {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.WEB, "agent": ACME},
+        _deny("runs_elsewhere"),
+    ),
+    (
+        "isolation server admin never runs a home agent in their own DM",
         ISOLATED,
         {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.DM, "agent": ACME},
-        ALLOW,
+        _deny("runs_elsewhere"),
     ),
     (
         "isolation own agent never posts outside",
@@ -1112,7 +1142,18 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "server admin opens the network of a sealed channel",
+        "server admin opens the network of a sealed channel from inside it",
+        ACME_SEALED,
+        {
+            "subject": ADMIN_INSIDE,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        ALLOW,
+    ),
+    (
+        "server admin outside a sealed channel cannot open its network",
         ACME_SEALED,
         {
             "subject": ADMIN,
@@ -1120,7 +1161,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="C_ACME"),
             "open_network": True,
         },
-        ALLOW,
+        Decision(False, "sealed_channel"),
     ),
     # --- channel protection and seals: server admins only ---
     (
@@ -1170,6 +1211,34 @@ def test_place_from_origin_maps_a_dm_scope_to_no_channel() -> None:
     )
 
 
+def test_a_channel_timer_scope_is_its_parent_channel_for_every_rule() -> None:
+    """An unattended channel turn's `ch:` scope is a queue key, not a place."""
+    timer = Place.from_origin(parent_channel_id="C_ACME", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc")
+    assert timer == INSIDE
+    for policy, place in (
+        (PINNED, timer),
+        (
+            PROTECTED,
+            Place.from_origin(parent_channel_id="C_PROT", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc"),
+        ),
+    ):
+        normal = Place.from_origin(parent_channel_id=place.parent_channel_id, thread_id=None)
+        for action in (Action.RUN_AGENT, Action.START_TURN):
+            assert authorize(
+                policy, subject=MEMBER, action=action, agent=ACME, place=place
+            ) == authorize(policy, subject=MEMBER, action=action, agent=ACME, place=normal)
+    assert authorize(PINNED, subject=MEMBER, action=Action.RUN_AGENT, agent=ACME, place=timer)
+    assert not authorize(
+        PINNED,
+        subject=MEMBER,
+        action=Action.RUN_AGENT,
+        agent=ACME,
+        place=Place.from_origin(
+            parent_channel_id="C_OTHER", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc"
+        ),
+    )
+
+
 @pytest.mark.parametrize("action", [Action.START_TURN, Action.ACT_FOR_CREATOR])
 def test_role_gate_requires_current_membership_and_matching_role(action: Action) -> None:
     policy = TenantAccessPolicy(invoker_role_ids=("123",))
@@ -1184,3 +1253,140 @@ def test_role_gate_requires_current_membership_and_matching_role(action: Action)
     assert not authorize(
         policy, subject=Subject(platform_user_id="U1", is_admin=True), action=action
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "metadata", "aliased"),
+    [
+        ("default", {"daimon_managed": "true", "daimon_name": "default"}, True),
+        ("daimon", {"daimon_managed": "true", "daimon_name": "daimon"}, False),
+        ("default-reader", {"daimon_reader_of": "h", "daimon_reader_source": "default"}, False),
+        ("default", {"daimon_name": "default"}, False),
+    ],
+    ids=["seeded-renamed", "seeded-unrenamed", "reader", "own-default"],
+)
+def test_agent_names_when_builtin_name_then_only_the_renamed_seed_takes_the_old_rules(
+    name: str, metadata: dict[str, str], aliased: bool
+) -> None:
+    """A rule on the other built-in name may be a workspace's own agent's."""
+    from daimon.core.access_policy import AgentRule, agent_invoker_roles
+    from daimon.core.authz import agent_names
+
+    other = "daimon" if name.startswith("default") else "default"
+    policy = TenantAccessPolicy(agent_rules={other: AgentRule(invoker_role_ids=("1234",))})
+    names = agent_names(name, metadata)
+    assert bool(agent_invoker_roles(policy, names)) is aliased, f"{names} under {other}'s rule"
+
+
+def _reach(*checked: str, platform: str = "discord") -> OwnDmRead:
+    return OwnDmRead(platform, frozenset(checked))
+
+
+#: The room facts made C_SEAL narrow; no admin limited its readers by hand.
+NARROW = attach_automatic_rules(
+    TenantAccessPolicy(), {"C_SEAL": ChannelRule(readers="inside")}, unknown_narrow=False
+)
+
+
+def _read_limited(
+    subject: Subject = MEMBER, policy: TenantAccessPolicy = NARROW, **extra: object
+) -> Decision:
+    return authorize(
+        policy,
+        subject=subject,
+        action=Action.READ_CHANNEL,
+        place=Place(channel_id="C_SEAL"),
+        **extra,  # pyright: ignore[reportArgumentType]
+    )
+
+
+def test_own_dm_reach_lets_a_checked_target_past_not_a_reader_and_nothing_else() -> None:
+    assert _read_limited(own_dm_read=_reach("C_SEAL")) == ALLOW
+    # Every other caller keeps today's answer.
+    assert _read_limited().reason == "not_a_reader"
+    assert _read_limited(own_dm_read=_reach()).reason == "not_a_reader", "nothing was checked"
+    assert _read_limited(own_dm_read=_reach("C_OTHER")).reason == "not_a_reader", "exact target"
+    assert _read_limited(own_dm_read=_reach("C_SEAL", platform="slack")).reason == "not_a_reader"
+    assert _read_limited(own_dm_read=_reach("C_SEAL", platform="teams")).reason == "not_a_reader"
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        BEARER,
+        AGENT_KEY_ADMIN,
+        Subject(platform_user_id="U_MEM", client=True),
+    ],
+    ids=["no-person", "agent-key", "client"],
+)
+def test_own_dm_reach_is_for_a_person_never_a_key_or_a_client(subject: Subject) -> None:
+    assert not _read_limited(subject, own_dm_read=_reach("C_SEAL"))
+
+
+def test_own_dm_reach_does_not_lift_a_hold_or_a_limit_an_admin_set_by_hand() -> None:
+    held = TurnHold(platform="discord", channel_id="C_HELD", client=False)
+    assert not _read_limited(own_dm_read=_reach("C_SEAL"), hold=held)
+    # A room an admin sealed keeps its rule, with or without a narrow fact on it.
+    reach = _reach("C_SEAL")
+    assert _read_limited(policy=SEALED, own_dm_read=reach).reason == "not_a_reader"
+    both = attach_automatic_rules(
+        SEALED, {"C_SEAL": ChannelRule(readers="inside")}, unknown_narrow=False
+    )
+    assert _read_limited(policy=both, own_dm_read=reach).reason == "not_a_reader"
+    own = TenantAccessPolicy(channel_rules={"C_SEAL": ChannelRule(readers="own", writers="own")})
+    assert not _read_limited(policy=own, own_dm_read=reach)
+    # A thread under a room sealed by hand follows it.
+    thread = authorize(
+        SEALED,
+        subject=MEMBER,
+        action=Action.READ_CHANNEL,
+        place=Place(channel_id="T1", parent_channel_id="C_SEAL"),
+        own_dm_read=_reach("T1"),
+    )
+    assert thread.reason == "not_a_reader"
+
+
+def test_own_dm_reach_reads_a_thread_under_a_narrow_room() -> None:
+    def read(checked: str) -> Decision:
+        return authorize(
+            NARROW,
+            subject=MEMBER,
+            action=Action.READ_CHANNEL,
+            place=Place(channel_id="T1", parent_channel_id="C_SEAL"),
+            own_dm_read=_reach(checked),
+        )
+
+    assert read("T1") == ALLOW
+    assert read("C_SEAL").reason == "not_a_reader", "the thread itself was not checked"
+
+
+def test_a_reach_latched_turn_posts_only_into_its_own_dm() -> None:
+    def post(place: Place) -> Decision:
+        return authorize(OPEN, subject=MEMBER, action=Action.POST, place=place, reach_latched=True)
+
+    assert post(Place(channel_id="C_OPEN")).reason == "reach_latched"
+    assert post(Place(channel_id="T1", parent_channel_id="C_OPEN")).reason == "reach_latched"
+    assert post(Place(channel_id="D1", own_dm=True)) == ALLOW
+    unlatched = authorize(
+        OPEN, subject=MEMBER, action=Action.POST, place=Place(channel_id="C_OPEN")
+    )
+    assert unlatched == ALLOW, "a turn that used no reach posts as before"
+
+
+def test_a_reach_latched_turn_sends_direct_messages_to_its_own_person_only() -> None:
+    def send(recipient: str, subject: Subject = MEMBER) -> Decision:
+        return authorize(
+            OPEN,
+            subject=subject,
+            action=Action.DIRECT_MESSAGE,
+            recipient_id=recipient,
+            reach_latched=True,
+        )
+
+    assert send("U_OTHER").reason == "reach_latched"
+    assert send("U_MEM") == ALLOW
+    assert send("U_MEM", BEARER).reason == "reach_latched", "no person to send to"
+    unlatched = authorize(
+        OPEN, subject=MEMBER, action=Action.DIRECT_MESSAGE, recipient_id="U_OTHER"
+    )
+    assert unlatched == ALLOW

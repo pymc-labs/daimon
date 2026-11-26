@@ -36,3 +36,11 @@ def test_two_overlapping_reloads_both_see_the_changes() -> None:
 def test_overlay_drops_leavers_and_sets_flags() -> None:
     merged = overlay({"a": True, "b": False}, {"a": False, "b": None, "c": True})
     assert merged == {"a": False, "c": True}, "events win over the older read"
+
+
+def test_overlay_carries_role_ids_with_the_state() -> None:
+    from daimon.core.member_reloads import MemberState
+
+    old = MemberState(False, ("r1",))
+    merged = overlay({"a": old, "b": old}, {"a": MemberState(False, ("r1", "r2")), "b": None})
+    assert merged == {"a": MemberState(False, ("r1", "r2"))}

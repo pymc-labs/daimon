@@ -115,7 +115,9 @@ class SettingsView(discord.ui.View):
             await _actor(self.runtime, interaction, self.place.tenant_id),
             raw,
             self.place,
-            agents=tenant_agents(self.runtime.anthropic, self.place.tenant_id),
+            agents=tenant_agents(
+                self.runtime.anthropic, self.place.tenant_id, records=self.runtime.sessionmaker
+            ),
         )
         if screen is not None:
             await _draw(interaction, self.runtime, self.place, screen)
@@ -165,7 +167,7 @@ class SettingsCog(commands.Cog):
                 runtime.settings,
                 actor,
                 place,
-                agents=tenant_agents(runtime.anthropic, tenant_id),
+                agents=tenant_agents(runtime.anthropic, tenant_id, records=runtime.sessionmaker),
             )
             await _draw(interaction, runtime, place, screen)
         except (DaimonError, discord.HTTPException) as exc:

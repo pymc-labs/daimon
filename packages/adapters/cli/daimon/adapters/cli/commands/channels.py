@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
@@ -13,6 +13,12 @@ from typing import Annotated, Any, Literal, cast
 import httpx
 import typer
 from cryptography.fernet import InvalidToken
+from daimon.adapters.cli.channel_lookup import (
+    discord_parent_channel,
+    fetch_discord_channel,
+    parent_channel,
+    split_thread,
+)
 from daimon.adapters.cli.commands.channels_answerable import channels_answerable_command
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
@@ -28,14 +34,18 @@ from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.channel_budget import (
+    BUDGET_ON_LIMIT,
     BUDGET_WINDOWS,
+    BudgetSpec,
     ChannelBudgetError,
     describe_budget,
     load_budget_status,
     parse_budget_spec,
+    require_alert_destination,
 )
 from daimon.core.channel_changes import ChannelActor, clear_budget, set_budget
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
+from daimon.core.channel_post_check import alert_channel_problem
 from daimon.core.channel_rules import (
     READERS_LABELS,
     WRITERS_LABELS,
@@ -58,7 +68,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import RuleRefused, thread_rule_key
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
-from daimon.core.stores.domain import Platform
+from daimon.core.stores.domain import ChannelBudgetRow, Platform
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
@@ -73,7 +83,8 @@ channels_app = typer.Typer(
     help="Channels: a summary, spend budgets, skills, rules and where Daimon answers."
 )
 budget_app = typer.Typer(
-    help="A channel's spend budget: new turns there stop once its spend reaches the limit."
+    help="A channel's spend budget: new turns there stop once its spend reaches the limit, "
+    "or, set to alert, only alerts are posted."
 )
 channels_app.add_typer(budget_app, name="budget")
 skills_app = typer.Typer(
@@ -87,10 +98,6 @@ agent_rule_app = typer.Typer(help="An agent's rule: which channels it runs in.")
 
 _PLATFORMS = ("discord", "slack", "teams")
 _CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
-_TEAMS_THREAD = ";messageid="
-_DISCORD_API = "https://discord.com/api/v10"
-_DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
-_DISCORD_MISSING = frozenset({403, 404})  # the bot cannot see the channel, or it is gone
 _SLACK_CONVERSATIONS_INFO = "https://slack.com/api/conversations.info"
 
 
@@ -103,86 +110,14 @@ class BudgetListing(BaseModel):
     spent_usd: Decimal
     active: bool
     summary: str
+    on_limit: str
+    alert_channel_id: str | None
 
 
 def _validate_platform(value: str) -> Platform:
     if value in _PLATFORMS:
         return value  # type: ignore[return-value]
     raise typer.BadParameter(f"unsupported platform {value!r}; valid: {', '.join(_PLATFORMS)}")
-
-
-def _channel(platform: str, value: str) -> str:
-    """A thread id budgets against its channel.
-
-    Slack threads are `<channel>:<thread ts>`, Teams threads
-    `<channel>;messageid=<root>`; a Teams channel id itself contains ":".
-    """
-    separator = _TEAMS_THREAD if platform == "teams" else ":"
-    channel_id = value.strip().partition(separator)[0].strip()
-    if not channel_id:
-        raise typer.BadParameter("channel id must not be empty")
-    return channel_id
-
-
-async def _fetch_discord_channel(
-    token: str, *, channel_id: str, transport: httpx.AsyncBaseTransport | None
-) -> dict[str, Any] | None:
-    """The channel as Discord returns it to the bot; None when the bot cannot see it."""
-    try:
-        async with httpx.AsyncClient(
-            base_url=_DISCORD_API,
-            headers={"Authorization": f"Bot {token}"},
-            timeout=10.0,
-            transport=transport,
-        ) as http:
-            response = await http.get(f"/channels/{channel_id}")
-    except httpx.HTTPError as exc:
-        raise DaimonError(f"could not reach Discord to look up channel {channel_id}") from exc
-    if response.status_code in _DISCORD_MISSING:
-        return None
-    if not response.is_success:
-        raise DaimonError(
-            f"Discord returned HTTP {response.status_code} looking up channel {channel_id}"
-        )
-    return cast("dict[str, Any]", response.json())
-
-
-async def _discord_budget_channel(
-    rt: CliRuntime,
-    *,
-    guild_id: str,
-    channel_id: str,
-    transport: httpx.AsyncBaseTransport | None,
-    missing_ok: bool = False,
-) -> str:
-    """The server channel a Discord id budgets against: a thread's parent.
-
-    Spend is attributed to parent channels, so a budget saved on a thread id
-    would never gate anything; the id is looked up with the bot token. With
-    `missing_ok`, an id the bot cannot see (403 or 404), or any id when no bot
-    token is set, is returned as given, so the budget of a deleted channel can
-    still be cleared.
-    """
-    if not channel_id.isdigit():
-        raise typer.BadParameter(f"{channel_id!r} is not a Discord channel id")
-    if rt.settings.discord is None:
-        if missing_ok:
-            return channel_id
-        raise DaimonError(
-            "DAIMON_DISCORD__BOT_TOKEN is not set; it is needed to look the channel up"
-        )
-    channel = await _fetch_discord_channel(
-        rt.settings.discord.bot_token.get_secret_value(), channel_id=channel_id, transport=transport
-    )
-    if channel is None:
-        if missing_ok:
-            return channel_id
-        raise DaimonError(f"Discord channel {channel_id} is not visible to daimon")
-    if str(channel.get("guild_id")) != guild_id:
-        raise DaimonError(f"channel {channel_id} is not in server {guild_id}")
-    if channel.get("type") in _DISCORD_THREAD_TYPES:
-        return str(channel["parent_id"])
-    return channel_id
 
 
 async def _existing_tenant_id(rt: CliRuntime, *, platform: str, workspace_id: str) -> uuid.UUID:
@@ -208,6 +143,22 @@ def budget_set_command(
     ends_at: Annotated[
         str | None, typer.Option("--ends-at", help="ISO 8601; fixed windows only.")
     ] = None,
+    on_limit: Annotated[
+        str | None,
+        typer.Option(
+            "--on-limit",
+            help=f"At the limit: {', '.join(BUDGET_ON_LIMIT)} (stop refuses turns; "
+            "alert posts an alert at each full multiple of the limit). "
+            "Default: the budget's current mode, stop for a new one.",
+        ),
+    ] = None,
+    alert_channel: Annotated[
+        str | None,
+        typer.Option(
+            "--alert-channel",
+            help="Channel alerts post to; default is the support channel (needs alert).",
+        ),
+    ] = None,
 ) -> None:
     """Set or replace a channel's budget."""
     settings = load_settings()
@@ -225,6 +176,8 @@ def budget_set_command(
                 window=window,
                 starts_at=starts_at,
                 ends_at=ends_at,
+                on_limit=on_limit,
+                alert_channel=alert_channel,
             )
 
     run_cli(_with_runtime(), console=console)
@@ -241,18 +194,70 @@ async def budget_set(
     window: str,
     starts_at: str | None,
     ends_at: str | None,
+    on_limit: str | None = None,
+    alert_channel: str | None = None,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    try:
-        spec = parse_budget_spec(limit_usd=usd, window=window, starts_at=starts_at, ends_at=ends_at)
-    except ChannelBudgetError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    target = _channel(platform, channel_id)
+    def parse(current: ChannelBudgetRow | None) -> BudgetSpec:
+        try:
+            return parse_budget_spec(
+                limit_usd=usd,
+                window=window,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                on_limit=on_limit,
+                alert_channel_id=alert_channel,
+                current=current,
+            )
+        except ChannelBudgetError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    if on_limit is not None or alert_channel is None:
+        parse(None)  # refused before any lookup or write; a lone alert_channel needs the row
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    if platform == "discord":
-        target = await _discord_budget_channel(
-            rt, guild_id=workspace_id, channel_id=target, transport=discord_transport
+    target = await parent_channel(
+        rt,
+        platform=platform,
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        transport=discord_transport,
+    )
+    async with rt.sessionmaker() as session:
+        spec = parse(
+            await channel_budgets.get_channel_budget(
+                session, tenant_id=tenant_id, platform=platform, channel_id=target
+            )
         )
+    if alert_channel is not None:
+        alert_id = await parent_channel(
+            rt,
+            platform=platform,
+            workspace_id=workspace_id,
+            channel_id=alert_channel,
+            transport=discord_transport,
+        )
+        keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
+        async with httpx.AsyncClient(timeout=10.0, transport=discord_transport) as http:
+            problem = await alert_channel_problem(
+                http,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=alert_id,
+                label=alert_id,
+                settings=rt.settings,
+                sessionmaker=rt.sessionmaker,
+                fernet=build_multifernet(keys) if keys else None,
+            )
+        if problem is not None:
+            raise typer.BadParameter(problem)
+        spec = replace(spec, alert_channel_id=alert_id)
+    async with rt.sessionmaker() as session:
+        try:
+            await require_alert_destination(
+                session, spec, tenant_id=tenant_id, platform=platform, settings=rt.settings
+            )
+        except ChannelBudgetError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     budget = await set_budget(
         rt.sessionmaker, _operator(tenant_id), platform=platform, channel_id=target, spec=spec
     )
@@ -267,7 +272,10 @@ async def budget_set(
 def _operator(tenant_id: uuid.UUID) -> ChannelActor:
     """The host operator: trusted as an admin, with no account behind it."""
     return ChannelActor(
-        tenant_id=tenant_id, account_id=None, subject=Subject(is_admin=True), surface="cli"
+        tenant_id=tenant_id,
+        account_id=None,
+        subject=Subject(is_admin=True, operator=True),
+        surface="cli",
     )
 
 
@@ -326,10 +334,10 @@ async def budget_clear(
     channel_id: str,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    target = _channel(platform, channel_id)
+    target = split_thread(platform, channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     if platform == "discord":
-        target = await _discord_budget_channel(
+        target = await discord_parent_channel(
             rt,
             guild_id=workspace_id,
             channel_id=target,
@@ -389,6 +397,8 @@ async def budget_list(
             spent_usd=s.spent_usd,
             active=s.is_active,
             summary=describe_budget(s),
+            on_limit=s.budget.on_limit,
+            alert_channel_id=s.budget.alert_channel_id,
         )
         for s in statuses
         if s.budget.platform == platform
@@ -411,7 +421,12 @@ def _listing(channel: ChannelSummary) -> ChannelListing:
         agent=channel.agent_name,
         environment=channel.environment_name,
         own_agents_only=channel.own_agents_only,
-        budget=f"${budget.spent_usd} of ${budget.limit_usd} ({budget.window})" if budget else "",
+        budget=(
+            f"${budget.spent_usd} of ${budget.limit_usd} ({budget.window}"
+            f"{', alert only' if budget.on_limit == 'alert' else ''})"
+            if budget
+            else ""
+        ),
     )
 
 
@@ -585,7 +600,7 @@ async def channels_skills_list(
             session,
             tenant_id=tenant_id,
             platform=platform,
-            channel_id=_channel(platform, channel_id) if channel_id else None,
+            channel_id=split_thread(platform, channel_id) if channel_id else None,
         )
     emit_rows(console, rows, columns=_SKILL_COLUMNS, as_json=as_json)
 
@@ -626,7 +641,7 @@ async def channels_skills_add(
     skill: str,
 ) -> None:
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    channel = _channel(platform, channel_id)
+    channel = split_thread(platform, channel_id)
     async with rt.sessionmaker() as session, session.begin():
         added = await add_skill_to_channel(
             session,
@@ -641,6 +656,7 @@ async def channels_skills_add(
                 rt.settings.defaults_root, features=rt.settings.configured_features
             ),
             surface="cli",
+            records=rt.sessionmaker,
         )
         if isinstance(added, str):
             raise DaimonError(CHANNEL_SKILL_REFUSALS[added])
@@ -684,7 +700,7 @@ async def channels_skills_remove(
     skill: str,
 ) -> None:
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    channel = _channel(platform, channel_id)
+    channel = split_thread(platform, channel_id)
     async with rt.sessionmaker() as session, session.begin():
         rows = await list_channel_skills(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel
@@ -754,7 +770,7 @@ async def _channel_label(
     if rt.settings.discord is None:
         return None
     try:
-        found = await _fetch_discord_channel(
+        found = await fetch_discord_channel(
             rt.settings.discord.bot_token.get_secret_value(),
             channel_id=channel_id,
             transport=discord_transport,
@@ -901,7 +917,7 @@ async def channels_rule_set(
     kind = "category" if category else "thread" if thread else "channel"
     where = f"{platform}:{workspace_id} {kind}"
     # The CLI is the deployment operator.
-    subject = Subject(is_admin=True)
+    subject = Subject(is_admin=True, operator=True)
     if category:
         try:
             changed = await set_category_rule(
@@ -1048,7 +1064,7 @@ async def agents_rule_set(
             agent_name=agent_name.strip(),
             runs_in=channels,
             # The CLI is the deployment operator.
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             surface="cli",
             default=rt.deployment_default,
         )
@@ -1115,6 +1131,6 @@ async def agents_rule_invoker_roles(
         platform=platform,
         agent_name=agent_name.strip(),
         role_ids=cleaned,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
     )
     console.print(f"{platform}:{workspace_id} {escape(agent_name)} invoker roles updated.")

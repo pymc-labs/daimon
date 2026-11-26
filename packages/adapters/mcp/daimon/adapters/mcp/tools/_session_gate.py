@@ -15,12 +15,17 @@ import anthropic
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
-from daimon.core.channel_backend import backend_selection_enabled
+from daimon.core.channel_backend import backend_refusal_causes, backend_selection_enabled
 from daimon.core.config import get_repo_memory_settings
-from daimon.core.confirmation import backend_switch_tools
+from daimon.core.confirmation import (
+    backend_switch_tools,
+    compute_card_skipped,
+    watch_card_skipped,
+)
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.toolset import place_toolset
@@ -28,6 +33,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.relay_scope import without_identity_relays
 from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import MaTool, hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
@@ -35,8 +41,11 @@ from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
+    COMPUTE_APPROVAL_TOOLS,
     DAIMON_SERVER_NAME,
+    PROVIDER_MOVE_TOOLS,
     REACH_APPROVAL_TOOLS,
+    WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -46,6 +55,13 @@ from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 
 _log = structlog.get_logger(__name__)
+
+#: What a refusal says when the session can't show the card, such as one that started
+#: before the card existed: only a new session carries it.
+CARD_UNVERIFIED = (
+    "This conversation cannot verify the confirmation card. "
+    "Start a new conversation and ask again. Nothing changed."
+)
 
 CardGap = Literal[
     "no_origin",
@@ -68,22 +84,39 @@ async def session_card_gap(
     *,
     tool_name: str,
     require_public_context: bool = False,
+    gated: bool = True,
 ) -> CardGap | None:
     """None when this call's session waits for the person's Approve, else why it does not.
 
     Read from the session itself: the verified origin's live session must run
     the origin's responder and hold `tool_name` on `always_ask`, as MA reports
     it or, failing that, as daimon recorded sending it (`_recorded_as_gated`).
-    An `agent_chat` or unattended session has no origin.
+    An `agent_chat` or unattended session has no origin, or an unattended one.
+    `gated=False` checks only the session's place and responder, for a tool that
+    asks nobody.
     """
     if origin is None:
         return "no_origin"
+    if gated and card_satisfied(auth):
+        # The person pressed Approve on Daimon's own card for exactly this call.
+        return None
+    if not origin.attended:
+        # A provider turn nobody watches has an unattended origin; MA's has none.
+        return "no_origin"
     if tool_name == "lead_intake_resolve" and (
-        not origin.attended
-        or not auth.chat_session_id
-        or origin.chat_session_id != auth.chat_session_id
+        not auth.chat_session_id or origin.chat_session_id != auth.chat_session_id
     ):
         return "no_origin"
+    if tool_name in WATCH_APPROVAL_TOOLS and await watch_card_skipped(
+        runtime.session_factory, auth.tenant_id, origin.responder_ma_agent_id, origin.platform
+    ):
+        # The deployment's admin set this agent to make watches without the card.
+        return None
+    if tool_name in COMPUTE_APPROVAL_TOOLS and await compute_card_skipped(
+        runtime.session_factory, auth.tenant_id, origin.responder_ma_agent_id, origin.platform
+    ):
+        # The admin set this agent to start and extend cloud computers without the card.
+        return None
     async with runtime.session_factory() as session:
         live = await get_live_thread_session(
             session,
@@ -126,15 +159,20 @@ async def session_card_gap(
                 return "source_context_unavailable"
         if ma_session.agent.id != origin.responder_ma_agent_id:
             return "other_agents_session"
-        if has_confirmation_gate(
-            [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=tool_name
-        ) or await _recorded_as_gated(
-            runtime,
-            auth,
-            live,
-            tool_name=tool_name,
-            ma_agent_id=ma_session.agent.id,
-            reported_tools_sha256=hash_tools(ma_session.agent.tools),
+        if (
+            not gated
+            or has_confirmation_gate(
+                [tool.model_dump(mode="json") for tool in ma_session.agent.tools],
+                tool_name=tool_name,
+            )
+            or await _recorded_as_gated(
+                runtime,
+                auth,
+                live,
+                tool_name=tool_name,
+                ma_agent_id=ma_session.agent.id,
+                reported_tools_sha256=hash_tools(ma_session.agent.tools),
+            )
         ):
             return None
         return "session_not_gated"
@@ -147,6 +185,7 @@ async def session_card_gap(
             tool=tool_name,
             ma_session_id=live.ma_session_id,
             error=str(exc),
+            causes=backend_refusal_causes(exc),
         )
         return "session_unreadable"
 
@@ -220,7 +259,42 @@ async def _recorded_as_gated(
         runtime.client,
         ma_agent_id,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
+    public_url = runtime.settings.mcp.public_url
+    # A contained room's session is bound without the signed-identity servers
+    # (`Admission.agent`), so the same agent without them is the other recorded shape.
+    stripped, names = without_identity_relays(
+        agent, public_url=None if public_url is None else str(public_url)
+    )
+    for candidate in (agent, stripped) if names else (agent,):
+        if await _recorded_as_gated_for(
+            runtime,
+            auth,
+            live,
+            candidate,
+            tool_name=tool_name,
+            reported_tools_sha256=reported_tools_sha256,
+            reported_agent=agent,
+        ):
+            return True
+    return False
+
+
+async def _recorded_as_gated_for(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    live: ThreadSessionRow,
+    agent: BetaManagedAgentsAgent,
+    *,
+    tool_name: str,
+    reported_tools_sha256: str,
+    reported_agent: BetaManagedAgentsAgent,
+) -> bool:
+    recorded = live.effective_config
+    if recorded is None:
+        return False
+    public_url = runtime.settings.mcp.public_url
     hidden = await resolve_hidden_mcp_server_names(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -229,12 +303,13 @@ async def _recorded_as_gated(
         server_urls={server.name: server.url for server in agent.mcp_servers},
     )
     # MA reporting the agent's own tools means it left the overrides out.
+    # `reported_agent` is the agent as MA holds it, with any identity servers.
     if reported_tools_sha256 not in {
+        hash_tools(reported_agent.tools),
         hash_tools(agent.tools),
         hash_tools(visible_tools(agent, hidden)),
     }:
         return False
-    public_url = runtime.settings.mcp.public_url
     toolsets = await _candidate_toolsets(runtime, auth, live, agent)
     # The bind may have been made with other rules than today's, so both the
     # current set and none are tried; neither matching reads as not gated.
@@ -258,12 +333,31 @@ async def _recorded_as_gated(
     legacy = confirmed | ({"request_channel_backend_switch"} if selection else set[str]())
     before_config = confirmed - {
         "request_provider_allowlist",
+        "request_channel_pin",
         "request_channel_pin_clear",
     }
     before_config_legacy = before_config | (
         {"request_channel_backend_switch"} if selection else set[str]()
     )
-    before_pin_clear = confirmed - {"request_channel_pin_clear"}
+    before_pin_set = confirmed - {"request_channel_pin"}
+    before_pin_clear = before_pin_set - {"request_channel_pin_clear"}
+    candidates = (
+        confirmed,
+        legacy,
+        before_config,
+        before_config_legacy,
+        before_pin_set,
+        before_pin_clear,
+    )
+    # A bind from before the thread pick asked holds only the agent switch gated, and one
+    # from while provider moves applied at once holds neither; each still proves every
+    # other card it gated.
+    if selection:
+        candidates += tuple(
+            candidate - ungated
+            for ungated in ({"set_thread_model"}, PROVIDER_MOVE_TOOLS)
+            for candidate in candidates
+        )
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
     # A bind made before the carded tools or the reach card holds neither gated, and
     # the two vary independently. Such a template proves only a call to some other
@@ -281,7 +375,7 @@ async def _recorded_as_gated(
             pre_carded,
             pre_skills,
         )
-        for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+        for candidate in candidates
         for pre_carded in (False, True)
         if pre_carded_ok or not pre_carded
         for pre_skills in (False, True)
@@ -289,6 +383,12 @@ async def _recorded_as_gated(
         for watch_tools in (
             WATCH_CONFIRMED_TOOLS,
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
+            # A session bound while `watch_approval` was skip: the rest still asked.
+            WATCH_CONFIRMED_TOOLS - WATCH_APPROVAL_TOOLS,
+            # A session bound while `compute_approval` was skip, alone or with the
+            # watch skip: the rest still asked.
+            WATCH_CONFIRMED_TOOLS - COMPUTE_APPROVAL_TOOLS,
+            WATCH_CONFIRMED_TOOLS - WATCH_APPROVAL_TOOLS - COMPUTE_APPROVAL_TOOLS,
             frozenset[str](),
         )
         for reach_tools in (REACH_APPROVAL_TOOLS, frozenset[str]())

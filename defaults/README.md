@@ -18,12 +18,12 @@ Layout:
 
 Operator workflow: edit YAML → `daimon defaults apply`.
 
-The `daimon` agent also references Anthropic's built-in `docx`, `pptx` and
+The `default` agent also references Anthropic's built-in `docx`, `pptx` and
 `xlsx` skills (`type: anthropic`), limited to Teams with `platforms: [teams]`.
 They have no directory here and stay off the agent itself: a Teams turn on
 the Anthropic backend adds them to its session (see `docs/defaults.md`).
 
-`skills/team-etiquette` is attached to the `daimon` agent on every platform. It
+`skills/team-etiquette` is attached to the `default` agent on every platform. It
 covers posting for other people: cheaper shapes, the reach budget, routines,
 shared media and the never-tag opt-out.
 
@@ -64,7 +64,7 @@ are unsupported. Running timers must be stopped in Toggl itself because a shared
 key cannot verify their owner through Reports.
 
 `image-workflow` generates and edits images through OpenAI and validates PNG
-attachments in `/mnt/session/outputs`, using a limited project key on `image-maker`.
+attachments in the reply's outputs directory, using a limited project key on `image-maker`.
 The retired optional Gemini Imagen endpoint is refused.
 
 Opt-in agent specs live in `agents-optional/workspace-writer.yaml`,
@@ -75,7 +75,7 @@ binding Google or collecting keys; every user of an agent can use its credential
 
 Audience restrictions must match the platform. On Discord, configure
 `AgentRule.invoker_role_ids` for the permitted roles (admins are checked too;
-role-gated agents deny routines). Slack and Teams have no per-user agent gate:
+a routine runs only while its owner holds them). Slack and Teams have no per-user agent gate:
 route credential holders only to private channels with restricted membership,
 and limit channel reach with `runs_in`. CLI `--agent NAME` is unchecked, so
 only trusted operators should have local CLI access. Keep credential holders

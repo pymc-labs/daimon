@@ -77,7 +77,7 @@ from daimon.adapters.discord.bot import (
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     admission_refusal_message,
 )
-from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
@@ -86,6 +86,7 @@ from daimon.adapters.discord.errors import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.outsiders import is_public_thread
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
@@ -112,6 +113,8 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.channel_audience import requester_standing
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.platform_words import words_for
@@ -130,8 +133,8 @@ from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_re
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
-from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
@@ -483,12 +486,23 @@ async def run_wizard_submit_turn_observed(
         )
         # The protection check above cached any parent it had to fetch.
         category_id, category_unresolved = await _resolve_category(channel, fetch=False)
+        async with bot.runtime.sessionmaker() as session:
+            standing = await requester_standing(
+                session,
+                tenant_id=row.tenant_id,
+                user_id=str(interaction.user.id),
+                channel_id=parent_channel_id,
+                event_role_ids=member_role_ids(author)
+                if isinstance(author, discord.Member)
+                else None,
+                resolver=bot.runtime.turn_deps.membership_resolver,
+            )
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
                 origin="chat",
                 tenant_id=row.tenant_id,
-                requester_org=RequesterOrg.HOST,
+                requester_org=standing,
                 platform="discord",
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,
@@ -497,6 +511,7 @@ async def run_wizard_submit_turn_observed(
                 role=Role.ADMIN if is_admin else Role.USER,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                public_thread=is_public_thread(channel),
             )
         except MissingTurnConfigError as err:
             _log.info(
@@ -567,6 +582,7 @@ async def run_wizard_submit_turn_observed(
                     identity_session,
                     tenant_id=row.tenant_id,
                     agent_name=agent.name,
+                    display_name=admission.display_name(agent.name),
                     is_builtin=is_builtin_agent(
                         name=agent.name,
                         metadata=agent.metadata,
@@ -639,13 +655,17 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 requester_is_admin=is_admin,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
+                answer_message_cap=admission.answer_message_cap,
                 send=_turn_send(turn_id),
                 edit=_edit_message,
                 delete=_delete_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 in_dm=isinstance(interaction.channel, discord.DMChannel),
                 fallback_active=lambda: transport.fallback_used,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id, cancel=cancel, turn_id=turn_id
@@ -708,7 +728,7 @@ async def run_wizard_submit_turn_observed(
         # site had NO timeout of any kind before this phase -- the old
         # 45-minute wait_for lived only in bot.py's mention path, so a
         # wizard-submit turn could hang forever.
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
 
         # --- Stage two: bind_session -- bind_session(). Always reuses
         # the thread's existing session: the form lives in the conversation
@@ -757,11 +777,15 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 requester_is_admin=is_admin,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
+                answer_message_cap=admission.answer_message_cap,
                 send=_turn_send(turn_card_intent.id),
                 edit=_edit_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 in_dm=isinstance(interaction.channel, discord.DMChannel),
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id,
@@ -790,6 +814,7 @@ async def run_wizard_submit_turn_observed(
                         now=datetime.now(UTC),
                         # A successor's orphan sweep leaves a live owner's marker alone.
                         owner_key=bot.runtime.owner_key,
+                        deadline=turn_deadline_at,
                     )
                     await marker_session.commit()
 
@@ -877,7 +902,12 @@ async def run_wizard_submit_turn_observed(
                     )
                     await wm_session.commit()
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-        _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
+        _log.warning(
+            "wizard_submit.turn_failed",
+            error=str(exc),
+            short_id=row.id,
+            causes=backend_refusal_causes(exc),
+        )
         finish_with_error(exc)
         await _render_wizard_turn_error(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state

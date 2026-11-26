@@ -16,6 +16,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY, ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._client import (
+    _fetch_known_channels,  # pyright: ignore[reportPrivateUsage]
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
     _require_guild_channel,  # pyright: ignore[reportPrivateUsage]
@@ -31,6 +32,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_history_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
+    _history_allowed,  # pyright: ignore[reportPrivateUsage]
 )
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -175,15 +177,19 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
                 if isinstance(guild_ch, discord.Thread):
                     await _check_thread_view(c, guild_ch, member, user_id)
-                    read_policy.require(ch_id, str(guild_ch.parent_id))
+                    read_policy.require(
+                        ch_id,
+                        str(guild_ch.parent_id),
+                        caller_checked=_history_allowed(guild_ch, member),
+                    )
                 else:
                     _check_view_permission(guild_ch, member)
-                    read_policy.require(ch_id)
+                    read_policy.require(ch_id, caller_checked=_history_allowed(guild_ch, member))
                 _check_history_permission(guild_ch, member)
 
         # 5. Build per-channel visibility data from fetch_channels.
         #    Absence does NOT mean invisible — it means "resolve it".
-        channels = await guild.fetch_channels()
+        channels = await _fetch_known_channels(guild)
         view_by_channel_id: dict[str, bool] = {}
         manage_threads_by_channel_id: dict[str, bool] = {}
         for ch in channels:
@@ -335,11 +341,18 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                 except ToolError:
                     can_view = False
 
-            # A sealed channel's hits are withheld outside it, like an invisible one's.
-            can_view = can_view and read_policy.allows(ch_id, parent_by_channel_id.get(ch_id))
+            # A sealed channel's hits are withheld outside it, like an invisible one's. A hit
+            # the caller can view and read (View, History, thread membership, as computed
+            # above for this very channel) is evidence enough for own-DM reach.
+            can_view = can_view and read_policy.allows(
+                ch_id, parent_by_channel_id.get(ch_id), caller_checked=True
+            )
             view_cache[ch_id] = can_view
             if can_view:
                 visible_hits.append(hit)
+
+        # A search that returned a limited room's hits through reach latches the turn.
+        await read_policy.record_reach(runtime)
 
         # 10. Map visible hits → MessageRow
         rows: list[MessageRow] = []

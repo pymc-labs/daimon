@@ -9,28 +9,17 @@ import pytest
 from daimon.core import settings_panel as panel
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
-from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.service import FeatureActor, read_features
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import choice, listed
 from daimon.testing.factories import make_tenant
-from pydantic import PostgresDsn, SecretStr
+from daimon.testing.shared_helpers import settings as _settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Sessions = async_sessionmaker[AsyncSession]
 AGENTS = [panel.AgentChoice("a1", "Alpha"), panel.AgentChoice("a2", "Beta")]
-
-
-def _settings() -> Settings:
-    return Settings.model_validate(
-        {
-            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
-            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
-            "discord": DiscordSettings(bot_token=SecretStr("test")),
-        }
-    )
 
 
 def _place(actor: FeatureActor, thread: str | None = None) -> FeaturePlace:
@@ -75,7 +64,9 @@ async def test_the_root_picks_a_group_and_each_group_lists_its_features(
         seen |= {o.value.split(":")[2] for o in screen.selects[0].options}
     place = _place(actor)
     views = await read_features(db_session_factory, _settings(), place)
-    discord = {v.spec.key for v in listed(views) if v.spec.on_platform("discord")}
+    discord = {
+        v.spec.key for v in listed(views, _settings(), place) if v.spec.on_platform("discord")
+    }
     assert seen == discord, "the groups list exactly the features that are set up or set"
 
 
@@ -89,7 +80,7 @@ async def test_a_feature_that_is_not_set_up_and_not_set_is_not_listed(
         v.spec.key
         for v in views
         if v.spec.on_platform("discord") and v.resolved.unavailable is not None
-    } - {v.spec.key for v in listed(views)}
+    } - {v.spec.key for v in listed(views, _settings(), _place(actor))}
     assert hidden, "the test deployment must have a feature that is not set up"
     root = await panel.open_panel(db_session_factory, _settings(), actor, _place(actor))
     shown: set[str] = set()
@@ -210,7 +201,10 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
     for platform in ("discord", "slack", "teams"):
         place = FeaturePlace.of(actor.tenant_id, platform, "C1")
         shown = {
-            v.spec.key for v in listed(await read_features(db_session_factory, _settings(), place))
+            v.spec.key
+            for v in listed(
+                await read_features(db_session_factory, _settings(), place), _settings(), place
+            )
         }
         for category in {spec.category for spec in FEATURES.values()}:
             screen = await panel.show(
@@ -432,7 +426,11 @@ async def test_a_long_group_pages_and_every_setting_is_reachable(
     keys = [o.value for p in pages for o in p.selects[0].options]
     shown = {
         v.spec.key
-        for v in listed(await read_features(db_session_factory, _settings(), _place(actor)))
+        for v in listed(
+            await read_features(db_session_factory, _settings(), _place(actor)),
+            _settings(),
+            _place(actor),
+        )
         if v.spec.category == "chat" and v.spec.on_platform("discord")
     }
     assert len(pages) > 1, "the group needs more than one page"

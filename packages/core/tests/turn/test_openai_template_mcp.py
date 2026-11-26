@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -27,11 +28,13 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.prepare import admitted_session_scope, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
+from daimon.testing.settings_mock import bare_settings
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import ConfigRevision
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
+from .test_gemini_full_source import CUSTOM, UNSEEDED_BUILT_INS, default_skill_bundles
 from .test_openai_agent_template import KEY, template_row
 from .test_openai_full_source import PARAMS, FullWire
 from .test_openai_runtime_transport import clients_for
@@ -41,7 +44,7 @@ HANDOFF_TOOLS = ("fork_agent", "hand_off_task")
 
 
 @asynccontextmanager
-async def handoff_mcp(request) -> AsyncIterator[object]:
+async def handoff_mcp(request, extra: tuple[str, ...] = ()) -> AsyncIterator[object]:
     """The real verifier, identity middleware and agent-chat search at the HTTP edge.
 
     The tools are offline stubs under their production names: what is checked
@@ -77,13 +80,13 @@ async def handoff_mcp(request) -> AsyncIterator[object]:
         sessionmaker=request.deps.sessionmaker,
     )
     mcp.add_middleware(identity)
-    for name in ("describe_agent", *HANDOFF_TOOLS, "request_agent_backend_switch"):
+    for name in ("describe_agent", *HANDOFF_TOOLS, "request_agent_backend_switch", *extra):
 
         async def stub() -> str:
             return "offline"
 
         mcp.tool(stub, name=name, description=f"{name} offline", tags={"agent-chat"})
-    mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
+    mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5, always_visible=[*extra]))
     try:
         yield mcp.http_app()
     finally:
@@ -91,9 +94,32 @@ async def handoff_mcp(request) -> AsyncIterator[object]:
 
 
 @pytest.fixture
-async def source_mcp(consent_request):
-    async with handoff_mcp(consent_request[0]) as app:
+async def source_mcp(switched_request):
+    async with handoff_mcp(switched_request[0]) as app:
         yield app
+
+
+def serve_skill(router, skill_id: str, data: bytes, version: str = "1") -> None:
+    """`skill_id` readable at `version`: an unserved read is a retryable blip."""
+    router.add(
+        "GET",
+        rf"/v1/skills/{skill_id}/versions",
+        lambda *_: httpx.Response(
+            200,
+            json={"data": [{"id": f"version-{skill_id}", "version": version}], "has_more": False},
+        ),
+    )
+    router.add(
+        "GET",
+        rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
+        lambda *_: httpx.Response(200, content=data),
+    )
+
+
+def serve_source_skills(router) -> None:
+    """The source's custom skills, each readable at version 1."""
+    for name, _bundle, _version, data in default_skill_bundles():
+        serve_skill(router, f"source-{name}", data)
 
 
 def bearer(auth: dict[str, object]) -> str:
@@ -103,7 +129,7 @@ def bearer(auth: dict[str, object]) -> str:
 
 
 @pytest.fixture
-async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
+async def template(switched_request, source_mcp, monkeypatch, tmp_path, request):
     from daimon.core.authz import Place
     from daimon.core.channel_backend import AgentBackendService
     from daimon.core.scope import DeploymentDefault, ScopeContext
@@ -114,9 +140,16 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     # {"legacy": True}: consent was given before this deploy's template kept MCP.
     model = param if isinstance(param, str) else param.get("model", "gpt-6-luna")
     legacy = isinstance(param, dict) and param.get("legacy", False)
-    request, _, source, actor, accepted, router, *_ = consent_request
+    # {"shared": True}: the copy answers a shared thread.
+    thread_mode = "shared" if isinstance(param, dict) and param.get("shared") else "per_caller"
+    # {"relay": True}: the connector relay is on from consent onward.
+    relay = isinstance(param, dict) and param.get("relay", False)
+    # {"code_default": True}: the operator installed no row; the code default serves.
+    code_default = isinstance(param, dict) and param.get("code_default", False)
+    request, _, source, actor, accepted, router, *_ = switched_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
+    serve_source_skills(router)
     scope = admitted_session_scope(
         request.admission, tenant_id=request.tenant_id, session_id="preparation"
     )
@@ -137,8 +170,13 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
+            **({"settings": bare_settings()} if relay else {}),
         ),
     )
+    if relay:
+        from daimon.core.features import snapshot
+
+        monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
     wire = FullWire(scope.tenant_id)
     clients = clients_for(monkeypatch, wire.handle)
 
@@ -172,13 +210,15 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         configuration_grant={
             "profiles": ["openai.persistent_workspace"],
             "models": ["gpt-6-luna", "gpt-6-astra"],
-            "thread_modes": ["per_caller"],
+            "thread_modes": sorted({"per_caller", thread_mode}),
             "requires": {},
         },
     )
     manifest = tmp_path / "runtime.json"
     before = {key: value for key, value in row.items() if key != "template_capabilities"}
-    manifest.write_text(json.dumps([before if legacy else row]))
+    manifest.write_text("[]" if code_default else json.dumps([before if legacy else row]))
+    if code_default:
+        monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "offline")
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
     monkeypatch.setenv(KEY, "offline")
 
@@ -216,12 +256,12 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
             state["expected"],
             actor,
             model=model,
-            accepted_drops=quote.declared_drops,
-            expected_preview_digest=quote.digest,
         )
         state["expected"], state["local"] = confirmed.local, state["local"] + 1
         linked = ConfigRevision.create(
-            revision.channel, state["local"], revision.model_copy(update={"model": model})
+            revision.channel,
+            state["local"],
+            revision.model_copy(update={"model": model, "thread_mode": thread_mode}),
         )
         async with sessions.begin() as db:
             await mux_state.put_config_revision(
@@ -236,6 +276,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         manifest.write_text(json.dumps([row]))  # this deploy: the template keeps MCP
     wire.requests.clear()
     yield request, quote, wire, consent
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 
@@ -280,17 +321,19 @@ async def _revoked(request, token: str) -> bool:
     return row.revoked_at is not None
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_consent_keeps_daimon_tools_and_drops_only_what_the_template_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert {"memory", "skills"} <= set(quote.declared_drops)
+    assert "memory" in quote.declared_drops
+    # Its custom skills fit OpenAI's limits: each attaches; only the unseeded built-ins are lost.
+    assert {d for d in quote.declared_drops if d.startswith("skill")} == UNSEEDED_BUILT_INS
     # J6b: its execution tools map to bash in the hosted environment; only web tools
     # (none on this source) would be named losses.
     assert "tools" not in quote.declared_drops
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("template", ["gpt-6-luna", "gpt-6-astra"], indirect=True)
 async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revokes_it(
     template, source_mcp
@@ -321,9 +364,9 @@ async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revoke
     assert second != first
     assert await _revoked(request, second)
 
-    # What the provider holds during a turn calls Daimon's MCP: the copy's switch
-    # and hand-off tools are offered and run. The switch runs for this credential
-    # too: its confirm call posts Daimon's own card (`daimon.core.switch_cards`).
+    # What the provider holds during a turn calls Daimon's MCP: the copy's hand-off
+    # tools are offered and run. The switch is carded like any gated tool, so the
+    # server refuses it here, where this credential has no card.
     live = await live_token(request)
     await offered_and_run(source_mcp, live)
     switched = await mcp_session(
@@ -332,8 +375,8 @@ async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revoke
         method="tools/call",
         params={"name": "request_agent_backend_switch", "arguments": {}},
     )
-    assert "confirmation card" not in json.dumps(switched)
-    assert switched["result"]["isError"] is False
+    assert "confirmation card" in json.dumps(switched)
+    assert switched["result"]["isError"] is True
 
 
 async def offered_and_run(source_mcp, token: str) -> None:
@@ -382,7 +425,7 @@ CONNECTOR_PARAMS = {
 }
 
 
-@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [CONNECTOR_PARAMS], indirect=True)
 async def test_a_user_connector_drops_only_itself_never_daimon_mcp(template):
     """An agent with its own connector keeps Daimon MCP; the card names the connector."""
     from daimon.core.confirmation import drop_words
@@ -400,29 +443,46 @@ async def test_a_user_connector_drops_only_itself_never_daimon_mcp(template):
     assert "mcp_server:linear" in wire.agent["instructions"]
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("template", [{"legacy": True}], indirect=True)
-async def test_a_copy_switched_before_this_deploy_is_asked_to_confirm_again_once(template):
-    """Consent that declared MCP dropped no longer matches: re_confirm, never a silent gain."""
-    from daimon.core.channel_backend import AgentBackendRefused
-    from daimon.core.turn.errors import AdmissionDenied
-
-    request, quote, wire, consent = template
-    assert "mcp" in quote.declared_drops, "consented while the template had no MCP"
-    with pytest.raises(AdmissionDenied) as refused:
-        await _turn(request, 0)
-    assert isinstance(refused.value.__cause__, AgentBackendRefused)
-    assert refused.value.__cause__.reason == "re_confirm"
-    assert wire.posts == [], "nothing reached OpenAI"
-    again, request = await consent(request)
-    assert "mcp" not in again.declared_drops
+async def test_a_copy_switched_before_this_deploy_gains_mcp_unasked(template):
+    """MCP lost while the template had none comes back on the next turn, with no refusal."""
+    request, quote, wire, _ = template
+    assert "mcp" in quote.declared_drops, "switched while the template had no MCP"
     await _turn(request, 0)
     (body,) = wire.posts
     assert [tool["type"] for tool in body["agent"]["tools"]].count("mcp") == 1
 
 
+@pytest.mark.parametrize("switched_request", [CONNECTOR_PARAMS], indirect=True)
+async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, monkeypatch):
+    """With the relay on the connector is bound under Daimon's URL on its credential."""
+    from daimon.core.features import snapshot
+    from daimon.core.turn.runtime_manifest import capture_preparation_source, represented_source
+
+    request, _, wire, _ = template
+    monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
+    captured = await capture_preparation_source(request, fresh=True)
+    (representation,) = [r for r in captured.representations if r.target.mcp_servers]
+    daimon, linear = representation.target.mcp_servers
+    public = str(request.deps.mcp.public_url).rstrip("/")
+    assert (linear.name, linear.url) == ("linear", f"{public}/connectors/linear"), "relayed"
+    assert linear.credential_ref == daimon.credential_ref, "the relay takes Daimon's credential"
+    assert "mcp_server:linear" not in representation.target.declared_drops, "never a loss"
+    assert "mcp.linear.app" not in representation.target.model_dump_json(), "no upstream URL"
+    assert represented_source(captured, representation.target) == representation, "verifies"
+    # The consent named the connector lost; the relay's mount keeps it, and one
+    # vault credential per destination carries Daimon's turn token to both.
+    await _turn(request, 0)
+    (body,) = wire.posts
+    servers = [tool["server_label"] for tool in body["agent"]["tools"] if tool["type"] == "mcp"]
+    assert servers == ["daimon-mcp", "linear"], "the connector reaches OpenAI through the relay"
+    assert "mcp.linear.app" not in json.dumps([wire.agent, body]), "never the upstream URL"
+
+
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {
             **CONNECTOR_PARAMS,
@@ -448,7 +508,7 @@ async def test_a_connector_name_no_drop_can_spell_fails_safe(template):
     assert "mcp.linear.app" not in json.dumps([wire.agent, body])
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_preparation_that_fails_after_minting_revokes_the_credential(template, monkeypatch):
     """A token minted for a turn that never starts is revoked now, not left to its TTL."""
     from daimon.core.turn import openai_host
@@ -456,7 +516,7 @@ async def test_a_preparation_that_fails_after_minting_revokes_the_credential(tem
     request, _, _, _ = template
     minted: list[str] = []
 
-    async def mint_then_fail(preparation, runtime):
+    async def mint_then_fail(preparation, runtime, _uploaded):
         connection = preparation.target_spec.mcp_servers[0]
         assert runtime.mcp_secrets is not None
         minted.append(
@@ -471,7 +531,7 @@ async def test_a_preparation_that_fails_after_minting_revokes_the_credential(tem
     assert await _revoked(request, token)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("template", ["gpt-6-luna", "gpt-6-astra"], indirect=True)
 async def test_a_tool_gated_after_the_switch_keeps_the_copy_running(template, monkeypatch):
     """A release that gates one more Daimon tool asks no one to confirm again."""
@@ -489,15 +549,13 @@ async def test_a_tool_gated_after_the_switch_keeps_the_copy_running(template, mo
     assert drop in wire.agent["instructions"], "the model is told it is gone"
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_tool_the_owner_turned_off_after_the_switch_asks_again(template, consent_request):
-    """Turning a Daimon tool off is the owner's change: re_confirm, nothing sent."""
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_tool_the_owner_turned_off_after_the_switch_keeps_it(template, switched_request):
+    """Only the owner or an admin edits the agent, and the model and losses stay: no card."""
     from anthropic.types.beta import BetaManagedAgentsAgent
-    from daimon.core.channel_backend import AgentBackendRefused
-    from daimon.core.turn.errors import AdmissionDenied
 
     request, _, wire, _ = template
-    router = consent_request[5]
+    router = switched_request[5]
     native = request.admission.agent.model_dump(mode="json")
     search, _ = native["tools"][1]["configs"]
     assert search["name"] == "search_tools", "the toolset this test turns off"
@@ -506,8 +564,293 @@ async def test_a_tool_the_owner_turned_off_after_the_switch_asks_again(template,
     router.add_agent(BetaManagedAgentsAgent.model_validate(native))
     router.add_environment(request.admission.environment)
     router.add_environment_list(request.admission.environment)
-    with pytest.raises(AdmissionDenied) as refused:
-        await _turn(request, 0)
-    assert isinstance(refused.value.__cause__, AgentBackendRefused), "refused as a re-confirm"
-    assert refused.value.__cause__.reason == "re_confirm", "the owner's change needs a new card"
-    assert wire.posts == [], "nothing reached OpenAI"
+    await _turn(request, 0)
+    (body,) = wire.posts
+    (mcp,) = [tool for tool in body["agent"]["tools"] if tool["type"] == "mcp"]
+    assert "search_tools" not in mcp["allowed_tools"], "the tool turned off never runs"
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_new_instructions_after_the_switch_keep_it(template, switched_request):
+    """An edit that changes neither the model nor the losses (Daimon rewriting an
+    agent's prompt) asks no one to confirm the switch again."""
+    from anthropic.types.beta import BetaManagedAgentsAgent
+
+    request, _, wire, _ = template
+    router = switched_request[5]
+    native = request.admission.agent.model_dump(mode="json")
+    native["system"] = "Edited instructions"
+    router.routes.clear()
+    router.add_agent(BetaManagedAgentsAgent.model_validate(native))
+    router.add_environment(request.admission.environment)
+    router.add_environment_list(request.admission.environment)
+    await _turn(request, 0)
+    assert len(wire.posts) == 1, "the turn ran on OpenAI"
+    assert "Edited instructions" in wire.agent["instructions"]
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_the_session_attaches_the_agents_custom_skills_uploaded_once(template):
+    request, _, wire, _ = template
+    await _turn(request, 0)
+    await _turn(request, 1)
+    uploads = [r for r in wire.requests if r.method == "POST" and r.url.path == "/v1/skills"]
+    assert len(uploads) == len(CUSTOM) == len(wire.skills), "each skill version uploads once"
+    (body,) = wire.posts
+    assert {s["skill_id"] for s in body["environment"]["skills"]} == set(wire.skills)
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_loss(
+    template, switched_request, monkeypatch
+):
+    import io
+    import zipfile
+
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.mcp_oauth import discovery
+    from daimon.core.turn import session_skills
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from mux.profiles import get_profile
+
+    reads: list[str] = []
+
+    def counting(real, name):
+        async def counted(*args, **kwargs):
+            reads.append(name)
+            return await real(*args, **kwargs)
+
+        return counted
+
+    for module, name in ((discovery, "list_mcp_tools"), (session_skills, "measure_carried_skills")):
+        monkeypatch.setattr(module, name, counting(getattr(module, name), name))
+    request, *_ = template
+    router = switched_request[5]
+    limit = get_profile("openai.persistent_workspace").skill_limits
+    assert limit is not None
+    for skill_id, extra in (("skill_team", b""), ("skill_huge", b"\0" * (limit.total_bytes + 1))):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as packed:
+            name = skill_id.replace("_", "-")
+            packed.writestr("SKILL.md", f"---\nname: {name}\ndescription: Fixture.\n---\nUse it.\n")
+            if extra:
+                packed.writestr("data.bin", extra)
+        router.add(
+            "GET",
+            rf"/v1/skills/{skill_id}/versions",
+            lambda *_, sid=skill_id: httpx.Response(
+                200, json={"data": [{"id": f"version-{sid}", "version": "7"}], "has_more": False}
+            ),
+        )
+        archive = stream.getvalue()
+        router.add(
+            "GET",
+            rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
+            lambda *_, body=archive: httpx.Response(200, content=body),
+        )
+    channel = tuple(
+        BetaManagedAgentsCustomSkill(type="custom", skill_id=skill_id, version="7")
+        for skill_id in ("skill_team", "skill_huge")
+    )
+    request = replace(request, admission=replace(request.admission, channel_skills=channel))
+    source = await capture_preparation_source(request, capability_preview=True)
+    openai = [r for r in source.representations if r.target.model.provider == "openai"]
+    assert openai, "one per model the template grants"
+    assert len(source.representations) > 1, "several models, so a repeat would show"
+    assert sorted(reads) == ["list_mcp_tools", "measure_carried_skills"], (
+        f"the catalogue and the skills are read once for every model: {reads}"
+    )
+    for represented in source.representations:
+        carried = {skill.id for skill in represented.session_skills}
+        losses = [d for d in represented.unavailable_capabilities if d.startswith("skill:")]
+        assert "skills" not in represented.unavailable_capabilities, "never lost whole"
+        assert "skill:skill_huge" in losses, "over every provider's limit: a loss, by id"
+        assert represented.skill_names["skill_huge"] == "skill-huge", "shown by its name"
+        assert "skill_team" in carried, f"{represented.target.model.id} carries the channel's"
+        if represented in openai:
+            assert carried == {f"source-{s['skill_id']}" for s in CUSTOM} | {"skill_team"}
+        else:
+            # Gemini's shared inline budget may leave one out, but always by name.
+            assert len(carried) + len(losses) == len(CUSTOM) + 2 + len(UNSEEDED_BUILT_INS), (
+                carried,
+                losses,
+            )
+    from daimon.core.confirmation import drop_words
+
+    words = drop_words(("memory", "skill:skill_huge"), {"skill_huge": "skill-huge"})
+    assert words == "its memory and its skill-huge skill", "the card shows the name"
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_skill_that_cannot_be_read_is_its_own_named_loss(template, switched_request):
+    """A failed download costs that skill alone, never the whole capture."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    router = switched_request[5]
+    router.add(
+        "GET",
+        r"/v1/skills/skill_gone/versions",
+        lambda *_: httpx.Response(
+            404, json={"type": "error", "error": {"type": "not_found_error"}}
+        ),
+    )
+    gone = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_gone", version="3")
+    request = replace(request, admission=replace(request.admission, channel_skills=(gone,)))
+    source = await capture_preparation_source(request, capability_preview=True)
+    assert source.representations, "the capture still represents the agent"
+    for represented in source.representations:
+        assert "skill:skill_gone" in represented.unavailable_capabilities, "named by its id"
+        assert "skills" not in represented.unavailable_capabilities, "the others still carry"
+        assert represented.session_skills, "the readable skills still attach"
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_capture_measures_the_sources_skills_through_its_own_record(
+    template, switched_request, monkeypatch
+):
+    """The captured record rides along, so a converted one is measured from its catalog copy."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.turn import session_skills
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    seen = []
+    measure = session_skills.measure_skills
+
+    async def spy(*args, record=None, **kwargs):
+        seen.append(record)
+        return await measure(*args, record=record, **kwargs)
+
+    monkeypatch.setattr(session_skills, "measure_skills", spy)
+    team = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="7")
+    serve_skill(switched_request[5], "skill_team", default_skill_bundles()[0][3], version="7")
+    request = replace(request, admission=replace(request.admission, channel_skills=(team,)))
+    source = await capture_preparation_source(request, capability_preview=True)
+    assert source.source is not None, "the capture holds the source record"
+    assert seen, "the capture measured skills"
+    assert all(record == source.source for record in seen), "each measure reads through the record"
+
+
+async def shared_caller(request, account):
+    """`request` as `account` asks it in its shared thread; returns it and the owner."""
+    from daimon.core.shared_threads import shared_owner
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    channel = request.admission.backend_revision.channel
+    owner = shared_owner(Slot(thread=ThreadRef(channel=channel, thread_id=request.thread_id)))
+    admission = replace(request.admission, account_id=account, shared_owner=owner)
+    scope = admitted_session_scope(admission, tenant_id=request.tenant_id, session_id="shared")
+    return replace(request, admission=admission, scope=scope, session_account_id=owner), owner
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("template", [{"shared": True}], indirect=True)
+async def test_a_second_person_replies_in_the_owners_shared_copy_as_themselves(template):
+    """A shared thread's agent copy and session are its owner's; each asker's
+    credential names that asker, so the relay hides their personal sign-ins."""
+    import jwt
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.core.turn_origin import turn_origin
+    from daimon.testing.factories import make_account
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    request, _, wire, _ = template
+    async with request.deps.sessionmaker.begin() as db:
+        tenant = await get_tenant(db, request.tenant_id)
+        assert tenant is not None
+        other = (await make_account(db, tenant=tenant)).id
+    first, owner = await shared_caller(request, request.admission.account_id)
+    second, _ = await shared_caller(request, other)
+    for index, asker in enumerate((first, second)):
+        async with turn_origin(
+            request.deps.sessionmaker,
+            tenant_id=request.tenant_id,
+            account_id=asker.admission.account_id,
+            platform=tenant.platform,
+            parent_channel_id=request.admission.origin_channel_id or "channel",
+            thread_id=request.thread_id,
+            responder_ma_agent_id=request.admission.agent.id,
+            responder_name="helper",
+            role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
+        ):
+            await _turn(asker, index)
+    assert len(wire.posts) == 1, "the second person continues the owner's session"
+    thread = ThreadRef(channel=request.admission.backend_revision.channel, thread_id="thread")
+    binding = await request.deps.state_store.get_binding(Slot(thread=thread))
+    assert binding is not None and binding.id == str(owner)
+    secret = request.deps.mcp.jwt_secret.get_secret_value()
+    claims = [
+        jwt.decode(bearer(r["auth"]), secret, algorithms=["HS256"], options={"verify_aud": False})  # pyright: ignore[reportArgumentType]
+        for r in wire.rotations
+    ]
+    # Each reply's credential is its asker's own and names them, never the owner.
+    assert claims[-1]["sub"] == claims[-1]["requester_account_id"] == str(other)
+    assert (
+        claims[0]["sub"] == claims[0]["requester_account_id"] == str(request.admission.account_id)
+    )
+    assert str(owner) not in json.dumps(claims)
+    # The relay reads each credential as a shared turn: nobody's personal sign-in
+    # (the first asker's own, here) is lent to the thread.
+    from daimon.adapters.mcp.connector_relay import RelayTurn
+    from daimon.core.mcp_oauth.connector_tokens import connector_token_for_turn
+    from daimon.core.stores.connector_tokens import upsert_connector_token
+
+    agent_id = uuid.UUID(claims[0]["chat_agent_id"])
+    url = "https://mcp.linear.app/mcp"
+    async with request.deps.sessionmaker.begin() as db:
+        await upsert_connector_token(
+            db,
+            tenant_id=request.tenant_id,
+            account_id=request.admission.account_id,
+            agent_id=agent_id,
+            server_url=url,
+            access_token_encrypted=b"at",
+            refresh_token_encrypted=None,
+            token_endpoint="https://auth.example.com/token",
+            client_id="client",
+            client_secret_encrypted=None,
+            token_endpoint_auth_method="none",
+            scope=None,
+            resource=None,
+            expires_at=None,
+            refresh_owner="daimon",
+            now=datetime.now(UTC),
+        )
+    for claim in (claims[0], claims[-1]):
+        turn = RelayTurn(
+            tenant_id=request.tenant_id,
+            account_id=uuid.UUID(claim["sub"]),
+            agent_id=agent_id,
+            chat_session_id=claim["chat_session_id"],
+            platform=tenant.platform,
+            requester_account_id=uuid.UUID(claim["requester_account_id"]),
+            held=False,
+            confirmed_call_id=None,
+            token_jti=None,
+        )
+        assert turn.shared
+        hidden = await connector_token_for_turn(
+            request.deps.sessionmaker,
+            tenant_id=turn.tenant_id,
+            agent_id=turn.agent_id,
+            server_url=url,
+            requester_account_id=turn.requester,
+            hide_personal=turn.shared,
+        )
+        assert hidden is None, "a personal sign-in never reaches a shared thread"
+    own = await connector_token_for_turn(
+        request.deps.sessionmaker,
+        tenant_id=request.tenant_id,
+        agent_id=agent_id,
+        server_url=url,
+        requester_account_id=request.admission.account_id,
+        hide_personal=False,
+    )
+    assert own is not None, "the sign-in exists; only the shared thread hides it"

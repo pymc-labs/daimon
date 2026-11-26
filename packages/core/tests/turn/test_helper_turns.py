@@ -22,23 +22,17 @@ import pytest
 from daimon.core import helpers
 from daimon.core.config import McpSettings
 from daimon.core.helpers import helper_thread_key
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_helpers, file_uploads, helper_asks
 from daimon.core.stores.domain import HelperAskRow, Role, TenantRow, UploadedFile
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.admission import admit
-from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import bind_session
-from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import turn_origin
+from daimon.testing.builders import admit_chat, plain_turn_deps
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 from daimon.testing.turn_router import build_turn_router
 from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.state.lease import Slot
@@ -200,38 +194,26 @@ async def run_asking_turn(
             await on_helper_stream(scene)
         return turns[owner].dispatch(request)
 
-    deps = TurnDeps(
-        anthropic=build_async_anthropic(
+    deps = plain_turn_deps(
+        build_async_anthropic(
             api_key="offline",
             base_url="https://anthropic.invalid",
             transport=httpx.MockTransport(transport),
         ),
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
+        db_session_factory,
         defaults_root=tmp_path,
         mcp=McpSettings(public_url=HttpUrl(public_url) if public_url else None),
-        billing_config=None,
         markup=Decimal(1),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        turn_path="mux",
         channel_backends=True,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
-    admission = await admit(
+    admission = await admit_chat(
         deps,
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
+        tenant,
         platform="slack",
         external_user_id="writer",
         channel_id="channel",
         thread_id=THREAD,
         now=datetime.now(UTC),
-        origin="chat",
     )
     assert admission.agent.id == PARENT_ID, "the thread is answered by the asking agent"
     prepared = await bind_session(
@@ -264,7 +246,7 @@ async def run_asking_turn(
         platform_channel_id="channel",
     ) as origin:
         scene.origin_id = origin.id
-        outcome = await run_prepared_turn(
+        outcome = await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
@@ -273,10 +255,8 @@ async def run_asking_turn(
             external_user_id="writer",
             user_message=QUESTION,
             lifecycle=lifecycle,
-            cancel=asyncio.Event(),
             reseed_user_message=reseed,
             recovery_lifecycle=lambda _cancel: RecordingLifecycle(),
-            render_interval_s=0.001,
             operation_key="helper-turn-test",
         )
         # The origin, and with it the asks, goes when this block ends.

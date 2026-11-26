@@ -33,74 +33,45 @@ import httpx
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.billing_panel.read import (
     invoking_channel_id,
+    invoking_thread_id,
     is_platform_admin,
     load_billing_snapshot,
 )
 from daimon.adapters.discord.billing_panel.redeem import RedeemCodeModal
-from daimon.adapters.discord.billing_panel.state import (
-    COLOR_OVER_CAP,
-    COLOR_WARNING,
-    BillingPanelState,
-    MemberRow,
-)
 from daimon.adapters.discord.checks import refuse_if_not_platform_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.ui_render import Container, Text, panel_container
 from daimon.core.billing_panel import (
     ADD_CREDIT,
-    ASK_ADMIN,
-    CHANNEL_BUDGET,
-    CHANNEL_BUDGETS,
-    CHANNEL_BUDGETS_SHOWN,
     EXPIRY_DATES,
-    EXPIRY_INTRO,
     LOOK_UP,
-    NOTHING_USED,
     REDEEM_CODE,
-    TITLE,
-    TOP_SPENDERS,
-    TOP_SPENDERS_SHOWN,
     TOPUP_AMOUNTS,
-    YOU,
-    admin_summary,
-    caller_line,
-    channel_budget_line,
-    channel_budget_phrase,
+    BillingMarks,
+    BillingPanelState,
+    MemberRow,
+    billing_screen,
     create_checkout,
-    credit_headline,
-    expiry_rows,
+    expiry_screen,
     lookup_line,
-    month_label,
-    more_spenders,
-    panel_tone,
-    spender_line,
-    timed_credit_note,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.usage_events import (
     cost_for_user_in_tenant_since,
     turn_count_for_user_in_tenant_since,
 )
-from daimon.core.web_links import OPEN_IN_WEB, panel_links
+from daimon.core.web_links import OPEN_IN_WEB, Assignment, links_at, panel_links
 
 import discord
 from discord import Interaction
 from discord.ext import commands
 
 BotInteraction = Interaction[commands.Bot]
-Container = discord.ui.Container[discord.ui.LayoutView]
-Text = discord.ui.TextDisplay[discord.ui.LayoutView]
-
-# Fallback cost per turn used when guild has no usage history yet.
-_FALLBACK_TURN_COST_USD = 0.10
-
-
-# ---------------------------------------------------------------------------
-# Pure formatters
-# ---------------------------------------------------------------------------
 
 
 def plain_name(name: str) -> str:
@@ -126,80 +97,13 @@ def _discord_date(moment: datetime) -> str:
     return f"<t:{epoch}:D> (<t:{epoch}:R>)"
 
 
-def _gap() -> discord.ui.Separator[discord.ui.LayoutView]:
-    """The line and space between two blocks of a panel."""
-    return discord.ui.Separator(spacing=discord.SeparatorSpacing.large)
-
-
-def _accent(state: BillingPanelState, now: datetime) -> int | None:
-    tone = panel_tone(
-        balance=state.guild_balance_usd,
-        caller_spend=state.caller_spend,
-        caller_cap=state.caller_cap,
-        credits=state.timed_credit,
-        now=now,
-    )
-    return {"alert": COLOR_OVER_CAP, "warning": COLOR_WARNING, None: None}[tone]
-
-
-def _credit_text(state: BillingPanelState) -> str:
-    """The total as a heading, the words under it, and the timed credit it includes."""
-    figure, words = credit_headline(state.guild_balance_usd)
-    lines = [f"### {figure}"]
-    if words is not None:
-        lines.append(words)
-    if (note := timed_credit_note(state.timed_credit)) is not None:
-        lines.append(f"-# {note}")
-    if not state.is_admin:
-        lines.append(f"-# {ASK_ADMIN}")
-    return "\n".join(lines)
-
-
-def estimate_turns(
-    amount_usd: float,
-    *,
-    guild_spend: float,
-    guild_turns: int,
-) -> int:
-    """Estimate turns purchasable for amount_usd given guild usage history.
-
-    Uses the guild's average cost per turn when history is available
-    (guild_spend > 0 and guild_turns > 0); falls back to
-    _FALLBACK_TURN_COST_USD = $0.10/turn when there is no usage history yet.
-    The fallback is a conservative estimate for new guilds.
-    """
-    if guild_spend > 0 and guild_turns > 0:
-        cost_per_turn = guild_spend / guild_turns
-    else:
-        cost_per_turn = _FALLBACK_TURN_COST_USD
-    return int(amount_usd / cost_per_turn)
-
-
-# ---------------------------------------------------------------------------
-# Pure container builders
-# ---------------------------------------------------------------------------
-
-
-def _spenders_text(state: BillingPanelState) -> str:
-    """`**Top spenders**`, the top five by name, then `+ N more — look one up below`."""
-    rows = [
-        spender_line(rank, spender_name(row), cost=row.cost_usd, is_caller=row.is_caller)
-        for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
-    ] or [NOTHING_USED]
-    if overflow := more_spenders(len(state.member_rows), state.over_cap_count):
-        rows.append(f"-# + {overflow} more. Look one up below.")
-    return "\n".join([f"**{TOP_SPENDERS}**", *rows])
-
-
-def _channel_budgets_text(state: BillingPanelState, now: datetime) -> str:
-    """`**Channel budgets**`: every channel budget, most used first, five then a count."""
-    lines = [f"**{CHANNEL_BUDGETS}**"] + [
-        channel_budget_line(status, label=f"<#{status.budget.channel_id}>", now=now)
-        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
-    ]
-    if (more := len(state.channel_budgets) - CHANNEL_BUDGETS_SHOWN) > 0:
-        lines.append(f"-# + {more} more")
-    return "\n".join(lines)
+MARKS = BillingMarks(
+    person=spender_name,
+    channel=lambda channel_id: f"<#{channel_id}>",
+    date=_discord_date,
+    accent=True,
+    more_spenders=". Look one up below.",
+)
 
 
 def build_billing_container(
@@ -209,69 +113,17 @@ def build_billing_container(
     since: datetime,
     controls: Sequence[discord.ui.ActionRow[Any]] = (),
 ) -> Container:
-    """The /billing panel: one container, its sections set apart by separators.
-
-      - header: `## Billing` + `-# October 2026` + `-# $48.17 spent by 9 people`
-        (a member's subtext is the month alone)
-      - a member's own use: `**You**` + `$11.50 of your $25.00 this month`
-      - credit: `### $62.40` + `total credit left` + the timed credit it includes
-        (and for a member `-# Ask an admin to add credit.`)
-      - `**This channel**` + `$1.20 of $5.00 used this month`, when the
-        invoking channel has one
-      - admin only: `**Top spenders**` by name, then `**Channel budgets**` when
-        any exist
-      - ``controls``, the action rows, last; the Done render passes none
-
-    The accent is red with no credit left or the caller over their cap, amber
-    while timed credit expires within a week, and absent otherwise.
-    """
-    subtext = (
-        admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
-        if state.is_admin
-        else (month_label(since),)
-    )
-    sections: list[str] = []
-    if not state.is_admin:
-        own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
-        sections.append(f"**{YOU}**\n{own}")
-    sections.append(_credit_text(state))
-    if state.channel_budget is not None:
-        phrase = channel_budget_phrase(state.channel_budget, now=now)
-        sections.append(f"**{CHANNEL_BUDGET}**\n{phrase}")
-    if state.is_admin:
-        sections.append(_spenders_text(state))
-        if state.channel_budgets:
-            sections.append(_channel_budgets_text(state, now))
-    header = Text("\n".join([f"## {TITLE}", *(f"-# {line}" for line in subtext)]))
-    children: list[discord.ui.Item[discord.ui.LayoutView]] = [header]
-    for section in sections:
-        children += [_gap(), Text(section)]
-    if controls:
-        children += [_gap(), *controls]
-    return discord.ui.Container(*children, accent_colour=_accent(state, now))
+    """The /billing panel, with ``controls`` last; the Done render passes none."""
+    return panel_container(billing_screen(state, since=since, now=now, marks=MARKS), controls)
 
 
 def build_expiry_container(state: BillingPanelState) -> Container:
     """`## Expiry dates`, then `Unused credit expires:` and one row per timed credit."""
-    rows = expiry_rows(state.timed_credit, when=_discord_date)
-    return discord.ui.Container(
-        layout.header(EXPIRY_DATES), _gap(), Text("\n".join([EXPIRY_INTRO, *rows]))
-    )
+    return panel_container(expiry_screen(state.timed_credit, marks=MARKS))
 
 
-def build_member_lookup_container(
-    *,
-    display_name: str,
-    spend_usd: float,
-    turns: int,
-    since: datetime,
-    now: datetime,
-) -> Container:
-    """The member lookup's private reply: `## Maya Chen` + `$14.02 this month`.
-
-    With no spend and no turns the body is `Nothing used this month`, which
-    also covers someone who has no daimon account.
-    """
+def build_member_lookup_container(*, display_name: str, spend_usd: float, turns: int) -> Container:
+    """The member lookup's private reply: `## Maya Chen` + `$14.02 this month`."""
     hdr = layout.header(plain_name(display_name))
     return discord.ui.Container(hdr, Text(lookup_line(spend_usd, turns)))
 
@@ -376,8 +228,6 @@ class _MemberLookupSelect(discord.ui.UserSelect["BillingPanelView"]):
                 display_name=selected.display_name,
                 spend_usd=spend,
                 turns=turns,
-                since=since,
-                now=now,
             )
             await interaction.response.send_message(
                 view=layout.static_view(lookup_container),
@@ -409,10 +259,20 @@ class _InvokerOnly(discord.ui.LayoutView):
         return True
 
 
-def web_spend_url(runtime: DiscordRuntime, guild_id: int | str, *, is_admin: bool) -> str | None:
-    """The web page of this server's spend, or None with no web app."""
+async def web_spend_url(
+    runtime: DiscordRuntime, guild_id: int | str, *, is_admin: bool, interaction: BotInteraction
+) -> str | None:
+    """The web page of this server's spend, or None with no web app or where
+    `web_awareness` is Off at the invoking channel or thread."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
-    links = panel_links(runtime.settings.web, tenant_id, admin=is_admin)
+    channel_id, thread_id = invoking_channel_id(interaction), invoking_thread_id(interaction)
+    links = await links_at(
+        runtime.sessionmaker,
+        runtime.settings,
+        FeaturePlace.of(tenant_id, "discord", channel_id, thread_id),
+        panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+        Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
+    )
     return None if links is None else links.spend()
 
 
@@ -588,7 +448,12 @@ async def _rerender(
         account_id=view.account_id,
         now=now,
         since=since,
-        web_url=web_spend_url(runtime, interaction.guild_id, is_admin=is_admin),
+        web_url=await web_spend_url(
+            runtime,
+            interaction.guild_id,
+            is_admin=is_admin,
+            interaction=bot_interaction,
+        ),
     )
     await interaction.edit_original_response(
         view=new_view,

@@ -50,12 +50,14 @@ from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel, PostgresDsn, SecretStr
 
+from .harness import auth_identity
+
 TENANT = uuid.UUID(int=1)
 ACCOUNT = uuid.UUID(int=2)
 AGENT = ma_agent(id="agent", tenant_id=TENANT)
-AUTH = AuthIdentity(
-    tenant_id=TENANT,
-    account_id=ACCOUNT,
+AUTH = auth_identity(
+    ACCOUNT,
+    TENANT,
     role=Role.USER,
     agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id="agent"),
 )
@@ -400,13 +402,14 @@ def host_guards(monkeypatch: pytest.MonkeyPatch) -> list[Scope]:
     # A send's confirmation worker polls on its own schedule; its reads are
     # covered in test_agent_chat_safety.py, not in this request-order script.
     monkeypatch.setattr(agent_chat, "watch_turn", MagicMock())
-    # The settle request written before a headless send is database-only; its own
-    # tests cover it, and it sends no provider request.
+    # The settle request and the driver record written before a headless send are
+    # database-only; their own tests cover them, and they send no provider request.
     settle = agent_chat.session_settle_state
     requested = (None, dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
     monkeypatch.setattr(settle, "request_settle", AsyncMock(return_value=requested))
     monkeypatch.setattr(settle, "withdraw_settle_request", AsyncMock())
     monkeypatch.setattr(settle, "name_settle_turn", AsyncMock())
+    monkeypatch.setattr(settle, "record_agent_chat_driver", AsyncMock())
     return scopes
 
 
@@ -706,6 +709,7 @@ async def test_session_card_gate_keeps_one_read_and_refusal_copy(
         thread_id="thread",
         responder_ma_agent_id="agent",
         responder_name="agent",
+        attended=True,
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,

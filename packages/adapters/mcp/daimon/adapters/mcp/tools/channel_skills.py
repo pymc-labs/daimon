@@ -27,8 +27,10 @@ from daimon.core.authz import Action
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import channel_skills as store
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChannelSkillRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -96,12 +98,16 @@ async def _target(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> t
     return cast(str, auth.platform), target
 
 
-def _require_write(auth: AuthIdentity, channel_id: str) -> None:
+async def _require_write(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> None:
+    async with runtime.session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=auth.tenant_id)
     decision = may_set_channel_skills(
-        mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.SKILLS)), channel_id
+        policy, mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.SKILLS)), channel_id
     )
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_SKILLS, decision.reason)
+        if decision.reason == "sealed_channel":
+            raise ToolError(f"{SEALED_REFUSAL} Nothing was changed. Do not retry.")
         raise ToolError(_needs_skills_admin(auth))
     record_policy_decision(Action.SET_CHANNEL_SKILLS, "allow")
 
@@ -122,7 +128,7 @@ async def _add(
 ) -> ChannelSkillsResult:
     require_scope(auth, "channels:write")
     platform, target = await _target(runtime, auth, channel_id)
-    _require_write(auth, target)
+    await _require_write(runtime, auth, target)
     async with runtime.session_factory.begin() as session:
         try:
             added = await add_skill_to_channel(
@@ -139,6 +145,7 @@ async def _add(
                     features=runtime.settings.configured_features,
                 ),
                 surface="chat",
+                records=runtime.session_factory,
             )
         except SkillsListTruncatedError as exc:
             raise ToolError("The skills here could not all be read. Nothing changed.") from exc
@@ -155,7 +162,7 @@ async def _remove(
 ) -> ChannelSkillsResult:
     require_scope(auth, "channels:write")
     platform, target = await _target(runtime, auth, channel_id)
-    _require_write(auth, target)
+    await _require_write(runtime, auth, target)
     wanted = skill.strip()
     async with runtime.session_factory.begin() as session:
         rows = await store.list_channel_skills(

@@ -1,5 +1,5 @@
 // `/api/features*` shapes: the schema describes every key, a place's features say what is set where.
-export type Tier = "deployment" | "workspace" | "agent" | "channel" | "thread"
+export type Tier = "deployment" | "workspace" | "agent" | "channel" | "thread" | "routine"
 
 export type FeatureSchema = {
   key: string
@@ -8,6 +8,8 @@ export type FeatureSchema = {
   categoryName: string
   values: { value: string; label: string }[]
   default: string
+  /** Above 0, the feature also takes a name of up to this many characters. */
+  maxLength?: number
   tiers: Tier[]
   lockable: Tier[]
   platforms: string[]

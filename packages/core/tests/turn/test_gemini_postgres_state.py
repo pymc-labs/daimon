@@ -4,7 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from daimon.core._models import GeminiRuntimeState
@@ -432,8 +432,9 @@ async def test_post_dispatch_acquisition_respects_an_earlier_outer_send_timeout(
 async def test_pg_commit_finishes_before_cancellation_propagates(
     postgres_state, monkeypatch, kind, cancellations
 ):
+    from sqlalchemy.dialects import postgresql
     from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
-    from sqlalchemy.sql.dml import Update
+    from sqlalchemy.sql.dml import Insert, Update
 
     original_sessions, scope, _, _ = postgres_state
     started, release = asyncio.Event(), asyncio.Event()
@@ -441,7 +442,13 @@ async def test_pg_commit_finishes_before_cancellation_propagates(
     class ObservedSession(AsyncSession):
         async def execute(self, statement, *args, **kwargs):
             result = await super().execute(statement, *args, **kwargs)
-            if isinstance(statement, Update) and statement.table.name == "gemini_runtime_state":
+            if (
+                isinstance(statement, Update) and statement.table.name == "gemini_runtime_state"
+            ) or (
+                isinstance(statement, Insert)
+                and statement.table.name == "gemini_records"
+                and "DO UPDATE" in str(statement.compile(dialect=postgresql.dialect()))
+            ):
                 self.info["payload_updated"] = True
             return result
 
@@ -509,7 +516,9 @@ async def test_read_only_records_do_not_rewrite_payload(postgres_state):
     updates = []
 
     def observe(_conn, _cursor, statement, _parameters, _context, _many):
-        if statement.startswith("UPDATE gemini_runtime_state"):
+        if statement.startswith("UPDATE gemini_runtime_state") or (
+            statement.startswith("INSERT INTO gemini_records") and "DO UPDATE" in statement
+        ):
             updates.append(statement)
 
     engine = sessions.kw["bind"]
@@ -540,7 +549,7 @@ async def test_account_purge_previews_and_deletes_records_but_retains_financial_
             model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
         )
     preview = await collect_purge_preview(sm=sessions, account_id=UUID(scope.account_id))
-    assert preview.gemini_records.count == 1
+    assert preview.gemini_records.count == 2, "the account row and the drained blob's tombstone"
     result = await purge_account(sm=sessions, account_id=UUID(scope.account_id))
     assert result.db.gemini_records == preview.gemini_records.count
     async with sessions() as db:
@@ -656,7 +665,7 @@ async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_sessi
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def _gemini_session(storage, scope):
+async def _gemini_session(storage, scope, *, key="session"):
     """A real Gemini driver on `storage`, with one session that ran one turn (i1)."""
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
@@ -694,7 +703,7 @@ async def _gemini_session(storage, scope):
             )
         },
     )
-    session = await driver.sessions.create(scope, spec, key="session")
+    session = await driver.sessions.create(scope, spec, key=key)
     stamp = datetime.now(UTC).isoformat()
     transport.responses.append(
         {
@@ -822,8 +831,8 @@ async def test_a_records_writer_that_gives_up_logs_which_acquisition_failed(
         release.set()
         await task
     named = [e for e in logs if e["event"] == "session_fence.unavailable"]
-    assert [e["label"] for e in named] == ["gemini_state:records"]
-    assert "advisory" in named[0]["reasons"], named
+    assert [e["label"] for e in named] == ["gemini_records"]
+    assert "row_nowait" in named[0]["reasons"], named
 
 
 async def test_a_snapshot_read_that_gets_no_connection_is_busy_and_named(
@@ -850,3 +859,123 @@ async def test_a_snapshot_read_that_gets_no_connection_is_busy_and_named(
     assert [(e["label"], e["reasons"]) for e in named] == [
         ("gemini_state:records:read", ["pool_timeout"])
     ]
+
+
+async def test_postgres_shared_state_is_the_threads_own_and_needs_no_account(postgres_state):
+    """A shared thread's derived owner has no Account row: the slot vouches for it."""
+    from daimon.core.shared_threads import shared_owner, shared_slot
+
+    sessions, scope, _, _ = postgres_state
+    tenant = scope.tenant_id
+    slot = shared_slot(UUID(tenant), "slack", "channel", "thread")
+    shared_scope = scope.model_copy(update={"account_id": str(shared_owner(slot))})
+    first = PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=slot)
+    async with first.transaction() as records:
+        records.creations[(tenant, shared_scope.account_id, "key")] = ("p", "digest", "agent")
+    # Every caller's turn reaches the same state, from a fresh owner.
+    again = PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=slot)
+    async with again.transaction() as records:
+        assert list(records.creations) == [(tenant, shared_scope.account_id, "key")]
+    held = PostgresFlashAccounting(
+        sessions,
+        scope=shared_scope,
+        project="project",
+        hold_usd=Decimal(".49"),
+        cap_usd=Decimal(".49"),
+        shared_slot=slot,
+    )
+    await held.before_attempt(model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1)
+    # An account-less owner without its slot, and a slot that is not the owner's, refuse.
+    with pytest.raises(ValueError, match="account is unavailable"):
+        async with PostgresGeminiStorage(
+            sessions, scope=shared_scope, project="project"
+        ).transaction():
+            pass
+    other = shared_slot(UUID(tenant), "slack", "channel", "another-thread")
+    with pytest.raises(ValueError, match="differs from its thread"):
+        PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=other)
+    foreign = shared_slot(uuid4(), "slack", "channel", "thread")
+    with pytest.raises(ValueError, match="differs from its thread"):
+        PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=foreign)
+    async with sessions() as db:
+        rows = (await db.scalars(select(GeminiRuntimeState))).all()
+    assert sorted(row.kind for row in rows) == ["holds", "records"]
+
+
+async def test_two_sessions_in_one_account_write_at_once(postgres_state):
+    """Each session is its own row: a turn holding one never waits on another's."""
+    from mux.drivers.gemini.storage import Keys, session_key
+
+    sessions, scope, _, _ = postgres_state
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="project")
+    _, _, first = await _gemini_session(storage, scope)
+    _, _, second = await _gemini_session(storage, scope, key="other")
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def writer():
+        async with storage.transaction(Keys(lock=(session_key(first.ref.id),))) as records:
+            records.sessions[first.ref.id].unknown_delivery = True
+            held.set()
+            await release.wait()
+
+    task = asyncio.create_task(writer())
+    await held.wait()
+    try:
+        async with (
+            asyncio.timeout(2),
+            storage.transaction(Keys(lock=(session_key(second.ref.id),))) as records,
+        ):
+            records.sessions[second.ref.id].unknown_delivery = True
+    finally:
+        release.set()
+        await task
+    both = Keys(read=(session_key(first.ref.id), session_key(second.ref.id)))
+    async with storage.read(both) as records:
+        assert all(records.sessions[s.ref.id].unknown_delivery for s in (first, second)), (
+            "both concurrent writes committed"
+        )
+
+
+async def test_first_touch_drains_the_legacy_blob_and_old_code_refuses_it(postgres_state):
+    """The blob's rows move out once, sends go to their session, and older code (whose
+    `_load` sees only the tombstone) fails before it could write state again."""
+    from copy import deepcopy
+
+    from daimon.core.turn.gemini_state import TOMBSTONE, _dump, _load, _ProcessRecords
+    from mux.drivers.gemini.storage import Keys, session_key
+    from mux.testing.drivers.gemini.fake import MemoryStorage
+
+    sessions, scope, _, _ = postgres_state
+    memory = MemoryStorage()
+    _, _, session = await _gemini_session(memory, scope)
+    async with memory.read() as records:
+        legacy = deepcopy(records)
+    record = legacy.sessions[session.ref.id]
+    legacy.sends = {(scope.tenant_id, scope.account_id, k): v for k, v in record.sends.items()}
+    record.sends, record.refs = {}, ()
+    async with sessions.begin() as db:
+        db.add(
+            GeminiRuntimeState(
+                tenant_id=UUID(scope.tenant_id),
+                account_id=UUID(scope.account_id),
+                project="legacy",
+                kind="records",
+                body=_dump(legacy),
+            )
+        )
+    storage = PostgresGeminiStorage(
+        sessions, scope=scope, project="legacy", process=_ProcessRecords()
+    )
+    async with storage.read(Keys(read=(session_key(session.ref.id),), refs=True)) as records:
+        drained = records.sessions[session.ref.id]
+        assert set(drained.sends) == {"send"}, "the send moved into its session"
+        assert records.agents.get(drained.spec.agent.id), "refs were filled from the blob"
+    async with sessions() as db:
+        body = await db.scalar(
+            select(GeminiRuntimeState.body).where(
+                GeminiRuntimeState.project == "legacy", GeminiRuntimeState.kind == "records"
+            )
+        )
+    assert body == TOMBSTONE, "the blob is replaced by the tombstone"
+    with pytest.raises(ValueError, match="invalid durable Gemini tag"):
+        _load(body)

@@ -34,6 +34,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _AGENT_ID = "ag_acme"
 
 
@@ -86,15 +88,12 @@ async def test_the_guard_never_exempts_an_agent_key_even_an_admins(
         tenant_id=tenant_id,
         metadata={"daimon_name": "Acme Display"},
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
+    auth = auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         platform="discord",
         platform_user_id=None if auth_kind == "agent-key-no-platform-user" else "42",
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
-        is_admin=True,
-        is_platform_admin=True,
     )
     with pytest.raises(ToolError):
         await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
@@ -195,3 +194,39 @@ async def test_direct_tools_refuse_a_member_editing_a_pinned_agent(
             await _remove_skill_impl(
                 runtime, auth, agent_name="acme-config", skill_id="skill_1", **target
             )
+
+
+async def test_an_explicit_origin_must_be_attended_to_count_as_inside_a_private_channel(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Skill uploads pass their own origin; an unattended one proves nobody is in the channel."""
+    from types import SimpleNamespace
+
+    from daimon.core.access_policy import AgentRule, ChannelRule
+
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(
+            channel_rules={"C_ACME": ChannelRule(readers="own", writers="own")},
+            agent_rules={"acme-config": AgentRule(runs_in=("C_ACME",))},
+        ),
+    )
+    await db_session.commit()
+    agent = ma_agent(
+        id=_AGENT_ID,
+        name="acme-config",
+        tenant_id=tenant_id,
+        metadata={"daimon_name": "acme-config"},
+    )
+
+    def origin(*, attended: bool) -> Any:
+        return SimpleNamespace(parent_channel_id="C_ACME", thread_id=None, attended=attended)
+
+    admin = _member(tenant_id, is_admin=True)
+    await require_pin_write_access(runtime, admin, ma_agent=agent, origin=origin(attended=True))
+    with pytest.raises(ToolError, match="private"):
+        await require_pin_write_access(
+            runtime, admin, ma_agent=agent, origin=origin(attended=False)
+        )

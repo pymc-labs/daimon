@@ -35,6 +35,8 @@ export type AgentAccess = {
   groups: string[]
   fixed_to: string | null
   fixed_name: string | null
+  /** Null where the workspace has no direct messages. */
+  dm: DmGrant | null
 }
 
 export type AuditSource = "web" | "security"
@@ -60,7 +62,7 @@ export type Access = {
 export type Providers = {
   offered: { id: string; label: string }[]
   allowed: string[]
-  /** Whether the list follows the deployment's keyed providers. */
+  /** Whether the list follows the deployment default (`default_enabled_backends`). */
   followed: boolean
 }
 
@@ -80,3 +82,128 @@ export type SettingsPatch = {
 export type FeedbackReason = { code: string; label: string; count: number | null }
 export type AgentFeedback = { id: string | null; name: string; up: number | null; down: number | null; reasons: FeedbackReason[] }
 export type Feedback = { days: number; agents: AgentFeedback[] }
+
+/** Who may DM an agent: everyone, only the listed people and groups, or everyone but them. */
+export type DmWho = "members" | "listed" | "excluded"
+/** A person by platform id; `name` is null when the platform never told us. */
+export type DmPerson = { id: string; name: string | null }
+export type DmGrant = { on: boolean; who: DmWho; users: DmPerson[]; groups: string[] }
+export type DmGrantChange = { who: DmWho; user_ids: string[]; group_ids: string[] }
+
+export type DmSubject = "user" | "group" | "everyone"
+/** `agent` null is the default agent; `name` is a listed person's stored name. */
+export type DmRule = { position: number; subject: DmSubject; subject_id: string | null; name: string | null; agent: string | null; locked: boolean }
+/** `platform` is null where the workspace has no direct messages. */
+export type DmSettings = { platform: string | null; default_agent: string | null; agents: { id: string; name: string }[]; rules: DmRule[] }
+export type DmRuleAdd = { subject: DmSubject; subject_id: string | null; agent: string | null; locked: boolean }
+export type DmRuleChange = { agent?: string | null; locked?: boolean; to?: number }
+
+/** Where a DM from a person goes; `rule` is the 0-based position of the rule that matched.
+ * A start with no `agent` is the chat's own agent. `groups` are the named groups they are
+ * in, null when the platform could not say. */
+export type DmExplain = {
+  route: "start" | "choose" | "refused" | "unchecked"
+  agent: string | null
+  reason: "locked" | "pick" | "rule" | "default" | "only" | "no_agent" | "locked_unavailable" | "default_unavailable" | "unrouted" | null
+  agents: string[]
+  allowed: string[]
+  rule: number | null
+  groups: string[] | null
+}
+/** The platform's groups, live, then stored ids it no longer lists (no name). */
+export type PlatformGroups = { platform: string; groups: { id: string; name: string | null }[]; problem: "reinstall" | "unavailable" | null }
+
+// Monitoring: what an admin may read of a monitored agent's conversations.
+export type MonitoredWhere = "direct_messages" | "web" | "coding_tools"
+export type MonitoredConversation = {
+  id: string
+  person: { id: string | null; name: string }
+  where: MonitoredWhere
+  questions: number
+  tools: number
+  first_at: string
+  last_at: string
+}
+/** One kept line: a question, the answer, a tool call with how it ended, or when the person was told. */
+export type MonitoredEvent = {
+  id: string
+  at: string
+  kind: "question" | "answer" | "tool" | "notice"
+  content: string | null
+  tool: string | null
+  outcome: "completed" | "error" | "denied" | "cancelled" | null
+}
+export type AgentMonitoring = {
+  id: string
+  name: string
+  direct_messages: { on: boolean; since: string | null }
+  coding_tools: { on: boolean; since: string | null }
+}
+
+// Ops: the overview and grouped issues (failures and warnings).
+export type OpsPeriod = "24h" | "7d" | "30d"
+export type OpsArea = "turn" | "dm" | "routine" | "delivery" | "watch" | "wake" | "bridge"
+export type OpsSeverity = "error" | "warning"
+export type OpsStatus = "healthy" | "degraded" | "failing"
+export type IssueSubject = { kind: "agent" | "routine" | "watch" | "server" | "connector" | "platform" | "wake"; id: string | null; name: string }
+export type Issue = {
+  fingerprint: string
+  code: string
+  title: string
+  area: OpsArea
+  severity: OpsSeverity
+  subject: IssueSubject | null
+  reason: string | null
+  reason_label: string | null
+  events: number
+  people: number
+  first_seen: string
+  last_seen: string
+  /** Event counts per hour (24h) or day, oldest first, ending now. */
+  buckets: number[]
+  new: boolean
+  active: boolean
+  /** Resolved hides the issue until a newer event reopens it as `regressed`; muted hides it until reopened. */
+  state: IssueState
+  regressed: boolean
+  state_by: { id: string; name: string } | null
+  state_at: string | null
+}
+export type IssueState = "open" | "resolved" | "muted"
+export type IssueAction = "resolve" | "mute" | "reopen"
+export type IssueDetail = Omit<Issue, "people"> & {
+  people: { id: string; name: string }[]
+  agent: { id: string; name: string } | null
+  release: string | null
+}
+export type IssueEvent = {
+  at: string
+  count: number
+  person: { id: string | null; name: string } | null
+  platform: string | null
+  where_label: string | null
+  reason_label: string | null
+  thread_url: string | null
+  note: string | null
+}
+export type OpsOverview = {
+  updated_at: string
+  status: OpsStatus
+  answers: number
+  failed: number
+  failed_rate: number
+  dm_failures: number
+  routines_failing: number
+  routines_total: number
+  balance_usd: number
+  runway_days: number | null
+  /** Per hour (24h) or day; `answered` excludes `failed`, so the two stack to all answers. */
+  series: { at: string; answered: number; failed: number }[]
+  by_area: { area: OpsArea; label: string; events: number }[]
+  attention: Issue[]
+  answers_facts: { p50_ms: number | null; p95_ms: number | null; busy: number; recovered: number; cost_per_answer_usd: number | null }
+  workspace: {
+    agents: number; people: number; channels: number; routines_on: number; routines_total: number
+    watches_on: number; watches_total: number; watches_failing: number; funding_mode: "prepaid" | "operator_funded"
+  }
+}

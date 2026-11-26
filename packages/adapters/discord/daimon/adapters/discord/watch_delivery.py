@@ -9,7 +9,8 @@ A DM report runs as a fresh private DM turn of the owner under watch posture
 tenant's DMs must be on, the owner allowed to receive them, still a human member
 of the guild (read over REST), and the watch still due to report. Turned-off DMs,
 DMs Discord refuses, or a sealed source pause the watch; anything else stops this
-report only.
+report only. A watch made in a DM leaves the person's open conversation there as it
+was: its next turn is told what the report said (`agent_notices.dm_report_notice`).
 
 A new-thread report checks the owner's rights on the parent channel over REST
 (`require_watch_parent_access`), makes one public thread and records it on the
@@ -27,8 +28,11 @@ from datetime import UTC, datetime
 import structlog
 from daimon.adapters.discord.watch_access import require_watch_parent_access
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.dm_access import roles_by_membership, sender_admission
+from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
-from daimon.core.stores.direct_messages import dm_enabled
+from daimon.core.stores.agent_notices import record_agent_notices
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, dm_enabled
 from daimon.core.stores.domain import TaskContinuationRow, WatchRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import (
@@ -38,7 +42,9 @@ from daimon.core.stores.watches import (
     record_delivery_thread,
     watch_seed,
 )
+from daimon.core.turn.agent_notices import dm_report_notice
 from daimon.core.turn.errors import AdmissionDenied
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -86,6 +92,7 @@ async def deliver_dm_report(
     open_dm: DmOpener,
     member_present: MemberPresent,
     dm_policy: DmPolicyLookup,
+    membership_resolver: MembershipResolver | None,
 ) -> int:
     """Run the DM turn and send its text to the owner in chunks; how many chunks were sent.
 
@@ -104,7 +111,19 @@ async def deliver_dm_report(
             raise AdmissionDenied(reason="invoker_not_allowed")
         if not enabled:
             raise await _pause(sessionmaker, watch, "Watch paused: Daimon DMs are off here.")
-        if not dm_policy(watch.tenant_id).allows(owner):
+        granted = await sender_admission(
+            sessionmaker,
+            tenant_id=watch.tenant_id,
+            agent_name=watch.agent_name,
+            user_id=owner,
+            groups=roles_by_membership(
+                membership_resolver, tenant_id=watch.tenant_id, guild_id=tenant.external_id
+            ),
+        )
+        if granted is None:
+            # A failed role lookup says nothing about the owner: skip this report, keep the watch.
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        if not (dm_policy(watch.tenant_id).allows(owner) and granted):
             raise await _pause(
                 sessionmaker, watch, "Watch paused: you can no longer get DMs from Daimon here."
             )
@@ -122,20 +141,35 @@ async def deliver_dm_report(
     await still_open()
     text = await run_turn(watch)
     guild = await still_open()
-    sent = 0
+    posted: list[str] = []
     try:
         dm = await open_dm(guild, int(owner))
         for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
-            if sent:
+            if posted:
                 await still_open()
             await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
-            sent += 1
+            posted.append(chunk)
     except discord.Forbidden:
         # The owner closed their DMs to Daimon: every later report would fail the same way.
         raise await _pause(
             sessionmaker, watch, "Watch paused: Discord does not let Daimon DM you."
         ) from None
-    return sent
+    finally:
+        # Whatever reached the DM, even a cut-off report, is told to the conversation.
+        if posted and watch.thread_id.startswith(DM_SCOPE_PREFIX):
+            try:
+                async with sessionmaker.begin() as db:
+                    await record_agent_notices(
+                        db,
+                        tenant_id=watch.tenant_id,
+                        platform=watch.platform,
+                        thread_id=watch.thread_id,
+                        agent_id=watch.agent_id,
+                        texts=[dm_report_notice("\n".join(posted))],
+                    )
+            except SQLAlchemyError as error:  # a lost notice must not re-run the report
+                log.warning("watch_report.notice_failed", error=type(error).__name__)
+    return len(posted)
 
 
 def report_thread_name(watch: WatchRow) -> str:

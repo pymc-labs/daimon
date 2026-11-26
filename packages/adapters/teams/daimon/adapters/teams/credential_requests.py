@@ -14,10 +14,11 @@ the dialog has closed.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Unpack
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -46,17 +47,15 @@ from daimon.core.agent_pins import (
     request_pin_refusal,
 )
 from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
+from daimon.core.credential_flow import CardEdit, refuse_spent, submit_env, submit_env_file
 from daimon.core.credential_requests import (
-    CredentialRequestOutcome,
-    availability_for_request,
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
-    apply_env_file_submit,
-    apply_env_submit,
     begin_oauth_submit,
     consume_credential_submit,
     credential_card_edit,
@@ -76,7 +75,6 @@ from daimon.core.env_file import (
     EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
-    env_collision_line,
     env_name_problem,
     parse_env_file,
 )
@@ -121,7 +119,7 @@ from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     agent_env_writes_allowed,
 )
-from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
+from daimon.core.stores.domain import ChatPlatform, CredentialRequestRow, RepoAccessProof
 from daimon.core.teams_threads import conversation_of
 from microsoft_teams.api import (
     Attachment,
@@ -142,6 +140,7 @@ from microsoft_teams.cards import (
     TextBlock,
     TextInput,
 )
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
@@ -152,9 +151,8 @@ Refusal = Literal["invalid", "wrong_org", "wrong_requester", "expired", "used"]
 
 _FORM_KINDS = ("env", "env_file", "mcp", "repo", "skill_repo")
 _REPO_KINDS = ("repo", "skill_repo")
-#: Slack's caps: a GitHub token is short; whole-file errors name at most three keys.
+#: Slack's cap: a GitHub token is short.
 _MAX_GITHUB_TOKEN_CHARS = 255
-_COLLISION_LINES_SHOWN = 3
 _SHARED_AGENT = (
     "Changing this agent's keys or connections needs its owner or an admin, "
     "and connecting a repo needs an admin.\n\n"
@@ -182,6 +180,8 @@ _MESSAGES: dict[Refusal, str] = {
 }
 
 
+# Every caller below runs after `refusal` returned None for the click, which checks that the
+# click is in the conversation the form was posted in: the submitter is inside that place.
 def refusal(
     row: CredentialRequestRow,
     *,
@@ -268,14 +268,6 @@ def credential_form(row: CredentialRequestRow, error: str | None = None) -> Task
     return dialog(title, AdaptiveCard(body=body, actions=[save], fallback_text=title))
 
 
-def _collision_lines(collisions: Sequence[EnvEntry], held: frozenset[str]) -> tuple[str, ...]:
-    """The keys a whole-file import would replace: names and line numbers, no values."""
-    lines = [env_collision_line(entry, held) for entry in collisions[:_COLLISION_LINES_SHOWN]]
-    if len(collisions) > _COLLISION_LINES_SHOWN:
-        lines.append(f"…and {len(collisions) - _COLLISION_LINES_SHOWN} more.")
-    return tuple(lines)
-
-
 def oauthdialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
     """The requester's own sign-in link, shown only in their dialog."""
     text = invite_copy(server_name=row.target, agent_name=row.target_name or "the agent")
@@ -302,7 +294,11 @@ async def _guarded(
     try:
         return await work
     except SENDING_PANEL_ERRORS as err:
-        log.error("teams.credential.failed", err_type=type(err).__name__)
+        log.error(
+            "teams.credential.failed",
+            causes=backend_refusal_causes(err),
+            err_type=type(err).__name__,
+        )
         return failed
 
 
@@ -366,7 +362,10 @@ class TeamsCredentialRequests:
             # Gated at the click too, as on Slack: a member is not asked for a
             # token a shared agent would refuse.
             agent = await find_agent_by_derived_uuid(
-                self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+                self._runtime.anthropic,
+                tenant_id=row.tenant_id,
+                agent_id=row.agent_id,
+                records=self._runtime.sessionmaker,
             )
             if agent is None:
                 return _notice(_AGENT_GONE, row)
@@ -384,16 +383,26 @@ class TeamsCredentialRequests:
         if root is None or mcp.jwt_secret is None or self._runtime.turn_deps.fernet is None:
             return _notice(_UNCONFIGURED_OAUTH, row)
         agent = await find_agent_by_derived_uuid(
-            self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            self._runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=self._runtime.sessionmaker,
         )
         async with self._runtime.sessionmaker() as session:
-            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+            pin_refusal = await request_pin_refusal(
+                session, row=row, agent=agent, location_verified=True
+            )
         if pin_refusal is not None:
             return _notice(pin_refusal, row)
         now = datetime.now(UTC)
         try:
             consumed, flow = await begin_oauth_submit(
-                self._runtime.sessionmaker, row=row, agent=agent, app_root_url=root, now=now
+                self._runtime.sessionmaker,
+                row=row,
+                agent=agent,
+                app_root_url=root,
+                now=now,
+                location_verified=True,
             )
         except FormPinRefused as refused:
             return _notice(refused.refusal, row)
@@ -451,12 +460,17 @@ class TeamsCredentialRequests:
                 )
                 return credential_form(row, rejected)
         agent = await find_agent_by_derived_uuid(
-            self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            self._runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=self._runtime.sessionmaker,
         )
         if agent is None:
             return dialog_message(_AGENT_GONE)
         async with self._runtime.sessionmaker() as session:
-            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+            pin_refusal = await request_pin_refusal(
+                session, row=row, agent=agent, location_verified=True
+            )
         if pin_refusal is not None:
             return dialog_message(pin_refusal)
         url = activity.service_url
@@ -508,7 +522,7 @@ class TeamsCredentialRequests:
                 await store.set_credential_request_outcome(
                     session, token=row.token, outcome="write_failed"
                 )
-            edit = self._edit(row, "refused", service_url, reason="admin_required")
+            edit = self._edit(row, "refused", service_url, refusal="admin_required")
             self._spawn(edit, name="teams.cred.edit")
             return dialog_message(_SHARED_AGENT_SKILLS if skills else _SHARED_AGENT)
         # Verified before it is stored: a token that cannot read the repo is not
@@ -582,7 +596,7 @@ class TeamsCredentialRequests:
         service_url: str | None,
         *,
         outcome: ConfigurationChange | None = None,
-        reason: RefusalReason | None = None,
+        refusal: RefusalReason | None = None,
         replaces: str | None = None,
         refusal_lines: Sequence[str] = (),
         retry_reason: str | None = None,
@@ -598,7 +612,7 @@ class TeamsCredentialRequests:
                 row,
                 state=state,
                 outcome=outcome,
-                refusal=reason,
+                refusal=refusal,
                 replaces=replaces,
                 refusal_lines=refusal_lines,
                 retry_reason=retry_reason,
@@ -618,6 +632,9 @@ class TeamsCredentialRequests:
                 log.warning(
                     "teams.credential.edit_failed", state=state, err_type=type(err).__name__
                 )
+
+    def _port(self, service_url: str | None) -> _TeamsCredentialPort:
+        return _TeamsCredentialPort(self, service_url)
 
     async def _resume(self, row: CredentialRequestRow, service_url: str | None) -> None:
         if row.origin_thread_id is not None:
@@ -671,65 +688,7 @@ class TeamsCredentialRequests:
         plan = await prepare_env_submit(
             self._runtime.sessionmaker, row=row, replacement_refused=replacement_refused
         )
-        shadowed = plan.shadowed
-        try:
-            result = await apply_env_submit(
-                self._runtime.sessionmaker,
-                row=row,
-                agent=agent,
-                platform="teams",
-                value=secret,
-                plan=plan,
-                now=datetime.now(UTC),
-            )
-            consumed, state, queued = result.consumed, result.state, result.queued
-        except FormPinRefused:
-            # Decided with the consume: rolled back, the form stays live. The
-            # dialog showed the earlier refusal for a pin already set.
-            log.info("teams.credential.pin_refused", kind="env")
-            return
-        if consumed is None:
-            log.info("teams.credential.already_used", kind="env")
-            return
-        log.info("teams.credential.env", key=consumed.target, state=state)
-        # First, as on Discord and Slack: if the outcome edit fails, the card
-        # should not still offer a button that can only be refused.
-        await self._edit(consumed, "received", service_url)
-        change = ConfigurationChange(
-            target_name=consumed.target_name or "this agent",
-            kind="key",
-            detail=consumed.target,
-            availability=availability_for_request(consumed),
-        )
-        await self._edit(
-            consumed,
-            state,
-            service_url,
-            outcome=change if state == "applied" else None,
-            reason="replacement_admin_required" if state == "refused" else None,
-            replaces=shadowed if state == "refused" else None,
-        )
-        if queued:
-            await self._resume(consumed, service_url)
-
-    async def _apply_env_file(
-        self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent, entries: Sequence[EnvEntry]
-    ) -> tuple[CredentialRequestRow | None, tuple[EnvEntry, ...], bool, frozenset[str]]:
-        """Consume and write every entry in one transaction, as Slack does.
-
-        Returns the consumed row (None when already spent), the entries that
-        would replace a held key (then nothing is written and the request is
-        `stale_replacement`), whether the continuation was queued, and the held
-        names the refusal lines need.
-        """
-        return await apply_env_file_submit(
-            self._runtime.sessionmaker,
-            row=row,
-            agent=agent,
-            platform="teams",
-            entries=entries,
-            now=datetime.now(UTC),
-        )
+        await submit_env(self._port(service_url), row=row, agent=agent, value=secret, plan=plan)
 
     async def _save_env_file(
         self,
@@ -740,41 +699,7 @@ class TeamsCredentialRequests:
         service_url: str | None,
     ) -> None:
         """Whole-file, as on Slack: a key already held, by name or alias, writes nothing."""
-        try:
-            consumed, collisions, queued, held = await self._apply_env_file(row, agent, entries)
-        except FormPinRefused:
-            log.info("teams.credential.pin_refused", kind="env_file")
-            return
-        if consumed is None:
-            log.info("teams.credential.already_used", kind="env_file")
-            return
-        await self._edit(consumed, "received", service_url)
-        if collisions:
-            responder = consumed.responder_name or "Daimon"
-            lines = (
-                *_collision_lines(collisions, held),
-                f"Nothing was changed. Ask {responder} to replace a key you already have.",
-            )
-            log.info(
-                "teams.credential.env_file_refused",
-                key_count=len(entries),
-                collision_count=len(collisions),
-            )
-            await self._edit(
-                consumed, "refused", service_url, reason="env_file_invalid", refusal_lines=lines
-            )
-            return
-        # Key names only, never a value.
-        log.info("teams.credential.env_file_saved", keys=[entry.name for entry in entries])
-        change = ConfigurationChange(
-            target_name=consumed.target_name or "this agent",
-            kind="keys_bulk",
-            availability=availability_for_request(consumed),
-            count=len(entries),
-        )
-        await self._edit(consumed, "applied", service_url, outcome=change)
-        if queued:
-            await self._resume(consumed, service_url)
+        await submit_env_file(self._port(service_url), row=row, agent=agent, entries=tuple(entries))
 
     async def _consume(
         self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent
@@ -782,7 +707,11 @@ class TeamsCredentialRequests:
         """Spend the form, the pin decided in the same transaction. None when it is not spent."""
         try:
             consumed = await consume_credential_submit(
-                self._runtime.sessionmaker, row=row, agent=agent, now=datetime.now(UTC)
+                self._runtime.sessionmaker,
+                row=row,
+                agent=agent,
+                now=datetime.now(UTC),
+                location_verified=True,
             )
         except FormPinRefused:
             log.info("teams.credential.pin_refused", kind=row.kind)
@@ -832,7 +761,7 @@ class TeamsCredentialRequests:
             except Exception as err:
                 # Type only: a failed write can quote the token; the card says it did not land.
                 log.warning("teams.credential.repo_write_failed", err_type=type(err).__name__)
-                return await self._refuse(consumed, "target_unavailable", service_url)
+                return await refuse_spent(self._port(service_url), consumed, "target_unavailable")
             log.info("teams.credential.repo_bound", repo_url=repo_url, branch=branch)
             change = ConfigurationChange(
                 target_name=consumed.target_name or "this agent",
@@ -901,7 +830,9 @@ class TeamsCredentialRequests:
                 # Upstream details stay in operator logs, never on the card.
                 log.warning("teams.credential.skill_repo_sync_failed", err_type=type(err).__name__)
                 if not stored:
-                    return await self._refuse(consumed, "target_unavailable", service_url)
+                    return await refuse_spent(
+                        self._port(service_url), consumed, "target_unavailable"
+                    )
                 return await self._skills_partial(consumed, owner_repo, None, service_url)
             imported = [o for o in outcomes if o.action in (Action.CREATED, Action.UPDATED)]
             failure_detail = summarize_failed_imports(outcomes)
@@ -966,24 +897,6 @@ class TeamsCredentialRequests:
             detail=detail,
         )
         await self._edit(row, "partial", service_url, outcome=change)
-
-    async def _refuse(
-        self,
-        row: CredentialRequestRow,
-        reason: RefusalReason,
-        service_url: str | None,
-    ) -> None:
-        """Close a spent request that wrote nothing; no work resumes on it."""
-        outcome: CredentialRequestOutcome = (
-            "token_rejected"
-            if reason == "token_rejected"
-            else "policy_refused"
-            if reason == "mcp_permission_required"
-            else "write_failed"
-        )
-        async with self._runtime.sessionmaker.begin() as session:
-            await store.set_credential_request_outcome(session, token=row.token, outcome=outcome)
-        await self._edit(row, "refused", service_url, reason=reason)
 
     async def _decide_mcp(
         self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent, *, is_admin: bool
@@ -1061,7 +974,9 @@ class TeamsCredentialRequests:
         now = datetime.now(UTC)
         try:
             async with self._runtime.sessionmaker.begin() as session:
-                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+                consumed = await consume_form_unless_pinned(
+                    session, row=row, agent=agent, now=now, location_verified=True
+                )
         except FormPinRefused:
             log.info("teams.credential.pin_refused", kind="mcp")
             return
@@ -1083,13 +998,13 @@ class TeamsCredentialRequests:
             if url is None:
                 attempt.retry_allowed = False
                 log.error("teams.credential.mcp_missing_server_url")
-                return await self._refuse(consumed, "target_unavailable", service_url)
+                return await refuse_spent(self._port(service_url), consumed, "target_unavailable")
             if connect.refused:
                 attempt.retry_allowed = False
-                return await self._refuse(
+                return await refuse_spent(
+                    self._port(service_url),
                     consumed,
                     "replacement_admin_required" if connect.replaces else "mcp_permission_required",
-                    service_url,
                 )
             log.info("teams.credential.mcp", mcp_server_url=url)
             # Attach first, publish the agent-wide token only after that authorized
@@ -1114,14 +1029,16 @@ class TeamsCredentialRequests:
                 )
             except McpServerReplaceRefusedError:
                 attempt.retry_allowed = False
-                return await self._refuse(consumed, "replacement_admin_required", service_url)
+                return await refuse_spent(
+                    self._port(service_url), consumed, "replacement_admin_required"
+                )
             except (McpAgentGoneError, McpAttachFailedError) as err:
                 attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
                 log.warning(
                     "teams.credential.mcp_attach_failed",
                     err_type=type(err.__cause__ or err).__name__,
                 )
-                return await self._refuse(consumed, "target_unavailable", service_url)
+                return await refuse_spent(self._port(service_url), consumed, "target_unavailable")
             except McpTokenWriteFailedError as err:
                 log.warning(
                     "teams.credential.mcp_write_failed",
@@ -1146,3 +1063,37 @@ class TeamsCredentialRequests:
             )
             if queued and attached:
                 await self._resume(consumed, service_url)
+
+
+@dataclasses.dataclass(frozen=True)
+class _TeamsCredentialPort:
+    """A save running after its dialog closed: no private reply, only the card."""
+
+    requests: TeamsCredentialRequests
+    service_url: str | None
+    platform: ChatPlatform = "teams"
+    log_prefix: str = "teams.credential"
+
+    @property
+    def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        return self.requests._runtime.sessionmaker  # pyright: ignore[reportPrivateUsage]
+
+    def location_verified(self, row: CredentialRequestRow) -> bool:
+        # Every caller ran `refusal()` first, which checks the click is in the posted conversation.
+        return True
+
+    async def reply(self, text: str) -> None:
+        """Nothing: the dialog has closed, so the card is the only place left to say it."""
+
+    async def edit_card(
+        self, row: CredentialRequestRow, state: CardState, **card: Unpack[CardEdit]
+    ) -> None:
+        await self.requests._edit(row, state, self.service_url, **card)  # pyright: ignore[reportPrivateUsage]
+
+    async def resume(self, row: CredentialRequestRow) -> None:
+        await self.requests._resume(row, self.service_url)  # pyright: ignore[reportPrivateUsage]
+
+    def write_failed(
+        self, kind: str, err: Exception, *, key: str | None = None, key_count: int | None = None
+    ) -> None:
+        log.error("teams.credential.save_failed", kind=kind, err_type=type(err).__name__)

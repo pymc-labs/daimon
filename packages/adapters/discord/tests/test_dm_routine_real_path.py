@@ -31,6 +31,7 @@ from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.scheduler.main import _build_fire
 from daimon.core import direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Subject
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     admit_cold_dm,
@@ -43,6 +44,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mcp_vault import add_external_mcp_credential
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.mux_backend import resource_scope
+from daimon.core.provider_routine import SHELL_NEEDS_SANDBOX
 from daimon.core.routine_delivery import poll_deliveries_once
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
@@ -53,15 +55,24 @@ from daimon.core.stores.direct_messages import (
     set_dm_agent_name,
     set_dm_enabled,
 )
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import (
+    SANDBOX_KEY,
+    AgentSandboxPin,
+    FeatureTarget,
+    Role,
+    RoutineRow,
+    pin_json,
+)
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_oauth_flows import create_flow, mark_flow_completed
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenant_ledger import get_channel_spend
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn import unattended
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.builders import new_routine
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -78,6 +89,7 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 # Routine fires collect generated files; skip the real 6 s settle wait.
 pytestmark = pytest.mark.usefixtures("instant_routine_file_settle")
@@ -375,6 +387,8 @@ class Harness:
             mcp={"public_url": "https://mcp.example/mcp", "jwt_secret": "t" * 32},
             crypto={"keys": [upstream.crypto_key.decode()]},
             turn={"path": "mux"},
+            # Memory features require an Anthropic key, where every store lives.
+            anthropic={"api_key": "test-key"},
         )
         self.deps = replace(
             build_turn_deps(
@@ -741,14 +755,12 @@ async def test_a_paused_public_send_is_decided_unattended(
 
 async def _routine_row(harness: Harness, *, owner: str = OWNER_A) -> RoutineRow:
     async with harness.factory.begin() as session:
-        return await create_routine(
+        return await new_routine(
             session,
-            tenant_id=harness.tenant.id,
+            harness.tenant.id,
             created_by_user_id=owner,
             agent_id="ag_daimon",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="what is on my plate?",
             destination_kind="dm",
             channel_id=BUDGET,
@@ -786,7 +798,20 @@ async def _reclassify(db: AsyncSession, row: RoutineRow, change: str, **back: An
         )
 
 
-async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(harness: Harness):
+@pytest.mark.parametrize(
+    ("text", "sends", "tail"),
+    [
+        ("private answer", True, "private answer"),
+        ("", False, ""),
+        ("NO_POST: no new mail", False, "no new mail"),
+    ],
+    ids=["answer", "empty", "marker"],
+)
+async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(
+    harness: Harness, text: str, sends: bool, tail: str
+):
+    """A quiet run, with no final text or a NO_POST one, is billed and sends nothing."""
+    harness.upstream.scripts = [answer(text)]
     row = await _routine_row(harness)
     await harness.fire(row)
     sent: list[tuple[int, int, str]] = []
@@ -803,9 +828,16 @@ async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(ha
 
     await harness.deliver(fetch_channel=no_channel, open_dm=open_dm, files=False)
 
-    assert [(guild, user) for guild, user, _ in sent] == [(GUILD, int(OWNER_A))]
-    assert "private answer" in sent[0][2]
+    if sends:
+        assert [(guild, user) for guild, user, _ in sent] == [(GUILD, int(OWNER_A))]
+        assert text in sent[0][2]
+    else:
+        assert sent == []
     async with harness.factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=row.tenant_id)
+        assert saved is not None and saved.last_error is None
+        assert saved.delivery_note == (None if sends else "no_result")
+        assert saved.last_result_tail == tail
         spent = await get_channel_spend(
             session, tenant_id=harness.tenant.id, channel_id=BUDGET, since=None, until=None
         )
@@ -821,14 +853,15 @@ async def test_revoked_owner_gets_no_run_and_no_delivery(harness: Harness):
     assert after is not None and after.last_error and after.delivery_status is None
 
 
-async def test_a_provider_native_agent_is_refused_before_any_session(
+async def test_an_openai_agent_without_the_sandbox_opt_in_is_refused_before_any_session(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ):
+    """OpenAI's shell cannot be left out of its session, so the fire stops before one."""
     real_admit = direct_messages.admit
 
     async def native_admit(*args: Any, **kwargs: Any) -> Any:
         admission = await real_admit(*args, **kwargs)
-        revision = type("Revision", (), {"profile": "openai.responses"})()
+        revision = type("Revision", (), {"profile": "openai.persistent_workspace"})()
         return replace(admission, backend_revision=revision, backend_revision_origin="agent")
 
     monkeypatch.setattr(direct_messages, "admit", native_admit)
@@ -837,10 +870,8 @@ async def test_a_provider_native_agent_is_refused_before_any_session(
     assert not harness.upstream.state.sessions, "no session was created"
     after = await harness.reload(row)
     assert after is not None
-    assert after.last_error == "DM routines need a Managed Agents agent"
+    assert after.last_error == f"backend_unsupported: {SHELL_NEEDS_SANDBOX}"
     assert after.delivery_status is None
-    with pytest.raises(RuntimeError, match="Managed Agents"):
-        await harness.routine()
 
 
 async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checked(harness: Harness):
@@ -960,7 +991,6 @@ async def test_protected_final_action_is_refused_through_the_driver(
 
 
 async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness):
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(ToolSafetyPolicy(enabled=True, agent_rules=True))
@@ -987,7 +1017,6 @@ async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness)
 async def test_replacement_endpoint_cannot_reuse_predecessor_allow(
     harness: Harness, rule_endpoint: str, rule: str
 ):
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(ToolSafetyPolicy(enabled=True, agent_rules=True))
@@ -1358,7 +1387,6 @@ async def test_cached_agent_hints_cannot_authorize_actual_session_endpoint(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, recovery: bool
 ):
     from daimon.core import ma_resolver
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(
@@ -1443,14 +1471,12 @@ async def test_cached_agent_hints_cannot_authorize_actual_session_endpoint(
 
 async def test_channel_routine_stays_headless_without_personal_memory(harness: Harness):
     async with harness.factory.begin() as db:
-        row = await create_routine(
+        row = await new_routine(
             db,
-            tenant_id=harness.tenant.id,
+            harness.tenant.id,
             created_by_user_id=OWNER_A,
             agent_id="ag_daimon",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="channel work",
             destination_kind="channel",
             destination_id=BUDGET,
@@ -1575,6 +1601,36 @@ async def test_routine_origin_cannot_promote_handoffs_to_attended(harness: Harne
     harness.upstream.scripts = [inspect]
     result = await harness.routine()
     assert result.text == "unattended parent" and observed == [False]
+
+
+async def test_routine_origin_holds_own_dm_reach_and_has_read_nothing_through_it(
+    harness: Harness,
+):
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn_origin import current_origin_id
+
+    observed = []
+
+    async def inspect(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        origin_id = current_origin_id.get()
+        assert origin_id is not None
+        async with harness.factory() as db:
+            origin = await get_active_origin(
+                db,
+                origin_id=origin_id,
+                tenant_id=harness.tenant.id,
+                account_id=harness.accounts[OWNER_A],
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert origin is not None
+        observed.append((origin.own_dm_reach, origin.reach_read))
+        async for chunk in answer("unattended parent")(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [inspect]
+    await harness.routine()
+    assert observed == [(True, False)], "the owner-DM routine may reach; it has not read yet"
 
 
 @pytest.mark.parametrize("change", ["agent", "retarget"])
@@ -1707,14 +1763,12 @@ async def test_destination_free_fire_reads_owner_memory_read_only_and_drops_recl
 
     sentinel = "OWNER_PERSONAL_MEMORY_SENTINEL"
     async with harness.factory.begin() as db:
-        row = await create_routine(
+        row = await new_routine(
             db,
-            tenant_id=harness.tenant.id,
+            harness.tenant.id,
             created_by_user_id=OWNER_A,
             agent_id="ag_daimon",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="private work",
             destination_kind="dm",
             channel_id=None,
@@ -1746,14 +1800,12 @@ async def test_destination_free_fire_reads_owner_memory_read_only_and_drops_recl
             assert row is not None and row.last_result_tail is None
         else:
             await routines.delete_routine(db, row.id, tenant_id=row.tenant_id)
-            row = await create_routine(
+            row = await new_routine(
                 db,
-                tenant_id=harness.tenant.id,
+                harness.tenant.id,
                 created_by_user_id=OWNER_A,
                 agent_id="ag_daimon",
-                agent_name="daimon",
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message="legacy work",
                 source_provenance_known=True,
                 next_fire_at=datetime.now(UTC) - timedelta(seconds=1),
@@ -1822,6 +1874,70 @@ async def test_dm_routine_disables_sandbox_and_gates_all_mcp_calls(harness: Harn
             assert all(
                 config["permission_policy"] == {"type": "always_ask"} for config in body["configs"]
             )
+    assert reply.text == "private answer"
+
+
+def _bash_agent(harness: Harness) -> None:
+    harness.upstream.state.ma.agents["ag_daimon"]["tools"].append(
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+            ],
+        }
+    )
+
+
+def _builtins_on(harness: Harness, session_id: str) -> bool:
+    toolsets = [
+        tool.model_dump(mode="json")
+        for tool in harness.upstream.state.sessions[session_id].agent.tools
+        if tool.type == "agent_toolset_20260401"
+    ]
+    return bool(toolsets) and any(body["default_config"]["enabled"] for body in toolsets)
+
+
+@pytest.mark.parametrize(
+    ("environment", "guardrail", "kept"),
+    [
+        ("default", "on", True),
+        ("default", "off", False),
+        ("other", "on", False),
+        (None, "on", False),
+    ],
+    ids=["opted_in", "guardrail_off_wins", "other_environment", "no_opt_in"],
+)
+async def test_dm_routine_keeps_builtins_only_under_the_agent_opt_in(
+    harness: Harness, environment: str | None, guardrail: str, kept: bool
+):
+    """A DM routine's built-ins need the agent-level opt-in, and `unattended_capabilities` caps it."""
+    _bash_agent(harness)
+    async with harness.factory.begin() as db:
+        if environment is not None:
+            await set_feature_value(
+                db, tenant_id=harness.tenant.id, key=SANDBOX_KEY, value="on", set_by=None,
+                target=FeatureTarget("agent", agent_id="ag_daimon"), surface="cli",
+                pin=pin_json(AgentSandboxPin("ag_daimon", environment)),
+            )  # fmt: skip
+        if guardrail == "off":
+            await set_workspace_feature(
+                db,
+                None,
+                tenant_id=harness.tenant.id,
+                platform="discord",
+                key="unattended_capabilities",
+                value="off",
+                account_id=None,
+                surface="cli",
+            )
+    with capture_logs() as logs:
+        reply = await harness.routine()
+    assert _builtins_on(harness, reply.session_id) is kept, (
+        "built-ins stay on only for the opted-in agent in its environment, under the guardrail"
+    )
+    drifted = any(entry["event"] == "routine.sandbox_pin_mismatched" for entry in logs)
+    assert drifted is (environment == "other"), "only another environment is a drift"
     assert reply.text == "private answer"
 
 

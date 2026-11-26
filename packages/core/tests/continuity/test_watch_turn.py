@@ -774,10 +774,21 @@ async def test_watch_report_turn_also_requires_explicit_unattended():
         )
 
 
-async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkeypatch):
+@pytest.mark.parametrize(
+    ("final", "may_end_empty", "answer"),
+    [
+        ("report", False, "report"),
+        ("", False, "The reply finished without text."),
+        ("", True, ""),
+    ],
+)
+async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(
+    monkeypatch, final: str, may_end_empty: bool, answer: str
+):
     """The DM report turn hands its wake row to the shared turn, unattended: that row
     selects watch capabilities and `watch_posture` there (no daimon-mcp, no sandbox, no
-    built-ins, reads only), never the DM routine's session authority."""
+    built-ins, reads only), never the DM routine's session authority. A turn with no text
+    gets a placeholder, except a DM routine's, which delivers nothing."""
     from contextlib import asynccontextmanager
 
     from daimon.core import direct_messages
@@ -803,10 +814,10 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
     monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
     monkeypatch.setattr(direct_messages, "turn_origin", origin)
     monkeypatch.setattr(direct_messages, "render_turn_origin", lambda *_a, **_k: "controls")
-    monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: "report")
+    monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: final)
     prepared = MagicMock()
     prepared.admission.hold = None
-    text, session_id = await _run_admitted_dm_turn(
+    done = await _run_admitted_dm_turn(
         MagicMock(),
         prepared,
         tenant_id=row.tenant_id,
@@ -820,8 +831,11 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
         on_sealed=AsyncMock(),
         origin="routine",
         watch_row=row,
+        may_end_empty=may_end_empty,
     )
-    assert (text, session_id) == ("report", "sess_dm")
+    assert (done.text, done.session_id) == (answer, "sess_dm"), (
+        "the turn should return its reply and session"
+    )
     kwargs = run.await_args.kwargs
     assert kwargs["watch_row"] is row and kwargs["attended"] is False
 
@@ -843,6 +857,40 @@ async def test_dm_watch_refuses_a_thread_wake_or_another_recipient(row):
             source=DmSource(channel_id="4241", thread_id="4242"),
             budget_channel_id="4241",
         )
+
+
+async def test_a_watch_made_in_a_dm_reports_under_that_conversations_source_rules(
+    db_session_factory,
+):
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.direct_messages import DirectMessageAccessRevoked, dm_watch_source
+    from daimon.core.permissions import dm_source_limited
+    from daimon.core.stores.identity import get_or_create_platform_principal
+    from daimon.testing.factories import make_dm_conversation, make_tenant
+    from daimon.testing.turn_fakes import deps_for
+
+    deps = deps_for(None, db_session_factory)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant.id, platform="discord", external_id="555"
+        )
+        await make_dm_conversation(
+            session, tenant=tenant, account_id=principal.account_id,
+            external_user_id="555", scope_id="dm:moved", source_channel_id="chan-1",
+        )  # fmt: skip
+    source, budget = await dm_watch_source(
+        deps, tenant_id=tenant.id, scope_id="dm:moved", owner="555"
+    )
+    assert source is not None and (source.channel_id, budget) == ("chan-1", "chan-1")
+    sealed = TenantAccessPolicy(channel_rules={"chan-1": ChannelRule(readers="inside")})
+    assert dm_source_limited(
+        sealed, source_channel_id=source.channel_id, source_thread_id=source.thread_id
+    ), "the source it runs under is the one a seal refuses"
+    for scope, owner in (("dm:gone", "555"), ("dm:moved", "777")):
+        with pytest.raises(DirectMessageAccessRevoked) as refused:
+            await dm_watch_source(deps, tenant_id=tenant.id, scope_id=scope, owner=owner)
+        assert refused.value.reason == "dm_gone", "a missing or another person's DM pauses it"
 
 
 async def test_dm_watch_waits_for_its_owner_rather_than_skipping(db_session_factory):
@@ -979,3 +1027,41 @@ async def test_new_thread_report_sends_only_in_the_thread_its_firing_made(
     else:
         with pytest.raises(AdmissionDenied):
             await send
+
+
+async def test_a_dm_routine_runs_to_the_unattended_limit(db_session_factory, monkeypatch):
+    """A DM routine's deadline is its admission's ceiling, not the standard 45 minutes."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core import direct_messages
+    from daimon.core.direct_messages import run_dm_routine
+    from daimon.core.turn_hold import RequesterOrg
+    from daimon.testing.turn_fakes import deps_for
+
+    class _Bound(Exception):
+        pass
+
+    admission = MagicMock(backend_revision=None, turn_ceiling_s=90 * 60.0)
+    bind = AsyncMock(side_effect=_Bound)
+    monkeypatch.setattr(direct_messages, "dm_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(direct_messages, "get_tenant", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(direct_messages, "tenant_ready", lambda *_a, **_k: True)
+    monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
+    monkeypatch.setattr(direct_messages, "replace", lambda value, **_changes: value)
+    monkeypatch.setattr(direct_messages, "bind_session", bind)
+    before = datetime.now(UTC)
+    with pytest.raises(_Bound):
+        await run_dm_routine(
+            deps_for(None, db_session_factory),
+            tenant_id=uuid.uuid4(),
+            owner_user_id="555",
+            agent_name="daimon",
+            prompt="seed",
+            source=None,
+            budget_channel_id=None,
+            requester_org=RequesterOrg.HOST,
+        )
+    deadline = bind.await_args.kwargs["deadline"]
+    assert (
+        before + timedelta(minutes=90) <= deadline <= datetime.now(UTC) + timedelta(minutes=90)
+    ), "the fire runs to the unattended run limit its admission read"

@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, cast
 
+import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
@@ -26,6 +27,7 @@ from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action
 from daimon.core.channel_budget import (
+    BudgetSpec,
     ChannelBudgetError,
     ChannelBudgetStatus,
     describe_budget,
@@ -33,12 +35,18 @@ from daimon.core.channel_budget import (
     load_budget_status,
     may_set_channel_budget,
     parse_budget_spec,
+    require_alert_destination,
 )
 from daimon.core.channel_changes import ChannelActor, clear_budget, set_budget
+from daimon.core.channel_post_check import alert_channel_problem
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import channel_budgets as store
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import get_source_channel
+from daimon.core.stores.domain import ChannelBudgetRow
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -69,6 +77,10 @@ class ChannelBudgetResult:
     """False before a total or fixed window's start, or after a fixed one ends: it gates nothing."""
     summary: str
     """The line to read back, e.g. '$1.20 of $5.00 (monthly)'."""
+    on_limit: str = "stop"
+    """'stop' refuses new turns at the limit; 'alert' only posts alerts."""
+    alert_channel_id: str | None = None
+    """Where an 'alert' budget posts; None is the workspace's support channel."""
     web_url: WebUrl = None
     """Set by ``set_channel_budget``: the channel's settings on the web, when there is one."""
 
@@ -99,14 +111,18 @@ def _needs_budget_admin(auth: AuthIdentity) -> str:
     )
 
 
-def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
+async def require_budget_write(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> None:
     """Raise ``ToolError`` unless the caller may set, clear or raise ``channel_id``'s budget."""
     _require_platform_admin(auth)
+    async with runtime.session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=auth.tenant_id)
     decision = may_set_channel_budget(
-        mcp_subject(auth, is_admin=auth.is_platform_admin), channel_id
+        policy, mcp_subject(auth, is_admin=auth.is_platform_admin), channel_id
     )
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_BUDGET, decision.reason)
+        if decision.reason == "sealed_channel":
+            raise ToolError(f"{SEALED_REFUSAL} Nothing was changed. Do not retry.")
         raise ToolError(_needs_budget_admin(auth))
     record_policy_decision(Action.SET_CHANNEL_BUDGET, "allow")
 
@@ -132,6 +148,8 @@ def _result(status: ChannelBudgetStatus) -> ChannelBudgetResult:
         remaining_usd=str(status.remaining_usd),
         active=status.is_active,
         summary=describe_budget(status),
+        on_limit=budget.on_limit,
+        alert_channel_id=budget.alert_channel_id,
     )
 
 
@@ -316,19 +334,54 @@ async def _set_channel_budget_impl(
     window: str,
     starts_at: str | None,
     ends_at: str | None,
+    on_limit: str | None = None,
+    alert_channel_id: str | None = None,
 ) -> ChannelBudgetResult:
     """Validate everything before the write: a refused call leaves no row behind."""
     _require_platform_admin(auth)
     require_scope(auth, "channels:write")
     platform = _require_platform(auth)
-    try:
-        spec = parse_budget_spec(
-            limit_usd=limit_usd, window=window, starts_at=starts_at, ends_at=ends_at
-        )
-    except ChannelBudgetError as err:
-        raise ToolError(f"{err}. Nothing was saved.") from err
+
+    def parse(current: ChannelBudgetRow | None) -> BudgetSpec:
+        try:
+            return parse_budget_spec(
+                limit_usd=limit_usd,
+                window=window,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                on_limit=on_limit,
+                alert_channel_id=alert_channel_id,
+                current=current,
+            )
+        except ChannelBudgetError as err:
+            raise ToolError(f"{err}. Nothing was saved.") from err
+
+    if on_limit is not None or alert_channel_id is None:
+        parse(None)  # refused before any lookup or write; a lone alert_channel needs the row
     target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
-    require_budget_write(auth, target)
+    async with runtime.session_factory() as session:
+        spec = parse(
+            await store.get_channel_budget(
+                session, tenant_id=auth.tenant_id, platform=platform, channel_id=target
+            )
+        )
+    if alert_channel_id is not None:
+        # As a support channel is: a channel of this workspace the caller can see.
+        alert_id = await _budget_channel(runtime, auth, alert_channel_id)
+        await _require_alert_channel_postable(runtime, auth, platform, alert_id)
+        spec = replace(spec, alert_channel_id=alert_id)
+    async with runtime.session_factory() as session:
+        try:
+            await require_alert_destination(
+                session,
+                spec,
+                tenant_id=auth.tenant_id,
+                platform=platform,
+                settings=runtime.settings,
+            )
+        except ChannelBudgetError as err:
+            raise ToolError(f"{err}. Nothing was saved.") from err
+    await require_budget_write(runtime, auth, target)
     budget = await set_budget(
         runtime.session_factory,
         _actor(auth),
@@ -338,6 +391,28 @@ async def _set_channel_budget_impl(
     )
     async with runtime.session_factory() as session:
         return _result(await load_budget_status(session, budget, now=datetime.now(UTC)))
+
+
+async def _require_alert_channel_postable(
+    runtime: McpRuntime, auth: AuthIdentity, platform: str, channel_id: str
+) -> None:
+    async with runtime.session_factory() as session:
+        tenant = await get_tenant(session, auth.tenant_id)
+    if tenant is None:
+        raise ToolError("Daimon isn't set up here. Nothing was saved.")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        problem = await alert_channel_problem(
+            http,
+            platform=platform,
+            workspace_id=tenant.external_id,
+            channel_id=channel_id,
+            label=channel_id,
+            settings=runtime.settings,
+            sessionmaker=runtime.session_factory,
+            fernet=runtime.fernet,
+        )
+    if problem is not None:
+        raise ToolError(f"{problem} Nothing was saved.")
 
 
 async def _clear_channel_budget_impl(
@@ -354,7 +429,7 @@ async def _clear_channel_budget_impl(
     target = (
         await resolve_channel(runtime, auth, _require_channel_id(channel_id), lenient=True)
     ).channel_id
-    require_budget_write(auth, target)
+    await require_budget_write(runtime, auth, target)
     cleared = await clear_budget(
         runtime.session_factory, _actor(auth), platform=platform, channel_id=target
     )
@@ -390,13 +465,18 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         window: Literal["monthly", "total", "fixed"],
         starts_at: str | None = None,
         ends_at: str | None = None,
+        on_limit: Literal["stop", "alert"] | None = None,
+        alert_channel_id: str | None = None,
     ) -> ChannelBudgetResult:
         """Set or replace a channel's spending budget. Admin-only.
 
-        Once the channel's spend in the window reaches ``limit_usd`` (a
-        decimal string such as ``"25.00"``; ``"0"`` stops the channel), new
-        turns there are refused, including routines that post there. Spend
-        is the tenant's debits for the channel, markup included.
+        With ``on_limit`` ``stop``, once the channel's spend in the window
+        reaches ``limit_usd`` (a decimal string such as ``"25.00"``; ``"0"``
+        stops the channel), new turns there are refused, including routines
+        that post there. With ``alert``, turns continue and Daimon posts an
+        alert at the limit and each further multiple, to ``alert_channel_id``
+        or the support channel. Omitted, ``on_limit`` keeps the budget's mode;
+        a new budget stops. Spend is the channel's debits, markup included.
 
         ``window``: ``monthly`` resets each UTC calendar month and takes no
         dates; ``total`` counts everything since ``starts_at`` (or ever);
@@ -413,6 +493,8 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             window=window,
             starts_at=starts_at,
             ends_at=ends_at,
+            on_limit=on_limit,
+            alert_channel_id=alert_channel_id,
         )
         links = await tenant_links(runtime, auth)
         url = None if links is None else links.channel(result.channel_id)

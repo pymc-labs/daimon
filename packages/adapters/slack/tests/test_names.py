@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -102,7 +101,7 @@ async def test_on_request_remembers_after_the_ack_and_a_failure_never_reaches_it
             billing_config=None,
             http_client=MagicMock(spec=httpx.AsyncClient),
             resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub
-            turn_deps=replace(deps_for(), turn_path=None),  # stub
+            turn_deps=deps_for(),  # stub
         )
     )
     client = _FakeSocketClient()

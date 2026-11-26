@@ -24,6 +24,7 @@ from daimon.core._models import (
     Routine,
     UserConfig,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_environments import (
     build_limited_channels_confirm,
     build_limited_network_confirm,
@@ -31,12 +32,17 @@ from daimon.core.channel_environments import (
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.privacy import (
     DELETE_PAUSED,
+    MONITORED_LINE,
     PurgePreview,
     PurgePreviewRow,
+    account_other_providers,
     collect_purge_preview,
+    delete_scope_lines,
+    privacy_lines,
     summary_line,
 )
 from daimon.core.purge import PurgeReport, purge_account
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
@@ -45,6 +51,7 @@ from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import (
     link_principals,
     make_account,
@@ -76,6 +83,17 @@ def test_plain_privacy_summary_plural_and_pause_spacing() -> None:
         "Deleting your account is paused during the event.\n\n"
         "Ask the team running Daimon if you need it deleted now."
     )
+
+
+def test_monitored_people_are_told_on_the_privacy_panel() -> None:
+    """The panel says admins can read monitored conversations, and counts what they hold."""
+    assert MONITORED_LINE not in privacy_lines("Daimon")
+    assert privacy_lines("Daimon", monitored=True)[-1] == MONITORED_LINE
+    empty = PurgePreviewRow(count=0, example=None)
+    preview = PurgePreview(**{name: empty for name in PurgePreview.model_fields})
+    for count, words in ((1, "1 record admins can read"), (3, "3 records admins can read")):
+        row = PurgePreviewRow(count=count, example=None)
+        assert summary_line(preview.model_copy(update={"monitored_events": row})) == words
 
 
 def test_restricted_network_confirm_names_selected_channel_and_spaced_action() -> None:
@@ -165,6 +183,31 @@ async def test_account_purge_deletes_github_user_after_last_link(
     assert second_report.db.github_user_links == 1
     async with db_session_factory() as session:
         assert await session.get(GitHubUserLink, 101) is None
+
+
+async def test_privacy_copy_names_a_provider_only_for_a_tenant_that_enabled_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    opted_in = await make_account(db_session, tenant=await make_tenant(db_session))
+    await set_access_policy(
+        db_session,
+        tenant_id=opted_in.tenant_id,
+        policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini")),
+    )
+    default = await make_account(db_session, tenant=await make_tenant(db_session))
+    await db_session.commit()
+
+    chosen = await account_other_providers(db_session_factory, account_id=opted_in.id)
+    unchosen = await account_other_providers(db_session_factory, account_id=default.id)
+
+    assert chosen == ("openai", "gemini")
+    assert unchosen == (), "a tenant that never opted in names only Anthropic"
+    stored = " ".join(privacy_lines("daimon", chosen))
+    assert "OpenAI" in stored and "Gemini" in stored
+    removed = " ".join(delete_scope_lines("daimon", chosen))
+    assert "retention period" in removed, "Gemini keeps stored conversations"
+    assert "OpenAI" not in " ".join(privacy_lines("daimon") + delete_scope_lines("daimon"))
 
 
 async def test_collect_purge_preview_returns_zero_counts_when_account_has_no_data(
@@ -501,6 +544,45 @@ async def test_preview_and_purge_agree_on_microsoft_user_tokens(
             session, tenant_id=tenant.id, user_id=oid
         )
     assert left == 0, "no refresh token may survive the purge"
+
+
+async def test_preview_and_purge_agree_on_connector_tokens(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    for owner in (account.id, None):
+        await connector_tokens_store.upsert_connector_token(
+            db_session,
+            tenant_id=tenant.id,
+            account_id=owner,
+            agent_id=uuid.uuid4(),
+            server_url="https://mcp.example.com/mcp",
+            access_token_encrypted=b"at",
+            refresh_token_encrypted=b"rt",
+            token_endpoint="https://auth.example.com/token",
+            client_id="client",
+            client_secret_encrypted=None,
+            token_endpoint_auth_method="none",
+            scope=None,
+            resource=None,
+            expires_at=None,
+            refresh_owner="daimon",
+            now=datetime.now(tz=UTC),
+        )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.connector_tokens.count == 1, "must count only the person's own sign-in"
+    assert "1 saved connector sign-in" in summary_line(preview), "the privacy card must list it"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.connector_tokens == 1, "purge must delete the sign-in it previewed"
+    async with db_session_factory() as session:
+        left = await connector_tokens_store.count_connector_tokens_for_account(
+            session, account_id=account.id
+        )
+    assert left == 0, "no connector token may survive the purge"
 
 
 async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
@@ -941,26 +1023,40 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "github_user_links": "github_user_links",
         "mcp_tokens": "mcp_tokens",
         "tag_opt_outs": "tag_opt_outs",
+        "dm_picks": "dm_picks",
+        "dm_rules": "dm_rules",
+        "dm_grant_users": "dm_grant_users",
+        "connector_tokens": "connector_tokens",
         "gemini_records": "gemini_records",
         "selfhosted_operations": "selfhosted_operations",
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
         "direct_message_conversations": "direct_message_conversations",
+        "dm_carry_overs": "dm_carry_overs",
+        "held_timers": "held_timers",
         "credential_requests": "credential_requests",
         "task_continuations": "task_continuations",
         "turn_outcomes": "turn_outcomes",
         "thread_sessions": "thread_sessions",
         "switch_cards": "switch_cards",
+        "long_job_cancel_audit": "long_job_cancel_audit",
+        "secret_shares": "secret_shares",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
+        "support_requests_anonymized": "support_requests_anonymized",
+        "support_person_limits": "support_person_limits",
+        "support_settlers_cleared": "support_settlers_cleared",
         "daimon_admins": "daimon_admins",
         "agent_post_requesters": "agent_post_requesters",
+        "agent_chat_session_links": "agent_chat_session_links",
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
         "microsoft_user_tokens": "microsoft_user_tokens",
         "web_people": "web_people",
         "web_admin_grants": "web_admin_grants",
+        "monitored_events": "monitored_events",
+        "ops_events": "ops_events",
         "mux_slots": "mux_slots",
         "mux_binding_generations": "mux_binding_generations",
         "mux_journal_sessions": "mux_journal_sessions",
@@ -968,6 +1064,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "mux_leases": "mux_leases",
         "mux_release_requests": "mux_release_requests",
         "mux_operations": "mux_operations",
+        "host_call_cards": "host_call_cards",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -1005,13 +1102,17 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
         "tag_opt_outs": "account_id PK/FK -> accounts.id; tag_opt_outs.delete_for_account",
+        "dm_agent_picks": "account_id FK -> accounts.id; dm_access.delete_picks_for_account",
         "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
         "watch_notice_receipts": "owner_account_id FK cascade; watches.delete_for_account deletes receipts",
         "watch_credentials": "owner_account_id FK cascade; watches.delete_for_account deletes keys",
         "selfhosted_resource_operations": "account UUID stored as account_id text",
         "long_job": "accounts.id FK cascade; cancellation audit cascades from the job",
-        "neutral_agent_revisions": "accounts.id FK cascade",
-        "neutral_skill_versions": "accounts.id FK cascade",
+        "neutral_agent_revisions": "accounts.delete_account deletes rows (no FK)",
+        "neutral_skill_versions": "accounts.delete_account deletes rows (no FK)",
+        # Keyed to the asker: a shared thread's framing quoting another participant
+        # outlives that person until the 7-day pending carry-over sweep.
+        "pending_carry_overs": "accounts.id FK cascade (asker); others' words: 7-day sweep",
         "cli_principals": "account_id FK -> accounts.id",
         "platform_principals": "account_id FK -> accounts.id",
         "user_config": "account_id PK/FK -> accounts.id",
@@ -1019,14 +1120,18 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "github_connect_requests": "requester_account_id FK -> accounts.id",
         "github_connect_click_intents": "requester_account_id FK -> accounts.id",
         "mcp_tokens": "account_id FK -> accounts.id",
+        "connector_tokens": "account_id FK -> accounts.id; agent-wide rows (NULL) stay",
         "coding_key_claims": "account_id FK -> accounts.id; counted and deleted with mcp_tokens",
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
-        "support_escalations": "account_id FK -> accounts.id",
+        "support_escalations": "account_id FK -> accounts.id; limit rows anonymized, not deleted",
+        "support_person_limits": "the person's rows deleted by platform user; set_by is SET NULL",
         "direct_message_conversations": "account_id FK -> accounts.id",
         # The web app: a person, with their identities, tokens and browser sessions, and
         # the admin grants of the account.
         "web_people": "account_id FK -> accounts.id",
+        "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
+        "ops_events": "account_id FK -> accounts.id; ops_events.delete_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",
@@ -1045,6 +1150,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "agent_personal_memory_store": "account_id; deleted with the person's memory stores",
         "long_job_cancel_audit": "owner_account_id and requested_by (account_records)",
         "mcp_oauth_flows": "cascades from its credential request",
+        # An agent-chat session's record of where it came from: erasure clears its grant,
+        # channel and account (`erasure.ERASABLE`, `agent_chat_session_links`).
+        "usage_reconcile_progress": "agent_chat_account_id, no FK; cleared with grant and channel",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -1068,7 +1176,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
             # Owner records cascade with account erasure, including conversation
-            # metadata. Tagged Fly apps then have no registration and are deleted
+            # metadata. Labelled machines then have no registration and are deleted
             # by the scheduler orphan sweep; Daimon calls lose their owner authority.
             "compute_sessions",
             # Background command rows (with their output tail) cascade with the
@@ -1090,6 +1198,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
+            # Same shape: a gated call waits at most a day for its requester's press,
+            # and its requester_account_id cascades with accounts.id.
+            "host_call_cards",
             # A tenant-wide channel budget; the only accounts.id FK is the admin
             # who set it, set_by_account_id with ON DELETE SET NULL.
             "channel_budgets",
@@ -1165,6 +1276,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # the workspace keeps its record of what changed. A person or invite it is
             # about is an id that clears when they go; the text names no one.
             "web_audit",
+            # An admin's resolve or mute of an issue: the only accounts.id FK is who did
+            # it, by_account_id with ON DELETE SET NULL; the state names no one else.
+            "ops_issue_states",
             # Channel setting changes: the only accounts.id FK is the actor, ON DELETE
             # SET NULL; the values name agents and amounts, never a person.
             "channel_changes",
@@ -1182,6 +1296,16 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # tombstone that refuses a stale writer naming an erased account.
             "privacy_session_deletes",
             "erased_account",
+            # An imported timer's note waits for an operator to confirm it and is emptied
+            # when settled; account_id is ON DELETE CASCADE, so erasing the account removes it.
+            "held_timers",
+            # Support limits, menus and channels are tenant config; `set_by_account_id`
+            # is attribution only, severed by ON DELETE SET NULL. A person's own
+            # limit rows are deleted by platform user (`support_person_limits`).
+            "support_limits",
+            "support_menus",
+            "support_menu_places",
+            "support_channels",
         }
     )
 

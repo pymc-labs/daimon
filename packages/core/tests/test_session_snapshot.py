@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Literal
 
 import pytest
@@ -70,6 +71,20 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 
+_snapshot_from_created_session = partial(
+    snapshot_from_created_session, env_sha256=None, env_file_id=None
+)
+
+
+_desired_snapshot = partial(
+    desired_snapshot,
+    environment_id="env_science",
+    repo_url=None,
+    repo_branch=None,
+    tool_safety=OPEN_TOOL_SAFETY,
+)
+
+
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
 
@@ -102,27 +117,19 @@ def _agent(
 
 
 def test_fingerprints_are_identical_when_the_same_configuration_is_rebuilt() -> None:
-    first = desired_snapshot(
+    first = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="abc",
-        repo_url=None,
-        repo_branch=None,
         memory_store_id="memstore_1",
         vault_id="vault_1",
-        tool_safety=OPEN_TOOL_SAFETY,
     )
-    second = desired_snapshot(
+    second = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="abc",
-        repo_url=None,
-        repo_branch=None,
         memory_store_id="memstore_1",
         vault_id="vault_1",
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert fingerprint_identity(first) == fingerprint_identity(second), (
@@ -211,16 +218,12 @@ def test_env_hash_matches_the_bytes_the_credential_assembler_produces() -> None:
         ),
     ]
 
-    snapshot = desired_snapshot(
+    snapshot = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=hash_env_bytes(assemble_env_bytes(rows)),
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert snapshot.env_sha256 == hash_env_bytes(assemble_env_bytes(rows)), (
@@ -236,29 +239,21 @@ def test_absent_system_prompt_hashes_differently_from_an_empty_one() -> None:
     assert hash_system("") is not None, "an empty prompt is a prompt and must hash"
 
     absent = fingerprint_identity(
-        desired_snapshot(
+        _desired_snapshot(
             _agent(system=None),
             hidden_mcp_server_names=frozenset(),
-            environment_id="env_science",
             env_sha256=None,
-            repo_url=None,
-            repo_branch=None,
             memory_store_id=None,
             vault_id=None,
-            tool_safety=OPEN_TOOL_SAFETY,
         )
     )
     empty = fingerprint_identity(
-        desired_snapshot(
+        _desired_snapshot(
             _agent(system=""),
             hidden_mcp_server_names=frozenset(),
-            environment_id="env_science",
             env_sha256=None,
-            repo_url=None,
-            repo_branch=None,
             memory_store_id=None,
             vault_id=None,
-            tool_safety=OPEN_TOOL_SAFETY,
         )
     )
 
@@ -354,10 +349,9 @@ def test_snapshot_from_created_session_captures_every_resource_handle() -> None:
 
 
 def test_snapshot_survives_a_json_round_trip() -> None:
-    snapshot = desired_snapshot(
+    snapshot = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="env-hash",
         repo_url="https://github.com/example/widgets",
         repo_branch="main",
@@ -366,7 +360,6 @@ def test_snapshot_survives_a_json_round_trip() -> None:
         env_file_id="file_env",
         repo_mount_path="/mnt/session/repo",
         repo_token_issued_at=1789000000,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     restored = SessionSnapshot.model_validate_json(snapshot.model_dump_json())
@@ -379,16 +372,14 @@ def test_snapshot_survives_a_json_round_trip() -> None:
 
 
 def test_identity_fingerprint_ignores_handles_and_diagnostics() -> None:
-    base = desired_snapshot(
+    base = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="env-hash",
         repo_url="https://github.com/example/widgets",
         repo_branch="main",
         memory_store_id="memstore_7",
         vault_id="vault_9",
-        tool_safety=OPEN_TOOL_SAFETY,
     )
     rehandled = base.model_copy(
         update={
@@ -410,27 +401,19 @@ def test_identity_fingerprint_ignores_handles_and_diagnostics() -> None:
 
 
 def test_a_model_change_moves_only_the_identity_fingerprint() -> None:
-    haiku = desired_snapshot(
+    haiku = _desired_snapshot(
         _agent(model_id="claude-haiku-4-5"),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="env-hash",
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
-    sonnet = desired_snapshot(
+    sonnet = _desired_snapshot(
         _agent(model_id="claude-sonnet-5"),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="env-hash",
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert fingerprint_identity(haiku) != fingerprint_identity(sonnet), (
@@ -442,27 +425,19 @@ def test_a_model_change_moves_only_the_identity_fingerprint() -> None:
 
 
 def test_an_env_change_moves_only_the_mutable_fingerprint() -> None:
-    before = desired_snapshot(
+    before = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="hash-before",
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
-    after = desired_snapshot(
+    after = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="hash-after",
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert fingerprint_mutable(before) != fingerprint_mutable(after), (
@@ -501,16 +476,12 @@ def test_a_hidden_server_is_not_in_the_desired_mutable_fingerprint() -> None:
         version=1,
     )
 
-    filtered = desired_snapshot(
+    filtered = _desired_snapshot(
         agent,
         hidden_mcp_server_names=frozenset({"docs"}),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert filtered.mcp_servers_sha256 == hash_mcp_servers([daimon]), (
@@ -522,17 +493,13 @@ def test_a_hidden_server_is_not_in_the_desired_mutable_fingerprint() -> None:
 
 
 def test_read_only_policy_without_a_memory_store_does_not_create_phantom_drift() -> None:
-    desired = desired_snapshot(
+    desired = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         memory_read_only=True,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
     absent_mount = desired.model_copy(update={"memory_read_only": False})
     assert fingerprint_identity(desired) == fingerprint_identity(absent_mount)
@@ -577,16 +544,12 @@ def _created_echoing(
 
 
 def _desired_for(agent: BetaManagedAgentsAgent) -> SessionSnapshot:
-    return desired_snapshot(
+    return _desired_snapshot(
         agent,
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -596,10 +559,8 @@ def test_a_latest_skill_echoed_back_pinned_is_not_skills_drift() -> None:
         skill_id="skill_style", type="custom", version="1791535473768193"
     )
     agent = _skilled_agent(latest)
-    recorded = snapshot_from_created_session(
+    recorded = _snapshot_from_created_session(
         _created_echoing(agent, pinned),
-        env_sha256=None,
-        env_file_id=None,
         repo_token_issued_at=None,
         vault_id=None,
         sent_skills=session_skills(agent),
@@ -614,10 +575,8 @@ def test_a_real_skill_change_after_creation_is_still_skills_drift() -> None:
     style = BetaManagedAgentsCustomSkill(skill_id="skill_style", type="custom", version="latest")
     charts = BetaManagedAgentsCustomSkill(skill_id="skill_charts", type="custom", version="latest")
     created_with = _skilled_agent(style)
-    recorded = snapshot_from_created_session(
+    recorded = _snapshot_from_created_session(
         _created_echoing(created_with, style.model_copy(update={"version": "17"})),
-        env_sha256=None,
-        env_file_id=None,
         repo_token_issued_at=None,
         vault_id=None,
         sent_skills=session_skills(created_with),
@@ -688,13 +647,8 @@ def test_multi_repo_helper_mounts_and_map_enter_snapshot() -> None:
             },
         }
     )
-    snapshot = snapshot_from_created_session(
-        session,
-        env_sha256=None,
-        env_file_id=None,
-        repo_token_issued_at=1,
-        vault_id=None,
-        sent_skills=(),
+    snapshot = _snapshot_from_created_session(
+        session, repo_token_issued_at=1, vault_id=None, sent_skills=()
     )
     assert snapshot.github_repo_map_sha256 == "map-hash"
     assert snapshot.github_repo_script_sha256 == "script-hash"
@@ -713,10 +667,8 @@ def test_the_personal_store_is_told_apart_by_id_whatever_the_mount_order() -> No
     )
 
     for order in ((shared, personal), (personal, shared)):
-        snapshot = snapshot_from_created_session(
+        snapshot = _snapshot_from_created_session(
             _session_with_memory(*order),
-            env_sha256=None,
-            env_file_id=None,
             repo_token_issued_at=None,
             vault_id=None,
             sent_skills=[],
@@ -762,27 +714,21 @@ def test_memory_access_covers_every_mounted_store(
         for store, access in (("memstore_shared", shared), ("memstore_alice", personal))
         if access is not None
     ]
-    observed = snapshot_from_created_session(
+    observed = _snapshot_from_created_session(
         _session_with_memory(*mounts),
-        env_sha256=None,
-        env_file_id=None,
         repo_token_issued_at=None,
         vault_id=None,
         sent_skills=[],
         personal_memory_store_ids=("memstore_alice",),
     )
-    desired_read_only = desired_snapshot(
+    desired_read_only = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id="memstore_shared" if shared else None,
         personal_memory_store_id="memstore_alice" if personal else None,
         memory_read_only=True,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert observed.memory_read_only is read_only
@@ -798,16 +744,12 @@ def test_memory_access_covers_every_mounted_store(
 def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() -> None:
     """Rows recorded before personal memory have no such field. Their identity
     fingerprint must not move, or every live row would look changed."""
-    snapshot = desired_snapshot(
+    snapshot = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id="memstore_7",
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
     legacy = SessionSnapshot.model_validate(
         snapshot.model_dump(exclude={"personal_memory_store_id"})
@@ -821,16 +763,12 @@ def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() ->
 def test_a_snapshot_recorded_with_the_external_flag_still_parses() -> None:
     """Earlier builds recorded `is_external` for someone from another organisation:
     such a row reads as anyone's, so their session is kept and upgraded in place."""
-    snapshot = desired_snapshot(
+    snapshot = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
     stored = json.loads(snapshot.model_dump_json()) | {"is_external": True}
 
@@ -843,16 +781,12 @@ def test_a_snapshot_recorded_with_the_external_flag_still_parses() -> None:
 
 
 def test_old_snapshot_unavailability_fields_are_ignored() -> None:
-    snapshot = desired_snapshot(
+    snapshot = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
     legacy = SessionSnapshot.model_validate(
         {
@@ -869,16 +803,12 @@ def test_old_snapshot_unavailability_fields_are_ignored() -> None:
 
 def test_refusal_keeps_first_time_and_announces_once_until_access_returns() -> None:
     url = "https://github.com/acme/refused"
-    snapshot = desired_snapshot(
+    snapshot = _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
     first = snapshot.model_copy(update=refreshed_unavailable_state(snapshot, (url,), now=_NOW))
     assert first.unavailable_repos == ((url, _NOW),)
@@ -933,6 +863,29 @@ def test_native_fast_model_is_in_session_identity_and_pricing():
     assert fingerprint_identity(fast) != fingerprint_identity(standard)
 
 
+def test_a_chosen_effort_is_session_identity_and_absent_when_unset() -> None:
+    """A conversation's effort replaces the session; no effort keeps every stored form."""
+    kwargs = dict(
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+    plain = desired_snapshot(_agent(), **kwargs)
+    low = desired_snapshot(_agent(), model_effort="low", **kwargs)
+    high = desired_snapshot(_agent(), model_effort="high", **kwargs)
+    assert "model_effort" not in plain.model_dump(mode="json")
+    assert low.model_dump(mode="json")["model_effort"] == "low"
+    assert identity_change_reasons(plain, low) == ("model",)
+    assert identity_change_reasons(low, high) == ("model",)
+    assert identity_change_reasons(low, low) == ()
+    assert len({fingerprint_identity(s) for s in (plain, low, high)}) == 3
+
+
 def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash() -> None:
     """The bind-time drift check sees a rule added or cleared since the session was made."""
     from daimon.core.session_compat import (
@@ -967,13 +920,11 @@ def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash(
     policy = ToolSafetyPolicy(enabled=True, agent_rules=True)
 
     def desired(rule_tools: frozenset[str] = frozenset()) -> SessionSnapshot:
-        return desired_snapshot(
+        return _desired_snapshot(
             agent,
             hidden_mcp_server_names=frozenset(),
             environment_id="env",
             env_sha256=None,
-            repo_url=None,
-            repo_branch=None,
             memory_store_id=None,
             vault_id=None,
             tool_safety=policy,
@@ -1004,13 +955,11 @@ def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash(
         ReuseAsIs,
     )
     # Rules switched off: the same rows leave the hash alone.
-    off = desired_snapshot(
+    off = _desired_snapshot(
         agent,
         hidden_mcp_server_names=frozenset(),
         environment_id="env",
         env_sha256=None,
-        repo_url=None,
-        repo_branch=None,
         memory_store_id=None,
         vault_id=None,
         tool_safety=ToolSafetyPolicy(enabled=True),
@@ -1021,17 +970,13 @@ def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash(
 
 
 def _desired(system_override: str | None) -> SessionSnapshot:
-    return desired_snapshot(
+    return _desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
-        environment_id="env_science",
         env_sha256="abc",
-        repo_url=None,
-        repo_branch=None,
         memory_store_id="memstore_1",
         vault_id="vault_1",
         system_override=system_override,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -1190,21 +1135,14 @@ def _routed_session(metadata: dict[str, str]) -> BetaManagedAgentsSession:
 def test_a_routed_session_keeps_the_router_whatever_the_setting_says_later() -> None:
     """The mode comes from the session's own stamp, and the desired servers follow
     the recorded mode. Nothing the router setting says reaches either."""
-    recorded = snapshot_from_created_session(
+    recorded = _snapshot_from_created_session(
         _routed_session({MA_METADATA_KEY_GITHUB_TRANSPORT: "router"}),
-        env_sha256=None,
-        env_file_id=None,
         repo_token_issued_at=None,
         vault_id="vlt_app",
         sent_skills=[],
     )
-    unstamped = snapshot_from_created_session(
-        _routed_session({}),
-        env_sha256=None,
-        env_file_id=None,
-        repo_token_issued_at=None,
-        vault_id="vlt_app",
-        sent_skills=[],
+    unstamped = _snapshot_from_created_session(
+        _routed_session({}), repo_token_issued_at=None, vault_id="vlt_app", sent_skills=[]
     )
     desired = _github_desired(github_transport=recorded.github_transport)
 

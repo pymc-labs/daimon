@@ -109,11 +109,12 @@ async def put_revision(
     previous_local: int | None,
     agent_name: str,
     preview_digest: str,
-    drop_consent: JsonValue | None = None,
     model: str | None = None,
     profile: str | None = None,
     requires: JsonValue | None = None,
     thread_mode: str | None = None,
+    effort: str | None = None,
+    environment: str | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
@@ -124,11 +125,12 @@ async def put_revision(
         profile=profile,
         requires=requires,
         thread_mode=thread_mode,
+        effort=effort,
+        environment=environment,
         digest=digest,
         previous_local=previous_local,
         agent_name=agent_name,
         preview_digest=preview_digest,
-        drop_consent=drop_consent,
     )
     session.add(row)
     await session.flush()

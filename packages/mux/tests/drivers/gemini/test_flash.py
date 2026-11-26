@@ -7,7 +7,7 @@ from mux.contracts.ids import ModelRef
 from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import OPT_IN_MODELS
 from mux.testing.drivers.gemini.accounting import Accounting
 from mux.testing.drivers.gemini.fake import FakeTransport
 from pydantic import JsonValue
@@ -35,6 +35,28 @@ async def test_503_only_chain_accounts_each_attempt_and_preserves_selected_model
         provider="gemini", id=FLASH_MODELS[2]
     )
     assert object_value(request()["agent_config"])["model"] == FLASH_MODELS[0]
+
+
+async def test_an_accounting_503_skips_that_model_unsent() -> None:
+    class SkipAlias(Accounting):
+        async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
+            await super().before_attempt(model=model, attempt=attempt)
+            if model.id == FLASH_MODELS[1]:
+                raise ProviderError("overloaded", retryable=True, native_code="503")
+
+    source, accounting = FakeTransport(), SkipAlias()
+    source.responses.extend(
+        [
+            ProviderError("overloaded", retryable=True, native_code="503"),
+            {"id": "interaction", "status": "completed"},
+        ]
+    )
+    await FlashTransport(source, accounting).create(request())
+    assert [object_value(r["agent_config"])["model"] for r in source.requests] == [
+        FLASH_MODELS[0],
+        FLASH_MODELS[2],
+    ]
+    assert [r.outcome for r in accounting.receipts] == ["refused", "accepted"]
 
 
 @pytest.mark.parametrize(
@@ -132,46 +154,56 @@ async def test_output_cap_is_snapshotted_before_the_accounting_await() -> None:
     assert source.requests[0]["generation_config"] == {"max_output_tokens": 4096}
 
 
-def argon_request() -> Mapping[str, JsonValue]:
-    return {"agent_config": {"type": "antigravity", "model": ARGON_MODEL}, "input": []}
+def opt_in_request(model: str) -> Mapping[str, JsonValue]:
+    return {"agent_config": {"type": "antigravity", "model": model}, "input": []}
 
 
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
 @pytest.mark.parametrize("overloaded", (False, True))
-async def test_argon_primary_is_one_attempt_and_never_falls_back_to_flash(
-    overloaded: bool,
+async def test_opt_in_primary_is_one_attempt_and_never_falls_back_to_flash(
+    model: str, overloaded: bool
 ) -> None:
     source, accounting = FakeTransport(), Accounting()
     source.responses.append(
         ProviderError("overloaded", retryable=True, native_code="503")
         if overloaded
-        else {"id": "argon", "status": "completed"}
+        else {"id": "opt-in", "status": "completed"}
     )
     source.responses.append({"id": "flash", "status": "completed"})
-    policy = FlashTransport(source, accounting, primary=ARGON_MODEL)
+    policy = FlashTransport(source, accounting, primary=model)
     if overloaded:
         with pytest.raises(ProviderError):
-            await policy.create(argon_request())
+            await policy.create(opt_in_request(model))
         assert accounting.receipts[0].outcome == "refused"
     else:
-        await policy.create(argon_request())
-        assert policy.model_for_interaction("argon") == ModelRef(provider="gemini", id=ARGON_MODEL)
-    assert source.requests == [argon_request()]
-    assert accounting.held == [ModelRef(provider="gemini", id=ARGON_MODEL)]
+        await policy.create(opt_in_request(model))
+        assert policy.model_for_interaction("opt-in") == ModelRef(provider="gemini", id=model)
+    assert source.requests == [opt_in_request(model)]
+    assert accounting.held == [ModelRef(provider="gemini", id=model)]
 
 
-async def test_argon_and_flash_primaries_refuse_each_others_requests() -> None:
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+async def test_opt_in_and_flash_primaries_refuse_each_others_requests(model: str) -> None:
     source, accounting = FakeTransport(), Accounting()
     with pytest.raises(ProviderError, match="flash_primary_required"):
-        await FlashTransport(source, accounting, primary=ARGON_MODEL).create(request())
+        await FlashTransport(source, accounting, primary=model).create(request())
     with pytest.raises(ProviderError, match="flash_primary_required"):
-        await FlashTransport(source, accounting).create(argon_request())
+        await FlashTransport(source, accounting).create(opt_in_request(model))
+    assert not source.requests and not accounting.held
+
+
+async def test_opt_in_primaries_refuse_each_others_requests() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    first, second = OPT_IN_MODELS[:2]
+    with pytest.raises(ProviderError, match="flash_primary_required"):
+        await FlashTransport(source, accounting, primary=first).create(opt_in_request(second))
     assert not source.requests and not accounting.held
 
 
 @pytest.mark.parametrize(
     "primary", ("gemini-3.5-flash-lite", "gemini-4-argon-preview", "gemini-pro")
 )
-def test_transport_primary_is_flash_or_argon_only(primary: str) -> None:
+def test_transport_primary_is_flash_or_opt_in_only(primary: str) -> None:
     with pytest.raises(ValueError):
         FlashTransport(FakeTransport(), Accounting(), primary=primary)
 
@@ -319,7 +351,7 @@ async def test_a_failed_release_never_breaks_the_call() -> None:
 
 @pytest.mark.parametrize(
     ("native_code", "rejected"),
-    [("quota_zero", 429), ("quota_exhausted", 429), (None, None)],
+    [("quota_zero", 429), ("quota_daily", 429), ("quota_exhausted", 429), (None, None)],
 )
 def test_a_429_naming_its_quota_is_a_definite_rejection(
     native_code: str | None, rejected: int | None
@@ -330,7 +362,7 @@ def test_a_429_naming_its_quota_is_a_definite_rejection(
 
     error = ProviderError(
         "rate_limited",
-        retryable=native_code != "quota_zero",
+        retryable=native_code not in ("quota_zero", "quota_daily"),
         native_code=native_code,
         native_error_code="http_429",
     )

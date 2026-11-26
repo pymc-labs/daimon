@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -13,11 +14,14 @@ import pytest
 from cryptography.fernet import MultiFernet
 from daimon.core import mcp_tool_annotations
 from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
+from daimon.core.config import McpIdentitySettings
+from daimon.core.mcp_identity import relay_url
 from daimon.core.mcp_oauth.discovery import read_mcp_catalogue
 from daimon.core.mcp_tool_annotations import (
     agent_mcp_token_for,
     annotations_from_mcp,
     mcp_annotation_lookup,
+    relay_catalogues,
 )
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy, classify_tool
 from daimon.core.turn.approvals import AnnotationLookup, interactive_decider, unattended_decider
@@ -48,6 +52,9 @@ async def _no_token(url: str) -> str | None:
     return None
 
 
+_mcp_annotation_lookup = partial(mcp_annotation_lookup, server_urls=_SERVERS, token_for=_no_token)
+
+
 _BRIDGE_TOOLS: list[Mapping[str, JsonValue]] = [
     {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
     {"name": "memory_flag_set", "annotations": {"readOnlyHint": False}},
@@ -70,9 +77,7 @@ def _deciders(policy: ToolSafetyPolicy, lookup: AnnotationLookup, card: AsyncMoc
 @pytest.mark.parametrize("attended", [True, False])
 async def test_a_read_only_hint_runs_a_noun_first_read_without_a_card(attended: bool) -> None:
     card = AsyncMock(return_value="denied")
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS))
     result = await _deciders(_ON, lookup, card)[attended](_call("memory_flag_list"))
     assert result.allow, "readOnlyHint=true makes memory_flag_list a read"
     card.assert_not_awaited()
@@ -94,9 +99,7 @@ async def test_no_read_only_hint_or_a_destructive_one_is_never_auto_allowed(
     tool: str, attended: bool
 ) -> None:
     card = AsyncMock(return_value="denied")
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS))
     result = await _deciders(_ON, lookup, card)[attended](_call(tool))
     assert not result.allow
     if attended:
@@ -119,9 +122,7 @@ async def test_an_operator_override_wins_over_annotations_both_ways(attended: bo
         effects={"bridge/memory_flag_list": "write", "bridge/memory_flag_purge": "read"},
     )
     reads: list[str | None] = []
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS, reads))
     card = AsyncMock(return_value="denied")
     decide = _deciders(policy, lookup, card)[attended]
     assert not (await decide(_call("memory_flag_list"))).allow, "override write beats readOnlyHint"
@@ -135,9 +136,7 @@ async def test_a_denied_entry_beats_a_trusted_read_only_hint(attended: bool) -> 
         enabled=True, trusted_annotations=("bridge",), denied=("bridge/memory_flag_list",)
     )
     reads: list[str | None] = []
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS, reads))
     card = AsyncMock(return_value="approved")
     decide = _deciders(policy, lookup, card)[attended]
     assert not (await decide(_call("memory_flag_list"))).allow
@@ -158,9 +157,7 @@ async def test_an_untrusted_servers_annotations_are_never_read(
     policy: ToolSafetyPolicy, attended: bool
 ) -> None:
     reads: list[str | None] = []
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS, reads))
     card = AsyncMock(return_value="denied")
     decide = _deciders(policy, lookup, card)[attended]
     with capture_logs() as logs:
@@ -177,9 +174,7 @@ async def test_an_unreadable_catalogue_falls_back_to_the_name(attended: bool) ->
     async def _refused(url: str, token: str | None) -> Sequence[Mapping[str, JsonValue]]:
         raise ValueError("MCP catalogue read refused")
 
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_refused
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_refused)
     card = AsyncMock(return_value="denied")
     decide = _deciders(_ON, lookup, card)[attended]
     assert not (await decide(_call("memory_flag_list"))).allow
@@ -226,9 +221,7 @@ async def test_trusted_and_disabled_calls_do_not_read_annotations() -> None:
 
 @pytest.mark.parametrize("attended", [True, False])
 async def test_each_annotation_based_allow_is_logged(attended: bool) -> None:
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS))
     card = AsyncMock(return_value="denied")
     decide = _deciders(_ON, lookup, card)[attended]
     with capture_logs() as logs:
@@ -259,9 +252,7 @@ async def test_a_refused_read_warns_once_per_server_then_logs_at_info(
 
     with capture_logs() as logs:
         for _ in range(2):
-            lookup = mcp_annotation_lookup(
-                server_urls=_SERVERS, token_for=_no_token, read_catalogue=_refused
-            )
+            lookup = _mcp_annotation_lookup(read_catalogue=_refused)
             assert await lookup(_call("memory_flag_list")) is None
     levels = [e["log_level"] for e in logs if e["event"] == "tool_safety.annotations_unavailable"]
     assert levels == ["warning", "info"]
@@ -341,3 +332,76 @@ async def test_the_catalogue_read_keeps_annotations_and_sends_no_empty_bearer(
         ToolAnnotations(read_only_hint=False),
     ]
     assert seen_auth == [None, None, None]
+
+
+_RELAY_PUBLIC_URL = "https://daimon.example/mcp"
+
+
+def _identity(**server: Any) -> McpIdentitySettings:
+    return McpIdentitySettings.model_validate(
+        {
+            "servers": [
+                {
+                    "name": "billing",
+                    "url": "https://billing.example.com/mcp",
+                    "auth": "bearer",
+                    "workspaces": ["discord:1"],
+                    "agents": ["daimon"],
+                    **server,
+                }
+            ],
+            "bearers": {"billing": "operator-key"},
+        }
+    )
+
+
+async def test_a_relay_url_attached_under_another_name_is_not_trusted() -> None:
+    """Trust is by attached name: `tracker` trusted must not read the hints of the relay
+    server `billing` that an agent attached under that name."""
+    relays = relay_catalogues(
+        _identity(), public_url=_RELAY_PUBLIC_URL, workspace="discord:1", agent_name="daimon"
+    )
+    reads: list[tuple[str, str | None]] = []
+
+    async def _read(url: str, token: str | None) -> Sequence[Mapping[str, JsonValue]]:
+        reads.append((url, token))
+        if url == relay_url(_RELAY_PUBLIC_URL, "billing"):
+            raise httpx.ConnectError("the relay takes only a session's credential")
+        return _BRIDGE_TOOLS
+
+    async def lookup_for(name: str) -> ToolAnnotations | None:
+        lookup = mcp_annotation_lookup(
+            server_urls={name: relay_url(_RELAY_PUBLIC_URL, "billing")},
+            token_for=_no_token,
+            read_catalogue=_read,
+            relays=relays,
+        )
+        return await lookup(_call("memory_flag_list", server=name))
+
+    assert await lookup_for("billing") == ToolAnnotations(read_only_hint=True)
+    assert reads == [("https://billing.example.com/mcp", "operator-key")]
+    reads.clear()
+    assert await lookup_for("tracker") is None, "no hints under a name that is not the relay's"
+    assert reads == [(relay_url(_RELAY_PUBLIC_URL, "billing"), None)], (
+        "read at the attached URL with no operator key, as any unrelated server"
+    )
+
+
+@pytest.mark.parametrize(
+    ("workspace", "agent_name", "listed"),
+    [
+        ("discord:1", "daimon", True),
+        ("discord:2", "daimon", False),
+        (None, "daimon", False),
+        ("discord:1", "other", False),
+    ],
+    ids=["allowed", "other-workspace", "no-workspace", "other-agent"],
+)
+def test_a_relay_server_the_workspace_or_agent_may_not_use_is_not_read(
+    workspace: str | None, agent_name: str, listed: bool
+) -> None:
+    """The relay refuses such a caller, so its catalogue is not read with the operator key."""
+    relays = relay_catalogues(
+        _identity(), public_url=_RELAY_PUBLIC_URL, workspace=workspace, agent_name=agent_name
+    )
+    assert bool(relays) is listed, "a relay server is read only for an allowed workspace and agent"

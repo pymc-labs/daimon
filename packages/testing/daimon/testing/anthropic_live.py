@@ -640,7 +640,7 @@ def durable_receipt(
             key == "status"
             and value in {"pass", "fail", "failed", "pending", "PENDING", "cancelled"}
             or key == "path"
-            and value in {"legacy", "mux"}
+            and value == "mux"
             or key == "termination"
             and value in {"completed", "cancelled", "errored", "interrupted"}
         )
@@ -1085,8 +1085,8 @@ class LiveContext:
     def retain_completed_leg(self, leg: dict[str, object]) -> None:
         """Save audited final output before a later proof or cleanup can fail."""
         path = leg.get("path")
-        if self.admission.package != "A7" or path not in ("legacy", "mux"):
-            raise LiveRefused("completed leg is outside the admitted A7 pair")
+        if self.admission.package != "A7" or path != "mux":
+            raise LiveRefused("completed leg is outside the admitted A7 probe")
         Audit(self.redaction_secrets).audit(json.loads(json.dumps([*self.completed_legs, leg])))
         descriptor = os.open(
             self.admission.output / f"a7-{path}-leg.json",
@@ -1842,10 +1842,20 @@ def add_live_arguments(parser: object) -> None:
     parser.add_argument("--spend-ledger", type=Path)
 
 
+def source_pin() -> Mapping[str, object]:
+    root = Path(__file__).resolve().parents[4]
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    return {"head": git("rev-parse", "HEAD"), "clean": not git("status", "--porcelain")}
+
+
 def live_command(package: Package, args: object) -> None:
     import argparse
 
-    from daimon.testing.a7_anthropic import source_pin
     from daimon.testing.anthropic_live_cases import a7_pair, f2_default
 
     if not isinstance(args, argparse.Namespace):

@@ -140,7 +140,7 @@ async def _overview_impl(runtime: McpRuntime, auth: AuthIdentity) -> CreditsOver
         markup=runtime.settings.billing.markup,
         ledger_limit=OVERVIEW_LEDGER,
     )
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return CreditsOverview(
         balance_usd=report.balance_usd,
         spent_usd=report.spent_usd,
@@ -174,7 +174,7 @@ async def _spend_impl(
         agent_labels=_labels(runtime, actor.tenant_id),
         channel_names=_stored_names,
     )
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     lines = [_line(e) for e in rows]
     if by == "person" and details != "shown":
         # Person names default to the email local part, which is private.
@@ -210,7 +210,7 @@ async def _feedback_impl(runtime: McpRuntime, auth: AuthIdentity, days: int) -> 
             )
     except FeedbackNotAllowed as err:
         raise ToolError(str(err)) from err
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return FeedbackSummary(
         report=feedback_report(found, names=names, days=days),
         web_url=links.feedback() if links else None,

@@ -75,13 +75,54 @@ def _reserved_word_in_skill_md(skill_dir: Path) -> str | None:
     return None
 
 
-def _smart_strip(extract_root: Path) -> Path:
+def smart_strip(extract_root: Path) -> Path:
+    """Descend into a lone top-level directory unless the root holds a SKILL.md."""
     entries = list(extract_root.iterdir())
     dirs = [e for e in entries if e.is_dir()]
     has_root_skill = (extract_root / "SKILL.md").exists() or (extract_root / "skill.md").exists()
     if len(dirs) == 1 and not has_root_skill:
         return dirs[0]
     return extract_root
+
+
+def extract_tarball(
+    tarball_bytes: bytes,
+    extract_root: Path,
+    *,
+    label: str,
+    max_tarball_decompressed_bytes: int = DEFAULT_MAX_TARBALL_DECOMPRESSED_BYTES,
+    max_tarball_members: int = MAX_TARBALL_MEMBERS,
+) -> Path:
+    """Safely extract a GitHub tarball under ``extract_root`` and return the repo root
+    (GitHub's single ``owner-repo-sha/`` wrapper stripped). Caps of 0 disable a check."""
+    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tf:
+        # Pre-extraction accounting: bound expansion (a small tarball can
+        # decompress to tens of gigabytes) and member count, BEFORE any file is
+        # written. A cap of 0 disables that check, matching max_tarball_bytes'
+        # existing convention on the compressed download side.
+        members = tf.getmembers()
+        if max_tarball_members > 0 and len(members) > max_tarball_members:
+            raise TarballTooLarge(
+                f"tarball for {label!r} contains {len(members)} members, exceeding "
+                f"max_tarball_members cap of {max_tarball_members}"
+            )
+        total_decompressed_bytes = sum(m.size for m in members)
+        if (
+            max_tarball_decompressed_bytes > 0
+            and total_decompressed_bytes > max_tarball_decompressed_bytes
+        ):
+            raise TarballTooLarge(
+                f"tarball for {label!r} decompresses to {total_decompressed_bytes} bytes, "
+                f"exceeding max_tarball_decompressed_bytes cap of "
+                f"{max_tarball_decompressed_bytes} bytes"
+            )
+        # CVE-2007-4559 safe extraction: filter="data" blocks path traversal,
+        # symlinks escaping the root, and device/special files. It does NOT
+        # bound expansion size or member count — the accounting above covers
+        # that separately, before any of these files are written.
+        tf.extractall(extract_root, filter="data")
+
+    return smart_strip(extract_root)
 
 
 def _find_skill_md_dirs(root: Path) -> list[Path]:
@@ -103,34 +144,13 @@ def _extract_and_bundle_sync(
     max_tarball_decompressed_bytes: int = DEFAULT_MAX_TARBALL_DECOMPRESSED_BYTES,
     max_tarball_members: int = MAX_TARBALL_MEMBERS,
 ) -> list[SkillEntry]:
-    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tf:
-        # Pre-extraction accounting: bound expansion (a small tarball can
-        # decompress to tens of gigabytes) and member count, BEFORE any file is
-        # written. A cap of 0 disables that check, matching max_tarball_bytes'
-        # existing convention on the compressed download side.
-        members = tf.getmembers()
-        if max_tarball_members > 0 and len(members) > max_tarball_members:
-            raise TarballTooLarge(
-                f"tarball for {repo_name!r} contains {len(members)} members, exceeding "
-                f"max_tarball_members cap of {max_tarball_members}"
-            )
-        total_decompressed_bytes = sum(m.size for m in members)
-        if (
-            max_tarball_decompressed_bytes > 0
-            and total_decompressed_bytes > max_tarball_decompressed_bytes
-        ):
-            raise TarballTooLarge(
-                f"tarball for {repo_name!r} decompresses to {total_decompressed_bytes} bytes, "
-                f"exceeding max_tarball_decompressed_bytes cap of "
-                f"{max_tarball_decompressed_bytes} bytes"
-            )
-        # CVE-2007-4559 safe extraction: filter="data" blocks path traversal,
-        # symlinks escaping the root, and device/special files. It does NOT
-        # bound expansion size or member count — the accounting above covers
-        # that separately, before any of these files are written.
-        tf.extractall(extract_root, filter="data")
-
-    repo_root = _smart_strip(extract_root)
+    repo_root = extract_tarball(
+        tarball_bytes,
+        extract_root,
+        label=repo_name,
+        max_tarball_decompressed_bytes=max_tarball_decompressed_bytes,
+        max_tarball_members=max_tarball_members,
+    )
 
     if not split:
         zip_bytes, _arcname_prefix, _included = build_bundled_zip(repo_root, repo_name)

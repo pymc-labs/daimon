@@ -18,23 +18,33 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
 import httpx
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
+from daimon.adapters.mcp.oauth_github_follow import (
+    FollowOffer,
+    confirmed_offer,
+    follow_offers,
+    follow_offers_html,
+    following_note_html,
+)
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.features.service import set_agent_feature
 from daimon.core.github_app_auth import (
     build_app_jwt,
     get_app_installation_details,
     installation_supports_write,
+    list_installation_repository_details,
+    mint_installation_listing_token,
 )
 from daimon.core.github_connect_cards import (
     NEEDED,
@@ -52,6 +62,8 @@ from daimon.core.stores import github_access, github_app_installations, github_c
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, Role
 from daimon.core.stores.github_access import list_agent_repos
+from daimon.core.stores.github_follow_org import FEATURE_KEY as FOLLOW_ORG_FEATURE
+from daimon.core.stores.github_follow_org import agent_follows
 from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
 from daimon.core.stores.github_request_actions import (
     finish_confirmed_requests,
@@ -104,6 +116,7 @@ _RETRY_FIELD_NAMES = frozenset(
         "remove",
         "access",
         "working",
+        "follow_org",
     }
 )
 _RETRY_FIELD_SCOPED_ACCESS = re.compile(r"access_\d+")
@@ -646,6 +659,7 @@ def _saved_agent_page(
     visible_ids: set[int] | None = None,
     back_url: str | None = "https://discord.com/app",
     installations: Sequence[_Installation] = (),
+    following: bool = False,
 ) -> Response:
     owner_installations = {item.owner_login.casefold(): item for item in installations}
     groups: dict[str, list[github_access.AgentRepo]] = {}
@@ -660,6 +674,7 @@ def _saved_agent_page(
         + icon("circle-check")
         + "</div>"
         + f'<p class="gh-status-line">{_agent_only_line(len(grants), name)}</p>'
+        + (following_note_html(agent_name=name) if following else "")
         + '<div class="gh-saved-groups">'
         + "".join(
             f'<section class="gh-owner-group"><h2 class="gh-owner-heading">'
@@ -770,6 +785,28 @@ _EDITOR_SCRIPT = """
     if (group) { group.querySelector(".gh-owner-rows").appendChild(row); group.hidden = false; }
     return row;
   }
+  const followOffers = [...form.querySelectorAll(".gh-follow-org")];
+  // The offer shows once the agent would hold every repo of that one org.
+  function renderFollow() {
+    const live = rows().filter(row => !removed.has(row.dataset.repoId));
+    const heldIds = new Set(live.map(row => row.dataset.repoId));
+    let on = false;
+    for (const offer of followOffers) {
+      const owner = offer.dataset.owner.toLowerCase();
+      const ready = live.length > 0 &&
+        live.every(row => (row.dataset.name || "").split("/")[0].toLowerCase() === owner) &&
+        offer.dataset.ids.split(",").every(id => heldIds.has(id));
+      const box = offer.querySelector("input");
+      offer.hidden = !ready;
+      box.disabled = !ready;
+      if (!ready) box.checked = false;
+      on = on || box.checked;
+    }
+    return on;
+  }
+  form.addEventListener("change", event => {
+    if (event.target.name === "follow_org") render();
+  });
   function render() {
     for (const row of rows()) {
       const id = row.dataset.repoId;
@@ -833,6 +870,7 @@ _EDITOR_SCRIPT = """
     if (added) parts.push("add " + added + " " + plural(added));
     if (removedCount) parts.push("remove " + removedCount + " " + plural(removedCount));
     if (workingChanged) parts.push("change working repo");
+    if (renderFollow()) parts.push("follow the org");
     document.getElementById("selection-status").textContent =
       parts.length ? "Not saved yet" : "No changes to save";
     document.querySelector(".gh-editor-footer").hidden = !parts.length;
@@ -1163,6 +1201,7 @@ _EDITOR_SCRIPT = """
   document.getElementById("discard-repos").addEventListener("click", () => {
     staged.clear(); removed.clear(); working = initialWorking; workingExplicit = false;
     pickerDraft.clear();
+    for (const box of form.querySelectorAll(".gh-follow-org input")) box.checked = false;
     for (const row of rows()) if (row.dataset.added === "true") row.remove();
     render();
   });
@@ -1209,8 +1248,13 @@ def _agent_editor_page(
     selection_error: str | None = None,
     pending_installation: _PendingInstallationRequest | None = None,
     github_user_id: int | None = None,
+    follow: tuple[FollowOffer, ...] = (),
+    following: bool = False,
 ) -> Response:
-    """Render one agent's grants and an optional staged add dialog."""
+    """Render one agent's grants and an optional staged add dialog.
+
+    `follow` offers the checkbox that gives the agent new repos of a whole org;
+    `following` says it already has them."""
     esc = html.escape
 
     snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
@@ -1446,6 +1490,9 @@ def _agent_editor_page(
         '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">'
         f"{icon('plus')}Add repos</button>"
     )
+    parts.append(follow_offers_html(follow, agent_name=agent_name))
+    if following:
+        parts.append(following_note_html(agent_name=agent_name))
     owner_choice_rows: list[str] = []
     for item in installations:
         count = sum(
@@ -1625,6 +1672,11 @@ def _agent_editor_page(
             + (" checked" if repo.id == requested_id else "")
             + ">"
             f"Add {esc(repo.full_name)}</label>"
+        )
+    for offer in follow:
+        parts.append(
+            f'<label><input type="checkbox" name="follow_org" value="{offer.installation_id}">'
+            f"Also give {esc(agent_name)} new repos added to {esc(offer.owner)}</label>"
         )
     parts.append(
         '<label>Working repo <select name="working"><option value="keep">Keep current</option>'
@@ -1903,6 +1955,76 @@ def _confirmation_page(
     )
 
 
+type OrgProof = Literal["org_admin", "full_listing"]
+
+
+async def _org_membership(
+    client: httpx.AsyncClient, token: str, org: str
+) -> Literal["admin", "other", "unknown"]:
+    """The signer's standing in `org`, asked live: an active admin, anything else GitHub says
+    about a member, or unknown when GitHub refuses the call. An App without the org members
+    permission is refused with 403 ("Resource not accessible by integration"); a 404 may be
+    that or a person who is no member, so both leave the answer unknown."""
+    response = await client.get(
+        f"https://api.github.com/user/memberships/orgs/{quote(org, safe='')}",
+        headers=_github_headers(token),
+    )
+    if response.status_code in (403, 404):
+        return "unknown"
+    response.raise_for_status()
+    body = TypeAdapter(dict[str, object]).validate_python(response.json())
+    return "admin" if body.get("state") == "active" and body.get("role") == "admin" else "other"
+
+
+async def _org_proof(
+    client: httpx.AsyncClient, token: str, offer: FollowOffer, *, app_jwt: str
+) -> OrgProof | None:
+    """Which proof shows the signer may hand over the whole org, or None.
+
+    First proof: GitHub says they are an active admin of the org. Second, when GitHub will
+    not say: the repos GitHub shows the signer are every repo the App's installation lists
+    (the listing the agent will follow), and neither listing was cut short. Someone who sees
+    every repo of the org passes; a client's admin who sees one of them does not. The offer's
+    repos are the signer's complete listing: an installation whose listing was cut short or
+    failed is never offered.
+    """
+    standing = await _org_membership(client, token, offer.owner)
+    if standing == "admin":
+        return "org_admin"
+    if standing == "other":
+        return None
+    listing_token = await mint_installation_listing_token(
+        client, jwt=app_jwt, installation_id=offer.installation_id
+    )
+    # `list_installation_repository_details` raises on any page it cannot complete.
+    everything = await list_installation_repository_details(client, token=listing_token)
+    ids = {repo.repo_id for repo in everything}
+    if None in ids or not ids <= offer.repo_ids:
+        return None
+    return "full_listing"
+
+
+async def _org_admin_offers(
+    factory: Callable[[], httpx.AsyncClient],
+    token: str,
+    offers: Sequence[FollowOffer],
+    *,
+    app_jwt: str,
+) -> tuple[FollowOffer, ...]:
+    """The offers the signer can prove an org for, so nobody is shown a box that would refuse
+    them. A GitHub error hides the offer; the save asks again."""
+    kept: list[FollowOffer] = []
+    if offers:
+        async with factory() as client:
+            for offer in offers:
+                try:
+                    if await _org_proof(client, token, offer, app_jwt=app_jwt) is not None:
+                        kept.append(offer)
+                except (httpx.HTTPError, ValueError):
+                    continue
+    return tuple(kept)
+
+
 def _github_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
@@ -2052,7 +2174,10 @@ def build_oauth_github_routes(
             return None
         try:
             return await find_agent_by_derived_uuid(
-                anthropic, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
+                anthropic,
+                tenant_id=invitation.tenant_id,
+                agent_id=invitation.agent_id,
+                records=sessionmaker,
             )
         except APIError:
             return None
@@ -2150,6 +2275,18 @@ def build_oauth_github_routes(
                 if invitation.agent_id is not None
                 else []
             )
+            following = (
+                invitation.agent_id is not None
+                and invitation.agent_ma_id is not None
+                and requester is not None
+                and await agent_follows(
+                    session,
+                    settings,
+                    tenant_id=invitation.tenant_id,
+                    platform=requester.platform,
+                    ma_agent_id=invitation.agent_ma_id,
+                )
+            )
         if invitation.agent_id is not None:
             back_url = (
                 f"https://discord.com/channels/{requester.external_id}"
@@ -2162,6 +2299,7 @@ def build_oauth_github_routes(
                 visible_ids,
                 back_url,
                 installations=installations,
+                following=following,
             )
         back = _back_to_chat(requester.platform, requester.external_id) if requester else ""
         return _already_connected_page(
@@ -2497,6 +2635,21 @@ def build_oauth_github_routes(
                 snapshot = await github_connect.agent_repo_snapshot(
                     session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
                 )
+                following = invitation.agent_ma_id is not None and await agent_follows(
+                    session,
+                    settings,
+                    tenant_id=invitation.tenant_id,
+                    platform=requester.platform,
+                    ma_agent_id=invitation.agent_ma_id,
+                )
+            # Following hands the agent repos on its own, so only a workspace admin offers it.
+            offers = follow_offers(
+                installations,
+                grants,
+                may_follow=invitation.agent_ma_id is not None
+                and current_requester.role is Role.ADMIN,
+                following=following,
+            )
             cancel_url = f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
             if request.method == "GET":
                 pending_installation = _PendingInstallationRequest(False)
@@ -2531,6 +2684,13 @@ def build_oauth_github_routes(
                     missing_names=tuple(missing_names),
                     pending_installation=pending_installation,
                     github_user_id=flow.github_user_id,
+                    follow=await _org_admin_offers(
+                        factory,
+                        token,
+                        offers,
+                        app_jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
+                    ),
+                    following=following,
                 )
             posted_snapshot = fields.get("snapshot", [""])[0]
             posted_signature = fields.get("snapshot_sig", [""])[0]
@@ -2588,7 +2748,6 @@ def build_oauth_github_routes(
             allowed_fields = _RETRY_FIELD_NAMES | {f"access_{repo_id}" for repo_id in repairable}
             if fields.keys() - allowed_fields:
                 return _error("Selection could not be verified.", 400, retry_confirm_url)
-            working_before = next((repo.repo_id for repo in grants if repo.is_working_repo), None)
             working_choice = working_values[0]
             if working_choice not in ("keep", "clear"):
                 try:
@@ -2613,7 +2772,38 @@ def build_oauth_github_routes(
                 )
             ):
                 return _error("GitHub access could not be verified.", 403, retry_confirm_url)
-            if not selected_ids and not removed_ids and working_choice == "keep":
+            follow_values = fields.get("follow_org", [])
+            follow_id: int | None = None
+            chosen: FollowOffer | None = None
+            if follow_values:
+                try:
+                    follow_id = int(follow_values[0])
+                except ValueError:
+                    follow_id = None
+                if len(follow_values) != 1 or follow_id is None:
+                    return _error("Selection could not be verified.", 400, retry_confirm_url)
+                held_after = (set(old) - set(removed_ids)) | set(selected_ids)
+                chosen = confirmed_offer(
+                    offers,
+                    installation_id=follow_id,
+                    held_after=held_after,
+                    installations_after={
+                        repo.installation_id
+                        for repo in grants
+                        if repo.repo_id in held_after and repo.installation_id is not None
+                    }
+                    | {visible[repo_id].installation_id for repo_id in selected_ids},
+                )
+                if chosen is None:
+                    return _error(
+                        "Give the agent every repo of the org first.", 400, retry_confirm_url
+                    )
+            if (
+                not selected_ids
+                and not removed_ids
+                and working_choice == "keep"
+                and follow_id is None
+            ):
                 return _agent_editor_page(
                     root=root,
                     state=state,
@@ -2631,6 +2821,13 @@ def build_oauth_github_routes(
                     requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
                     selection_error="Choose a change to save.",
+                    follow=await _org_admin_offers(
+                        factory,
+                        token,
+                        offers,
+                        app_jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
+                    ),
+                    following=following,
                 )
             if posted_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
                 return _error(
@@ -2693,7 +2890,9 @@ def build_oauth_github_routes(
                 # transaction below, so a removal in between refuses the save.
                 async with sessionmaker() as session:
                     acts_as_owner = await requester_owns_agent(session, invitation, live)
-                if not acts_as_owner:
+                # Following hands the agent every repo of the org, so an owner proves
+                # they are still an admin too.
+                if not acts_as_owner or follow_id is not None:
                     try:
                         still_admin = await _attest_native_admin(
                             requester=requester,
@@ -2705,8 +2904,26 @@ def build_oauth_github_routes(
                         return transient_error(_ADMIN_RETRY, 503)
                     if not still_admin:
                         return _error(
-                            "You can no longer manage this agent.", 403, retry_confirm_url
+                            "Only an admin can turn this on."
+                            if acts_as_owner
+                            else "You can no longer manage this agent.",
+                            403,
+                            retry_confirm_url,
                         )
+            follow_proof: OrgProof | None = None
+            if chosen is not None:
+                try:
+                    async with factory() as client:
+                        follow_proof = await _org_proof(client, token, chosen, app_jwt=app_jwt)
+                except (httpx.HTTPError, ValueError):
+                    return transient_error("Couldn't reach GitHub", 502)
+                if follow_proof is None:
+                    return _error(
+                        f"Only someone who sees every repo of {chosen.owner}, or an admin of "
+                        f"{chosen.owner} on GitHub, can turn this on.",
+                        403,
+                        retry_confirm_url,
+                    )
             save_stage = "check_authority"
             try:
                 async with sessionmaker.begin() as session:
@@ -2725,6 +2942,11 @@ def build_oauth_github_routes(
                     )
                     if not manages:
                         return _error("You can no longer manage this agent.", 403)
+                    if follow_id is not None and (
+                        transaction_requester is None
+                        or transaction_requester.role is not Role.ADMIN
+                    ):
+                        return _error("Ask an admin to turn this on.", 403)
                     save_stage = "lock_requests"
                     prelocked_request_ids = await lock_confirmed_request_repos(
                         session,
@@ -2825,7 +3047,9 @@ def build_oauth_github_routes(
                                 account_id=invitation.requester_account_id,
                                 agent_name=invitation.agent_name,
                             )
-                        elif repos and (working_before is None or working_before in removed_ids):
+                        elif repos and not old:
+                            # Only an agent's first repos pick a working repo; later saves
+                            # keep its choice, none included, so none is ever picked by chance.
                             await github_access.set_working_repo(
                                 session,
                                 tenant_id=invitation.tenant_id,
@@ -2846,6 +3070,32 @@ def build_oauth_github_routes(
                                 await github_connect.queue_connect_followup(
                                     session, invitation=invitation, repos=repos
                                 )
+                        if follow_id is not None and invitation.agent_ma_id is not None:
+                            save_stage = "follow_org"
+                            await set_agent_feature(
+                                session,
+                                settings,
+                                tenant_id=invitation.tenant_id,
+                                platform=requester.platform,
+                                ma_agent_id=invitation.agent_ma_id,
+                                key=FOLLOW_ORG_FEATURE,
+                                value="on",
+                                account_id=invitation.requester_account_id,
+                                surface="web",
+                            )
+                            _log.info(
+                                "github_connect.follow_turned_on",
+                                extra={"proof": follow_proof, "installation_id": follow_id},
+                            )
+                            # Read the org now, so the gap is filled without waiting an hour.
+                            await enqueue_reconciliation(
+                                session,
+                                installation_id=follow_id,
+                                delivery_id=f"follow:{uuid.uuid4()}",
+                                event="follow",
+                                deleted=False,
+                                now=datetime.now(UTC),
+                            )
                         save_stage = "audit"
                         await append_event(
                             session,
@@ -2857,7 +3107,12 @@ def build_oauth_github_routes(
                             tool_name="github_connect",
                             operation="github_connect",
                             outcome="allowed",
-                            reason="agent repos saved",
+                            reason="agent repos saved"
+                            + (
+                                f"; followed the org, proved by {follow_proof}"
+                                if follow_proof
+                                else ""
+                            ),
                             github_repo_ids=selected_ids + removed_ids,
                         )
             except (

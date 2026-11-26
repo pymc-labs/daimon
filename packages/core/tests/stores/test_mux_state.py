@@ -13,6 +13,7 @@ from daimon.core._models import ProviderBinding as BindingRow
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.testing.factories import make_tenant
+from daimon.testing.shared_helpers import NOW
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -24,8 +25,6 @@ from mux.state.operations import recovery
 from mux.state.suite import CHECKS, TENANTS, StoreMaker
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
 
 @pytest_asyncio.fixture

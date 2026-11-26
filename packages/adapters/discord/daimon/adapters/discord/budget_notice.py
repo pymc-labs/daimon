@@ -1,4 +1,5 @@
-"""Delivers the channel budget notice (`daimon.core.channel_budget_notice`) by member DM."""
+"""Delivers the channel budget notice (`daimon.core.channel_budget_notice`) by member DM,
+and an alert-only budget's alert in its channel."""
 
 from __future__ import annotations
 
@@ -12,8 +13,18 @@ import aiohttp
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.audience_gate import audience_fact
+from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.channel_budget_notice import (
+    AlertOutcome,
+    BudgetAlert,
+    BudgetAlerter,
+    BudgetNotice,
+    BudgetNotifier,
+)
+from daimon.core.config import env_dm_policy
+from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.stores.watches import (
     REFUSED,
     UNCLEAR,
@@ -23,6 +34,7 @@ from daimon.core.stores.watches import (
     Unclear,
 )
 from daimon.core.turn.deps import TurnDeps
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -44,21 +56,21 @@ def discord_budget_notifier(
         policies = runtime.settings.direct_message_policies
         text = notice.text(f"<#{notice.channel_id}>")
         delivered = 0
-        for user_id in notice.allowed_recipients(
-            policies.get(notice.tenant_id, DirectMessagePolicy())
+
+        async def admits(user_id: str) -> bool:
+            return await _default_agent_admits(
+                runtime, notice.tenant_id, notice.workspace_id, user_id
+            )
+
+        for user_id in await notice.allowed_recipients(
+            env_dm_policy(policies, notice.tenant_id), admits
         ):
             if is_closed():
                 log.info("channel_budget.notice_undelivered", err_type="ClientClosed")
                 break
             try:
-                landed = await send_member_notice(
-                    runtime,
-                    open_dm,
-                    is_closed,
-                    tenant_id=notice.tenant_id,
-                    workspace_id=notice.workspace_id,
-                    recipient_id=user_id,
-                    text=text,
+                landed = await _deliver_notice(
+                    open_dm, workspace_id=notice.workspace_id, recipient_id=user_id, text=text
                 )
                 delivered += int(landed)
             except (discord.HTTPException, LookupError, ValueError) as exc:
@@ -70,6 +82,72 @@ def discord_budget_notifier(
                 log.info("channel_budget.notice_undelivered", err_type=type(exc).__name__)
                 break
         return delivered
+
+    return send
+
+
+def discord_budget_alerter(
+    client: discord.Client, sessionmaker: async_sessionmaker[AsyncSession] | None = None
+) -> BudgetAlerter:
+    """Post the alert as a neutral card; `refused` when the channel is gone or closed to Daimon.
+
+    With `sessionmaker` the alert takes the room-audience gate (`audience_hold`) first: it
+    names another channel and what it spent, so a destination that outsiders can read gets
+    none (`refused`: the claim stays and the next multiple tries again). A background alert
+    runs under no hold. An audience that cannot be read is `failed`, tried again next poll.
+    The deployment's own alert channel, in another workspace, is the operator's and not gated.
+    """
+
+    async def audience_refuses(alert: BudgetAlert, channel: object) -> bool | None:
+        """True when the gate refuses, None when it cannot say, False when it passes."""
+        if sessionmaker is None or not alert.own:
+            return False
+        parent = str(channel.parent_id) if isinstance(channel, discord.Thread) else None
+        try:
+            fact = await audience_fact(
+                sessionmaker,
+                tenant_id=alert.tenant_id,
+                platform="discord",
+                channel_id=alert.destination_id,
+                parent_id=parent,
+                hold=None,
+            )
+        except Exception as exc:
+            log.warning("channel_budget.alert_audience_unreadable", err_type=type(exc).__name__)
+            return None
+        return fact is not None and not authorize(
+            TenantAccessPolicy(),
+            subject=Subject(),
+            action=Action.POST,
+            place=Place(channel_id=alert.destination_id, parent_channel_id=parent),
+            audience=fact,
+        )
+
+    async def send(alert: BudgetAlert) -> AlertOutcome:
+        try:
+            channel_id = int(alert.destination_id)
+            channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+            if not isinstance(channel, discord.abc.Messageable):
+                return "refused"
+            refused = await audience_refuses(alert, channel)
+            if refused is None:
+                return "failed"
+            if refused:
+                log.info("channel_budget.alert_refused", err_type="audience_contained")
+                return "refused"
+            guild = client.get_guild(int(alert.workspace_id))
+            ref = alert.channel_ref(f"<#{alert.channel_id}>", guild.name if guild else None)
+            await channel.send(
+                embed=build_notice_embed(alert.text(ref), neutral=True),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.Forbidden, discord.NotFound, ValueError) as exc:
+            log.info("channel_budget.alert_refused", err_type=type(exc).__name__)
+            return "refused"
+        except discord.HTTPException as exc:
+            log.info("channel_budget.alert_undelivered", err_type=type(exc).__name__)
+            return "failed"
+        return "sent"
 
     return send
 
@@ -97,6 +175,21 @@ def with_budget_notifier(
     )
 
 
+async def _default_agent_admits(
+    runtime: DiscordRuntime, tenant_id: uuid.UUID, guild_id: str, recipient_id: str
+) -> bool:
+    """A notice has no sending agent: the workspace default agent's grant decides, by roles."""
+    return await sender_admits(
+        runtime.turn_deps.sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=None,
+        user_id=recipient_id,
+        groups=roles_by_membership(
+            runtime.turn_deps.membership_resolver, tenant_id=tenant_id, guild_id=guild_id
+        ),
+    )
+
+
 async def send_member_notice(
     runtime: DiscordRuntime,
     open_dm: OpenDm,
@@ -108,9 +201,19 @@ async def send_member_notice(
     text: str,
 ) -> bool:
     """Existing private member-notice transport, also used for watch migration DMs."""
-    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, tenant_id)
     if is_closed() or not policy.allows(recipient_id):
         return False
+    if not await _default_agent_admits(runtime, tenant_id, workspace_id, recipient_id):
+        return False
+    return await _deliver_notice(
+        open_dm, workspace_id=workspace_id, recipient_id=recipient_id, text=text
+    )
+
+
+async def _deliver_notice(
+    open_dm: OpenDm, *, workspace_id: str, recipient_id: str, text: str
+) -> bool:
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
         await dm.send(
@@ -149,8 +252,10 @@ async def send_watch_notice(
     An owner Discord will never deliver to (a bot, gone from the server, DMs
     closed or the bot blocked) is `REFUSED`.
     """
-    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, tenant_id)
     if is_closed() or not policy.allows(recipient_id):
+        return None
+    if not await _default_agent_admits(runtime, tenant_id, workspace_id, recipient_id):
         return None
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))

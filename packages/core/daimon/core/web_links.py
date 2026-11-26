@@ -1,4 +1,4 @@
-"""Links from chat to pages of the web app. Pure: no I/O, no clock.
+"""Links from chat to pages of the web app. Pure but `links_at`, which reads one feature.
 
 The route table mirrors `web/src/lib/deep-links.json`, which the web app builds its own
 links from; a test keeps the two equal. A link is
@@ -9,11 +9,23 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal, NamedTuple
 from urllib.parse import quote
 
-from daimon.core.config import WebModuleKey, WebSettings
+import structlog
+from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import anthropic_configured, anthropic_disabled
+from daimon.core.config import Settings, WebModuleKey, WebSettings
+from daimon.core.defaults.owned import resolve_owned_agent
+from daimon.core.features.snapshot import FeaturePlace, Sessions, place_feature_or_none
+from daimon.core.ma_resolver import ResolverCache, find_agent_id_cached
+from daimon.core.mux_backend import resource_scope
+from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.stores.scoped_config_read import resolve
+from mux.errors import ProviderError
+
+log = structlog.get_logger(__name__)
 
 OPEN_IN_WEB: Final = "Open in web"
 """The label of every panel button that opens the web app, on every platform."""
@@ -25,6 +37,7 @@ LinkKey = Literal[
     "routine",
     "skill",
     "environment",
+    "overview",
     "person",
     "invites",
     "audit",
@@ -56,7 +69,8 @@ DEEP_LINKS: Final[Mapping[LinkKey, DeepLink]] = {
     "routine": DeepLink("/routines", "routine", "routines", "routines.view"),
     "skill": DeepLink("/agents/skills/{id}", None, "agents", "workspace.manage"),
     "environment": DeepLink("/agents/environments", "env", "agents", "workspace.manage"),
-    "person": DeepLink("/admin", "person", "admin", "people.manage"),
+    "overview": DeepLink("/admin", None, "admin", "audit.view"),
+    "person": DeepLink("/admin/people", "person", "admin", "people.manage"),
     "invites": DeepLink("/admin/invites", "invite", "admin", "people.manage"),
     "audit": DeepLink("/admin/audit", None, "admin", "audit.view"),
     "feedback": DeepLink("/admin/feedback", None, "admin", "audit.view"),
@@ -143,7 +157,7 @@ class TenantLinks:
         return self._url("person", None, person_id)
 
     def person_list(self) -> str | None:
-        """The admin page, with no person opened."""
+        """The people page, with no person opened."""
         return self._url("person")
 
     def invites(self, invite_id: str | None = None) -> str | None:
@@ -188,7 +202,7 @@ class TenantLinks:
             "spend": self._path("spend"),
             "integrations": self._path("integrations"),
             "github": self._path("github"),
-            "admin": self._path("person"),
+            "admin": self._path("overview"),
         }
         pages = {key: path for key, path in found.items() if path is not None}
         pages["profile"] = "/profile"
@@ -220,3 +234,70 @@ def panel_links(
     """The links a chat panel may offer in `tenant_id`; None with no web app."""
     links = WebLinks.from_settings(web)
     return None if links is None else links.for_tenant(tenant_id, admin=admin)
+
+
+class Assignment(NamedTuple):
+    """What names the agent assigned to a channel: the deployment default and the runtime's
+    Managed Agents client and resolver cache."""
+
+    default: DeploymentDefault
+    anthropic: AsyncAnthropic
+    cache: ResolverCache
+
+
+async def _assigned_agent(
+    sessions: Sessions, place: FeaturePlace, assignment: Assignment
+) -> str | None:
+    """The id (as the agent tier keys it) of the agent assigned to `place`'s channel: the
+    channel's, else the workspace's, else the deployment default. None when none is live. A
+    thread bound to another agent still follows its channel's assignment."""
+    async with sessions() as session:
+        context = ScopeContext(tenant_id=place.tenant_id, channel_id=place.channel_id)
+        name = (await resolve(session, context=context, default=assignment.default)).agent_name
+    if name is None:
+        return None
+    try:
+        scope = resource_scope(tenant_id=str(place.tenant_id))
+        return (await resolve_owned_agent(sessions, scope, name)).ref.id
+    except ProviderError as miss:
+        if miss.category != "not_found":
+            raise
+    if anthropic_disabled() or not anthropic_configured(assignment.anthropic):
+        return None
+    return await find_agent_id_cached(
+        assignment.anthropic, assignment.cache, tenant_id=place.tenant_id, name=name
+    )
+
+
+async def aware_at(
+    sessions: Sessions,
+    settings: Settings | None,
+    place: FeaturePlace,
+    assignment: Assignment | None = None,
+) -> bool:
+    """Whether `web_awareness` is On at `place`; False when it is Off or unreadable. A place
+    with a channel but no agent takes the agent assigned there, given `assignment`."""
+    if place.agent_id is None and place.channel_id is not None and assignment is not None:
+        # A card in a channel follows the agent assigned there (#1775).
+        try:
+            place = replace(place, agent_id=await _assigned_agent(sessions, place, assignment))
+        except Exception:  # A failed lookup offers no link, as an unreadable feature does.
+            log.warning("web_links.assigned_agent_failed", exc_info=True)
+            return False
+    found = await place_feature_or_none(sessions, settings, place, "web_awareness")
+    return found is not None and found.on
+
+
+async def links_at(
+    sessions: Sessions,
+    settings: Settings | None,
+    place: FeaturePlace,
+    links: TenantLinks | None,
+    assignment: Assignment | None = None,
+) -> TenantLinks | None:
+    """`links` where `web_awareness` is On at `place` (`aware_at`), else None. Every path that
+    tells the agent about the web app or puts a link to it on a card asks this (a turn's
+    controls ask its snapshot in `render_turn_origin`)."""
+    if links is None:
+        return None
+    return links if await aware_at(sessions, settings, place, assignment) else None

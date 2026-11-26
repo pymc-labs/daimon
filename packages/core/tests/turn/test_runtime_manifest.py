@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import traceback
+import uuid
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 from daimon.core.config import load_settings, load_turn_settings
+from daimon.core.host_calls import gate_path
 from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.runtime_manifest import (
@@ -17,7 +19,7 @@ from daimon.core.turn.runtime_manifest import (
     ProviderRuntimeConfigurationError,
     validate_configured_runtime_manifest,
 )
-from mux.contracts.ids import Provider
+from mux.profiles import PROFILES
 from pydantic import TypeAdapter, ValidationError
 
 PREFIXES = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
@@ -26,7 +28,6 @@ PREFIXES = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 def settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://offline/unused")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "offline-settings-required-value")
-    monkeypatch.setenv("DAIMON_TURN__PATH", "mux")
     monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "true")
 
 
@@ -108,15 +109,11 @@ def test_host_scoped_references_validate_without_key_or_persistence(
 
 
 @pytest.mark.parametrize("loader", [load_settings, load_turn_settings])
-@pytest.mark.parametrize("selection", ["legacy-enabled", "mux-disabled"])
-def test_inactive_path_does_not_discover_or_read_a_manifest(
-    loader, selection: str, monkeypatch: pytest.MonkeyPatch
+def test_disabled_backends_do_not_discover_or_read_a_manifest(
+    loader, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings_env(monkeypatch)
-    if selection == "legacy-enabled":
-        monkeypatch.setenv("DAIMON_TURN__PATH", "legacy")
-    else:
-        monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "false")
+    monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "false")
     original = os.environ.get
 
     def get(name, default=None):
@@ -128,7 +125,7 @@ def test_inactive_path_does_not_discover_or_read_a_manifest(
     monkeypatch.setattr(Path, "open", Mock(side_effect=AssertionError("inactive manifest read")))
     settings = loader(_env_file=None)
     turn = settings.turn if loader is load_settings else settings
-    assert turn.path == ("mux" if selection == "mux-disabled" else "legacy")
+    assert turn.channel_backends is False
 
 
 @pytest.mark.parametrize("loader", [load_settings, load_turn_settings])
@@ -180,284 +177,6 @@ def test_existing_environment_identifier_validation_remains(key: str) -> None:
         TypeAdapter(ApiKeyEnvironment).validate_python(key)
 
 
-@pytest.mark.parametrize(
-    ("provider", "model", "today", "before"),
-    [
-        # OpenAI's template already named web fetch a loss before #1483.
-        (
-            "openai",
-            "gpt-6-luna",
-            ("builtin_tool:web_fetch", "builtin_tool:web_search", "memory"),
-            ("builtin_tool:web_fetch", "memory", "tools"),
-        ),
-        # Gemini's named no web tool: both granular losses are new.
-        (
-            "gemini",
-            "gemini-3.8-flash",
-            ("builtin_tool:web_fetch", "builtin_tool:web_search", "memory"),
-            ("memory", "tools"),
-        ),
-    ],
-)
-@pytest.mark.parametrize("instructions", [None, "Source."])
-def test_a_target_is_rebuilt_as_a_pre_1483_consent_named_it(
-    provider: Provider,
-    model: str,
-    today: tuple[str, ...],
-    before: tuple[str, ...],
-    instructions: str | None,
-) -> None:
-    from daimon.core.turn.runtime_manifest import _with_tools_dropped
-    from mux.contracts.ids import ModelRef
-    from mux.contracts.resources import AgentSpec, ToolSpec
-
-    def losses(drops: tuple[str, ...]) -> str:
-        line = "Unavailable capabilities: " + ", ".join(drops) + "."
-        return "\n\n".join(p for p in (instructions, line) if p)
-
-    target = AgentSpec(
-        name="copy",
-        model=ModelRef(provider=provider, id=model),
-        system=losses(today),
-        tools=(ToolSpec(name="bash", kind="builtin"),),
-        declared_drops=today,
-    )
-    rebuilt = _with_tools_dropped(target, instructions)
-    assert rebuilt is not None
-    assert rebuilt.tools == () and rebuilt.declared_drops == before
-    # An agent with no instructions of its own has the losses line alone.
-    assert rebuilt.system == losses(before)
-    assert _with_tools_dropped(rebuilt, instructions) is None, "no tools: nothing to rebuild"
-
-
-COPIES = [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
-
-
-def daimon_copy(
-    provider: Provider,
-    model: str,
-    *,
-    asks: tuple[str, ...] = (),
-    runs: tuple[str, ...] = (),
-    losses: tuple[str, ...] = ("memory",),
-    mcp: bool = True,
-):
-    """A copy whose Daimon MCP tools run (`runs`) or are named losses (`asks`)."""
-    from mux.contracts.ids import ModelRef
-    from mux.contracts.resources import AgentSpec, MCPConnection, ToolSpec
-
-    drops = tuple(sorted({*losses, *(f"mcp_tool:daimon-mcp:{name}" for name in asks)}))
-    server = MCPConnection(
-        name="daimon-mcp",
-        url="https://daimon.invalid/mcp",
-        credential_ref="turn",
-        tool_policy={"allowed_tools": list(runs)},
-    )
-    return AgentSpec(
-        name="copy",
-        model=ModelRef(provider=provider, id=model),
-        system="Source.\n\nUnavailable capabilities: " + ", ".join(drops) + ".",
-        tools=(ToolSpec(name="bash", kind="builtin"),),
-        mcp_servers=(server,) if mcp else (),
-        declared_drops=drops,
-    )
-
-
-def consent_for(target):
-    """What a switch confirmed for `target` recorded: its losses and whole digest."""
-    from daimon.core.stores.domain import _BackendDropConsent
-    from mux.state.operations import request_digest
-
-    return _BackendDropConsent(
-        declared_drops=target.declared_drops,
-        source_pin="a" * 64,
-        target_digest=request_digest(target.model_dump(mode="json")),
-    )
-
-
-def gate_also(monkeypatch: pytest.MonkeyPatch, *names: str, ungate: tuple[str, ...] = ()) -> None:
-    """A later release that gates `names` (and stops gating `ungate`)."""
-    from daimon.core import tool_safety
-
-    gated = (tool_safety.confirmation_gated_tools() | set(names)) - set(ungate)
-    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated)
-
-
-@pytest.mark.parametrize(("provider", "model"), COPIES)
-def test_a_consent_from_before_fleet_removal_still_holds(provider: Provider, model: str) -> None:
-    """Then request_fleet_config was gated, start_long_job not, and get_long_job was listed."""
-    from daimon.core.turn.runtime_manifest import _same_losses
-
-    then = daimon_copy(
-        provider,
-        model,
-        asks=("add_skill", "publish_report", "request_fleet_config"),
-        runs=("describe_agent", "get_long_job", "start_long_job"),
-    )
-    today = daimon_copy(
-        provider,
-        model,
-        asks=("add_skill", "publish_report", "start_long_job"),
-        runs=("describe_agent", "get_long_job"),
-        losses=("memory",),
-    )
-    assert _same_losses(today, consent_for(then)), (
-        "a tool Daimon removed and one it gated since are Daimon's change, not the owner's"
-    )
-
-
-def test_a_gemini_default_model_consent_survives_newly_gated_tools() -> None:
-    """Its stored losses in full, on the provider default, against today's gated set."""
-    from daimon.core.turn.runtime_manifest import _model_consented, _same_losses
-
-    gated_then = (
-        "add_skill",
-        "create_attachment_upload_url",
-        "create_notebook_upload_url",
-        "publish_report",
-    )
-    losses = ("builtin_tool:web_fetch", "builtin_tool:web_search", "memory")
-    losses += ("model_controls", "sandbox")
-    then = daimon_copy(
-        "gemini",
-        "gemini-3.8-flash",
-        asks=gated_then,
-        runs=("describe_agent", "get_long_job", "start_long_job", "create_watch"),
-        losses=losses,
-    )
-    assert then.declared_drops == (
-        "builtin_tool:web_fetch",
-        "builtin_tool:web_search",
-        "mcp_tool:daimon-mcp:add_skill",
-        "mcp_tool:daimon-mcp:create_attachment_upload_url",
-        "mcp_tool:daimon-mcp:create_notebook_upload_url",
-        "mcp_tool:daimon-mcp:publish_report",
-        "memory",
-        "model_controls",
-        "sandbox",
-    ), "the drops that consent stored"
-    today = daimon_copy(
-        "gemini",
-        "gemini-3.8-flash",
-        asks=(*gated_then, "start_long_job", "create_watch"),
-        runs=("describe_agent", "get_long_job"),
-        losses=losses,
-    )
-    assert _same_losses(today, consent_for(then)), "only Daimon's gating changed"
-    assert _model_consented("gemini", "gemini-3.8-flash", None), "its default model"
-
-
-@pytest.mark.parametrize(
-    ("backend", "model", "picked", "consented"),
-    [
-        ("gemini", "gemini-3.8-flash", None, True),
-        ("openai", "gpt-6-luna", None, True),
-        ("gemini", "gemini-4-argon", None, False),
-        ("openai", "gpt-6-astra", None, False),
-        ("gemini", "gemini-4-argon", "gemini-4-argon", True),
-        ("gemini", "gemini-3.8-flash", "gemini-4-argon", False),
-        ("anthropic", None, None, True),
-    ],
-)
-def test_losses_count_only_for_the_model_the_consent_was_for(
-    backend: str, model: str | None, picked: str | None, consented: bool
-) -> None:
-    """A moved provider default is another model: it never rides on an old consent."""
-    from daimon.core.turn.runtime_manifest import _model_consented
-
-    assert _model_consented(backend, model, picked) is consented, (backend, model, picked)
-
-
-@pytest.mark.parametrize(("provider", "model"), COPIES)
-def test_an_owner_ask_tool_daimon_later_gates_needs_no_new_confirmation(
-    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
-) -> None:
-    """hand_off was a loss the owner set to ask; gating it changes nothing they lose."""
-    from daimon.core.turn.runtime_manifest import _same_losses
-
-    then = daimon_copy(provider, model, asks=("add_skill", "hand_off"), runs=("describe_agent",))
-    gate_also(monkeypatch, "hand_off")
-    today = daimon_copy(provider, model, asks=("add_skill", "hand_off"), runs=("describe_agent",))
-    today = today.model_copy(update={"system": "Source, reworded.\n\nUnavailable: all of it."})
-    assert _same_losses(today, consent_for(then)), "gating and instructions text are Daimon's"
-
-
-@pytest.mark.parametrize(("provider", "model"), COPIES)
-@pytest.mark.parametrize("change", ["ungated", "owner_loss", "mcp_back", "fewer_losses"])
-def test_a_gain_or_a_new_loss_still_asks_again(
-    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str, change: str
-) -> None:
-    """A tool gating gave back, a loss never confirmed, or MCP back on a copy without it."""
-    from daimon.core.turn.runtime_manifest import _same_losses
-
-    then = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent",))
-    asks, runs, losses = ("add_skill",), ("describe_agent",), ("memory",)
-    if change == "ungated":
-        gate_also(monkeypatch, ungate=("add_skill",))
-        asks, runs = (), ("add_skill", "describe_agent")
-    elif change == "owner_loss":
-        losses = ("memory", "skills")
-    elif change == "mcp_back":
-        then = daimon_copy(provider, model, losses=("mcp", "memory"), mcp=False)
-    else:
-        losses = ()
-    today = daimon_copy(provider, model, asks=asks, runs=runs, losses=losses)
-    assert not _same_losses(today, consent_for(then)), f"{change} needs a fresh confirmation"
-
-
-@pytest.mark.parametrize(("provider", "model"), COPIES)
-def test_a_self_carded_tool_newly_offered_asks_again(
-    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
-) -> None:
-    """A gated tool Daimon starts carding itself runs on provider turns: a gain."""
-    from daimon.core import tool_safety
-    from daimon.core.turn.runtime_manifest import _same_losses
-
-    then = daimon_copy(provider, model, asks=("add_skill",), runs=("describe_agent",))
-    carded = tool_safety.self_carded_tools() | {"add_skill"}
-    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: carded)
-    today = daimon_copy(provider, model, runs=("add_skill", "describe_agent"))
-    assert not _same_losses(today, consent_for(then)), "add_skill now runs, never confirmed"
-
-
-@pytest.mark.parametrize(("provider", "model"), COPIES)
-def test_a_consent_with_the_switch_tool_off_holds_when_daimon_gates_more(
-    monkeypatch: pytest.MonkeyPatch, provider: Provider, model: str
-) -> None:
-    """The owner turned the switch tool off before confirming; it stays a loss on both sides."""
-    from daimon.core.turn.runtime_manifest import _same_losses
-
-    asks = ("add_skill", "request_agent_backend_switch")
-    then = daimon_copy(provider, model, asks=asks, runs=("describe_agent", "hand_off"))
-    gate_also(monkeypatch, "hand_off")
-    today = daimon_copy(provider, model, asks=(*asks, "hand_off"), runs=("describe_agent",))
-    assert _same_losses(today, consent_for(then)), "the switch tool is the same loss as confirmed"
-
-
-@pytest.mark.parametrize(
-    ("provider", "today", "before"),
-    [
-        (
-            "openai",
-            ("builtin_tool:web_fetch", "builtin_tool:web_search"),
-            ("builtin_tool:web_fetch",),
-        ),
-        ("gemini", ("builtin_tool:web_fetch", "builtin_tool:web_search"), ()),
-    ],
-)
-def test_a_pre_1483_tools_loss_covers_todays_web_losses(
-    provider: Provider, today: tuple[str, ...], before: tuple[str, ...]
-) -> None:
-    """A consent that lost `tools` whole holds once the template keeps all but web tools."""
-    from daimon.core.turn.runtime_manifest import _same_losses
-
-    then = daimon_copy(provider, "m", losses=("memory", "tools", *before))
-    now = daimon_copy(provider, "m", losses=("memory", *today))
-    assert _same_losses(now, consent_for(then)), "its tools come back; web tools stay lost"
-    skills = daimon_copy(provider, "m", losses=("memory", "skills", *today))
-    assert not _same_losses(skills, consent_for(then)), "any other loss still asks again"
-
-
 async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch):
     """Smoke a1d991fb: Gemini copies and a Flash worker were refused at
     read_preparation_counterpart's catch-all with nothing logged."""
@@ -486,3 +205,62 @@ async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch)
     assert cause["frame"].startswith("daimon.core.turn.runtime_manifest:")
     # Fixed labels only: the exception's own text never reaches the log.
     assert "catalogue read failed" not in json.dumps(logs)
+
+
+@pytest.mark.parametrize(
+    "profile",
+    sorted(p.profile_id for p in PROFILES.values() if gate_path(p.provider) != "native"),
+)
+def test_every_non_ma_profile_mounts_connectors_never_a_loss(profile: str) -> None:
+    """Every OpenAI, Gemini and self-hosted profile relays each connector on Daimon's credential."""
+    from daimon.core.connector_relay import harness_connectors
+    from daimon.core.turn.runtime_manifest import relayed_connectors
+    from daimon.core.turn.selfhosted_tools import DAIMON_MCP_AUTH_ENV, build_turn_tools
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, MCPConnection, ToolSpec
+
+    names = ("github", "linear", "notion")
+    source = AgentSpec(
+        name="source",
+        model=ModelRef(provider="anthropic", id="m"),
+        mcp_servers=tuple(MCPConnection(name=n, url=f"https://{n}.invalid/mcp") for n in names),
+        tools=tuple(ToolSpec(name=n, kind="mcp_toolset") for n in names),
+    )
+    daimon = MCPConnection(name="daimon-mcp", url="https://d.invalid/mcp", credential_ref="turn")
+    provider = PROFILES[profile].provider
+    if gate_path(provider) == "in_process":
+        tools = build_turn_tools(
+            daimon_mcp_url=daimon.url,
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            channel_id="c",
+            agent_names=("source",),
+            skill_bundles={},
+            mcp_servers=source.mcp_servers or (),
+            mcp_credential_bindings=(),
+            single_tenant=False,
+            mcp_allowed_http_hosts=(),
+            agent_skills=(),
+            platform_skills=(),
+            channel_skills=(),
+            relayed=harness_connectors(source),
+        )
+        mounted = [
+            (s.name, s.url, s.headers_env.get("Authorization"))
+            for s in tools.mcp_servers
+            if s.name != daimon.name
+        ]
+        assert mounted == [
+            (n, f"https://d.invalid/mcp/connectors/{n}", DAIMON_MCP_AUTH_ENV) for n in names
+        ], "the harness mounts each connector through the relay"
+        return
+    relayed = relayed_connectors(
+        source, daimon, provider=provider, relay_on=True, public_url=daimon.url
+    )
+    assert [(s.name, s.url, s.credential_ref) for s in relayed] == [
+        (n, f"https://d.invalid/mcp/connectors/{n}", "turn") for n in names
+    ], "each connector mounts through the relay"
+    off = relayed_connectors(
+        source, daimon, provider=provider, relay_on=False, public_url=daimon.url
+    )
+    assert off == (), "with the relay off nothing mounts"

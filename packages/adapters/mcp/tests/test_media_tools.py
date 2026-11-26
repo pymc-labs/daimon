@@ -51,7 +51,7 @@ from google.genai import types
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .harness import seed_tenant_and_account
+from .harness import auth_identity, seed_tenant_and_account
 from .services.conftest import make_stub_gemini
 
 
@@ -82,10 +82,11 @@ class _SeedAuthMiddleware(Middleware):
 
 
 def _trusted_auth() -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
+        is_admin=False,
+        is_platform_admin=False,
         platform_user_id=None,
         chat_session_id="test-session",
     )
@@ -138,10 +139,11 @@ async def test_create_file_upload_url_returns_a_put_url_and_a_handle(
     mcp = FastMCP(name="t")
     mcp.add_middleware(
         _SeedAuthMiddleware(
-            AuthIdentity(
-                account_id=account_id,
-                tenant_id=tenant_id,
-                role=Role.ADMIN,
+            auth_identity(
+                account_id,
+                tenant_id,
+                is_admin=False,
+                is_platform_admin=False,
                 platform_user_id=None,
                 chat_session_id="test-session",
             )
@@ -376,9 +378,9 @@ async def test_a_billed_transcript_counts_toward_the_turns_channel_budget(
             now=now,
             chat_session_id="test-session",
         )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="u1",
@@ -450,9 +452,9 @@ async def test_a_billed_transcript_is_held_to_the_persons_allowance_on_the_turns
             now=now,
             chat_session_id="test-session",
         )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="u1",
@@ -490,9 +492,9 @@ async def test_a_channel_bound_keys_transcript_counts_toward_its_channel_budget(
         account = await make_account(session, tenant=tenant)
         await make_ledger_entry(session, tenant=tenant)
         await make_channel_budget(session, tenant=tenant, channel_id="222", limit_usd=limit_usd)
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="u1",

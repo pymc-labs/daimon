@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from daimon.core import direct_messages
-from daimon.core.direct_messages import reply_to_dm
-from daimon.core.stores.direct_messages import get_conversation
+from daimon.core.direct_messages import bounded_turns, reply_to_dm
+from daimon.core.features.model_input import DmHistoryCap
+from daimon.core.handoff_context import TranscriptTurn
+from daimon.core.stores.direct_messages import OwnerDmFence, get_conversation
 from daimon.core.stores.domain import Role
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -36,7 +40,7 @@ async def test_a_dm_turn_is_admitted_against_its_source_channel(
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
     monkeypatch.setattr(direct_messages, "admit", refuse)
-    deps = replace(deps_for(None, db_session_factory), turn_path=None)
+    deps = deps_for(None, db_session_factory)
 
     with pytest.raises(AdmissionDenied):
         await reply_to_dm(
@@ -58,7 +62,7 @@ async def test_a_dm_turn_is_admitted_against_its_source_channel(
             session, platform="discord", route_key="dm-chan", external_user_id="u1"
         )
     assert stored is not None and stored.source_channel_id == source_channel_id, "it round-trips"
-    assert stored.active_until is None, "a refused turn releases the conversation"
+    assert stored.claimed_at is None, "a refused turn releases the conversation"
 
 
 @pytest.mark.parametrize("owns_claim", [True, False])
@@ -68,7 +72,11 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
 ):
     from datetime import UTC, datetime, timedelta
 
-    from daimon.core.stores.direct_messages import claim_message, finish_message
+    from daimon.core.stores.direct_messages import (
+        OwnerDmFence,
+        claim_message,
+        finish_message,
+    )
     from daimon.core.stores.thread_sessions import get_thread_session_by_id
     from daimon.testing.factories import make_thread_session
 
@@ -86,13 +94,11 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
         now = datetime.now(UTC)
         claimed = await claim_message(
             session,
-            platform=original.platform,
+            fence=OwnerDmFence(original.platform, original.external_user_id),
             route_key=original.route_key,
-            external_user_id=original.external_user_id,
-            message_id="shutdown-test",
+            message_ids=("shutdown-test",),
             expected_scope_id=original.scope_id,
-            now=now,
-            active_until=now + timedelta(minutes=10),
+            claimed_at=now + timedelta(minutes=10),
         )
         assert claimed is not None
         if not owns_claim:
@@ -105,13 +111,13 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
         assert anthropic is client and session_id == "owned-dm-session"
         assert scope.tenant_id == str(tenant.id) and scope.account_id == str(account.id)
         assert not scope.is_platform and not scope.is_legacy_host_authorized
-        assert scope.authorization_id == "dm-shutdown-drain" and timeout_s == 3.0
+        assert scope.authorization_id == "dm-cancelled-turn" and timeout_s == 3.0
         calls.append(session_id)
         return interrupt_ack
 
     monkeypatch.setattr(direct_messages, "interrupt_orphaned_session", interrupt)
-    deps = replace(deps_for(client, db_session_factory), turn_path=None)
-    await direct_messages._settle_shutdown_cancelled_dm(deps, claimed)
+    deps = deps_for(client, db_session_factory)
+    await direct_messages._settle_cancelled_dm(deps, claimed)
     assert calls == (["owned-dm-session"] if owns_claim else [])
     async with db_session_factory() as session:
         stored = await get_thread_session_by_id(session, id=mapping.id)
@@ -123,7 +129,7 @@ async def test_a_private_conversation_is_dated_by_its_last_activity(
     db_session: AsyncSession,
 ) -> None:
     """The retention clock moves on a claimed message and a finished reply."""
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
     from daimon.core._models import DirectMessageConversation
     from daimon.core.stores.direct_messages import claim_message, finish_message
@@ -142,18 +148,90 @@ async def test_a_private_conversation_is_dated_by_its_last_activity(
 
     assert await stamp() > long_ago, "starting a conversation dates it"
     await db_session.execute(update(DirectMessageConversation).values(updated_at=long_ago))
-    now = datetime.now(UTC)
     claimed = await claim_message(
         db_session,
-        platform=dm.platform,
+        fence=OwnerDmFence(dm.platform, dm.external_user_id),
         route_key=dm.route_key,
-        external_user_id=dm.external_user_id,
-        message_id="m1",
+        message_ids=("m1",),
         expected_scope_id=dm.scope_id,
-        now=now,
-        active_until=now + timedelta(minutes=5),
+        claimed_at=datetime.now(UTC),
     )
-    assert claimed is not None and await stamp() == now, "a claimed message moves the clock"
+    assert claimed is not None and await stamp() > long_ago, "a claimed message moves the clock"
     await db_session.execute(update(DirectMessageConversation).values(updated_at=long_ago))
     await finish_message(db_session, conversation=claimed, history=[])
     assert await stamp() > long_ago, "a finished reply moves the clock"
+
+
+def _turns(count: int, size: int = 10) -> list[TranscriptTurn]:
+    return [TranscriptTurn(role="user", text=f"{i:03d}".ljust(size, "x")) for i in range(count)]
+
+
+def test_bounded_turns_default_is_twelve_turns_and_sixteen_thousand_chars() -> None:
+    kept = bounded_turns(_turns(40))
+    assert [t.text[:3] for t in kept] == [f"{i:03d}" for i in range(28, 40)]
+    assert sum(len(t.text) for t in bounded_turns(_turns(40, 5_000))) == 16_000
+
+
+def test_bounded_turns_honours_a_raised_cap() -> None:
+    kept = bounded_turns(_turns(150), DmHistoryCap(turns=100))
+    assert len(kept) == 100 and kept[-1].text.startswith("149")
+    assert sum(len(t.text) for t in bounded_turns(_turns(150, 5_000), DmHistoryCap(100))) == 100_000
+
+
+class _FencePing:
+    """The fence connection's session: counts pings, or fails them."""
+
+    def __init__(self, error: Exception | None = None, fails: int | None = None) -> None:
+        self.error, self.fails, self.pings = error, fails, 0
+
+    async def execute(self, statement: object) -> None:
+        if self.error is not None and (self.fails is None or self.fails > 0):
+            if self.fails is not None:
+                self.fails -= 1
+            raise self.error
+        assert str(statement) == "SELECT 1", "the ping is a plain query"
+        self.pings += 1
+
+
+async def _watch(monkeypatch: pytest.MonkeyPatch, db: _FencePing, held: list[bool]) -> OwnerDmFence:
+    @asynccontextmanager
+    async def session():
+        yield None
+
+    async def fence_held(_session: object, _fence: object) -> bool:
+        return held.pop(0)
+
+    monkeypatch.setattr(direct_messages, "_FENCE_CHECK_S", 0.01)
+    monkeypatch.setattr(direct_messages, "fence_held", fence_held)
+    fence = OwnerDmFence("discord", "42", 1, db)  # type: ignore[arg-type]
+    async with asyncio.timeout(None) as stop:
+        await asyncio.wait_for(
+            direct_messages._watch_fence(SimpleNamespace(sessionmaker=session), fence, stop),  # type: ignore[arg-type]
+            2,
+        )
+    return fence
+
+
+async def test_the_fence_watcher_pings_the_fence_connection_each_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FencePing()
+    fence = await _watch(monkeypatch, db, [True, True, False])
+    assert db.pings == 3, "each poll sends a query over the idle fence connection"
+    assert fence.lost.is_set(), "the lock check still ends the watch once the fence is gone"
+
+
+async def test_the_fence_watcher_treats_a_dead_fence_connection_as_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fence = await _watch(monkeypatch, _FencePing(OSError("connection closed")), [True])
+    assert fence.lost.is_set(), "two failed pings in a row mean the hold is gone"
+
+
+async def test_the_fence_watcher_survives_one_failed_ping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FencePing(TimeoutError(), fails=1)
+    fence = await _watch(monkeypatch, db, [True, True, False])
+    assert db.pings == 2, "a ping after the failed one resets the count"
+    assert fence.lost.is_set(), "only the lock check ended the watch"

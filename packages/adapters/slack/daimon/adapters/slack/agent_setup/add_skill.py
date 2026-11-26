@@ -31,6 +31,7 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
@@ -158,13 +159,18 @@ async def run_add_skill_submission(
         if await refused(fresh):
             raise _AddRefused
 
-    found = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)
+    found = await find_agent_by_daimon_tag(
+        runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
+    )
     if found is None:
         await tell(AGENT_GONE_MESSAGE)
         return
     try:
         agent = await retrieve_agent(
-            runtime.anthropic, found.id, scope=resource_scope(tenant_id=str(tenant_id))
+            runtime.anthropic,
+            found.id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
         if await refused(agent):
             return
@@ -184,8 +190,12 @@ async def run_add_skill_submission(
     except SkillIngestError as exc:
         await tell(f"{exc} Nothing was added.")
         return
-    except (DaimonError, anthropic.APIError, ScopeViolation):
-        log.exception("slack.agent_setup.add_skill.failed", agent_name=agent_name)
+    except (DaimonError, anthropic.APIError, ScopeViolation) as error:
+        log.exception(
+            "slack.agent_setup.add_skill.failed",
+            agent_name=agent_name,
+            causes=backend_refusal_causes(error),
+        )
         await tell(
             f"Adding {escape_mrkdwn(name)} to {escape_mrkdwn(agent_name)} failed. Try again."
         )

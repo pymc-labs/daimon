@@ -80,6 +80,7 @@ from daimon.adapters.mcp.resource_ports import (
 )
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._agent_chat_safety import (
+    earlier_turn_open,
     gate,
     record_turn,
     require_session_driver,
@@ -107,6 +108,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.agent_chat_requester import UNREAD, record_driver, session_provenance
 from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
@@ -127,14 +129,19 @@ from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mcp_identity import identity_relay_urls
-from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
+from daimon.core.mcp_vault import (
+    archive_relay_vaults,
+    refresh_mounted_mcp_vaults,
+    refresh_relay_vault,
+)
+from daimon.core.monitoring import KeptQuestion, capture_question, monitored_notice
 from daimon.core.mux_compat import retrieve_agent, retrieve_agent_version
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_ports_compat import archive_session_record
-from daimon.core.session_seal import seal_ids
+from daimon.core.session_seal import child_seal_ids, seal_ids
 from daimon.core.session_snapshot import (
     canonical_json,
 )
@@ -147,6 +154,8 @@ from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
 from daimon.core.turn.reducers import refusal_error
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.unattended_capabilities import capability_policy
+from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -189,7 +198,9 @@ def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
     return sent.data[0].id
 
 
-async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, scope: Scope) -> str:
+async def _send_billed(
+    runtime: McpRuntime, session: BetaManagedAgentsSession, message: str, *, scope: Scope
+) -> str:
     """Send a headless turn's message with its settle request written first.
 
     Nothing meters a headless turn live, so its calls are billed by
@@ -201,7 +212,16 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
     accepted send (a timeout, a 5xx) it stays. Naming the accepted message is
     best effort: an unnamed request waits on the first message processed after
     it was written. Returns the message's event id (the turn boundary).
+
+    The sources rule goes in front as on the routine runner: the agent chat
+    gate turns built-ins, search included, off (`capability_policy`), so it
+    is empty unless that policy changes.
     """
+    session_id = session.id
+    searches = capability_policy("mcp_chat").allow_builtins and claude_searches(
+        [tool.model_dump(mode="json") for tool in session.agent.tools]
+    )
+    text = sources_prefix(on=searches) + message
     async with runtime.session_factory.begin() as db:
         previous, requested_at = await session_settle_state.request_settle(
             db, managed_session_id=session_id
@@ -212,7 +232,7 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
             single_attempt(runtime),
             session_id,
             scope=scope,
-            events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
+            events=[{"type": "user.message", "content": [{"type": "text", "text": text}]}],
         )
         turn_event_id = _turn_boundary(sent)
     except (ToolError, anthropic.APIStatusError) as err:
@@ -235,6 +255,43 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
         # Named boundary: the turn is running and its request stands.
         log.exception("billing.settle_request_unnamed", managed_session_id=session_id)
     return turn_event_id
+
+
+async def _keep_question(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    turn_event_id: str,
+    message: str,
+) -> KeptQuestion | None:
+    """Keep the sent message when its agent is monitored over MCP; the settle that sees
+    the turn end keeps the reply (`usage_sweep.settle_finished_turn`)."""
+    return await capture_question(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=session.agent.id),
+        platform="mcp",
+        account_id=auth.account_id,
+        conversation=session.id,
+        turn_ref=turn_event_id,
+        content=message,
+    )
+
+
+def _turn_handle(
+    handle: str, turn_event_id: str, started_at: dt.datetime, kept: KeptQuestion | None = None
+) -> dict[str, str]:
+    """A started turn's handle; `monitoring` is a notice the client shows the person."""
+    out = {
+        "handle": handle,
+        "turn_event_id": turn_event_id,
+        "turn_started_at": started_at.isoformat(),
+    }
+    if kept is not None and kept.notice is not None:
+        out["monitoring"] = kept.notice.text
+    return out
 
 
 def _settle_when_finished(runtime: McpRuntime) -> OnRead:
@@ -269,6 +326,8 @@ class AgentDescription(BaseModel):
     platform: str | None = None
     workspace_id: str | None = None
     workspace: str | None = None
+    # Set while the agent is monitored: tell the person before they ask anything.
+    monitoring: str | None = None
 
 
 class AskResult(BaseModel):
@@ -279,6 +338,8 @@ class AskResult(BaseModel):
     handle: str
     message: str
     chart_urls: tuple[ChartUrl, ...] = ()
+    # Set when the person must be told this conversation is monitored; show it to them.
+    monitoring: str | None = None
     # Excluded from dumps AND the JSON schema: image blocks travel as MCP
     # content, never inside structured content, and advertising the field
     # would point schema-reading clients at a value that never arrives.
@@ -293,8 +354,9 @@ def _ask_tool_result(result: AskResult) -> ToolResult:
     Built the same way with or without charts, so the caller sees one content
     shape: prose text first, image blocks after, structured payload throughout.
     """
+    notice = [TextContent(type="text", text=result.monitoring)] if result.monitoring else []
     return ToolResult(
-        content=[TextContent(type="text", text=result.message), *result.image_blocks],
+        content=[*notice, TextContent(type="text", text=result.message), *result.image_blocks],
         structured_content=result.model_dump(mode="json"),
     )
 
@@ -420,15 +482,18 @@ async def _bound_posture(
     Memory is read-only under the seal unless the agent is the isolated
     channel's own (`memory_writable`), as at chat admission.
     """
+    # A provider turn's seals ride its credential (`child_seal_ids`); they
+    # keep memory read-only like a channel seal does.
+    carried = child_seal_ids(None, auth.seal_ids)
     channel_id = token_channel_id(auth)
     if channel_id is None:
-        return frozenset(), False
+        return carried, bool(carried)
     policy = await load_channel_policy(runtime, auth)
     here = channel_permissions(policy, channel_id=channel_id)
     if here.readers == "any":
-        return frozenset(), False
+        return carried, bool(carried)
     agent = agent_permissions(policy, agent_names)
-    return frozenset({channel_id}), not memory_writable(agent, here)
+    return carried | {channel_id}, bool(carried) or not memory_writable(agent, here)
 
 
 async def _budget_channel(
@@ -519,7 +584,11 @@ async def _resolve_ma_agent(
     if auth.agent_id is None:
         raise ToolError("agent not found")
     agent = await find_agent_by_derived_uuid_cached(
-        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=auth.agent_id
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=auth.agent_id,
+        records=runtime.session_factory,
     )
     if agent is None:
         raise ToolError("agent not found")
@@ -547,6 +616,13 @@ async def _describe_agent_impl(
     repo_url = next((repo.repo_full_name for grant, repo in grants if grant.is_working_repo), None)
     skill_names = [sk.skill_id for sk in ma_agent.skills]
     role_summary = (ma_agent.system or "")[:200]
+    notice = await monitored_notice(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent.id),
+        platform="mcp",
+    )
     return AgentDescription(
         name=ma_agent.name,
         role_summary=role_summary,
@@ -555,6 +631,7 @@ async def _describe_agent_impl(
         environment_name=env_name,
         platform=auth.platform,
         workspace_id=auth.external_id,
+        monitoring=notice.text if notice is not None else None,
     )
 
 
@@ -664,11 +741,17 @@ async def _refuse_a_changed_agent(
     An unedited agent costs one agent read.
     """
     scope = mcp_scope(auth)
-    agent = await retrieve_agent(runtime.client, session.agent.id, scope=scope)
+    agent = await retrieve_agent(
+        runtime.client, session.agent.id, scope=scope, records=runtime.session_factory
+    )
     if agent.version == session.agent.version:
         return
     started = await retrieve_agent_version(
-        runtime.client, agent.id, session.agent.version, scope=scope
+        runtime.client,
+        agent.id,
+        session.agent.version,
+        scope=scope,
+        records=runtime.session_factory,
     )
     if _session_setup(started) != _session_setup(agent):
         log.info(
@@ -715,6 +798,47 @@ async def _mirror_shared_mcp_tokens(
         exclude_github_copilot=True,
         vault_ids=runtime.resolver_cache.mcp_vault_ids,
     )
+
+
+def _agent_chat_binding(runtime: McpRuntime, handle: str) -> str | None:
+    """The agent-chat session a relay vault is bound to, only while a server may be
+    sent its driver: off, the relay credential stays exactly as it was."""
+    return handle if runtime.settings.mcp_identity.names_agent_chat_requester else None
+
+
+async def _bind_relay_vault(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    now: Callable[[], dt.datetime],
+) -> None:
+    """Bind a new session's relay vault to it (`refresh_relay_vault`), before its
+    first send. A continue binds it with its own refresh, older sessions included."""
+    mcp = runtime.settings.mcp
+    agent_chat = _agent_chat_binding(runtime, session.id)
+    if agent_chat is None or mcp.public_url is None or mcp.jwt_secret is None:
+        return
+    assert auth.agent_id is not None  # _resolve_ma_agent requires it
+    public_url = str(mcp.public_url)
+    relay_urls = identity_relay_urls(
+        (server.url for server in session.agent.mcp_servers), public_url=public_url
+    )
+    if not relay_urls:
+        return
+    for vault_id in dict.fromkeys(session.vault_ids):
+        await refresh_relay_vault(
+            runtime.client,
+            vault_id=vault_id,
+            account_id=auth.account_id,
+            agent_id=auth.agent_id,
+            jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+            relay_urls=relay_urls,
+            now=now(),
+            session_factory=runtime.session_factory,
+            scope=mcp_scope(auth),
+            agent_chat=agent_chat,
+        )
 
 
 @observed_agent_turn
@@ -795,7 +919,7 @@ async def _start_turn_impl(
         raise ToolError("environment not found")
 
     environment: BetaEnvironment | None = await find_environment_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=env_name
+        runtime.client, tenant_id=auth.tenant_id, name=env_name, records=runtime.session_factory
     )
     if environment is None:
         raise ToolError("environment not found")
@@ -883,6 +1007,7 @@ async def _start_turn_impl(
                 backend=MANAGED_AGENTS.provider,
             ),
             ma_agent,
+            server_setup=True,
         )
         session = await create_session(
             runtime.client,
@@ -922,20 +1047,34 @@ async def _start_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session.id
         observation.agent_id = str(ma_agent.id)
-    if recheck is not None:
-        await recheck()
-    await gate(runtime, auth, session)
-    turn_started_at = now()
-    turn_event_id = await _send_billed(runtime, session.id, message, scope=mcp_scope(auth))
-    channel = rules_channel(auth, session)
-    await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
+    # Fenced as a continue is: a send on this session by another caller, once its
+    # handle is listed, cannot fall between this driver record and this send.
+    async with session_mutation_fence(runtime.session_factory, session.id):
+        if recheck is not None:
+            await recheck()
+        await gate(runtime, auth, session)
+        await _bind_relay_vault(runtime, auth, session, now=now)
+        send = await record_driver(
+            runtime.session_factory,
+            managed_session_id=session.id,
+            signed_in_person=auth.signed_in_person,
+            session_status=None,
+            earlier=await earlier_turn_open(runtime, auth, session.id, new_session=True),
+            provenance=session_provenance(session.metadata),
+            new_session=True,
+        )
+        turn_started_at = now()
+        turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
+        kept = await _keep_question(
+            runtime, auth, session, turn_event_id=turn_event_id, message=message
+        )
+        channel = rules_channel(auth, session)
+        await record_turn(
+            runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
+        )
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
 
-    return {
-        "handle": session.id,
-        "turn_event_id": turn_event_id,
-        "turn_started_at": turn_started_at.isoformat(),
-    }
+    return _turn_handle(session.id, turn_event_id, turn_started_at, kept)
 
 
 @observed_agent_turn
@@ -1037,6 +1176,7 @@ async def _continue_turn_impl(
                 relay_urls=identity_relay_urls(
                     (server.url for server in current.agent.mcp_servers), public_url=public_url
                 ),
+                agent_chat=_agent_chat_binding(runtime, handle),
             )
         await gate(runtime, auth, current)
         return current
@@ -1044,6 +1184,15 @@ async def _continue_turn_impl(
     async with session_mutation_fence(runtime.session_factory, handle):
         # The fence may have waited behind a transfer or another send.
         current = await ready()
+        await record_driver(
+            runtime.session_factory,
+            managed_session_id=handle,
+            signed_in_person=auth.signed_in_person,
+            session_status=current.status,
+            earlier=UNREAD,
+            provenance=session_provenance(current.metadata),
+            resuming=True,
+        )
         resumed = await resume_paused(runtime, auth, current)
         if resumed is not None:
             if message is None:
@@ -1063,17 +1212,26 @@ async def _continue_turn_impl(
             current = await ready()
         elif message is None:
             raise ToolError(_MESSAGE_REQUIRED_MSG)
+        send = await record_driver(
+            runtime.session_factory,
+            managed_session_id=handle,
+            signed_in_person=auth.signed_in_person,
+            session_status=current.status,
+            earlier=await earlier_turn_open(runtime, auth, handle, new_session=False),
+            provenance=session_provenance(current.metadata),
+        )
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
-        turn_event_id = await _send_billed(runtime, handle, message, scope=mcp_scope(auth))
+        turn_event_id = await _send_billed(runtime, current, message, scope=mcp_scope(auth))
+        kept = await _keep_question(
+            runtime, auth, current, turn_event_id=turn_event_id, message=message
+        )
         channel = rules_channel(auth, current)
-        await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
+        await record_turn(
+            runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
+        )
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
-    return {
-        "handle": handle,
-        "turn_event_id": turn_event_id,
-        "turn_started_at": turn_started_at.isoformat(),
-    }
+    return _turn_handle(handle, turn_event_id, turn_started_at, kept)
 
 
 async def _list_sessions_impl(
@@ -1174,9 +1332,9 @@ async def _cancel_turn_impl(
     status anyway, including an already-idle or already-terminated session
     (harmless no-op). This call returns immediately; it does not wait for the
     interrupt to take effect — poll ``get_my_session`` to see the session
-    reach ``idle`` or ``terminated`` (contrast ``daimon.core.ma.
-    send_interrupt_and_wait``, which sends the same event and then blocks on
-    the SSE stream for a terminal ``session.status_idle``; this tool is
+    reach ``idle`` or ``terminated`` (contrast the turn codec's
+    ``interrupt``, which sends the same event and then blocks on the SSE
+    stream for a terminal ``session.status_idle``; this tool is
     fire-and-return, not fire-and-wait).
 
     An interrupted turn is still billed for what it already consumed before
@@ -1541,15 +1699,18 @@ async def _ask_impl(
                     message=delivery.message,
                     chart_urls=delivery.chart_urls,
                     image_blocks=delivery.image_blocks,
+                    monitoring=started.get("monitoring"),
                 )
 
         remaining = deadline - clock()
         if remaining <= 0:
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.CEILING)
+            notice = started.get("monitoring")
             raise ToolError(
                 f"Daimon did not finish a reply within "
                 f"{timeout_seconds:g} seconds; resume with handle {handle}"
+                + (f"\n{notice}" if notice else "")
             )
         await sleep(min(poll_interval_seconds, remaining))
 
@@ -1611,7 +1772,8 @@ def register_agent_chat_tools(
 
         Returns the agent's name, system-prompt summary, skill identifiers,
         and configured environment. No parameters — agent identity is read
-        from the token claim (confused-deputy mitigation).
+        from the token claim (confused-deputy mitigation). ``monitoring``, when
+        set, is a notice to show the person before they ask anything.
         """
         return await _describe_agent_impl(runtime, await _auth(ctx))
 
@@ -1640,6 +1802,7 @@ def register_agent_chat_tools(
         this turn's first event: poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard everything up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
 
         ``bundle`` is an opaque handle returned by the bundle upload route.
         Passing it mounts that archive read-only in the session's uploads
@@ -1675,7 +1838,8 @@ def register_agent_chat_tools(
         membership and invoker-policy access before reply delivery where required. Chart
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
-        continue that conversation instead of starting a new one.
+        continue that conversation instead of starting a new one. Show the person
+        ``monitoring`` when it is set; the text result leads with it.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
         """
@@ -1712,6 +1876,7 @@ def register_agent_chat_tools(
         the session's earlier turns. Poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
 
         When ``get_my_session`` reports ``status`` ``paused`` with the hint
         to call ``continue_turn``, a turn this tool started is waiting on tool

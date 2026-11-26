@@ -6,9 +6,9 @@ user sees exactly what the subsequent `purge_account(...)` call will delete.
 No Anthropic SDK calls — MA-side bodies, sessions, vault contents stay in
 the Anthropic workspace and are not enumerated here.
 
-Adding a new account- or principal-scoped table that `purge_account` learns to
-delete MUST update this module too, or the preview undercounts. The schema-
-reflecting drift-guard test in `tests/test_privacy.py` enforces this at CI time.
+Both count from `daimon.core.erasure.ERASABLE`, so a table purge erases is counted
+here too. The schema-reflecting drift guard in `tests/test_privacy.py` checks every
+account- or principal-keyed table has a disposition.
 
 Scope of "every row": both this preview and the purge it mirrors are scoped to
 the account's OWN principals. One residue class follows from that and is
@@ -24,38 +24,19 @@ scope and erases those rows.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterable
+from dataclasses import fields
 from typing import TYPE_CHECKING, Final, NamedTuple
 
-from daimon.core.stores import account_records as account_records_store
+from daimon.core.erasure import ERASABLE, Subject
 from daimon.core.stores import accounts as accounts_store
-from daimon.core.stores import agent_posts as agent_posts_store
-from daimon.core.stores import coding_key_claims as coding_key_claims_store
-from daimon.core.stores import credential_requests as credential_requests_store
-from daimon.core.stores import direct_messages as direct_messages_store
-from daimon.core.stores import gemini_runtime_state as gemini_state_store
-from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
-from daimon.core.stores import lead_intake as lead_intake_store
-from daimon.core.stores import mcp_tokens as mcp_tokens_store
-from daimon.core.stores import message_feedback as message_feedback_store
-from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import mux_erasure as mux_erasure_store
-from daimon.core.stores import platform_names as platform_names_store
-from daimon.core.stores import routines as routines_store
-from daimon.core.stores import selfhosted_resources as selfhosted_store
-from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
-from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
-from daimon.core.stores import support_escalation as support_escalation_store
-from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
-from daimon.core.stores import teams_message_admissions as teams_admissions_store
-from daimon.core.stores import tenants as tenants_store
-from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import watches as watches_store
-from daimon.core.stores import web_people as web_people_store
-from daimon.core.stores import web_roles as web_roles_store
-from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
+from daimon.core.turn.notices import provider_name
+from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -94,29 +75,43 @@ class PurgePreview(BaseModel):
     github_connect_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_connect_click_intents: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
+    connector_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     gemini_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     selfhosted_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mcp_tokens: PurgePreviewRow
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_carry_overs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    held_timers: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_picks: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_rules: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_grant_users: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     task_continuations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     turn_outcomes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     thread_sessions: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     switch_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    long_job_cancel_audit: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    secret_shares: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
+    support_requests_anonymized: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    support_person_limits: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    support_settlers_cleared: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    agent_chat_session_links: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     lead_intakes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_people: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_admin_grants: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    monitored_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    ops_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # Provider-neutral conversation state erased with the account (stores.mux_erasure),
     # one row per PurgeReport mux field.
     mux_slots: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -126,11 +121,13 @@ class PurgePreview(BaseModel):
     mux_leases: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_release_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    host_call_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # What stays, so the confirmation can say so: conversations other people share with
     # the person (and the person's requests in them), and settlement records.
     retained_shared_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_shared_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_accounting_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    retained_shared_provider_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def held_lines(preview: PurgePreview) -> list[str]:
@@ -146,6 +143,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.github_connect_click_intents, "GitHub connect button"),
         (preview.github_user_links, "linked GitHub account"),
         (preview.mcp_tokens, "Daimon access token"),
+        (preview.connector_tokens, "saved connector sign-in"),
         (preview.gemini_records, "Gemini conversation record"),
         (preview.selfhosted_operations, "self-hosted retry record"),
         (preview.slack_user_tokens, "saved access token"),
@@ -155,7 +153,12 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.thread_sessions, "conversation link"),
         (preview.switch_cards, "pending model switch"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.dm_carry_overs, "imported earlier conversation"),
+        (preview.held_timers, "imported timer"),
         (preview.tag_opt_outs, "never-tag setting"),
+        (preview.dm_picks, "private conversation agent choice"),
+        (preview.dm_rules, "private conversation routing rule"),
+        (preview.dm_grant_users, "private conversation access entry"),
         (preview.daimon_admins, "Daimon admin grants"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
@@ -165,6 +168,9 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.web_admin_grants, "web app admin role"),
         (preview.mux_slots, "saved conversation"),
         (preview.mux_journal_events, "saved conversation message"),
+        (preview.host_call_cards, "approval request"),
+        (preview.monitored_events, "record admins can read"),
+        (preview.ops_events, "failure record"),
     )
     parts = [
         "saved settings"
@@ -174,6 +180,66 @@ def held_lines(preview: PurgePreview) -> list[str]:
         if row.count > 0
     ]
     return parts
+
+
+def cascade_lines(
+    preview: PurgePreview,
+    platform: str,
+    *,
+    bold: str = "**",
+    code: str = "`",
+    escape: Callable[[str], str] = str,
+    app: str = "",
+) -> list[str]:
+    """The delete confirmation's "What will happen" lines, in each platform's markup.
+
+    ``app`` names the chat app in the token and request-record lines, where it applies.
+    """
+
+    def n(row: PurgePreviewRow, singular: str) -> str:
+        return f"{bold}{row.count}{bold} {singular if row.count == 1 else singular + 's'}"
+
+    def ex(row: PurgePreviewRow) -> str:
+        return f"{code}{escape(row.example or '—')}{code}"
+
+    slack = f" {app}" if app else ""
+    p = preview
+    lines = (
+        (
+            p.linked_principals,
+            f"🔑 Remove {n(p.linked_principals, 'linked account')}, "
+            f"for example {ex(p.linked_principals)}",
+        ),
+        (p.routines, f"⏰ Cancel {n(p.routines, 'routine')}"),
+        (p.principal_links, f"🔗 Remove {n(p.principal_links, 'link')} between your accounts"),
+        (p.user_configs, "⚙ Remove your saved settings"),
+        (
+            p.user_skills,
+            f"🧰 Forget {n(p.user_skills, 'skill')} you synced, for example {ex(p.user_skills)}",
+        ),
+        (p.github_user_links, f"🔗 Unlink {n(p.github_user_links, 'GitHub account')}"),
+        (p.mcp_tokens, f"🎫 Delete {n(p.mcp_tokens, 'Daimon access token')}"),
+        (p.slack_user_tokens, f"🔐 Delete {n(p.slack_user_tokens, f'saved{slack} access token')}"),
+        (
+            p.microsoft_user_tokens if platform == "teams" else None,
+            "🔌 Disconnect your Microsoft account",
+        ),
+        (
+            p.slack_turn_contexts,
+            f"💬 Delete {n(p.slack_turn_contexts, f'temporary{slack} request record')}",
+        ),
+        (
+            p.direct_message_conversations,
+            "💬 Delete Daimon's saved data for "
+            f"{n(p.direct_message_conversations, 'private conversation')}",
+        ),
+        (
+            p.mux_slots if platform != "teams" else None,
+            f"💬 Delete Daimon's copy of {n(p.mux_slots, 'saved conversation')}, with its messages",
+        ),
+        (p.account, "🪪 Remove your account"),
+    )
+    return [line for row, line in lines if row is not None and row.count > 0]
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -191,6 +257,8 @@ def _plural(label: str) -> str:
         return "links from agents to your GitHub keys"
     if label == "post an agent made for you":
         return "posts agents made for you"
+    if label == "record admins can read":
+        return "records admins can read"
     return f"{label}s"
 
 
@@ -221,30 +289,75 @@ def legal_links(settings: Settings) -> LegalLinks:
     )
 
 
-def privacy_lines(display_name: str) -> tuple[str, str]:
-    """The privacy panel's two lines: what the deployment keeps, what Anthropic keeps.
+MONITORED_LINE: Final[str] = "Admins can read your conversations with the agents they monitor."
 
-    The categories behind them are the privacy policy's, one button away.
+#: The other providers that store what an agent running on them is sent.
+_OPENAI: Final[str] = PERSISTENT_WORKSPACE.provider
+_GEMINI: Final[str] = INLINE_REUSE.provider
+_OTHER_PROVIDERS: Final[tuple[str, ...]] = (_OPENAI, _GEMINI)
+
+
+def _other_providers_text(providers: Iterable[str]) -> str | None:
+    """The enabled other providers as "OpenAI and Gemini"; None when there are none."""
+    chosen = set(providers)
+    named = [provider_name(key) for key in _OTHER_PROVIDERS if key in chosen]
+    return " and ".join(named) if named else None
+
+
+async def account_other_providers(
+    sm: async_sessionmaker[AsyncSession], *, account_id: uuid.UUID
+) -> tuple[str, ...]:
+    """The providers besides Anthropic the account's tenant admin turned on."""
+    from daimon.core.stores.access_policy import load_access_policy
+
+    async with sm() as session:
+        account = await accounts_store.get_account(session, account_id)
+        if account is None:
+            return ()
+        policy = await load_access_policy(session, tenant_id=account.tenant_id)
+    return tuple(p for p in _OTHER_PROVIDERS if p in policy.enabled_backends)
+
+
+def privacy_lines(
+    display_name: str, providers: Iterable[str] = (), *, monitored: bool = False
+) -> tuple[str, ...]:
+    """The privacy panel's lines: what the deployment keeps, what the providers keep and,
+    when admins monitor an agent in the workspace (`monitoring.monitors_any`), that they can
+    read it.
+
+    `providers` are the other providers an admin turned on; each is named, since an
+    agent that runs on one sends it the conversation. The categories behind the lines
+    are the privacy policy's, one button away.
     """
-    return (
+    others = _other_providers_text(providers)
+    lines = (
         f"{display_name} stores your linked accounts, routines and settings. "
         "Saved GitHub keys are encrypted.",
-        "Anthropic stores your agents and their conversations.",
+        "Anthropic stores your agents and their conversations."
+        + (f" {others} also stores them for agents that run there." if others else ""),
     )
+    return (*lines, MONITORED_LINE) if monitored else lines
 
 
-def delete_scope_lines(display_name: str) -> tuple[str, str]:
+def delete_scope_lines(display_name: str, providers: Iterable[str] = ()) -> tuple[str, str]:
     """What Delete removes and what it leaves, true to `purge_account`.
 
     The purge deletes the deployment's own rows about the account and, upstream,
     tries to delete every Managed Agents session tagged with it (the
     conversations it started); that upstream delete can fail, so the confirm
-    promises only the attempt. Shared agents and their memory stores stay; see
-    the carve-outs in `daimon.core.purge`.
+    promises only the attempt. OpenAI sessions get the same attempt; Gemini keeps
+    its stored interactions for its own retention. Shared agents and their memory stay;
+    see the carve-outs in `daimon.core.purge`.
     """
+    chosen = set(providers)
+    elsewhere = ""
+    if _OPENAI in chosen:
+        elsewhere += " It tries the same at OpenAI."
+    if _GEMINI in chosen:
+        elsewhere += " Gemini conversations stay with Google for its own retention period."
     return (
         f"This deletes {display_name}'s records about you and tries to delete your "
-        "conversations stored at Anthropic.",
+        "conversations stored at Anthropic." + elsewhere,
         "Shared agents and their memory stay, and other people may keep using them.",
     )
 
@@ -277,339 +390,42 @@ async def collect_purge_preview(
 ) -> PurgePreview:
     """Read-only snapshot of what `purge_account(account_id=...)` would remove.
 
-    No Anthropic SDK calls. No mutation. Mirrors `purge_account`'s FK-safe
-    coverage by walking the same store helpers in read mode.
+    No Anthropic SDK calls. No mutation. Counts each `ERASABLE` entry purge erases,
+    plus the hand-written watches, mux state, account row and GitHub user.
     """
     async with sm() as session:
-        # 1. Linked principals (CLI + platform under the account).
         cli_list = await identity_store.list_cli_principals_for_account(
             session, account_id=account_id
         )
         pp_list = await identity_store.list_platform_principals_for_account(
             session, account_id=account_id
         )
-        linked_principals = PurgePreviewRow(
+        subject = Subject(account_id, tuple(cli_list), tuple(pp_list))
+        rows: dict[str, PurgePreviewRow] = {}
+        for entry in ERASABLE:
+            if entry.count is None:
+                continue
+            n = await entry.count(session, subject)
+            example = await entry.example(session, subject) if entry.example and n else None
+            rows[entry.key] = PurgePreviewRow(count=n, example=example)
+        mux = await mux_erasure_store.inventory(
+            session, account_id=account_id, principal_ids=[p.id for p in subject.principals]
+        )
+        for prefix, counts in (("mux_", mux.erased), ("retained_", mux.retained)):
+            for f in fields(counts):
+                rows[prefix + f.name] = PurgePreviewRow(count=getattr(counts, f.name), example=None)
+        account = int(await accounts_store.account_exists(session, account_id=account_id))
+        orphaned = await github_links_store.count_users_orphaned_by_account_delete(
+            session, account_id=account_id
+        )
+        watches = await watches_store.count_for_account(session, account_id=account_id)
+    return PurgePreview(
+        **rows,
+        linked_principals=PurgePreviewRow(
             count=len(cli_list) + len(pp_list),
             example=_format_linked_principals_example(cli_list, pp_list),
-        )
-
-        # 2. principal_links — distinct links touching ANY principal under the
-        # account. `purge_account` deletes each link exactly once (on the first
-        # principal walk that touches it), so summing per-principal counts here
-        # would double-count linked pairs where both endpoints are in-account.
-        links_total = await identity_store.count_principal_links_for_account(
-            session,
-            cli_principal_ids=[cli.id for cli in cli_list],
-            platform_principal_ids=[pp.id for pp in pp_list],
-        )
-        principal_links = PurgePreviewRow(
-            count=links_total,
-            example=None,
-        )
-
-        # 3. Routines (platform principals only — CLI principals don't own routines).
-        routines_total = 0
-        routines_example: str | None = None
-        for pp in pp_list:
-            n = await routines_store.count_routines_for_principal(
-                session, tenant_id=pp.tenant_id, external_id=pp.external_id
-            )
-            routines_total += n
-            if routines_example is None and n > 0:
-                first = await routines_store.get_first_routine_for_principal(
-                    session, tenant_id=pp.tenant_id, external_id=pp.external_id
-                )
-                if first is not None:
-                    # RoutineRow has no human-meaningful label field today; use id.
-                    routines_example = str(first.id)
-        routines = PurgePreviewRow(count=routines_total, example=routines_example)
-
-        # 4. user_configs.
-        user_cfg_count = await accounts_store.count_user_config_for_account(
-            session, account_id=account_id
-        )
-        user_configs = PurgePreviewRow(count=user_cfg_count, example=None)
-
-        # 5. account row itself.
-        exists = await accounts_store.account_exists(session, account_id=account_id)
-        account = PurgePreviewRow(count=1 if exists else 0, example=None)
-
-        # 6. user_skills — both CLI and platform principals own rows.
-        user_skills_total = 0
-        user_skills_example: str | None = None
-        for p in (*cli_list, *pp_list):
-            n = await user_skills_store.count_user_skills_for_principal(session, principal_id=p.id)
-            user_skills_total += n
-            if user_skills_example is None and n > 0:
-                first_skill = await user_skills_store.get_first_user_skill_for_principal(
-                    session, principal_id=p.id
-                )
-                if first_skill is not None:
-                    user_skills_example = first_skill.name
-        user_skills = PurgePreviewRow(count=user_skills_total, example=user_skills_example)
-
-        github_user_links = PurgePreviewRow(
-            count=await github_links_store.count_users_orphaned_by_account_delete(
-                session, account_id=account_id
-            ),
-            example=None,
-        )
-
-        gemini_records_count = await gemini_state_store.count_records_for_account(
-            session, account_id=account_id
-        )
-        selfhosted_operations_count = await selfhosted_store.count_operations_for_account(
-            session, account_id=account_id
-        )
-        # 9. mcp_tokens — account-scoped (keyed by account_id, not principal), so
-        # a single count mirrors the account/user_configs blocks above.
-        mcp_tokens_count = await mcp_tokens_store.count_tokens_for_account(
-            session, account_id=account_id
-        ) + await coding_key_claims_store.count_claims_for_account(session, account_id=account_id)
-        mcp_tokens = PurgePreviewRow(count=mcp_tokens_count, example=None)
-
-        # 11. slack_user_tokens — Slack platform principals only, 0 or 1 per
-        # principal (PK is (team_id, slack_user_id)), mirroring the
-        # github_credentials loop. team_id = Tenant.external_id resolved via
-        # the principal's tenant_id.
-        slack_user_tokens_total = 0
-        tenant_cache: dict[uuid.UUID, str | None] = {}
-        for pp in pp_list:
-            if pp.platform != "slack":
-                continue
-            if pp.tenant_id not in tenant_cache:
-                tenant_row = await tenants_store.get_tenant(session, pp.tenant_id)
-                tenant_cache[pp.tenant_id] = (
-                    tenant_row.external_id if tenant_row is not None else None
-                )
-            team_id = tenant_cache[pp.tenant_id]
-            if team_id is None:
-                continue
-            token = await slack_user_tokens_store.get_slack_user_token(
-                session, team_id=team_id, slack_user_id=pp.external_id
-            )
-            if token is not None:
-                slack_user_tokens_total += 1
-        slack_user_tokens = PurgePreviewRow(count=slack_user_tokens_total, example=None)
-
-        # 12. slack_turn_contexts — account-scoped (tenant_id, account_id),
-        # summed over every distinct tenant any principal belongs to, mirroring
-        # purge_account's loop.
-        distinct_tenant_ids = {p.tenant_id for p in (*cli_list, *pp_list)}
-        slack_turn_contexts_total = 0
-        for tenant_id in distinct_tenant_ids:
-            slack_turn_contexts_total += (
-                await slack_turn_contexts_store.count_turn_contexts_for_account(
-                    session, tenant_id=tenant_id, account_id=account_id
-                )
-            )
-        slack_turn_contexts = PurgePreviewRow(count=slack_turn_contexts_total, example=None)
-
-        # 13. credential_requests — requester_platform_user_id-scoped. Keyed by
-        # (platform_user_id, tenant_id) mirroring purge_principal's actual
-        # per-principal tenant-scoped delete call exactly (unlike the
-        # github_oauth_states block above, which counts platform principals
-        # cross-tenant), so this preview agrees field-for-field with what
-        # purge_account actually deletes. Dedup avoids double-counting when two
-        # principals under the account share a (platform_user_id, tenant_id) key.
-        credential_request_keys: set[tuple[str, uuid.UUID]] = set()
-        for pp in pp_list:
-            credential_request_keys.add((pp.external_id, pp.tenant_id))
-        for cli in cli_list:
-            credential_request_keys.add((cli.os_user, cli.tenant_id))
-        credential_requests_total = 0
-        for platform_user_id, key_tenant_id in credential_request_keys:
-            credential_requests_total += (
-                await credential_requests_store.count_credential_requests_for_platform_user(
-                    session,
-                    platform_user_id=platform_user_id,
-                    tenant_id=key_tenant_id,
-                )
-            )
-        account_records = await account_records_store.count_for_account(
-            session,
-            account_id=account_id,
-            platform_user_keys=[(pp.tenant_id, pp.external_id) for pp in pp_list],
-        )
-        credential_requests_total += account_records.credential_requests
-        credential_requests = PurgePreviewRow(count=credential_requests_total, example=None)
-
-        # 14. wizard_sessions — requester_platform_user_id-scoped, same shape as
-        # credential_requests above. Keyed by (platform_user_id, tenant_id),
-        # mirroring _purge_principal_in_session's actual tenant-scoped delete
-        # call exactly, so this preview agrees field-for-field with what
-        # purge_account actually deletes. Dedup avoids double-counting when two
-        # principals under the account share a (platform_user_id, tenant_id) key.
-        wizard_session_keys: set[tuple[str, uuid.UUID]] = set()
-        for pp in pp_list:
-            wizard_session_keys.add((pp.external_id, pp.tenant_id))
-        for cli in cli_list:
-            wizard_session_keys.add((cli.os_user, cli.tenant_id))
-        wizard_sessions_total = 0
-        for platform_user_id, key_tenant_id in wizard_session_keys:
-            wizard_sessions_total += (
-                await wizard_session_store.count_wizard_sessions_for_platform_user(
-                    session,
-                    platform_user_id=platform_user_id,
-                    tenant_id=key_tenant_id,
-                )
-            )
-        wizard_sessions = PurgePreviewRow(count=wizard_sessions_total, example=None)
-
-        # 14. message_feedback — account-scoped (keyed by account_id, not
-        # principal), OR'd with the account's (tenant, platform-user) keys
-        # exactly as purge_account's delete does, since a vote cast before the
-        # person had an accounts row carries a null account_id. The argument
-        # shapes here are identical to purge_account's call by contract — any
-        # divergence makes this preview lie about what erasure will remove.
-        message_feedback_platform_user_keys = [(pp.tenant_id, pp.external_id) for pp in pp_list]
-        message_feedback_count = await message_feedback_store.count_message_feedback_for_account(
-            session,
-            account_id=account_id,
-            platform_user_keys=message_feedback_platform_user_keys,
-        )
-        message_feedback = PurgePreviewRow(count=message_feedback_count, example=None)
-
-        # 15. support_escalations — same account-scoped shape, and the SAME
-        # platform-user keys, as message_feedback above. The argument shapes
-        # here are identical to purge_account's delete by contract; any
-        # divergence makes this preview lie about what erasure will remove.
-        support_escalations_count = (
-            await support_escalation_store.count_support_escalations_for_account(
-                session,
-                account_id=account_id,
-                platform_user_keys=message_feedback_platform_user_keys,
-            )
-        )
-        support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
-
-        # 16. daimon_admins — the grants that list this person's id.
-        from daimon.core.stores.daimon_admins import count_user_rows
-
-        daimon_admins_total = 0
-        for pp in pp_list:
-            daimon_admins_total += await count_user_rows(
-                session,
-                tenant_id=pp.tenant_id,
-                platform=pp.platform,
-                platform_user_id=pp.external_id,
-            )
-        # 17. agent_posted_messages — posts and auto-opened threads naming this
-        # person as who asked; erasure clears the id and keeps the post's owner.
-        agent_post_requesters_total = 0
-        for pp in pp_list:
-            agent_post_requesters_total += await agent_posts_store.count_requester(
-                session,
-                tenant_id=pp.tenant_id,
-                platform=pp.platform,
-                platform_user_id=pp.external_id,
-            )
-        # 18. platform_user_names — the last name each platform gave for them,
-        # keyed exactly as the purge's per-principal delete.
-        platform_user_names_total = 0
-        for pp in pp_list:
-            platform_user_names_total += (
-                await platform_names_store.count_user_names_for_platform_user(
-                    session,
-                    tenant_id=pp.tenant_id,
-                    platform=pp.platform,
-                    platform_user_id=pp.external_id,
-                )
-            )
-        # 19. teams_messages — Teams message receipts, with any unhandled words.
-        teams_messages_total = 0
-        for pp in pp_list:
-            if pp.platform == "teams":
-                teams_messages_total += await teams_admissions_store.count_teams_messages_for_user(
-                    session, tenant_id=pp.tenant_id, user_id=pp.external_id
-                )
-        lead_intakes_total = 0
-        for pp in pp_list:
-            lead_intakes_total += await lead_intake_store.count_actor(
-                session, pp.tenant_id, pp.external_id
-            )
-        # 20. microsoft_user_tokens — a Teams person's Connect Microsoft token.
-        microsoft_user_tokens_total = 0
-        for pp in pp_list:
-            if pp.platform == "teams":
-                microsoft_user_tokens_total += (
-                    await microsoft_tokens_store.count_microsoft_user_tokens(
-                        session, tenant_id=pp.tenant_id, user_id=pp.external_id
-                    )
-                )
-        watches_count = await watches_store.count_for_account(session, account_id=account_id)
-        web_people_total = await web_people_store.count_for_account(session, account_id=account_id)
-        web_admin_grants_total = await web_roles_store.count_admin_grants_for_account(
-            session, account_id=account_id
-        )
-        mux = await mux_erasure_store.inventory(
-            session, account_id=account_id, principal_ids=[p.id for p in (*cli_list, *pp_list)]
-        )
-        direct_message_count = await direct_messages_store.count_conversations_for_account(
-            session, account_id=account_id
-        )
-        github_connect_requests_count = await github_connect_store.count_requests_for_account(
-            session, account_id=account_id
-        )
-        tag_opt_outs_count = await tag_opt_outs_store.count_for_account(
-            session, account_id=account_id
-        )
-        github_connect_click_intents_count = (
-            await github_connect_store.count_click_intents_for_account(
-                session, account_id=account_id
-            )
-        )
-
-    return PurgePreview(
-        linked_principals=linked_principals,
-        principal_links=principal_links,
-        watches=PurgePreviewRow(count=watches_count, example=None),
-        lead_intakes=PurgePreviewRow(count=lead_intakes_total, example=None),
-        routines=routines,
-        user_configs=user_configs,
-        account=account,
-        user_skills=user_skills,
-        github_connect_requests=PurgePreviewRow(count=github_connect_requests_count, example=None),
-        github_connect_click_intents=PurgePreviewRow(
-            count=github_connect_click_intents_count, example=None
         ),
-        github_user_links=github_user_links,
-        mcp_tokens=mcp_tokens,
-        gemini_records=PurgePreviewRow(count=gemini_records_count, example=None),
-        selfhosted_operations=PurgePreviewRow(count=selfhosted_operations_count, example=None),
-        slack_user_tokens=slack_user_tokens,
-        slack_turn_contexts=slack_turn_contexts,
-        credential_requests=credential_requests,
-        task_continuations=PurgePreviewRow(count=account_records.task_continuations, example=None),
-        turn_outcomes=PurgePreviewRow(count=account_records.turn_outcomes, example=None),
-        thread_sessions=PurgePreviewRow(count=account_records.thread_sessions, example=None),
-        switch_cards=PurgePreviewRow(count=account_records.switch_cards, example=None),
-        wizard_sessions=wizard_sessions,
-        message_feedback=message_feedback,
-        support_escalations=support_escalations,
-        daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
-        agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
-        direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
-        tag_opt_outs=PurgePreviewRow(count=tag_opt_outs_count, example=None),
-        platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
-        teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
-        microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),
-        web_people=PurgePreviewRow(count=web_people_total, example=None),
-        web_admin_grants=PurgePreviewRow(count=web_admin_grants_total, example=None),
-        mux_slots=PurgePreviewRow(count=mux.erased.slots, example=None),
-        mux_binding_generations=PurgePreviewRow(count=mux.erased.binding_generations, example=None),
-        mux_journal_sessions=PurgePreviewRow(count=mux.erased.journal_sessions, example=None),
-        mux_journal_events=PurgePreviewRow(count=mux.erased.journal_events, example=None),
-        mux_leases=PurgePreviewRow(count=mux.erased.leases, example=None),
-        mux_release_requests=PurgePreviewRow(count=mux.erased.release_requests, example=None),
-        mux_operations=PurgePreviewRow(count=mux.erased.operations, example=None),
-        retained_shared_conversations=PurgePreviewRow(
-            count=mux.retained.shared_conversations, example=None
-        ),
-        retained_shared_operations=PurgePreviewRow(
-            count=mux.retained.shared_operations, example=None
-        ),
-        retained_accounting_records=PurgePreviewRow(
-            count=mux.retained.accounting_records, example=None
-        ),
+        account=PurgePreviewRow(count=account, example=None),
+        github_user_links=PurgePreviewRow(count=orphaned, example=None),
+        watches=PurgePreviewRow(count=watches, example=None),
     )

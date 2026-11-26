@@ -8,7 +8,7 @@ import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ import httpx
 import pytest
 from daimon.adapters.discord import credential_modals
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import credential_flow
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -150,7 +151,7 @@ async def owned_submit(
                 billing_config=None,
                 deployment_default=DeploymentDefault(),
                 resolver_cache=new_resolver_cache(),
-                turn_deps=replace(deps_for(client, db_session_factory), turn_path=None),
+                turn_deps=deps_for(client, db_session_factory),
                 mcp_token_probe=probe,
             )
             yield OwnedSubmit(runtime, row, probe, interaction, requests)
@@ -370,7 +371,7 @@ async def test_real_consume_removal_changes_probe_readback_without_scored_credit
     async def leave_unused(*_args: object, **_kwargs: object) -> CredentialRequestRow:
         return owned_submit.row
 
-    monkeypatch.setattr(credential_modals, "consume_credential_submit", leave_unused)
+    monkeypatch.setattr(credential_flow, "consume_credential_submit", leave_unused)
     result = await executor.execute_cell(plan(), None, rejected_token=binding(owned_submit))
     require(result.reported_status == "PENDING", "invalid SQL acquired full-cell credit")
     require(result.catalog_outcome.status == "PASS", "unused-row diagnostic missing")

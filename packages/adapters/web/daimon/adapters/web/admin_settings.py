@@ -18,12 +18,13 @@ from daimon.core import workspace_settings as access_settings
 from daimon.core.agent_configuration import configuration_refusal
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import (
+    NO_CAPTURE,
     AgentBackendRefused,
     AgentBackendService,
     BackendActor,
     make_backend_service,
 )
-from daimon.core.provider_keys import default_enabled_backends
+from daimon.core.provider_keys import deployment_keyed_providers
 from daimon.core.stores import web_workspace_settings as workspace_settings
 from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.web_admin import WebAdminError
@@ -58,14 +59,16 @@ def settings_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/admin")
 
     def backends() -> AgentBackendService:
-        return make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        return make_backend_service(
+            runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
+        )
 
     async def providers_json(tenant_id: uuid.UUID) -> dict[str, Any] | None:
         service = backends()
         if not service.enabled:
             return None
         policy = await service.tenant_policy(tenant_id)
-        keyed = {*default_enabled_backends(), *policy.enabled_backends}
+        keyed = {*deployment_keyed_providers(), *policy.enabled_backends}
         return {
             "offered": [{"id": p, "label": label} for p, label in _PROVIDERS if p in keyed],
             "allowed": list(policy.enabled_backends),

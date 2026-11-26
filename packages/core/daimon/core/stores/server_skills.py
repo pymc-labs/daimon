@@ -262,38 +262,6 @@ async def forget_mirror(session: AsyncSession, *, tenant_id: uuid.UUID, skill_id
     )
 
 
-async def hold_update(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_id: str,
-    skill_id: str,
-    digest: str,
-    reason: str,
-    now: datetime,
-) -> None:
-    """Record that the agent stays on its version until its owner re-confirms its backend."""
-    stmt = insert(AgentSkillFollow).values(
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        skill_id=skill_id,
-        follow=True,
-        held_digest=digest,
-        held_reason=reason,
-        updated_at=now,
-    )
-    await session.execute(
-        stmt.on_conflict_do_update(
-            index_elements=[
-                AgentSkillFollow.tenant_id,
-                AgentSkillFollow.agent_id,
-                AgentSkillFollow.skill_id,
-            ],
-            set_={"held_digest": digest, "held_reason": reason, "updated_at": now},
-        )
-    )
-
-
 async def release_holds(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_ids: Collection[str], skill_id: str
 ) -> None:

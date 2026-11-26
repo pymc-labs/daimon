@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
 import pytest
+from daimon.core.pricing import ProviderPrice
+from daimon.core.turn.host_spend_cap import SpendGuard, priced_cents
+from daimon.core.turn.hosted_io import OpenAITurnIO
 from daimon.core.turn.io import TurnConnectionLost
-from daimon.core.turn.openai_io import OpenAITurnIO
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TextBlock, TurnState
 from mux.contracts.events import Event
@@ -127,6 +131,7 @@ class Wire:
         self.delay_stop = False
         self.foreign_usage = False
         self.eof = False
+        self.cancelled = False
 
     def event(self, suffix, id_, **fields):
         return {
@@ -152,6 +157,7 @@ class Wire:
             body = json.loads(request.content)
             if body["events"][0]["type"] == "agent.session.input.cancel":
                 self.running = False
+                self.cancelled = True
             else:
                 assert body == {
                     "events": [
@@ -188,6 +194,11 @@ class Wire:
                     "metadata": {"mux_tenant": "tenant"},
                 },
             )
+        if path.endswith("/turns/root") and not self.cancelled:
+            known = [value for value in self.turns if value["id"] == "root"]
+            if self.foreign_usage:
+                known = [{**turn("root"), "session_id": "foreign"}]
+            return httpx.Response(200, json=known[-1]) if known else httpx.Response(404, json={})
         if path.endswith("/turns/root"):
             self.waits += 1
             return httpx.Response(
@@ -200,6 +211,20 @@ class Wire:
             values = self.turns
             if self.foreign_usage:
                 values = [{**turn("root"), "session_id": "foreign"}]
+            if request.url.params.get("order") == "desc":
+                values = values[::-1]
+                if "after" in request.url.params:
+                    ids = [value["id"] for value in values]
+                    values = values[ids.index(request.url.params["after"]) + 1 :]
+                limit = int(request.url.params.get("limit", 100))
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": values[:limit],
+                        "has_more": len(values) > limit,
+                        "last_id": values[:limit][-1]["id"] if values else None,
+                    },
+                )
         else:
             assert path.endswith("/items")
             values = self.items
@@ -406,7 +431,7 @@ def test_foreign_account_cannot_construct_host_codec():
 
 @pytest.mark.asyncio
 async def test_conflicting_root_outcome_is_refused_before_journal_mutation(host):
-    from daimon.core.turn.openai_codec import display_event
+    from daimon.core.turn.hosted_codec import OPENAI, display_event
     from mux.drivers.openai.normalize import EventNormalizer
 
     _, backend, _, persistence = host
@@ -415,7 +440,7 @@ async def test_conflicting_root_outcome_is_refused_before_journal_mutation(host)
     cancelled = EventNormalizer("session").saved_turn(turn("root", "cancelled"))
     assert completed is not None and cancelled is not None
     await io.accept_record(completed)
-    assert display_event(completed, session_id="session") is not None
+    assert display_event(completed, session_id="session", codec=OPENAI) is not None
     before = list(persistence.records)
     with pytest.raises(ProviderError):
         await io.accept_record(cancelled)
@@ -464,3 +489,215 @@ async def test_eof_without_explicit_root_outcome_checkpoints_gap_and_reconnects(
         await source.__anext__()
     assert persistence.gaps == 1 and wire.sources[-1].closed
     assert not persistence.records
+
+
+def _price(*, cache_write: Decimal | None = Decimal(10)) -> ProviderPrice:
+    return ProviderPrice(
+        "openai",
+        "gpt-6-luna",
+        date(2020, 1, 1),
+        Decimal(1000),
+        Decimal(1000),
+        Decimal(1),
+        cache_write,
+    )
+
+
+async def _capped(host, *, limit_cents: int, clock=lambda: 0.0):
+    _, backend, wire, persistence = host
+    told: list[str] = []
+
+    async def notify() -> None:
+        told.append("notified")
+
+    guard = SpendGuard(limit_cents=limit_cents, price=_price(), notify=notify, clock=clock)
+    io = OpenAITurnIO(
+        backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root", spend_guard=guard
+    )
+    wire.turns.append(turn("root", "in_progress"))
+    wire.running = True
+    wire.live = [
+        wire.event(
+            "turn.item.done",
+            "answer-event",
+            turn_id="root",
+            item=message("answer", "root", "current answer"),
+        )
+    ]
+    return io, wire, persistence, told
+
+
+@pytest.mark.asyncio
+async def test_a_turn_over_the_spend_limit_is_cancelled_and_told(host):
+    from daimon.core.turn.driver import InterruptedDuringRecovery
+
+    io, wire, persistence, told = await _capped(host, limit_cents=1)
+    # 100 input and 20 output tokens at $1000/M is $0.12 = 12 cents.
+    source = await io.open_stream(read_timeout_s=2)
+    with pytest.raises(InterruptedDuringRecovery):
+        await source.__anext__()
+    assert told == ["notified"]
+    assert persistence.operations[-1][0] == "cancel"
+    assert persistence.records[-1].payload["outcome"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_under_the_spend_limit_runs_on(host):
+    io, wire, persistence, told = await _capped(host, limit_cents=100)
+    source = await io.open_stream(read_timeout_s=2)
+    await source.__anext__()
+    await source.close()
+    assert told == [] and not persistence.operations
+
+
+@pytest.mark.asyncio
+async def test_the_guard_polls_the_meter_at_most_once_an_interval():
+    now, reads = [0.0], []
+
+    async def read():
+        reads.append(now[0])
+        return ()
+
+    async def notify() -> None: ...
+
+    guard = SpendGuard(limit_cents=1, price=_price(), notify=notify, clock=lambda: now[0])
+    for now[0] in (0.0, 1.0, 4.9, 5.0, 9.0):
+        assert await guard.exceeded(read) is False
+    assert reads == [0.0, 5.0]
+    with pytest.raises(ValueError):
+        SpendGuard(limit_cents=0, price=_price(), notify=notify)
+
+
+@pytest.mark.asyncio
+async def test_usage_is_priced_without_cache_writes_and_the_latest_revision_wins(host):
+    io, _, wire, persistence = host
+    io = OpenAITurnIO(io._backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root")
+    wire.turns.append(turn("root"))
+    observed = await io.replay_usage()
+    assert observed[0].input_cache_write_tokens is None
+    spent = priced_cents(observed, _price())
+    assert spent == priced_cents(observed, _price(cache_write=None))
+    assert spent == priced_cents([*observed, observed[0]], _price())
+    assert (
+        priced_cents([observed[0].model_copy(update={"completeness": "unknown"})], _price()) is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_usage_poll_when_thread_is_long_then_reads_only_the_root_turn(host):
+    """The guard's poll reads the root turn alone, so no other turn can time it out or fail it."""
+    _, backend, wire, persistence = host
+    wire.turns = [turn(f"old-{index}") for index in range(600)] + [turn("root")]
+    io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root")
+    before = len(wire.requests)
+    usage = await io.replay_usage()
+    assert [value.turn_id for value in usage] == ["root"], usage
+    read = [r.url.path.removeprefix("/v1") for r in wire.requests[before:]]
+    assert read == [
+        "/agents/sessions/session/turns/root",
+        "/agents/sessions/session/turns/root/items",
+    ], read
+
+
+def _observation(input_tokens: int, output_tokens: int):
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.usage import UsageObservation
+
+    return UsageObservation(
+        id="o",
+        revision=1,
+        session=SESSION,
+        turn_id="root",
+        model=ModelRef(provider="openai", id="gpt-6-luna"),
+        grain="turn",
+        basis="cumulative",
+        input_tokens=input_tokens,
+        input_cached_tokens=0,
+        input_cache_write_tokens=0,
+        output_tokens=output_tokens,
+        completeness="measured",
+        observed_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_when_meter_fails_then_keeps_the_last_known_total():
+    """A failed read neither ends the reply on its own nor forgets what was spent."""
+
+    async def notify() -> None: ...
+
+    async def read():
+        return (_observation(100, 20),)  # 12 cents at $1000/M
+
+    guard = SpendGuard(limit_cents=20, price=_price(), notify=notify, clock=lambda: 0.0)
+    assert await guard.exceeded(read) is False, "12 cents is under a 20 cent cap"
+    assert guard.unread(TimeoutError()) is False, "a failed read alone does not stop the reply"
+    capped = SpendGuard(limit_cents=10, price=_price(), notify=notify, clock=lambda: 0.0)
+    assert await capped.exceeded(read) is True, "12 cents is over a 10 cent cap"
+    assert capped.unread(TimeoutError()) is True, "a failed read keeps the cap that already fired"
+
+
+def test_usage_past_the_priced_limit_when_no_long_rate_then_counts_at_the_base_rate():
+    """A turn total past the limit bills at the base rate and counts toward the cap."""
+    from daimon.core.pricing import provider_cost_of
+
+    price = ProviderPrice(
+        "openai",
+        "gpt-6-luna",
+        date(2020, 1, 1),
+        Decimal(1),
+        Decimal(1),
+        Decimal(1),
+        max_priced_input_tokens=1000,
+    )
+    observation = _observation(2_000_000, 0)
+    assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) == Decimal(2), (
+        "a turn total is not one request, so it bills at the base rate"
+    )
+    assert priced_cents([observation], price) == Decimal(200), "base rate: 2M at $1/M"
+
+
+@pytest.mark.asyncio
+async def test_usage_when_the_turn_resource_lacks_it_then_the_terminal_event_prices_the_turn(host):
+    """A completed turn whose resource reports no usage is billed from its terminal event."""
+    _, backend, wire, persistence = host
+    unmetered = {**turn("root"), "usage": None}
+    wire.turns.append(unmetered)
+    wire.live = [wire.event("turn.completed", "done", turn=unmetered, usage=turn("root")["usage"])]
+    wire.eof = True
+    io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root")
+    source = await io.open_stream(read_timeout_s=2)
+    frame = await source.__anext__()
+    await source.close()
+    assert frame.normalized is not None and frame.normalized.type == "session.turn_ended", frame
+    usage = await io.replay_usage()
+    assert [(u.input_tokens, u.output_tokens) for u in usage] == [(100, 20)], usage
+    assert priced_cents(usage, _price()) is not None, "the spend cap can price the turn"
+
+
+async def test_history_reads_more_than_five_thousand_events_in_large_pages():
+    from types import SimpleNamespace
+
+    from daimon.core.turn.hosted_codec import OPENAI
+
+    total, requested = 6500, []
+
+    async def list_events(scope, session, *, page):
+        requested.append(page.limit)
+        start = int(page.cursor) + 1 if page.cursor else 0
+        data = [
+            SimpleNamespace(
+                id=str(i), session_id=session.id, native=SimpleNamespace(provider="openai")
+            )
+            for i in range(start, min(start + page.limit, total))
+        ]
+        more = start + len(data) < total
+        return SimpleNamespace(data=data, has_more=more, next_cursor=data[-1].id if more else None)
+
+    backend = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(profile_id=OPENAI.profile),
+        events=SimpleNamespace(list=list_events),
+    )
+    io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=Persistence())
+    assert len(await io._history()) == total
+    assert requested == [1000] * 7

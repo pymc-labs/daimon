@@ -11,8 +11,8 @@ Served: Gemini agent and channel turns, and an OpenAI agent's own turn once its
 tenant's hosted environment is known
 (`request.openai_environment_id`). Both agent templates keep the agent's Daimon
 MCP tools (`template_capabilities: "mcp"`), with a per-turn caller credential.
-A channel pinned to OpenAI needs a native agent of its own, so it still needs an
-operator row.
+A channel pinned to OpenAI needs a native agent of its own, so it needs an
+operator row; without one the turn is refused with `channel_row_missing`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
-from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE, selectable_models
+from mux.profiles import (
+    INLINE_REUSE,
+    PERSISTENT_WORKSPACE,
+    get_profile,
+    selectable_models,
+    shared_threads_available,
+)
 
 if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -31,9 +37,9 @@ GEMINI, OPENAI = INLINE_REUSE.provider, PERSISTENT_WORKSPACE.provider
 # A namespace label for this deployment's own provider resources. OpenAI turns
 # from these rows send no project header: the key's default project applies.
 DEFAULT_PROJECT = "daimon-deployment"
-# The deployment's requested session spend limit; profile capability checks
-# determine whether the provider can honor it.
-OPENAI_SPEND_LIMIT_CENTS = 50
+# The deployment's per-turn spend limit: OpenAI's native one where the provider
+# honours it, else enforced by the host (`host_spend_cap`), as for every Gemini turn.
+SPEND_LIMIT_CENTS = 50
 # Per-attempt reservations and the shared per-account hold cap protect ordinary
 # Gemini requests, including concurrent conversations and provider fallback.
 _GEMINI_HOLD = "0.25"
@@ -46,7 +52,9 @@ def _grant(profile: str, models: tuple[str, ...]) -> dict[str, JsonValue]:
     return {
         "profiles": [profile],
         "models": list(models),
-        "thread_modes": ["per_caller"],
+        "thread_modes": ["per_caller", "shared"]
+        if shared_threads_available(get_profile(profile).provider)
+        else ["per_caller"],
         "requires": {},
     }
 
@@ -75,6 +83,7 @@ def _gemini_rows(tenant_id: str) -> list[dict[str, JsonValue]]:
         "configuration_grant": _grant(profile, selectable_models(GEMINI)),
         "hold_usd": _GEMINI_HOLD,
         "cap_usd": _GEMINI_CAP,
+        "spend_limit_usd_cents": SPEND_LIMIT_CENTS,
     }
     return [
         {
@@ -97,7 +106,7 @@ def _openai_rows(
         "project_header": False,
     }
     # The host refuses a row limit that differs from the turn's own native budget.
-    limit = OPENAI_SPEND_LIMIT_CENTS
+    limit = SPEND_LIMIT_CENTS
     rows: list[dict[str, JsonValue]] = []
     environment = getattr(request, "openai_environment_id", None)
     if isinstance(environment, str) and environment:
@@ -150,5 +159,5 @@ def capture_template_rows(tenant_id: str) -> list[dict[str, JsonValue]]:
     common: dict[str, JsonValue] = {"api_key_env": DEFAULT_KEY_ENV[OPENAI], "project_header": False}
     return [
         *(row for row in _gemini_rows(tenant_id) if row.get("root_materialization") is True),
-        _openai_root(tenant_id, common, OPENAI_SPEND_LIMIT_CENTS),
+        _openai_root(tenant_id, common, SPEND_LIMIT_CENTS),
     ]

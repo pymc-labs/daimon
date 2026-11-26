@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import Any
 
 import aiohttp
 import httpx
@@ -18,9 +19,12 @@ from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
+from daimon.core.dm_debounce import DmBursts
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
+from daimon.core.native_admins import GroupMembersCache
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
@@ -29,6 +33,11 @@ from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn_origin import ResponderAccount
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+def new_dm_bursts() -> DmBursts[tuple[str, str, str], dict[str, Any]]:
+    """No open bursts, keyed by (team, channel, user) and read by each event's text."""
+    return DmBursts(lambda event: str(event.get("text") or ""))
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,10 @@ class SlackRuntime:
     # One connection pool for every workspace's per-event AsyncWebClient; None
     # (tests) lets slack_sdk open a throwaway session per call.
     slack_http: aiohttp.ClientSession | None = None
+    # User group members for DM grants and rules (`user_groups`), a minute at most.
+    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
+    # The messages each person sent in each direct message that no turn has answered yet.
+    dm_bursts: DmBursts[tuple[str, str, str], dict[str, Any]] = field(default_factory=new_dm_bursts)
 
     @cached_property
     def fernet(self) -> MultiFernet:
@@ -216,6 +229,8 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
             )
         finally:
             await turn_deps.context_providers.aclose()
+            await turn_deps.provider_clients.aclose()
             await drain_outcomes()
+            await drain_ops_events()
             await drain_budget_notices()
             await engine.dispose()

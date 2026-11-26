@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -95,6 +95,7 @@ async def setup(
         await make_channel_budget(session, tenant=tenant, channel_id="101", limit_usd=Decimal("0"))
     await session.commit()
     client = AsyncMock(spec=AsyncAnthropic)
+    client.api_key = "fixture-key"  # an instance attribute the class spec lacks; the gate reads it
     cache = new_resolver_cache()
     cache[(tenant.id, "agent", "daimon")] = "ag_1"
     cache[(tenant.id, "environment", "default")] = "env_1"
@@ -335,13 +336,20 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
     with capture_logs(processors=[stamp_log]) as baseline_logs:
         await DaimonBot._orchestrate_observed(bot, message, "100", uuid.UUID(scope.tenant_id))  # pyright: ignore[reportPrivateUsage]
     assert tuple(entry.request_json for entry in gateway.events) == observed_requests
+
+    # `turn.finished` carries a wall-clock duration that differs between the two runs.
+    def comparable(fields: Any) -> dict[str, Any]:
+        return {k: v for k, v in fields.items() if k != "duration_ms"}
+
     assert [
         (
             entry["event"],
-            {k: v for k, v in entry.items() if k not in ("event", "log_level", "captured_s")},
+            comparable(
+                {k: v for k, v in entry.items() if k not in ("event", "log_level", "captured_s")}
+            ),
         )
         for entry in baseline_logs
-    ] == [(entry.event, entry.fields) for entry in receipt.effects.logs]
+    ] == [(entry.event, comparable(entry.fields)) for entry in receipt.effects.logs]
     await client.close()
     assert receipt.decision is not None and receipt.decision.reason == gate
     assert not receipt.decision.admitted
@@ -461,10 +469,7 @@ async def test_foreign_routed_bind_is_refused_before_connection_or_callback() ->
     attempts: list[object] = []
     for engine in (owned_engine, foreign_engine):
         event.listen(engine.sync_engine, "do_connect", lambda *args, **kwargs: attempts.append(1))
-    deps = replace(
-        deps_for(None, async_sessionmaker(owned_engine, binds={AsyncSession: foreign_engine})),
-        turn_path=None,
-    )
+    deps = deps_for(None, async_sessionmaker(owned_engine, binds={AsyncSession: foreign_engine}))
     invoke = AsyncMock()
     try:
         with pytest.raises(ValueError, match="owned local"):
@@ -515,7 +520,7 @@ async def test_foreign_routed_bind_is_refused_before_connection_or_callback() ->
 async def test_capture_gaps_and_invalid_evidence_never_become_certification(case: str) -> None:
     engine = create_async_engine("postgresql+asyncpg://localhost/daimon_test_nc_N5")
     tenant, account = uuid.uuid4(), uuid.uuid4()
-    deps = replace(deps_for(None, async_sessionmaker(engine)), turn_path=None)
+    deps = deps_for(None, async_sessionmaker(engine))
     scope = Scope(
         tenant_id=str(tenant), account_id=str(account), principal_id="p", authorization_id="auth"
     )

@@ -3,7 +3,8 @@ import io
 import pytest
 from daimon.adapters.discord import tables
 from daimon.adapters.discord.tables import render_discord_tables
-from PIL import Image
+from daimon.testing import table_image_oracle as oracle
+from PIL import Image, ImageChops
 
 
 async def test_wide_table_is_a_readable_bounded_png():
@@ -17,10 +18,37 @@ async def test_wide_table_is_a_readable_bounded_png():
     assert len(files) == 1
     image = Image.open(io.BytesIO(files[0].fp.read()))
     assert image.format == "PNG"
-    assert image.width == 2400
+    assert image.width <= 2400
     assert image.height >= 98
     assert image.getpixel((0, 0)) == (12, 31, 64)
-    assert "table-1.png" in text
+    assert "table-1.png" not in text and "Table attached" not in text
+
+
+async def test_table_image_matches_the_oracle_layout():
+    source = (
+        "| Fruit | Colour | Price |\n|---|---|---|\n| Apple | Red | $1 |\n"
+        "| Banana | Yellow | $2 |\n| Orange | Orange | $3 |\n| Pear | Green | $4 |"
+    )
+    table = oracle._plain_table(source)
+    assert table is not None
+    reference = oracle._template(table)
+    assert reference is not None
+    _, files = await render_discord_tables(source, enabled=True)
+    image = Image.open(io.BytesIO(files[0].fp.read())).convert("RGB")
+    assert image.size == reference.size
+    assert ImageChops.difference(image, reference).getbbox() is None
+
+
+async def test_small_table_is_sized_to_its_content():
+    _, files = await render_discord_tables("| a | b |\n| --- | --- |\n| 1 | 2 |", enabled=True)
+    assert Image.open(io.BytesIO(files[0].fp.read())).width < 400
+
+
+def test_numeric_cells_align_right_in_left_columns():
+    assert tables._aligned("left", "$1,234.50", header=False) == "right"
+    assert tables._aligned("left", "12%", header=False) == "right"
+    assert tables._aligned("left", "Total", header=False) == "left"
+    assert tables._aligned("left", "123", header=True) == "left"
 
 
 async def test_non_table_text_is_unchanged():
@@ -48,7 +76,7 @@ async def test_unsupported_header_preserves_table_but_supported_neighbor_renders
     raw = "| 中文 |\n| --- |\n| 123 |\n"
     supported = "| Value |\n| --- |\n| 456 |\n"
     text, files = await render_discord_tables(raw + "\n" + supported, enabled=True)
-    assert raw in text
+    assert raw.rstrip("\n") in text
     assert len(files) == 1
 
 
@@ -69,3 +97,11 @@ async def test_render_failure_keeps_raw_table_text(monkeypatch):
     monkeypatch.setattr(tables, "table_png", fail)
     table = "| A | B |\n| --- | --- |\n| a | b |\n"
     assert await render_discord_tables(table, enabled=True) == (table, [])
+
+
+async def test_closing_a_tables_gap_keeps_blank_lines_in_code():
+    source = "a\n\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n\n```\nx\n\n\n\ny\n```\nend"
+    text, files = await render_discord_tables(source, enabled=True)
+    assert (
+        len(files) == 1 and "```\nx\n\n\n\ny\n```" in text and "\n\n\n" not in text.split("```")[0]
+    )

@@ -155,11 +155,50 @@ TAIL = (
     "0190_long_job_features",
     "0191_drop_dev_toggle_values",
     "0192_reset_allow_writes",
-    "0193_retention_activity",
-    "0194_tenant_retirement",
-    "0195_retention_runs",
-    "0196_audit_clocks",
-    "0197_dm_activity",
+    "0193_deployment_identity",
+    "0194_host_call_cards",
+    "0195_agent_record_versions",
+    "0196_connector_tokens",
+    "0197_thread_model_consents",
+    "0198_agent_backend_effort",
+    "0199_self_helpers",
+    "0200_skill_copies",
+    "0202_agent_backend_environment",
+    "0203_pending_carry_overs",
+    "0204_shared_agent_copies",
+    "0205_web_search_usage",
+    "0206_support_plans",
+    "0207_skill_manifest_bytes",
+    "0208_active_turn_deadline",
+    "0209_thread_model_effort",
+    "0210_dm_access",
+    "0211_callback_watch_imports",
+    "0212_sandbox_tools_feature",
+    "0213_outbox_attribution",
+    "0214_provider_key_gate",
+    "0215_gemini_records",
+    "0216_usage_obs_observed_at",
+    "0217_monitored_events",
+    "0218_support_menu_channel",
+    "0219_channel_budget_alerts",
+    "0220_discord_audience_facts",
+    "0221_routine_delivery_hold",
+    "0222_secret_shares",
+    "0223_dm_watch_delivery",
+    "0224_ops_events",
+    "0225_agent_github_grant_removals",
+    "0226_compute_tool_names",
+    "0227_turn_origin_own_dm_reach",
+    "0228_compute_task_wait_until",
+    "0229_compute_started_by_wake",
+    "0230_agent_chat_signed_in",
+    "0231_agent_chat_send_count",
+    "0232_agent_chat_session_grant",
+    "0233_retention_activity",
+    "0234_tenant_retirement",
+    "0235_retention_runs",
+    "0236_audit_clocks",
+    "0237_dm_activity",
 )
 HEAD = TAIL[-1]
 
@@ -210,10 +249,20 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "helper_of"),
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
+    ("thread_model_settings", "provider"),
+    ("thread_model_settings", "effort"),
+    ("thread_model_settings", "model"),
+    ("usage_observation", "provider"),
+    ("usage_observation", "observed_at"),
+    ("routines", "delivery_hold"),
+    ("routines", "owner_notice"),
+    ("compute_tasks", "wait_until"),
+    ("compute_sessions", "wake_turns"),
 }
+AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 
 
-# Indexes and the run table added by 0195, absent from every earlier head.
+# Indexes and the run table added by 0235, absent from every earlier head.
 RETENTION_INDEXES = {
     "ix_thread_sessions_tenant_last_turn",
     "ix_credential_requests_closed_at",
@@ -231,9 +280,9 @@ RETENTION_INDEXES = {
     "ix_web_logins_created_at",
     "ix_web_threads_deleted_at",
     "ix_web_threads_tenant_updated",
-    # Added by 0196, with the watches.last_fired_at column.
+    # Added by 0236, with the watches.last_fired_at column.
     "ix_long_job_cancel_audit_requested_at",
-    # Added by 0197, with direct_message_conversations.updated_at.
+    # Added by 0237, with direct_message_conversations.updated_at.
     "ix_dm_conversations_tenant_updated",
 }
 
@@ -284,6 +333,11 @@ CHAIN = [
 TOP = (PREVIEW_HEAD, *TAIL)
 
 
+# Heads with the routine sandbox columns and history; from 0212 on they are unmapped, kept
+# for the release still running during a deploy.
+SANDBOX_HEADS = (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, ADMINS_HEAD, *TOP)
+
+
 SANDBOX_COLUMNS = {
     "sandbox_tools_enabled",
     "sandbox_tools_set_by",
@@ -331,8 +385,6 @@ TABLES = {
     "lead_opportunities",
     "lead_mailbox_scans",
     "lead_mailbox_messages",
-    # Added by SANDBOX_HEAD, with its index and via check; compared from there on.
-    "routine_sandbox_history",
     "long_job",
     "long_job_policy",
     "long_job_policy_history",
@@ -393,15 +445,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         }
     if expected not in (ADMINS_HEAD, *TOP):
         compared_tables = compared_tables - {"daimon_admins"}
-    if expected not in (
-        SANDBOX_HEAD,
-        RECRUITMENT_HEAD,
-        REMOVAL_HEAD,
-        LONG_JOBS_HEAD,
-        ADMINS_HEAD,
-        *TOP,
-    ):
-        compared_tables = compared_tables - {"routine_sandbox_history"}
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
         return kind != "table" or name in compared_tables
@@ -433,7 +476,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if expected != HEAD and kind == "index" and name in RETENTION_INDEXES:
             return False
-        # 0196 drops the cancel audit's key to long_job; earlier heads still have it.
+        # 0236 drops the cancel audit's key to long_job; earlier heads still have it.
         if (
             expected != HEAD
             and kind == "foreign_key_constraint"
@@ -516,7 +559,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             table = getattr(getattr(obj, "table", None), "name", None)
             if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS | AFTER_MERGE_COLUMNS:
                 return False
-            if name in MAIN_BRANCH_OBJECTS:
+            if name in MAIN_BRANCH_OBJECTS | AFTER_MERGE_OBJECTS:
                 return False
         # Historical main retains these two objects for older readers, while
         # its ORM intentionally omits them. These retained objects
@@ -532,15 +575,23 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected not in TOP
         ):
             return False
-        if kind == "column" and expected not in (
-            SANDBOX_HEAD,
-            RECRUITMENT_HEAD,
-            REMOVAL_HEAD,
-            LONG_JOBS_HEAD,
-            ADMINS_HEAD,
-            *TOP,
+        if (
+            kind == "column"
+            and name in {"effort", "environment"}
+            and getattr(getattr(obj, "table", None), "name", None) == "agent_backend_revision"
+            and expected != HEAD
         ):
-            return name not in SANDBOX_COLUMNS
+            return False
+        if (
+            kind == "column"
+            and name in {"self_helpers", "helper_key", "own_dm_reach", "reach_read"}
+            and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
+            and expected != HEAD
+        ):
+            return False
+        # Unmapped at HEAD; checked below instead.
+        if kind == "column" and name in SANDBOX_COLUMNS:
+            return False
         return kind != "table" or name in compared_tables
 
     migration_context = MigrationContext.configure(
@@ -550,14 +601,9 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     inspector = inspect(connection)
     constraints = {c["name"] for c in inspector.get_check_constraints("routines")}
     assert {"ck_routines_destination_kind", "ck_routines_dm_owner"} <= constraints
-    if expected in (
-        SANDBOX_HEAD,
-        RECRUITMENT_HEAD,
-        REMOVAL_HEAD,
-        LONG_JOBS_HEAD,
-        ADMINS_HEAD,
-        *TOP,
-    ):
+    routine_columns = {c["name"] for c in inspector.get_columns("routines")}
+    if expected in SANDBOX_HEADS:
+        assert routine_columns >= SANDBOX_COLUMNS, f"{expected} keeps the routine sandbox columns"
         # compare_metadata does not compare CHECK constraints.
         [via] = [
             c

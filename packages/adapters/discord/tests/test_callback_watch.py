@@ -17,6 +17,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.testing import ma_agent
+from daimon.testing.turn_fakes import run_prepared
 from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
     list_response,
@@ -158,7 +159,6 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
     deps = replace(
         runtime.turn_deps,
         anthropic=fake_client,
-        turn_path="mux",
         tool_safety=ToolSafetyPolicy(enabled=True),
     )
     runtime = replace(runtime, anthropic=fake_client, turn_deps=deps)
@@ -307,24 +307,22 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
 
         # An attended turn reusing the same prepared session/thread must get its
         # ordinary tools, even without another bind or agent-config change.
-        from daimon.core.turn.run import run_prepared_turn
         from daimon.testing.turn_fakes import RecordingLifecycle
 
         user_sent.clear()
-        await run_prepared_turn(
+        await run_prepared(
             deps,
             replace(bound[0], admission=replace(bound[0].admission, observation=None)),
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="4242",
             external_user_id="555",
             user_message="An attended follow-up.",
             lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
             reseed_user_message=AsyncMock(return_value="An attended follow-up."),
             recovery_lifecycle=MagicMock(),
             attended=True,
             operation_key="attended-follow-up",
+            render_interval_s=2.0,
         )
         assert len(sent_tools) == 2
         assert sent_tools[1] == original_tools

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,6 +32,7 @@ from daimon.core.roster import RosterAgent, paginate
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_tenant
+from daimon.testing.shared_helpers import walk as _walk
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,7 +101,7 @@ def _make_runtime() -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+        turn_deps=deps_for(),
     )
 
 
@@ -117,16 +117,6 @@ def _interaction(user_id: int = 42) -> MagicMock:
     interaction.followup.send = AsyncMock()
     interaction.edit_original_response = AsyncMock()
     return interaction
-
-
-def _walk(item: Any) -> list[Any]:
-    found = [item]
-    for child in getattr(item, "children", []) or []:
-        found.extend(_walk(child))
-    accessory = getattr(item, "accessory", None)
-    if accessory is not None:
-        found.extend(_walk(accessory))
-    return found
 
 
 def _text(item: Any) -> str:

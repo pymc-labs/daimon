@@ -131,7 +131,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # guild-join tests never run a turn
+        turn_deps=deps_for(),  # guild-join tests never run a turn
     )
 
 

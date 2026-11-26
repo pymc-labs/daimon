@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.agent_notices import take_agent_notices
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn import openai_host
 from daimon.core.turn.admission import Admission
@@ -37,6 +41,7 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ThreadRef
 from mux.drivers.openai import deployment
 from mux.errors import ScopeViolation
+from mux.profiles import PERSISTENT_WORKSPACE
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from openai import AsyncOpenAI
@@ -59,7 +64,7 @@ async def application(
     settings = Settings(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
-        turn=TurnSettings(path="mux", channel_backends=True),
+        turn=TurnSettings(channel_backends=True),
     )
     native = ScriptedTransport()
     async with native.client() as client:
@@ -112,7 +117,7 @@ def manifest(monkeypatch: pytest.MonkeyPatch, path: Path, rows: list[dict[str, J
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
 
 
-@pytest.mark.parametrize("selection", ["unset", "anthropic", "legacy", "disabled", "gemini"])
+@pytest.mark.parametrize("selection", ["unset", "anthropic", "disabled", "gemini"])
 async def test_unconfigured_application_never_discovers_provider_credentials(
     application: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
@@ -137,8 +142,6 @@ async def test_unconfigured_application_never_discovers_provider_credentials(
                 REVISION.channel, 1, resolve_default(BackendConfig())
             ),
         )
-    elif selection == "legacy":
-        deps = replace(deps, turn_path="legacy")
     elif selection == "disabled":
         deps = replace(deps, channel_backends=False)
     else:
@@ -235,6 +238,8 @@ async def test_plan_is_scoped_and_credential_access_is_deferred(
 
     assert runtime.account_scope_id == "project"
     assert runtime.price is provider_prices(PROFILE)[("openai", REVISION.model)]
+    # No meter reports the container fee: usage settles at $0 infrastructure, never pending.
+    assert await runtime.infrastructure(cast(Any, None)) == 0
     # Our OpenAI project rejects `spend_control`: Luna never asks for a native cap.
     assert runtime.controls.spend_limit_usd_cents is None
     plan = await runtime.session_plan(application)
@@ -348,7 +353,8 @@ async def test_denied_policy_never_reads_selected_key_or_constructs_transport(
     monkeypatch.setattr(os.environ, "get", tracked)
 
     async def deny(deps: TurnDeps, selected: Admission) -> Admission:
-        return replace(selected, memory_read_only=True)
+        # A read-only stamp no longer denies on a provider host; a lost policy does.
+        raise AdmissionDenied(reason="invoker_not_allowed")
 
     monkeypatch.setattr(openai_host, "reauthorize", deny)
     with pytest.raises(AdmissionDenied):
@@ -457,5 +463,228 @@ async def test_real_application_prepares_and_runs_using_builtin_runtime(
         sum(req.method == "POST" and req.url.path.endswith("/events") for req in wire.requests) == 1
     )
     assert all(source.closed for source in wire.sources)
-    assert clients and all(client.is_closed() for client in clients)
-    assert await store.pending_outbox()  # unpriced actual usage remains durable pending
+    assert clients and not any(client.is_closed() for client in clients), "one shared client"
+    await application.deps.provider_clients.aclose()
+    assert all(client.is_closed() for client in clients)
+    assert not await store.pending_outbox()  # settled at $0 infrastructure, none left pending
+
+
+async def test_a_shared_turn_runs_without_any_caller_mcp_credential(
+    application: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    shared = replace(
+        application, admission=replace(application.admission, shared_owner=uuid.uuid4())
+    )
+    runtime = build_openai_runtime(shared)
+    assert runtime.mcp_secrets is None and runtime.end_of_turn is None
+    assert runtime.controls.mcp_enabled is False
+    assert build_openai_runtime(application).controls.mcp_enabled is None
+
+
+async def test_a_channels_own_deployment_attaches_its_channel_skills(
+    application: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A channel-origin plan carries the channel's custom skills; one over the limit stays out."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.stores.domain import SkillSizeRow
+    from daimon.core.stores.skill_copies import put_skill_size
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+
+    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline-only")
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+        for skill_id, size in (("skill_team", 10), ("skill_huge", 29 * 1024 * 1024)):
+            # Measured before: no download needed.
+            await put_skill_size(
+                db,
+                SkillSizeRow(
+                    tenant_id=TENANT,
+                    skill_id=skill_id,
+                    version="7",
+                    name=skill_id,
+                    total_bytes=size,
+                    largest_file_bytes=size,
+                    file_count=1,
+                    text_only=True,
+                ),
+            )
+    copied: list[tuple[SkillRef, ...]] = []
+
+    async def copy(
+        *_: object, pins: tuple[SkillRef, ...], **__: object
+    ) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
+        copied.append(pins)
+        return tuple(SkillRef(id=f"copy-{pin.id}", version="1") for pin in pins), ()
+
+    monkeypatch.setattr(session_skills, "copy_skills", copy)
+    channel = tuple(
+        BetaManagedAgentsCustomSkill(type="custom", skill_id=skill_id, version="7")
+        for skill_id in ("skill_team", "skill_huge")
+    )
+    request = replace(application, admission=replace(application.admission, channel_skills=channel))
+    runtime = build_channel_runtime(request)
+    assert isinstance(runtime, OpenAIHostRuntime), "the channel's OpenAI deployment"
+    plan = await runtime.session_plan(request)
+    assert copied == [(SkillRef(id="skill_team", version="7"),)], "only the one that fits"
+    assert plan.skills == (SkillRef(id="copy-skill_team", version="1"),), "attached per session"
+    async with application.deps.sessionmaker.begin() as db:
+        notices = await take_agent_notices(
+            db,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            agent_id=request.admission.agent.id,
+            since=datetime.now(UTC) - timedelta(minutes=1),
+        )
+    assert len(notices) == 1 and "`skill_huge`" in notices[0], "the agent hears what is missing"
+
+
+async def test_copy_skills_when_one_archive_is_bad_then_copies_the_rest_and_names_it(
+    application: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused or unreadable skill is a named loss of that skill alone, never a failed reply."""
+    import io
+    import zipfile
+
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+    good = io.BytesIO()
+    with zipfile.ZipFile(good, "w") as archive:
+        archive.writestr("SKILL.md", "---\nname: team\ndescription: d\n---\nbody")
+
+    async def download(_: object, *, skill_id: str, **__: object) -> bytes:
+        return good.getvalue() if skill_id == "skill_team" else b"not an archive"
+
+    class Created(SimpleNamespace):
+        pass
+
+    class Skills:
+        async def create(self, *_: object, **__: object) -> Created:
+            return Created(id="copy-team", latest_version=Created(version="1"))
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    copies, losses = await session_skills.copy_skills(
+        application.deps.sessionmaker,
+        application.deps.anthropic,
+        cast(Any, Skills()),
+        scope=SCOPE,
+        tenant_id=TENANT,
+        profile=PERSISTENT_WORKSPACE,
+        account_scope_id="project",
+        pins=(SkillRef(id="skill_bad", version="7"), SkillRef(id="skill_team", version="7")),
+    )
+    assert copies == (SkillRef(id="copy-team", version="1"),), "the readable skill still copies"
+    assert losses == ("skill:skill_bad",), "the bad one is named, not raised"
+
+
+async def test_copy_skills_when_an_openai_copy_predates_plain_frontmatter_then_uploads_anew(
+    application: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy uploaded before `plain_manifest` may be refused by every session, so it is not reused."""
+    import io
+    import zipfile
+
+    from daimon.core.stores.domain import SkillCopyRow
+    from daimon.core.stores.skill_copies import put_skill_copy
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+        await put_skill_copy(
+            db,
+            SkillCopyRow(
+                tenant_id=TENANT,
+                provider="openai",
+                account_scope_id="project",
+                skill_id="skill_team",
+                version="7",
+                copy_id="copy-stale",
+                copy_version="1",
+            ),
+        )
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("SKILL.md", "---\nname: team\ndescription: d\n---\nbody")
+
+    async def download(*_: object, **__: object) -> bytes:
+        return archive_bytes.getvalue()
+
+    class Created(SimpleNamespace):
+        pass
+
+    class Skills:
+        async def create(self, *_: object, **__: object) -> Created:
+            return Created(id="copy-plain", latest_version=Created(version="1"))
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    copies, _ = await session_skills.copy_skills(
+        application.deps.sessionmaker,
+        application.deps.anthropic,
+        cast(Any, Skills()),
+        scope=SCOPE,
+        tenant_id=TENANT,
+        profile=PERSISTENT_WORKSPACE,
+        account_scope_id="project",
+        pins=(SkillRef(id="skill_team", version="7"),),
+    )
+    assert copies == (SkillRef(id="copy-plain", version="1"),), "the stale copy is not reused"
+
+
+@pytest.mark.parametrize(
+    ("retryable", "outcome"), [(True, "retried"), (False, "named")], ids=["retryable", "permanent"]
+)
+async def test_copy_skills_when_an_upload_fails_then_only_a_permanent_error_is_a_loss(
+    application: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    retryable: bool,
+    outcome: str,
+) -> None:
+    """A transient upload error retries with the reply; a permanent one names the skill."""
+    import io
+    import zipfile
+
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+    from mux.errors import ProviderError
+
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("SKILL.md", "---\nname: team\ndescription: d\n---\nbody")
+
+    async def download(*_: object, **__: object) -> bytes:
+        return archive_bytes.getvalue()
+
+    class Skills:
+        async def create(self, *_: object, **__: object) -> object:
+            raise ProviderError("overloaded", retryable=retryable, native_code="503")
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    call = session_skills.copy_skills(
+        application.deps.sessionmaker,
+        application.deps.anthropic,
+        cast(Any, Skills()),
+        scope=SCOPE,
+        tenant_id=TENANT,
+        profile=PERSISTENT_WORKSPACE,
+        account_scope_id="project",
+        pins=(SkillRef(id="skill_team", version="7"),),
+    )
+    if outcome == "retried":
+        with pytest.raises(ProviderError):
+            await call
+        return
+    copies, losses = await call
+    assert (copies, losses) == ((), ("skill:skill_team",)), "a permanent refusal is a named loss"

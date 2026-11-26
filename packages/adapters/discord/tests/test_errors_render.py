@@ -323,3 +323,19 @@ def test_neutral_provider_failures_map_to_their_cause(
     assert code is None or code not in result
     wrapped = TurnError(kind="upstream", cause=failure)
     assert render_error(wrapped, request_id=TEST_RID) == f"{expected}\n\n{REF}"
+
+
+def test_a_turn_stopped_by_a_room_that_became_contained_gets_a_short_notice_not_an_error() -> None:
+    from daimon.adapters.discord.errors import AUDIENCE_STOPPED
+    from daimon.core.audience_refusal import AUDIENCE_CONTAINED
+    from daimon.core.turn.errors import AdmissionDenied
+
+    denied = AdmissionDenied(reason="invoker_not_allowed", detail=AUDIENCE_CONTAINED)
+
+    for error in (denied, TurnError(kind="upstream", cause=denied)):
+        text = render_error(error, request_id=TEST_RID)
+        assert text == AUDIENCE_STOPPED
+        assert "went wrong" not in text and "Ref" not in text
+    # Any other admission refusal keeps the generic text.
+    other = AdmissionDenied(reason="invoker_not_allowed")
+    assert render_error(other, request_id=TEST_RID) == f"{OUR_SIDE}\n\n{REF}"

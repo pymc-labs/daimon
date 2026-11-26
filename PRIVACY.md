@@ -19,10 +19,12 @@ organisation a Teams deployment serves), Daimon stores:
 - **Thread mappings.** Which Discord thread, Slack conversation or Teams chat
   maps to which Managed Agents session, so conversations continue.
 - **Shared conversation journal.** Daimon's own copy of conversations on its
-  provider-neutral path, including stored messages and tool results.
-- **Private chat context.** When an admin enables DM conversations, an excerpt
-  of the conversation and the 12 most recent private messages, up to 16,000
-  characters each. `/dm-me` replaces that copy.
+  provider-neutral path, including stored messages and tool results, and the
+  stored history of conversations with Gemini agents.
+- **Private chat context.** When an admin enables DM conversations, the
+  selected workspace, an excerpt of the channel conversation and the 12 most
+  recent private messages, up to 16,000 characters each. Both go to the agent
+  with each private message. `/dm-me` replaces that copy.
 - **Names.** The display name and username each platform last sent for a
   person, and the last name of each channel.
 - **Teams installations.** The ID, group ID and name of each team the app is
@@ -33,6 +35,17 @@ organisation a Teams deployment serves), Daimon stores:
 - **Security audit.** Tool names, outcomes, reason codes, timestamps and
   tenant, account, platform-user and agent identifiers. Arguments, messages,
   credentials and response bodies are excluded.
+- **Failure records.** When an answer, direct message, routine, delivery, watch
+  or follow-up fails: the kind of failure, a short reason code, the time, and
+  the agent, routine, channel and account identifiers. Messages, tool
+  arguments and credentials are excluded. Only workspace owners and admins
+  read them.
+- **Monitored conversations.** When an admin monitors an agent, what people
+  ask it in direct messages, web chat and MCP, and its answers. Over MCP also
+  the name, time and outcome of each other tool a person calls on that agent,
+  never what the call sent or returned. Only workspace owners and admins read
+  them, not an agent's owner. People are told in the conversation or their
+  first tool result, and the privacy panel says so.
 - **Credentials.** Bound external credentials, such as a GitHub token,
   encrypted at rest.
 - **Feedback and support notes**, and **uploads** you attach to a chat.
@@ -41,8 +54,11 @@ organisation a Teams deployment serves), Daimon stores:
   artifact are kept in the operator's object storage.
 
 The conversations themselves run in Anthropic's Managed Agents service, which
-holds the full transcript. Daimon's own copies are the journal and private
-chat context above.
+holds the full transcript. A server admin can also turn on agents that run on
+OpenAI or Google (Gemini); only then do those providers receive that server's
+conversations, and the connector data an operator allows them, and store them
+under their own terms. Daimon's own copies are the journal, private chat
+context and monitored conversations above.
 
 ## What the agent's tools receive
 
@@ -56,7 +72,8 @@ like a tool result. This is on by default. An operator turns it off with
 ## How long it is kept
 
 Daimon deletes records past these limits. An operator changes each one with
-the setting linked in the table; `0` keeps the records.
+the setting linked in the table; `0` keeps the records, except for Gemini
+history, monitored conversations and failure records, which always expire.
 
 | Records | Kept | Setting |
 | --- | --- | --- |
@@ -65,6 +82,9 @@ the setting linked in the table; `0` keeps the records.
 | Finished jobs, compute and routine output | 90 days | [`DAIMON_RETENTION__JOB_OUTPUT_DAYS`](docs/configuration.md#daimon_retention__job_output_days) |
 | Resolved credential and GitHub access requests | 90 days | [`DAIMON_RETENTION__ACCESS_REQUESTS_DAYS`](docs/configuration.md#daimon_retention__access_requests_days) |
 | Thread mappings, turn outcomes, the shared journal, private chat context and web threads | 365 days after last activity | [Conversation history kept](docs/features.md#conversation-history-kept) |
+| Gemini conversation history | 30 days after last activity | [`DAIMON_GEMINI__RECORDS_RETENTION_DAYS`](docs/configuration.md#daimon_gemini__records_retention_days) |
+| Monitored conversations | 90 days | [`DAIMON_MONITORING__RETENTION_DAYS`](docs/configuration.md#daimon_monitoring__retention_days) |
+| Failure records | 30 days | [`DAIMON_OPS_EVENTS__RETENTION_DAYS`](docs/configuration.md#daimon_ops_events__retention_days) |
 | Deleted web threads | 30 days | [`DAIMON_RETENTION__DELETED_THREADS_DAYS`](docs/configuration.md#daimon_retention__deleted_threads_days) |
 | Finished task requests | 30 days | [`DAIMON_RETENTION__TASK_CONTINUATIONS_DAYS`](docs/configuration.md#daimon_retention__task_continuations_days) |
 | Uploads with no owner | 24 hours | Fixed |
@@ -102,20 +122,24 @@ On Discord, run `/privacy` in a server where your account is linked. On Slack,
 run `/privacy`. On Teams, send `privacy`; the bot replies in your private chat.
 You can:
 
-- **View** who stores what about you, Daimon or Anthropic.
+- **View** who stores what about you: Daimon, Anthropic and any other provider
+  an admin turned on, and whether admins monitor agents in that workspace.
 - **Export** a summary, on Slack and Teams. Discord has no export.
 - **Delete** your account and its linked personal records.
 
 Deletion covers every server, workspace and organisation linked to your
 account in this deployment. Daimon also tries to delete your conversations
-from Anthropic. That can fail. If Daimon reports a failure, ask the operator
-to check and remove the rest.
+from Anthropic, and from OpenAI for conversations stored there. That can fail.
+If Daimon reports a failure, ask the operator to check and remove the rest.
+Google offers no delete for stored Gemini conversations, so Google keeps them
+for its own retention period.
 
 Deletion removes your stored name, your private conversations with the
-routing records behind them, your skill records and your personal agent
-memory. It clears your account and platform-user identifiers from security
-logs and your link to promo redemptions. You can read your personal memory
-with `/memory mine` and clear it with `/memory forget-mine`.
+routing records behind them, the records admins can read for a monitored
+agent, the failure records tied to your account, your skill records and your
+personal agent memory. It clears your account and platform-user identifiers
+from security logs and your link to promo redemptions. You can read your
+personal memory with `/memory mine` and clear it with `/memory forget-mine`.
 
 ## What stays after deletion
 

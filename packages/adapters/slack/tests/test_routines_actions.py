@@ -19,6 +19,7 @@ from daimon.adapters.slack.routines_panel.actions import handle_routine_action
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.routines import create_routine, get_routine, record_result
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -144,14 +145,13 @@ async def test_handle_routine_action_pause_flips_enabled_to_false_and_triggers_v
     """Pause overflow flips enabled=False in the DB and calls views.update."""
     # Seed team + routine (creator = _USER_ID)
     tenant_id, fernet_key, _ = await _seed_team(db_session)
-    routine = await create_routine(
+    routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id=_USER_ID,
         agent_id="agent-x",
         agent_name="Test Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="daily stand-up",
         enabled=True,
     )
@@ -228,14 +228,13 @@ async def test_handle_routine_action_cross_tenant_routine_id_is_refused_with_no_
     """Routine from tenant A sent via team B's payload must be refused without a write."""
     # Tenant A + routine
     tenant_a_id, _, _ = await _seed_team(db_session, team_id="T_CROSS_A")
-    routine_a = await create_routine(
+    routine_a = await new_routine(
         db_session,
-        tenant_id=tenant_a_id,
+        tenant_a_id,
         created_by_user_id=_USER_ID,
         agent_id="agent-a",
         agent_name="Agent A",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="tenant A routine",
         enabled=True,
     )
@@ -276,14 +275,13 @@ async def test_handle_routine_action_delete_by_creator_pushes_confirm_modal_and_
 ) -> None:
     """Delete overflow by the creator pushes a confirm modal and does NOT delete yet."""
     tenant_id, fernet_key, _ = await _seed_team(db_session, team_id="T_DEL_CREATOR")
-    routine = await create_routine(
+    routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id=_USER_ID,
         agent_id="agent-x",
         agent_name="Test Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="deletable routine",
         enabled=True,
     )
@@ -314,14 +312,13 @@ async def test_handle_routine_action_delete_by_non_admin_non_creator_is_refused(
 ) -> None:
     """Delete overflow by a non-admin non-creator must not push a confirm modal."""
     tenant_id, fernet_key, _ = await _seed_team(db_session, team_id="T_DEL_GATE")
-    routine = await create_routine(
+    routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id="U_ORIGINAL_CREATOR",
         agent_id="agent-y",
         agent_name="Test Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="gated routine",
         enabled=True,
     )
@@ -433,14 +430,13 @@ async def test_handle_routine_action_output_by_non_admin_non_creator_does_not_le
     last run.
     """
     tenant_id, fernet_key, _ = await _seed_team(db_session, team_id="T_OUT_GATE")
-    routine = await create_routine(
+    routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id="U_ORIGINAL_CREATOR",
         agent_id="agent-z",
         agent_name="Test Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="gated routine",
         enabled=True,
     )
@@ -471,14 +467,13 @@ async def test_handle_routine_action_output_by_creator_returns_last_output(
     """The creator still reads their own routine's output — the gate is
     admin-or-creator, matching pause/resume/delete, not admin-only."""
     tenant_id, fernet_key, _ = await _seed_team(db_session, team_id="T_OUT_OK")
-    routine = await create_routine(
+    routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id=_USER_ID,
         agent_id="agent-z",
         agent_name="Test Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="my routine",
         enabled=True,
     )
@@ -543,15 +538,12 @@ async def test_resume_of_running_routine_replies_without_rescheduling_or_reporti
     db_session, db_session_factory, fake_slack_web_client, monkeypatch
 ):
     tenant_id, fernet_key, _ = await _seed_team(db_session)
-    routine = await create_routine(
+    routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id=_USER_ID,
         agent_id="ag",
-        agent_name="daimon",
         cron_expr="0 * * * *",
-        timezone_="UTC",
-        trigger_message="run",
         enabled=True,
     )
     runtime = build_slack_runtime(fernet_key, db_session_factory)

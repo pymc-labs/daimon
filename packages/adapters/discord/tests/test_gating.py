@@ -2,15 +2,31 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 from daimon.adapters.discord.gating import (
     HintCooldown,
+    bot_message_answerable,
     is_participation_candidate,
     is_plain_text_mention_candidate,
     should_process_message,
 )
 
+_is_participation_candidate = partial(
+    is_participation_candidate,
+    may_turn_on=True,
+    author_is_bot=False,
+    bot_mentioned=False,
+    in_thread=True,
+    guild_id="g1",
+)
+
+
 DAIMON_ID = "111"
+
+_should_process_message = partial(should_process_message, guild_id="g1", self_user_id=DAIMON_ID)
+
 HUMAN_ID = "222"
 QA_BOT_ID = "333"
 QA_ADMIN_BOT_ID = "555"
@@ -18,52 +34,42 @@ OTHER_BOT_ID = "444"
 
 
 def test_gate_admits_mentioning_human_in_guild() -> None:
-    assert should_process_message(
-        author_is_bot=False,
-        author_id=HUMAN_ID,
-        bot_mentioned=True,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
-    ), "a human's explicit mention in a guild is the ordinary turn trigger"
+    assert _should_process_message(author_is_bot=False, author_id=HUMAN_ID, bot_mentioned=True), (
+        "a human's explicit mention in a guild is the ordinary turn trigger"
+    )
 
 
 def test_gate_rejects_human_when_not_mentioned() -> None:
-    assert not should_process_message(
-        author_is_bot=False,
-        author_id=HUMAN_ID,
-        bot_mentioned=False,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
+    assert not _should_process_message(
+        author_is_bot=False, author_id=HUMAN_ID, bot_mentioned=False
     ), "an unmentioned message must not start a turn"
 
 
 def test_reply_to_recorded_agent_post_is_addressed() -> None:
-    assert should_process_message(
+    assert _should_process_message(
         author_is_bot=False,
         author_id=HUMAN_ID,
         bot_mentioned=False,
         reply_to_recorded_post=True,
-        guild_id="g1",
+        self_user_id=None,
     )
-    assert not should_process_message(
+    assert not _should_process_message(
         author_is_bot=False,
         author_id=HUMAN_ID,
         bot_mentioned=False,
         reply_to_recorded_post=False,
-        guild_id="g1",
+        self_user_id=None,
     )
 
 
 def test_only_allow_listed_qa_bot_can_reply_to_recorded_post() -> None:
     for author_id, expected in ((QA_BOT_ID, True), (OTHER_BOT_ID, False)):
         assert (
-            should_process_message(
+            _should_process_message(
                 author_is_bot=True,
                 author_id=author_id,
                 bot_mentioned=False,
                 reply_to_recorded_post=True,
-                guild_id="g1",
-                self_user_id=DAIMON_ID,
                 qa_bot_user_ids=(QA_BOT_ID,),
             )
             is expected
@@ -71,111 +77,77 @@ def test_only_allow_listed_qa_bot_can_reply_to_recorded_post() -> None:
 
 
 def test_own_webhook_post_is_rejected_even_if_it_mentions_bot() -> None:
-    assert not should_process_message(
+    assert not _should_process_message(
         author_is_bot=True,
         author_id=QA_BOT_ID,
         bot_mentioned=True,
         author_is_webhook=True,
-        guild_id="g1",
         qa_bot_user_ids=(QA_BOT_ID,),
+        self_user_id=None,
     )
 
 
 def test_gate_rejects_human_mention_in_dm() -> None:
-    assert not should_process_message(
-        author_is_bot=False,
-        author_id=HUMAN_ID,
-        bot_mentioned=True,
-        guild_id=None,
-        self_user_id=DAIMON_ID,
+    assert not _should_process_message(
+        author_is_bot=False, author_id=HUMAN_ID, bot_mentioned=True, guild_id=None
     ), "DMs have no tenant, so they must not start a turn"
 
 
 def test_gate_rejects_bot_author_when_no_qa_bot_configured() -> None:
-    assert not should_process_message(
-        author_is_bot=True,
-        author_id=OTHER_BOT_ID,
-        bot_mentioned=True,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
-        qa_bot_user_ids=(),
+    assert not _should_process_message(
+        author_is_bot=True, author_id=OTHER_BOT_ID, bot_mentioned=True, qa_bot_user_ids=()
     ), "with no allow-list, every bot-authored mention is rejected"
 
 
 def test_gate_admits_allow_listed_qa_bot() -> None:
-    assert should_process_message(
-        author_is_bot=True,
-        author_id=QA_BOT_ID,
-        bot_mentioned=True,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
-        qa_bot_user_ids=(QA_BOT_ID,),
+    assert _should_process_message(
+        author_is_bot=True, author_id=QA_BOT_ID, bot_mentioned=True, qa_bot_user_ids=(QA_BOT_ID,)
     ), "the allow-listed QA bot's mention must start a turn like a human's"
 
 
 def test_gate_rejects_unlisted_bot_when_qa_bot_configured() -> None:
-    assert not should_process_message(
-        author_is_bot=True,
-        author_id=OTHER_BOT_ID,
-        bot_mentioned=True,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
-        qa_bot_user_ids=(QA_BOT_ID,),
+    assert not _should_process_message(
+        author_is_bot=True, author_id=OTHER_BOT_ID, bot_mentioned=True, qa_bot_user_ids=(QA_BOT_ID,)
     ), "the allow-list admits only listed ids, never bots in general"
 
 
 def test_gate_rejects_self_authored_mention_when_allow_listed_to_own_id() -> None:
-    assert not should_process_message(
-        author_is_bot=True,
-        author_id=DAIMON_ID,
-        bot_mentioned=True,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
-        qa_bot_user_ids=(DAIMON_ID,),
+    assert not _should_process_message(
+        author_is_bot=True, author_id=DAIMON_ID, bot_mentioned=True, qa_bot_user_ids=(DAIMON_ID,)
     ), "allow-listing daimon's own id must not arm an unbounded self-trigger loop"
 
 
 def test_gate_admits_each_of_two_allow_listed_bots() -> None:
     for author_id in (QA_BOT_ID, QA_ADMIN_BOT_ID):
-        assert should_process_message(
+        assert _should_process_message(
             author_is_bot=True,
             author_id=author_id,
             bot_mentioned=True,
-            guild_id="g1",
-            self_user_id=DAIMON_ID,
             qa_bot_user_ids=(QA_BOT_ID, QA_ADMIN_BOT_ID),
         ), "both an admin and a non-admin driver must be able to start turns"
 
 
 def test_gate_rejects_self_authored_mention_when_listed_alongside_others() -> None:
-    assert not should_process_message(
+    assert not _should_process_message(
         author_is_bot=True,
         author_id=DAIMON_ID,
         bot_mentioned=True,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
         qa_bot_user_ids=(QA_BOT_ID, DAIMON_ID),
     ), "the self-trigger refusal must not be bypassable by padding the allow-list"
 
 
 def test_gate_rejects_qa_bot_when_not_mentioned() -> None:
-    assert not should_process_message(
-        author_is_bot=True,
-        author_id=QA_BOT_ID,
-        bot_mentioned=False,
-        guild_id="g1",
-        self_user_id=DAIMON_ID,
-        qa_bot_user_ids=(QA_BOT_ID,),
+    assert not _should_process_message(
+        author_is_bot=True, author_id=QA_BOT_ID, bot_mentioned=False, qa_bot_user_ids=(QA_BOT_ID,)
     ), "the allow-list relaxes the bot-author check only, not the mention requirement"
 
 
 def test_gate_rejects_qa_bot_in_dm() -> None:
-    assert not should_process_message(
+    assert not _should_process_message(
         author_is_bot=True,
         author_id=QA_BOT_ID,
         bot_mentioned=True,
         guild_id=None,
-        self_user_id=DAIMON_ID,
         qa_bot_user_ids=(QA_BOT_ID,),
     ), "the allow-list relaxes the bot-author check only, not the guild requirement"
 
@@ -184,57 +156,31 @@ def test_gate_rejects_qa_bot_in_dm() -> None:
 
 
 def test_participation_candidate_is_an_unmentioned_human_in_a_guild_thread() -> None:
-    assert is_participation_candidate(
-        may_turn_on=True,
-        author_is_bot=False,
-        bot_mentioned=False,
-        in_thread=True,
-        guild_id="g1",
-    ), "an unmentioned human message in a guild thread is what the feature screens"
+    assert _is_participation_candidate(), (
+        "an unmentioned human message in a guild thread is what the feature screens"
+    )
 
 
 def test_participation_candidate_is_refused_when_nothing_can_turn_it_on() -> None:
-    assert not is_participation_candidate(
-        may_turn_on=False,
-        author_is_bot=False,
-        bot_mentioned=False,
-        in_thread=True,
-        guild_id="g1",
-    ), "a disabled deployment must keep today's mention-only behaviour"
+    assert not _is_participation_candidate(may_turn_on=False), (
+        "a disabled deployment must keep today's mention-only behaviour"
+    )
 
 
 def test_participation_candidate_never_a_bot_and_never_a_mention() -> None:
-    assert not is_participation_candidate(
-        may_turn_on=True,
-        author_is_bot=True,
-        bot_mentioned=False,
-        in_thread=True,
-        guild_id="g1",
-    ), "bots never trigger organic turns, QA allow-list included"
-    assert not is_participation_candidate(
-        may_turn_on=True,
-        author_is_bot=False,
-        bot_mentioned=True,
-        in_thread=True,
-        guild_id="g1",
-    ), "a mention belongs to the mention path, not this one"
+    assert not _is_participation_candidate(author_is_bot=True), (
+        "bots never trigger organic turns, QA allow-list included"
+    )
+    assert not _is_participation_candidate(bot_mentioned=True), (
+        "a mention belongs to the mention path, not this one"
+    )
 
 
 def test_participation_candidate_only_in_guild_threads() -> None:
-    assert not is_participation_candidate(
-        may_turn_on=True,
-        author_is_bot=False,
-        bot_mentioned=False,
-        in_thread=False,
-        guild_id="g1",
-    ), "top-level channel messages are never screened"
-    assert not is_participation_candidate(
-        may_turn_on=True,
-        author_is_bot=False,
-        bot_mentioned=False,
-        in_thread=True,
-        guild_id=None,
-    ), "no guild means no tenant"
+    assert not _is_participation_candidate(in_thread=False), (
+        "top-level channel messages are never screened"
+    )
+    assert not _is_participation_candidate(guild_id=None), "no guild means no tenant"
 
 
 def test_hint_cooldown_allows_one_per_thread_per_window() -> None:
@@ -294,3 +240,35 @@ def test_plain_text_candidate_admits_a_person_naming_the_bot_in_a_guild() -> Non
 def test_plain_text_candidate_rejects(overrides: dict[str, object], why: str) -> None:
     """Only a person's unmentioned guild message that names the bot qualifies."""
     assert not _plain_text_candidate(**overrides), f"{why} must not be a candidate"  # type: ignore[arg-type]
+
+
+def test_answer_bots_lets_another_bots_mention_through_but_never_its_reply_or_our_own() -> None:
+    """`answer_bots` decides later; a reply could be another agent answering, so it never counts."""
+    other = partial(_should_process_message, author_is_bot=True, answer_bots=True)
+    assert other(author_id=OTHER_BOT_ID, bot_mentioned=True), "a mention reaches the agent check"
+    assert not other(author_id=OTHER_BOT_ID, bot_mentioned=False, reply_to_recorded_post=True), (
+        "a bot's reply to an answer is never answered"
+    )
+    assert not other(author_id=DAIMON_ID, bot_mentioned=True), "never itself"
+    assert not other(author_id=OTHER_BOT_ID, bot_mentioned=True, author_is_webhook=True), (
+        "never an agent posting through a webhook"
+    )
+
+
+@pytest.mark.parametrize(
+    ("typed", "is_reply", "to_other", "answered"),
+    [
+        (True, False, False, True),
+        (False, False, False, False),  # a reply-ping lists us in `mentions` but types nothing
+        (True, True, False, False),  # a reply to our own post, or one we cannot read
+        (True, True, True, True),
+        (False, True, True, False),
+    ],
+)
+def test_a_bot_is_answered_only_for_a_typed_mention_never_a_reply_to_our_post(
+    typed: bool, is_reply: bool, to_other: bool, answered: bool
+) -> None:
+    assert (
+        bot_message_answerable(typed_mention=typed, is_reply=is_reply, reply_to_other=to_other)
+        is answered
+    )

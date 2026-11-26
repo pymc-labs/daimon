@@ -39,6 +39,7 @@ from anthropic.types.beta.skill_list_response import SkillListResponse
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, Decision, Place, Subject, authorize
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -102,10 +103,13 @@ REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
 }
 
 
-def may_set_channel_skills(subject: Subject, channel_id: str) -> Decision:
-    """Whether `subject` may add or remove `channel_id`'s skills: server admins only. Pure."""
+def may_set_channel_skills(
+    policy: TenantAccessPolicy, subject: Subject, channel_id: str
+) -> Decision:
+    """Whether `subject` may add or remove `channel_id`'s skills: server admins only, and a
+    private channel's only from inside it (`sealed_outside`). Pure."""
     return authorize(
-        TenantAccessPolicy(),
+        policy,
         subject=subject,
         action=Action.SET_CHANNEL_SKILLS,
         place=Place(channel_id=channel_id),
@@ -361,6 +365,7 @@ async def add_skill_to_channel(
     actor_account_id: uuid.UUID | None,
     platform_skills: Mapping[str, Sequence[SkillRef]],
     surface: ChangeSurface,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> ChannelSkillRow | ChannelSkillRefusal:
     """Add `skill` to `channel_id` for whatever agent answers there now, or say why not.
 
@@ -373,7 +378,9 @@ async def add_skill_to_channel(
         session, context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id), default=default
     )
     agent = (
-        await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name=resolved.agent_name)
+        await find_agent_by_daimon_tag(
+            client, tenant_id=tenant_id, name=resolved.agent_name, records=records
+        )
         if resolved.agent_name
         else None
     )
@@ -444,6 +451,13 @@ def skill_room(agent: SkillHolder, platform_skills: Sequence[MaSkill] = ()) -> i
     """
     held = {skill.skill_id for skill in (*agent.skills, *platform_skills)}
     return max(0, AGENT_SKILL_CAP - len(held))
+
+
+def remove_label(shown: int, total: int) -> str:
+    """The label of a remove list that can tick only `shown` of a channel's `total` skills."""
+    if total <= shown:
+        return "Remove"
+    return f"Remove (first {shown} shown; remove some to reach the rest)"
 
 
 def platform_skill_refs(
@@ -562,8 +576,12 @@ async def turn_platform_skills(
                 else list_skills_lenient_cached(client, cache)
             )
             complete = not truncated
-        except (anthropic.APIError, SkillsListTruncatedError):
-            _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
+        except (anthropic.APIError, SkillsListTruncatedError) as error:
+            _log.warning(
+                "channel_skills.list_failed",
+                tenant_id=str(tenant_id),
+                causes=backend_refusal_causes(error),
+            )
     own = {skill.skill_id for skill in agent.skills}
     held = set(own)
     picked: list[MaSkill] = []
@@ -682,8 +700,12 @@ async def turn_channel_skills(
             # mount would escape the clash check: read it fresh.
             listed, truncated = await list_skills_lenient(client)
         bodies = None if truncated else _tenant_bodies(listed, tenant_id)
-    except (anthropic.APIError, SkillsListTruncatedError):
-        _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
+    except (anthropic.APIError, SkillsListTruncatedError) as error:
+        _log.warning(
+            "channel_skills.list_failed",
+            tenant_id=str(tenant_id),
+            causes=backend_refusal_causes(error),
+        )
         bodies = None
     wanted = applicable_skills(
         rows, agent=agent, agent_names=agent_names, bodies=bodies, platform_skills=platform_skills
@@ -713,6 +735,7 @@ __all__ = [
     "choose_channel_skill",
     "may_set_channel_skills",
     "platform_skill_refs",
+    "remove_label",
     "skill_room",
     "turn_channel_skills",
     "turn_platform_skills",

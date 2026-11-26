@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -45,9 +44,9 @@ from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.slack_notices import shown_text
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
@@ -114,7 +113,7 @@ def _build_runtime(
         billing_config=None,
         http_client=http_client or MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
         deployment_default=DeploymentDefault(),
     )
 

@@ -19,6 +19,7 @@ from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.outsiders import channel_outsiders
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
@@ -121,6 +122,7 @@ class PermissionsView(PanelViewBase):
         notice: str | None = None,
         visibility: OutsiderVisibility | None = None,
         internal_role_ids: tuple[str, ...] = (),
+        team_role_ids: tuple[str, ...] = (),
     ) -> None:
         super().__init__(state, runtime=runtime, allowed_user_id=allowed_user_id)
         container = build_permissions_container(
@@ -172,6 +174,19 @@ class PermissionsView(PanelViewBase):
         roles.callback = self._on_internal_roles  # type: ignore[method-assign]
         self.internal_roles_select = roles
         container.add_item(discord.ui.ActionRow(roles))
+        if internal_role_ids:
+            team: discord.ui.RoleSelect[discord.ui.LayoutView] = discord.ui.RoleSelect(
+                placeholder="Name your team roles",
+                min_values=0,
+                max_values=min(25, len(internal_role_ids)),
+                default_values=[
+                    discord.Object(id=int(role_id), type=discord.Role)
+                    for role_id in team_role_ids[:25]
+                ],
+            )
+            team.callback = self._on_team_roles  # type: ignore[method-assign]
+            self.team_roles_select = team
+            container.add_item(discord.ui.ActionRow(team))
         row.add_item(self.done_button())  # pyright: ignore[reportArgumentType]  # Button[Self] is the same runtime item
         container.add_item(row)
         self.add_item(container)
@@ -209,7 +224,11 @@ class PermissionsView(PanelViewBase):
                 readers=readers,
                 writers=writers,
                 # `refuse_if_not_admin` above checked the live role.
-                subject=build_subject(is_admin=True, platform_user_id=str(interaction.user.id)),
+                subject=build_subject(
+                    is_admin=True,
+                    platform_user_id=str(interaction.user.id),
+                    origin_channel_ids=interaction_origin(interaction),
+                ),
                 surface="panel",
                 default=self.runtime.deployment_default,
                 actor_account_id=state.account_id,
@@ -262,7 +281,9 @@ class PermissionsView(PanelViewBase):
         ) as session:
             await lock_access_policy(session, tenant_id=_tenant_id(self.state))
             policy = await load_access_policy(session, tenant_id=_tenant_id(self.state))
-            updated = policy.model_copy(update={"internal_role_ids": ids})
+            # A team role that is no longer internal leaves the team.
+            team = tuple(role for role in policy.team_role_ids if role in ids)
+            updated = policy.model_copy(update={"internal_role_ids": ids, "team_role_ids": team})
             await set_access_policy(session, tenant_id=_tenant_id(self.state), policy=updated)
         await self.swap_to(
             interaction,
@@ -272,6 +293,33 @@ class PermissionsView(PanelViewBase):
                 state=self.state,
                 allowed_user_id=self.allowed_user_id,
                 notice="Internal roles saved.",
+            ),
+        )
+
+    async def _on_team_roles(self, interaction: discord.Interaction) -> None:
+        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]
+            return
+        ids = tuple(str(role.id) for role in self.team_roles_select.values)
+        await interaction.response.defer()
+        async with policy_write_transaction(
+            self.runtime.sessionmaker, tenant_id=_tenant_id(self.state)
+        ) as session:
+            await lock_access_policy(session, tenant_id=_tenant_id(self.state))
+            policy = await load_access_policy(session, tenant_id=_tenant_id(self.state))
+            if not set(ids) <= set(policy.internal_role_ids):
+                notice = "Choose team roles from your internal roles."
+            else:
+                updated = policy.model_copy(update={"team_role_ids": ids})
+                await set_access_policy(session, tenant_id=_tenant_id(self.state), policy=updated)
+                notice = "Team roles saved."
+        await self.swap_to(
+            interaction,
+            await build_permissions_view(
+                interaction,
+                runtime=self.runtime,
+                state=self.state,
+                allowed_user_id=self.allowed_user_id,
+                notice=notice,
             ),
         )
 
@@ -330,7 +378,7 @@ async def build_permissions_view(
     if interaction.guild is not None:
         channel = interaction.guild.get_channel(state.channel_id)
         if isinstance(channel, discord.abc.GuildChannel):
-            visibility = await channel_outsiders(channel, policy.internal_role_ids)
+            visibility = channel_outsiders(channel, policy.internal_role_ids, policy.team_role_ids)
     return PermissionsView(
         state,
         runtime=runtime,
@@ -339,4 +387,5 @@ async def build_permissions_view(
         notice=notice,
         visibility=visibility,
         internal_role_ids=policy.internal_role_ids,
+        team_role_ids=policy.team_role_ids,
     )

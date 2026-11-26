@@ -6,21 +6,22 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.hosted_codec import SELFHOSTED
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn.selfhosted_codec import PROFILE
-from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, register_host
+from daimon.core.turn.selfhosted_host import HOST, SelfHostedHostRuntime
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
-from mux.contracts.resources import AgentSpec, SessionSpec
+from mux.contracts.resources import Agent, AgentSpec, SessionSpec
 from mux.drivers.selfhosted import DirectTransport, FoundryInvocationsTransport
 from mux.errors import ProviderError, ScopeViolation
 from mux.profiles.anthropic import MANAGED_AGENTS
@@ -29,17 +30,16 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    TypeAdapter,
-    ValidationError,
 )
 
 if TYPE_CHECKING:
     from daimon.core.config import SelfHostedSettings
+    from daimon.core.pricing import ProviderPrice
+    from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.tool_safety import ToolSafetyPolicy
     from mux.drivers.selfhosted import HarnessConfig
 
-_ROWS = TypeAdapter(list[dict[str, JsonValue]])
-_MAX_BYTES = 1_048_576
+PROFILE = SELFHOSTED.profile
 
 
 class EntraTokenProvider:
@@ -142,10 +142,15 @@ def merge_tool_policy(
 
 
 class SelfHostedDeployment(BaseModel):
-    """A credential-free operator grant for one exact channel configuration."""
+    """A credential-free operator grant for one exact channel configuration.
+
+    With `source_agent_id` it grants that agent's own configuration instead: the
+    agent's spec runs on the harness as `agent_id`, in `environment_id`, wherever
+    the row's platform, channel and account match (`"*"`: any). Never a channel pin.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    profile: Literal["selfhosted.loop"] = PROFILE
+    profile: Literal["selfhosted.loop"] = "selfhosted.loop"
     tenant_id: str = Field(min_length=1)
     platform: str = Field(min_length=1)
     channel_id: str = Field(min_length=1)
@@ -156,32 +161,42 @@ class SelfHostedDeployment(BaseModel):
     infrastructure_usd: Decimal = Field(ge=0, allow_inf_nan=False)
     max_tool_calls: int = Field(default=100, ge=0)
     deadline_s: float = Field(default=300, gt=0, allow_inf_nan=False)
+    source_agent_id: uuid.UUID | None = None
 
     @property
     def project(self) -> str:
         return self.tenant_id
 
+    def grants_agent_turn(
+        self, agent_id: uuid.UUID, *, platform: str, channel_id: str, account_id: str
+    ) -> bool:
+        return (
+            self.source_agent_id == agent_id
+            and self.platform in ("*", platform)
+            and self.channel_id in ("*", channel_id)
+            and self.account_id in ("*", account_id)
+        )
+
 
 def authorized_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not path:
-        return ()
-    try:
-        with Path(path).open("rb") as stream:
-            raw = stream.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            return ()
-        return tuple(
-            SelfHostedDeployment.model_validate(row)
-            for row in _ROWS.validate_json(raw)
-            if row.get("profile") == PROFILE and row.get("tenant_id") == tenant_id
-        )
-    except (OSError, ValidationError):
-        return ()
+    """The tenant's channel grants."""
+    return tuple(row for row in _all_deployments(tenant_id) if row.source_agent_id is None)
+
+
+def agent_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
+    """The tenant's per-agent grants."""
+    return tuple(row for row in _all_deployments(tenant_id) if row.source_agent_id is not None)
+
+
+def _all_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
+    from daimon.core.turn.runtime_manifest import tenant_deployments
+
+    return tenant_deployments(SelfHostedDeployment, PROFILE, tenant_id)
 
 
 def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedHostRuntime:
     from daimon.core.channel_backend import BackendUnsupported, check_backend
+    from daimon.core.ma_identity import derive_agent_uuid
 
     revision, scope = request.admission.backend_revision, request.scope
     if revision is None or revision.profile != PROFILE or revision.model is None:
@@ -190,18 +205,41 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         check_backend(revision)
     except BackendUnsupported as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
+    # The agent's own choice runs only on a row granting that agent, never a channel's.
+    agent_origin = request.admission.backend_revision_origin == "agent"
+    served = request.target_spec if agent_origin else None
+    if agent_origin and (served is None or request.admission.shared_owner is not None):
+        raise AdmissionDenied(reason="backend_unsupported")
+    source_agent_id = (
+        derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
+        if agent_origin
+        else None
+    )
     matches = tuple(
         deployment
-        for deployment in authorized_deployments(scope.tenant_id)
-        if deployment.platform == request.platform
-        and deployment.channel_id == revision.channel.channel_id
-        and deployment.account_id == scope.account_id
-        and deployment.config_digest == revision.content_digest()
+        for deployment in (
+            agent_deployments(scope.tenant_id)
+            if agent_origin
+            else authorized_deployments(scope.tenant_id)
+        )
+        if deployment.config_digest == revision.content_digest()
+        and (
+            deployment.grants_agent_turn(
+                source_agent_id,
+                platform=request.platform,
+                channel_id=revision.channel.channel_id,
+                account_id=scope.account_id,
+            )
+            if source_agent_id is not None
+            else deployment.platform == request.platform
+            and deployment.channel_id == revision.channel.channel_id
+            and deployment.account_id == scope.account_id
+        )
     )
     if len(matches) != 1:
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = matches[0]
-    if (
+    if not agent_origin and (
         request.admission.agent.id != deployment.agent_id
         or request.admission.environment.id != deployment.environment_id
     ):
@@ -221,8 +259,23 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     settings = load_settings()
     billing = settings.billing.selfhosted
     price = require_selfhosted_price(billing, revision.model)
+    from daimon.core.mux_backend import owner_turn_scope
+
+    # A shared thread's session is the thread owner's; its grant and credential stay the caller's.
+    shared = request.admission.shared_owner
+    turn_scope = owner_turn_scope(scope, str(shared) if shared is not None else None)
+
+    class ServedAgents(SelfHostedAgents):
+        """Serves the consented agent spec as the harness record's: an agent-origin turn."""
+
+        async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
+            live = await super().retrieve(scope, ref)
+            if ref != agent_ref or served is None:
+                return live
+            return live.model_copy(update={"spec": served})
+
     agents, environments = (
-        SelfHostedAgents(request.deps.sessionmaker),
+        (ServedAgents if agent_origin else SelfHostedAgents)(request.deps.sessionmaker),
         SelfHostedEnvironments(request.deps.sessionmaker),
     )
 
@@ -267,7 +320,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         raise ValueError("self-hosted MCP token requires a positive remaining turn deadline")
 
     def check(configured: ConfigRevision, authorized: Scope) -> None:
-        if configured != revision or authorized != scope:
+        if configured != revision or authorized not in (scope, turn_scope):
             raise ScopeViolation(
                 request.thread_id, "self-hosted runtime differs from admitted turn"
             )
@@ -277,6 +330,8 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         if preparation.admission.backend_revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
         check(preparation.admission.backend_revision, preparation.scope)
+        if source_agent_id is not None:
+            await _require_pinned_environment(preparation, source_agent_id, deployment)
         agent = await agents.retrieve(scope, agent_ref)
         environment = await environments.retrieve(scope, environment_ref)
         extension = environment.spec.native_config
@@ -364,6 +419,11 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             channel_skills=channel_rows,
             agent=agent,
         )
+        from daimon.core.connector_relay import harness_connectors
+        from daimon.core.features.snapshot import deployment_on
+
+        relay_on = deployment_on(settings, "mcp_connector_relay", request.platform)
+        relayed = frozenset(harness_connectors(agent.spec)) if relay_on else frozenset[str]()
         prepared_tools = await asyncio.to_thread(
             build_turn_tools,
             daimon_mcp_url=str(public_url),
@@ -376,6 +436,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             single_tenant=settings.selfhosted.single_tenant,
             mcp_allowed_http_hosts=settings.selfhosted.mcp_allowed_http_hosts,
             daimon_tools=toolset.daimon_tools,
+            relayed=relayed,
             # The driver compiles permissions from the original pinned spec;
             # this builder only resolves credential-free connection fields.
             mcp_servers=tuple(
@@ -437,6 +498,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     body["tool_policy"] = merge_tool_policy(original_policy, effective_host_policy)
                 from daimon.core.turn.persistence import current_persistence
                 from daimon.core.turn.selfhosted_tools import mint_turn_mcp_authorization
+                from daimon.core.turn.template_mcp import origin_read_only
                 from mux.contracts.ids import ResourceRef
 
                 active = current_persistence.get()
@@ -448,9 +510,9 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     provider="selfhosted",
                     account_scope_id=scope.tenant_id,
                     tenant_id=scope.tenant_id,
-                    account_id=scope.account_id,
+                    account_id=turn_scope.account_id,
                 )
-                active.check_session(scope, ref)
+                active.check_session(turn_scope, ref)
                 await admit_selfhosted_usage(
                     sessionmaker=request.deps.sessionmaker,
                     tenant_id=request.tenant_id,
@@ -475,6 +537,14 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         now=request.now(),
                         deadline_s=token_deadline_s,
                         slack_turn_context_id=request.admission.slack_turn_context_id,
+                        hold=request.admission.hold,
+                        seal_ids=request.admission.origin_seal_ids,
+                        memory_read_only=origin_read_only(request.admission),
+                        bind_session=bool(prepared_tools and prepared_tools.relayed),
+                        requester_account_id=request.admission.account_id
+                        if shared is not None
+                        else None,
+                        answering_agent_id=request.admission.agent.id if agent_origin else None,
                     )
 
             async def token_provider() -> str:
@@ -562,7 +632,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             binding = await store.get_binding(
                 Slot(
                     thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
-                    account_id=scope.account_id,
+                    account_id=None if shared is not None else scope.account_id,
                 )
             )
             if binding is None or binding.native_refs.get("session") != session_id:
@@ -625,7 +695,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             provider="selfhosted",
             account_scope_id=scope.tenant_id,
             tenant_id=scope.tenant_id,
-            account_id=scope.account_id,
+            account_id=turn_scope.account_id,
         )
         receipts: dict[str, UsageObservation] = {}
         events = wire.EventsResponse.model_validate(raw).events
@@ -661,7 +731,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         return ConfiguredTransport()
 
     def authorize(authorized: Scope, kind: str, id_: str | None) -> bool:
-        return authorized == scope and (
+        return authorized in (scope, turn_scope) and (
             kind == "session"
             or (kind, id_)
             in {
@@ -671,7 +741,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         )
 
     async def tools(authorized: Scope, spec: AgentSpec) -> TurnTools:
-        if authorized != scope or prepared_tools is None or spec != prepared_spec:
+        if authorized not in (scope, turn_scope) or prepared_tools is None or spec != prepared_spec:
             raise ScopeViolation(agent_ref.id, "self-hosted tools differ from admitted agent")
         return prepared_tools
 
@@ -757,8 +827,24 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         )
         return "Daimon: some skills are unavailable in this thread: " + details + "."
 
+    async def counterpart(preparation: ProviderPreparationRequest) -> AgentRevision:
+        from daimon.core.stores.neutral_catalog import AgentRevision
+
+        check_admitted = preparation.admission.backend_revision
+        if not agent_origin or check_admitted is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        check(check_admitted, preparation.scope)
+        agent = await agents.retrieve(scope, agent_ref)
+        return AgentRevision(
+            catalog_id="selfhosted:" + deployment.agent_id,
+            local_revision=agent.revision.local,
+            agent=agent,
+            principal_id=scope.principal_id,
+        )
+
     return SelfHostedHostRuntime(
         transport_factory=transport,
+        read_agent_counterpart=counterpart if agent_origin else None,
         journal=None,
         usage_store=None,
         account_scope_id=scope.tenant_id,
@@ -782,16 +868,33 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     )
 
 
-def register_runtime() -> None:
+def _tariffs() -> Mapping[tuple[str, str], ProviderPrice]:
     from daimon.core.config import load_billing_settings
     from daimon.core.selfhosted_usage import selfhosted_prices
-    from daimon.core.turn.runtimes import register_channel_runtime
 
-    register_host()
-    register_channel_runtime(
-        PROFILE,
-        build_selfhosted_runtime,
-        authorizations=authorized_deployments,
-        tariffs=lambda: selfhosted_prices(load_billing_settings().selfhosted),
-        fallback=True,
-    )
+    return selfhosted_prices(load_billing_settings().selfhosted)
+
+
+async def _require_pinned_environment(
+    request: ProviderPreparationRequest, agent_id: uuid.UUID, deployment: SelfHostedDeployment
+) -> None:
+    """The agent's consented revision pins the granted row's environment."""
+    from daimon.core.stores import mux_state
+
+    revision = request.admission.backend_revision
+    if revision is None:
+        raise AdmissionDenied(reason="backend_unsupported")
+    async with request.deps.sessionmaker() as session:
+        setting = await mux_state.get_config_agent_revision(session, revision, agent_id=agent_id)
+    pinned = setting if setting is not None else request.admission.backend_agent_revision
+    if pinned is None or pinned.environment != deployment.environment_id:
+        raise AdmissionDenied(reason="backend_unsupported")
+
+
+BACKEND = replace(
+    HOST,
+    runtime=build_selfhosted_runtime,
+    authorizations=authorized_deployments,
+    tariffs=_tariffs,
+    agent_grants=agent_deployments,
+)

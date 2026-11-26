@@ -579,13 +579,26 @@ async def test_a_purge_does_not_retry_an_error_that_is_not_a_lock_failure(
 async def test_the_migration_carries_the_guards_the_models_install(sm: Factory) -> None:
     import importlib.util
 
-    path = Path(__file__).parents[1] / "alembic/versions/0142_mux_account_erasure.py"
-    spec = importlib.util.spec_from_file_location("mux_account_erasure_guards", path)
-    assert spec is not None and spec.loader is not None
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
-    assert migration.GUARD_STATEMENTS == _erasure_guards.INSTALL
-    assert migration.GUARD_REMOVAL == _erasure_guards.REMOVE
+    for name, install, remove in (
+        ("0142_mux_account_erasure", _erasure_guards.INSTALL, _erasure_guards.REMOVE),
+        (
+            "0217_monitored_events",
+            _erasure_guards.MONITORING_INSTALL,
+            _erasure_guards.MONITORING_REMOVE,
+        ),
+        (
+            "0224_ops_events",
+            _erasure_guards.OPS_EVENTS_INSTALL,
+            _erasure_guards.OPS_EVENTS_REMOVE,
+        ),
+    ):
+        path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
+        spec = importlib.util.spec_from_file_location(f"guards_{name}", path)
+        assert spec is not None and spec.loader is not None
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        assert install == migration.GUARD_STATEMENTS, f"{name} drifted from the models"
+        assert remove == migration.GUARD_REMOVAL, f"{name} removal drifted from the models"
     async with sm() as session:
         triggers = set(
             await session.scalars(

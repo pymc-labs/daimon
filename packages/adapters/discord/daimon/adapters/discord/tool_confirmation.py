@@ -17,12 +17,14 @@ import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
@@ -61,6 +63,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     save_always_allow,
     snapshot_tool_rule,
 )
+from daimon.core.turn.output import audience_output_check
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -168,6 +171,9 @@ class _ConfirmationView(discord.ui.LayoutView):
         #: The posted card's ordering key for `edit_card_within`; set once the
         #: card is sent, before anyone can click it.
         self.card_key: object = ("discord-view", id(self))
+        #: The room-audience check (`audience_hold`), set with the card: its edit on an answer
+        #: carries the agent's text again.
+        self.audience_check: AudienceCheck | None = None
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
             accent_colour=discord.Colour(
                 COLOR_AMBER
@@ -245,7 +251,11 @@ class _ConfirmationView(discord.ui.LayoutView):
             return
         await interaction.response.defer()
         try:
-            subject = await self._rule_subject(clicker)
+            # Where the click came from is the origin; the card never names it.
+            subject = replace(
+                await self._rule_subject(clicker),
+                origin_channel_ids=interaction_origin(interaction),
+            )
             scope = allowed_rule_scope(reference, subject)
         except Exception:
             scope = None
@@ -381,6 +391,15 @@ class _ConfirmationView(discord.ui.LayoutView):
             return
         # Answered: nothing on this card listens any more.
         self.stop()
+        if self.audience_check is not None and not await _audience_allows(self.audience_check):
+            # The room became one outsiders can read: the card keeps what it showed.
+            self.answered_edit_done.set()
+            await interaction.response.send_message(
+                embed=build_notice_embed(AUDIENCE_CARD_NOTE),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         answered = build_confirmation_card(
             self._prompt,
             state=answer,
@@ -463,6 +482,8 @@ def discord_confirmation_hook(
     counts as no admin.
     """
 
+    card_check = _card_audience_check(channel, runtime, tenant_id, admission)
+
     async def role_guild() -> discord.Guild | None:
         if isinstance(channel, (discord.Thread, discord.TextChannel)):
             return channel.guild
@@ -476,7 +497,11 @@ def discord_confirmation_hook(
         return await tenant_guild(client, runtime.sessionmaker, tenant_id)
 
     if runtime is not None:
-        from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+        from daimon.core.channel_backend import (
+            NO_CAPTURE,
+            backend_selection_enabled,
+            make_backend_service,
+        )
 
         if backend_selection_enabled(runtime.settings.turn):
             from daimon.adapters.discord.bot import requester_role
@@ -494,57 +519,15 @@ def discord_confirmation_hook(
                 role, _ = await requester_role(guild, clicker)
                 return role is Role.ADMIN
 
-            async def current_admin(clicker: str) -> bool:
-                guild = await role_guild()
-                if guild is None:
-                    return False
-                role, _roles = await requester_role(guild, clicker)
-                async with runtime.sessionmaker() as session:
-                    subject = await load_live_subject(
-                        session,
-                        tenant_id=tenant_id,
-                        platform="discord",
-                        caller=AdminCaller(
-                            platform_user_id=clicker,
-                            is_server_admin=role is Role.ADMIN,
-                            role_ids=tuple(_roles),
-                        ),
-                        action=DelegatedAction.AGENT_SETTINGS,
-                    )
-                return subject.is_admin
-
-            from daimon.core.turn.admission import capture_admitted_backend_source
-
-            capture = partial(
-                capture_admitted_backend_source,
-                runtime.turn_deps,
-                admission=admission,
-                tenant_id=tenant_id,
-                account_id=account_id,
-                platform="discord",
-            )
-
+            # The admin cards set the allowed providers or clear a pin: no agent source.
             prepare_admin, check_admin = backend_switch_callbacks(
                 make_backend_service(
-                    runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                    runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
                 ),
                 sessionmaker=runtime.sessionmaker,
-                anthropic=runtime.anthropic,
                 tenant_id=tenant_id,
                 account_id=account_id,
-                current_admin=current_admin,
                 current_platform_admin=current_platform_admin,
-                answering_agent_name=(
-                    getattr(getattr(admission, "config", None), "agent_name", None)
-                ),
-                default_agent_name=runtime.deployment_default.agent_name,
-                place_word="server",
-                # A hand-off earlier in this thread decides whose conversation moves.
-                handoff_thread=(
-                    ("discord", str(channel.parent_id), str(channel.id))
-                    if isinstance(channel, discord.Thread)
-                    else None
-                ),
                 # A channel-pin card clears only the channel this turn runs in.
                 pin_channel=ChannelRef(
                     tenant_id=str(tenant_id),
@@ -647,6 +630,8 @@ def discord_confirmation_hook(
             how="once" if prompt.tool_rules_enabled else None,
         )
         try:
+            if card_check is not None:
+                await card_check()
             message = await channel.send(
                 view=_ConfirmationView(answered, prompt, answer=None, note=qa.NOTE),
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -661,7 +646,7 @@ def discord_confirmation_hook(
 
         async def retire_unsent() -> None:
             view.retired = True
-            await _retire(message, prompt, "stopped", note=qa.NOTE)
+            await _retire(message, prompt, "stopped", note=qa.NOTE, check=card_check)
 
         return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
 
@@ -685,12 +670,16 @@ def discord_confirmation_hook(
         )
         if (approved := await _qa_auto_approve(view, prompt)) is not None:
             return approved
+        if card_check is not None:
+            # The card carries what the agent wrote: it takes the same gate as an answer.
+            await card_check()
+        view.audience_check = card_check
         message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         view.card_key = ("discord", message.id)
 
         async def retire(state: ConfirmationCardState) -> None:
             view.retired = True
-            await _retire(message, prompt, state)
+            await _retire(message, prompt, state, check=card_check)
 
         async def remind() -> None:
             # Once, after a while: the requester is pinged in the card's own thread.
@@ -728,13 +717,67 @@ def discord_confirmation_hook(
     return _confirm
 
 
+AudienceCheck = Callable[[], Awaitable[None]]
+
+AUDIENCE_CARD_NOTE = (
+    "People outside the team can now read this channel, so this card was not updated."
+)
+
+
+async def _audience_allows(check: AudienceCheck) -> bool:
+    """False when the card's room may no longer take the agent's text, or cannot be checked."""
+    try:
+        await check()
+    except Exception as exc:
+        log.info("tool_confirmation.audience_refused", error_type=type(exc).__name__)
+        return False
+    return True
+
+
+def _card_audience_check(
+    channel: discord.abc.Messageable,
+    runtime: DiscordRuntime | None,
+    tenant_id: uuid.UUID | None,
+    admission: Admission | None,
+) -> AudienceCheck | None:
+    """The room-audience check (`audience_hold`) for cards posted into `channel`, the turn's room.
+
+    None where there is no room to check, or no turn to hold: a direct message, and a hook
+    built without its runtime, tenant or admission.
+    """
+    if runtime is None or tenant_id is None or admission is None:
+        return None
+    # A hand-built admission has no mode: it is off, like a server that never set it.
+    if getattr(admission, "audience_mode", "off") == "off":
+        return None
+    if isinstance(channel, discord.Thread):
+        room, thread = str(channel.parent_id), str(channel.id)
+    elif isinstance(channel, discord.TextChannel):
+        room, thread = str(channel.id), None
+    else:
+        return None
+    return audience_output_check(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id=room,
+        thread_id=thread,
+        hold=admission.hold,
+        agent=admission.agent.name,
+        mode=admission.audience_mode,
+    )
+
+
 async def _retire(
     message: discord.Message,
     prompt: ConfirmationPrompt,
     state: ConfirmationCardState,
     *,
     note: str | None = None,
+    check: AudienceCheck | None = None,
 ) -> None:
+    if check is not None and not await _audience_allows(check):
+        return  # the room is one outsiders can read now: the card keeps what it showed
     card = build_confirmation_card(prompt, state=state)
     # Bounded for the turn, finished in the background (`edit_card_within`).
     await edit_card_within(

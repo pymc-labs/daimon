@@ -10,8 +10,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import Settings
+from daimon.core.privacy import delete_scope_lines
 from daimon.core.stores import mcp_tokens, web_identities, web_people
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import WebPersonRow
 from daimon.testing.turn_router import build_turn_router
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -139,9 +142,19 @@ async def test_the_last_sign_in_stays_and_a_spare_can_go(rig: Rig) -> None:
 
 
 async def test_deleting_needs_the_name_and_the_setting(rig: Rig) -> None:
-    async with rig.open() as (client, _):
+    async with rig.open() as (client, ws):
+        async with rig.factory() as db:
+            await set_access_policy(
+                db,
+                tenant_id=ws.tenant_id,
+                policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai")),
+            )
+            await db.commit()
         preview = (await client.get("/api/profile/delete")).json()
         assert preview["enabled"] is True and preview["held"], f"the preview lists data: {preview}"
+        assert preview["scope"] == list(delete_scope_lines("Daimon", ("openai",))), (
+            "the dialog names the providers the chat panels name"
+        )
         wrong = await client.post("/api/profile/delete", json={"confirm": "Bob"})
         assert wrong.status_code == 422, f"a wrong name deletes nothing: {wrong.text}"
     async with rig.open(delete_enabled=False) as (client, _):

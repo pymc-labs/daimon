@@ -338,10 +338,11 @@ def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
             " Gemini.",
         ),
         (
-            "re_confirm",
+            "tool_limits",
             "gemini",
-            "churn-explorer's model-provider switch needs to be confirmed again.",
-            "In a new conversation, ask churn-explorer to switch to Gemini again, then Confirm.",
+            "This server limits the agent's tools, and Gemini can't apply that limit.",
+            'Ask an admin to turn those tools back on, or to say "switch churn-explorer to'
+            ' Anthropic".',
         ),
     ],
 )
@@ -356,7 +357,7 @@ def test_an_unattributed_provider_refusal_never_blames_the_channel():
     rendered = admission_refusal_text("backend_unsupported", _NOUNS)
     assert "channel" not in rendered
     assert rendered == (
-        "This agent's model provider isn't available here right now.\n\n"
+        "This agent's model provider can't run this conversation here.\n\n"
         "Ask an admin to check which provider this agent uses."
     )
 
@@ -382,6 +383,11 @@ def test_a_full_gemini_hold_ledger_reads_as_busy_in_plain_words() -> None:
             "quota_zero",
             "Gemini 4 Argon isn't available on this server's Google plan.",
             "Pick another model or ask an admin to upgrade it.",
+        ),
+        (
+            "quota_daily",
+            "Today's Google quota for Gemini 4 Argon is used up.",
+            "It refills daily; use another model until then, or ask an admin to raise it.",
         ),
         (
             "quota_exhausted",
@@ -433,7 +439,7 @@ def test_a_sealed_selfhosted_conversation_says_to_start_a_new_one(
     """The harness seals a conversation whose tools would not stop. Its errored
     root, live or replayed, keeps that reason up to the error card."""
     from daimon.core.errors import TurnError
-    from daimon.core.turn.selfhosted_io import root_failed
+    from daimon.core.turn.hosted_io import root_failed
     from daimon.core.turn.termination import termination_reason
 
     cause = root_failed(native_reason)

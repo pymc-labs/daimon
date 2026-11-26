@@ -20,7 +20,7 @@ from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import create_origin, mark_serving_helpers
 from daimon.testing.factories import make_account, make_tenant, make_web_person
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec
@@ -28,6 +28,8 @@ from mux.profiles.selfhosted import LOOP
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 
 class _World:
@@ -88,19 +90,15 @@ async def _setup(
     world = _World(sessionmaker)
     for agent_id, name in (("ag_lead", "lead"), ("ag_argon", "argon"), ("ag_other", "other")):
         world.agents.append(
-            ma_agent(
+            ma_agent_payload(
                 id=agent_id,
                 name=name,
                 description="Reads papers" if name == "argon" else None,
                 metadata={MA_METADATA_KEY_TENANT: str(tenant.id), MA_METADATA_KEY_NAME: name},
-            ).model_dump(mode="json")
+            )
         )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="slack",
-        chat_session_id="test-session",
+    auth = auth_identity(
+        account.id, tenant.id, role=Role.USER, platform="slack", chat_session_id="test-session"
     )
     return world, auth, origin
 
@@ -396,3 +394,33 @@ async def test_an_ask_refuses_files_it_cannot_pass(
             wait=False,
             files=[handle],
         )
+
+
+async def test_an_agent_without_native_multiagent_asks_fresh_copies_of_itself(
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    world, auth, origin = await _setup(db_session, committing_sessionmaker, serving=False)
+    async with committing_sessionmaker.begin() as session:
+        await mark_serving_helpers(session, origin_id=origin.id, self_helpers=True)
+    runtime = world.runtime()
+
+    listed = await tool._list_helpers_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(origin.id)
+    )
+    asks = [
+        await tool._ask_helper_impl(  # pyright: ignore[reportPrivateUsage]
+            runtime, auth, origin_context_id=str(origin.id), helper="self", message=part, wait=False
+        )
+        for part in ("first half", "second half")
+    ]
+
+    assert [h.name for h in listed.helpers] == ["self", "argon"]
+    async with committing_sessionmaker() as session:
+        rows = await helper_asks.list_asks(
+            session,
+            tenant_id=auth.tenant_id,
+            origin_id=origin.id,
+            ids=[uuid.UUID(a.ask_id) for a in asks],
+        )
+    assert {(row.helper_agent_id, row.helper_name) for row in rows} == {("ag_lead", tool.COPY_NAME)}
+    assert len(rows) == 2

@@ -11,8 +11,10 @@ import binascii
 import ipaddress
 import json
 import os
+import re
 import ssl
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +22,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from daimon.core.anthropic_guard import ANTHROPIC_UNCONFIGURED_PLACEHOLDER
 from daimon.core.features.registry import FEATURES, deployment_key, parse_deployment
 from daimon.core.features.removed import without_removed_features, without_removed_fields
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
@@ -98,15 +101,6 @@ class DatabaseSettings(BaseModel):
             "preparations wait in memory instead of timing out in the DB pool."
         ),
     )
-
-
-ANTHROPIC_UNCONFIGURED_PLACEHOLDER = "sk-ant-unconfigured-openai-only-deployment"
-"""Never a valid credential. `AnthropicSettings.resolved_api_key()` returns
-this when no real key is configured, so every `AsyncAnthropic` client in the
-app can keep its existing non-optional constructor call: an OpenAI-only
-deployment that never exercises the Anthropic/default path never notices,
-and one that accidentally does gets a clean 401 instead of a crash at
-startup or a scattered `Optional` check at every call site."""
 
 
 class AnthropicSettings(BaseModel):
@@ -794,10 +788,10 @@ class DiscordSettings(BaseModel):
         ge=1,
         description=(
             "Minimum age in seconds before Discord can retire a card after definite "
-            "recovery failure or repeated failed recovery passes. Must be at least the turn "
-            "ceiling plus 15 minutes. Recovery runs at startup and periodically, "
-            "and deletes a known "
-            "pending card when the bot has Manage Messages permission."
+            "recovery failure or repeated failed recovery passes. Must be at least the longest "
+            "turn time limit (180 minutes) plus 15 minutes. Recovery runs at startup and "
+            "periodically, and deletes a known pending card when the bot has Manage Messages "
+            "permission."
         ),
     )
     turn_card_unrecoverable_after_attempts: int = Field(
@@ -814,11 +808,13 @@ class DiscordSettings(BaseModel):
     def _stale_card_age_exceeds_turn_ceiling(cls, age_s: int) -> int:
         # Import after config is initialized: turn.__init__ imports admission,
         # which imports config, so a module-level import would form a cycle.
-        from daimon.core.turn.ceiling import TURN_CEILING_S
+        from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 
-        if age_s < TURN_CEILING_S + 15 * 60:
+        # A card's turn may run to the longest time limit; it is not stale before that.
+        if age_s < LONGEST_TURN_CEILING_S + 15 * 60:
             raise ValueError(
-                "turn card unrecoverable age must be at least turn ceiling plus 15 minutes"
+                "turn card unrecoverable age must be at least the longest turn time limit "
+                "plus 15 minutes"
             )
         return age_s
 
@@ -1629,9 +1625,9 @@ class SelfHostedSettings(BaseModel):
 
 
 class GeminiSettings(BaseModel):
-    """Optional Gemini API credentials for media MCP tools.
+    """Gemini media-tool credentials and stored-conversation retention.
 
-    When unset, the media tools skip registration so the ``mcp`` process
+    When the key is unset, the media tools skip registration so the ``mcp`` process
     boots without them.
     """
 
@@ -1639,6 +1635,14 @@ class GeminiSettings(BaseModel):
         default=None,
         description=(
             "Gemini API key used by media-generation MCP tools. Tools are unregistered when unset."
+        ),
+    )
+    records_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a Gemini conversation may sit idle before the scheduler prunes its stored "
+            "history. A thread that comes back after that starts a new conversation."
         ),
     )
 
@@ -1817,6 +1821,36 @@ class SelfhostedBillingSettings(BaseModel):
         return self
 
 
+class ProviderDailyCeilingSettings(BaseModel):
+    """The most every tenant together may spend each UTC day on one model provider.
+
+    Each tenant's own daily model cap bounds one tenant; tenants are free to create,
+    so only this bounds the deployment's provider bill. The default, $200, lets ten
+    tenants each use up a $20 model cap in a day and holds the worst case near $6,000
+    a month per provider. Checked with the daily model cap as each turn starts, from
+    today's observed usage at list price, re-read at most once a minute per worker.
+    """
+
+    openai: Decimal = Field(
+        default=Decimal("200"),
+        ge=0,
+        description=(
+            "Most all tenants together may spend each UTC day on OpenAI, in provider "
+            "USD at list price. Once reached, OpenAI turns are refused until midnight "
+            "UTC. 0 allows no OpenAI turns."
+        ),
+    )
+    gemini: Decimal = Field(
+        default=Decimal("200"),
+        ge=0,
+        description=(
+            "Most all tenants together may spend each UTC day on Gemini, in provider "
+            "USD at list price. Once reached, Gemini turns are refused until midnight "
+            "UTC. 0 allows no Gemini turns."
+        ),
+    )
+
+
 class BillingSettings(BaseModel):
     """Money policy: markup multiplier and trial credit seed.
 
@@ -1828,8 +1862,8 @@ class BillingSettings(BaseModel):
     markup: Decimal = Field(
         default=Decimal("1.0"),
         description=(
-            "Multiplier applied to raw Anthropic usage cost before billing "
-            "the tenant. 1.0 = pass-through."
+            "Multiplier applied to raw provider usage cost (every provider) before "
+            "billing the tenant. 1.0 = pass-through."
         ),
     )
     selfhosted: SelfhostedBillingSettings = Field(default_factory=SelfhostedBillingSettings)
@@ -1848,11 +1882,11 @@ class BillingSettings(BaseModel):
         description=(
             "Most a tenant may spend each UTC day on any one Gemini model, in provider "
             "USD at list price, counted across every agent turn. A "
-            "Gemini agent turn has no token envelope and its usage reaches no ledger "
-            "debit, so this is the guard. Checked as each turn starts, for "
+            "Gemini agent turn has no token envelope and its usage is debited only "
+            "once measured, so this is the guard. Checked as each turn starts, for "
             "its first request's model and any Flash fallback of it, never mid-turn; "
-            "a model with no current tariff is refused, and an unpriced fallback never "
-            "runs. It resets at midnight UTC. 0 allows no Gemini turns."
+            "a model with no current tariff never runs on any request. It resets at "
+            "midnight UTC. 0 allows no Gemini turns."
         ),
     )
     openai_daily_model_cap_usd: Decimal = Field(
@@ -1870,43 +1904,35 @@ class BillingSettings(BaseModel):
 
 
 class SupportSettings(BaseModel):
-    """Human-support escalation: where requests land, and how many each user gets.
+    """Ask a person: the default channel per platform, and each person's default credits.
 
-    `credits_per_user` is a COUNT of human interactions, deliberately not the
-    USD in `BillingSettings.signup_credit`. Sharing a ledger with billing would
-    let a support request eat the tenant's ability to run turns, and would give
-    a paid-up tenant unlimited support. Different unit, different table.
+    Support credits are their own unit, not the USD in `BillingSettings.signup_credit`:
+    sharing billing's ledger would let a request eat a tenant's turns and give a paid-up
+    tenant unlimited support. A request is charged to the most specific place with a
+    support limit, else to the person's default credits.
 
-    Each platform's requests go only to its own channel: Discord's to
-    `escalation_channel_id`, Slack's to `slack_escalation_channel_id`, Teams'
-    to `teams_escalation_channel_id`. An unset channel disables the affordance
-    it serves entirely rather than recording requests nobody will ever see.
-    Failing closed is the honest behaviour: an escalate button that reaches no
-    one is worse than no button, because the person believes they have asked
-    for help. Every platform spends the same per-user, per-tenant allowance
-    from one ledger.
+    Each platform's requests go to its own default channel, or to a channel the
+    workspace picked while `support_own_channel` is on. With neither, Ask a person is
+    unavailable there: a button that reaches no one is worse than none.
     """
 
     escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Discord channel id where human-support requests from Discord are "
-            "posted (the unprefixed name predates per-platform channels). A Teams "
-            "id (`19:…`) left here is ignored. Unset (the default) disables the "
-            "escalate affordance on Discord — a request that reaches nobody is "
-            "worse than no button at all. A channel rather than operator DMs: it "
-            "survives one person's DMs being closed, and it leaves a shared "
-            "record anyone on the rota can pick up. The bot must be able to post "
-            "there."
+            "Default Discord channel id for Ask a person requests from Discord (the "
+            "unprefixed name predates per-platform channels). A Teams id (`19:…`) left "
+            "here is ignored. A workspace may pick its own channel instead while "
+            "support_own_channel is on. Unset, with no own channel, Ask a person is "
+            "unavailable on Discord. The bot must be able to post there."
         ),
     )
     slack_escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Slack channel id where human-support requests from Slack are "
-            "posted. Unset (the default) disables the Ask the team button on "
-            "Slack. Slack requests never go to another platform's channel, nor "
-            "theirs here. The bot must be a member of the channel."
+            "Default Slack channel id for Ask a person requests from Slack. A workspace "
+            "may pick its own channel instead while support_own_channel is on. Unset, "
+            "with no own channel, Ask a person is unavailable on Slack. Requests never "
+            "go to another platform's channel. The bot must be a member of the channel."
         ),
     )
     slack_escalation_team_id: str | None = Field(
@@ -1922,13 +1948,24 @@ class SupportSettings(BaseModel):
     teams_escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Teams channel id (`19:…`) where human-support requests from Teams are "
-            "posted. Unset (the default) disables Ask a person on Teams. Teams "
-            "requests never go to the Discord or Slack channel, nor theirs here. "
-            "The Teams bot must be a member of the channel's team (and of the "
-            "channel, if it is private)."
+            "Default Teams channel id (`19:…`) for Ask a person requests from Teams. A "
+            "workspace may pick its own channel instead while support_own_channel is on. "
+            "Unset, with no own channel, Ask a person is unavailable on Teams. Requests "
+            "never go to another platform's channel. The Teams bot must be a member of "
+            "the channel's team (and of the channel, if it is private)."
         ),
     )
+
+    def channel_for(self, platform: str) -> str | None:
+        """The default request channel on `platform`; another platform's id counts as unset."""
+        channel = {
+            "discord": self.escalation_channel_id,
+            "slack": self.slack_escalation_channel_id,
+            "teams": self.teams_escalation_channel_id,
+        }.get(platform)
+        if not channel or channel.startswith("19:") != (platform == "teams"):
+            return None
+        return channel
 
     @field_validator("teams_escalation_channel_id")
     @classmethod
@@ -1946,45 +1983,38 @@ class SupportSettings(BaseModel):
         default=20,
         ge=0,
         description=(
-            "How many human-support requests each user gets within a tenant. "
-            "A COUNT of interactions, NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — "
-            "the two are deliberately separate ledgers. 0 disables escalation."
+            "Default support credits each person gets within a workspace, spent where no "
+            "support limit applies. A request costs its menu option's price, one credit "
+            "on the default menu. Not the USD in DAIMON_BILLING__SIGNUP_CREDIT. 0 leaves "
+            "Ask a person to places with a support limit."
         ),
     )
     feedback_to_support: dict[uuid.UUID, bool] = Field(
         default_factory=dict[uuid.UUID, bool],
         description=(
-            "Per-tenant switch, keyed by tenant UUID: true also posts every submitted "
-            '\N{THUMBS DOWN SIGN} "What went wrong?" form (the reasons, the text, the '
-            "person, the agent and a link to the answer) to the channel Ask a human "
-            "posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack, "
-            "DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord and "
-            "DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID for Teams. "
-            "Missing/false (the default) keeps the form in the database only. The form "
-            "tells the person their answers are shared when it is on. Spends no "
-            "support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object."
+            "Deprecated: the support_feedback feature replaces it, and "
+            "`daimon features import-env` stores this map as workspace settings. Per-tenant "
+            "switch, keyed by tenant UUID: true also posts every submitted "
+            '\N{THUMBS DOWN SIGN} "What went wrong?" form to where Ask a person requests go. '
+            "A workspace setting beats it. "
+            "Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object."
         ),
     )
 
-    def routes_feedback(self, tenant_id: uuid.UUID) -> bool:
-        """Whether this tenant's submitted 👎 forms also go to the support channel."""
-        return self.feedback_to_support.get(tenant_id) is True
-
 
 class TurnSettings(BaseModel):
-    """Neutral turn ports. mux and backend selection are on by default.
+    """Neutral turn ports. Backend selection is on by default.
 
-    `path`, `channel_backends` and `agent_backends` are emergency stops, not setup:
-    a fresh install needs none of them. Setting one off stops new turns at
+    `channel_backends` and `agent_backends` are emergency stops, not setup:
+    a fresh install needs neither. Setting one off stops new turns at
     admission and queued or retried work before it is sent again.
     """
 
-    path: Literal["legacy", "mux"] = Field(
+    path: Literal["mux"] = Field(
         default="mux",
         description=(
-            "Turn I/O path. mux (the default) runs turns through the neutral "
-            "Events/Sessions ports. Emergency stop only: legacy returns every turn "
-            "to the Managed Agents-only path."
+            "Deprecated, no effect: every turn runs through the neutral Events/Sessions "
+            "ports. The legacy value was removed and fails at startup; remove the variable."
         ),
     )
 
@@ -2015,6 +2045,8 @@ class TurnSettings(BaseModel):
     @classmethod
     def _empty_path_is_the_default(cls, value: object) -> object:
         # An empty value is how compose passes an unset variable: the default, not a stop.
+        if value == "legacy":
+            raise ValueError("the legacy turn path was removed; unset DAIMON_TURN__PATH")
         return "mux" if value == "" else value
 
 
@@ -2276,18 +2308,84 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+def env_dm_policy(
+    policies: Mapping[uuid.UUID, DirectMessagePolicy], tenant_id: uuid.UUID
+) -> DirectMessagePolicy:
+    """A workspace's deprecated env DM policy; `members` (no limit) when it has none."""
+    return policies.get(tenant_id, DirectMessagePolicy())
+
+
+def env_admits(
+    policies: Mapping[uuid.UUID, DirectMessagePolicy], tenant_id: uuid.UUID, user_id: str
+) -> bool:
+    """Whether `DAIMON_DIRECT_MESSAGE_POLICIES` lets `user_id` have a private message here.
+
+    The one env rule. Every path applies it with the stored access, inbound, agent-sent
+    and explain alike, so the stricter wins until the env value is removed.
+    """
+    return env_dm_policy(policies, tenant_id).allows(user_id)
+
+
 class SignedIdentityServer(BaseModel):
-    """One remote MCP server that receives a signed caller identity on every request."""
+    """One remote MCP server reached through the identity relay.
+
+    `auth="signed"` sends a short-lived signed caller identity on every request.
+    `auth="bearer"` sends one configured key instead, for a server that attributes
+    writes to the requester (`requester_meta`) but trusts the key rather than a
+    signature. A bearer key is one shared credential, so such a server must name its
+    workspaces and agents.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
     url: str
-    issuer: str = Field(min_length=1)
-    audience: str = Field(min_length=1)
+    auth: Literal["signed", "bearer"] = "signed"
+    issuer: str = ""
+    audience: str = ""
     # Servers are deployment-wide: without a list any workspace's agents may use one.
     workspaces: frozenset[str] | None = None
     ca_certificate: str | None = None
+    requester_meta: bool = False
+    agents: tuple[str, ...] = ()
+    # True: the server answers with what the channel's readers can read, so an agent
+    # using it stays in its channel (`daimon.core.relay_scope`). False: the server checks
+    # each call's asker and place itself, so the agent behaves like any other.
+    channel_scoped: bool = True
+    # Tools whose call, in a person's turn, carries a wake link the server posts to
+    # when the work it started ends (`daimon.adapters.mcp.identity_relay._wake_link`).
+    wake_tools: frozenset[str] = frozenset()
+    # Also name the person on an agent-chat turn they started signed in to the hub, as
+    # requester kind `agent_chat`. Off by default: a server that does not know the kind
+    # may refuse every call that carries it.
+    agent_chat_requester: bool = False
+
+    @model_validator(mode="after")
+    def _wake_needs_requester(self) -> SignedIdentityServer:
+        if self.wake_tools and not self.requester_meta:
+            raise ValueError("wake_tools needs requester_meta")
+        if self.agent_chat_requester and not self.requester_meta:
+            raise ValueError("agent_chat_requester needs requester_meta")
+        return self
+
+    @model_validator(mode="after")
+    def _auth_fields(self) -> SignedIdentityServer:
+        if self.auth == "signed":
+            if not self.issuer or not self.audience:
+                raise ValueError("a signed server needs an issuer and an audience")
+            return self
+        if self.issuer or self.audience:
+            raise ValueError("a bearer server takes no issuer or audience")
+        if not self.workspaces or not self.agents:
+            raise ValueError("a bearer server needs workspaces and agents")
+        return self
+
+    @field_validator("agents")
+    @classmethod
+    def _agent_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not name for name in value):
+            raise ValueError("agents must be non-empty names")
+        return value
 
     @field_validator("url")
     @classmethod
@@ -2340,23 +2438,64 @@ class McpIdentitySettings(BaseModel):
             "request with a short-lived EdDSA token naming the agent, the workspace and, "
             "for a person's turn, who asked, the channel and the message. Daimon names the "
             "asker only while that person's turn is live in the calling session's thread. "
-            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the "
-            "same server policy without the signing key. Default: [] (off)."
+            'A server may instead set auth to "bearer": Daimon then sends the key from '
+            "DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, and workspaces and "
+            "agents (agent names that may use it) are required. Set requester_meta to true "
+            "for a server that attributes writes to the requester: Daimon removes any "
+            "requester fields the caller supplied and stamps each tool call with who it is "
+            "for and where: the asker while their turn is live, or the person an unattended "
+            "run acts for. "
+            "Set agent_chat_requester to true as well for a server that accepts "
+            'requester_kind "agent_chat": a turn a person started through the MCP hub, '
+            "signed in with their platform login, then names that person with no place. "
+            "Turns started with an agent, coding or CLI key name nobody. "
+            "An agent using a server stays in its channel with no long-term memory, a fresh "
+            "session per channel turn and no handoffs, because the server answers with what "
+            "the channel's readers can read. Set channel_scoped to false for a server that "
+            "checks each call's asker and place itself: its agents then get their normal "
+            "memory and sessions, so what they learn can surface in their other channels. "
+            "A requester_meta server may list wake_tools: a person's call to one carries "
+            "params._meta.wake_url, a private callback watch link for that conversation; "
+            "each POST of the work's outcome to it wakes the conversation once. Each call "
+            "gets its own link to one watch per conversation, which lasts a day after the "
+            "latest call. Needs the watches feature and DAIMON_WATCHES__CALLBACK_BASE_URL. "
+            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is "
+            "signed; chat workers use the same server policy without the signing key. "
+            "Default: [] (off)."
         ),
     )
 
-    @field_validator("servers", mode="before")
+    bearers: Annotated[dict[str, SecretStr], NoDecode] = Field(
+        default_factory=dict[str, SecretStr],
+        description=(
+            'Keys for the servers whose auth is "bearer", by server name: a JSON object '
+            'such as {"tools": "<key>"}. Kept apart from '
+            "DAIMON_MCP_IDENTITY__SERVERS so the key is set as a secret. Daimon sends the "
+            "key as the server's bearer in place of the caller's own credential, which "
+            "never reaches the server. The MCP service needs them, and there every bearer "
+            "server needs one; no other server may have one. A chat worker given one reads "
+            "that server's tool hints when DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS names it. "
+            "Default: {} (none)."
+        ),
+    )
+
+    @property
+    def unscoped_names(self) -> frozenset[str]:
+        """Names of the servers that opted out of channel scoping."""
+        return frozenset(s.name for s in self.servers if not s.channel_scoped)
+
+    @field_validator("servers", "bearers", mode="before")
     @classmethod
-    def _parse_json(cls, value: object) -> object:
+    def _parse_json(cls, value: object, info: ValidationInfo) -> object:
         if not isinstance(value, str):
             return value
         if not value.strip():
-            return []
+            return [] if info.field_name == "servers" else {}
         try:
             return json.loads(value)
         except json.JSONDecodeError as err:
             raise ValueError(
-                f"DAIMON_MCP_IDENTITY__SERVERS is not valid JSON "
+                f"DAIMON_MCP_IDENTITY__{(info.field_name or '').upper()} is not valid JSON "
                 f"(line {err.lineno}, column {err.colno})"
             ) from None
 
@@ -2375,6 +2514,35 @@ class McpIdentitySettings(BaseModel):
         if value is not None:
             load_signing_key(value.get_secret_value())
         return value
+
+    @model_validator(mode="after")
+    def _bearers_match_servers(self) -> McpIdentitySettings:
+        """A key is usable and names a bearer server; a signed server never has one."""
+        bearer_servers = {server.name for server in self.servers if server.auth == "bearer"}
+        if not set(self.bearers) <= bearer_servers:
+            raise ValueError(
+                "DAIMON_MCP_IDENTITY__BEARERS must name only servers whose auth is bearer"
+            )
+        for key in self.bearers.values():
+            value = key.get_secret_value()
+            if not value or not value.isascii() or not value.isprintable() or " " in value:
+                raise ValueError("a bearer key must be printable ASCII without spaces")
+        return self
+
+    @property
+    def names_requester(self) -> bool:
+        """Whether any server is sent the requester's identity (`requester_meta`)."""
+        return any(server.requester_meta for server in self.servers)
+
+    @property
+    def names_agent_chat_requester(self) -> bool:
+        """Whether any server is sent the person behind an agent-chat turn."""
+        return any(server.agent_chat_requester for server in self.servers)
+
+    @property
+    def needs_signing_key(self) -> bool:
+        """Whether any server is sent a signed identity, which needs `signing_key`."""
+        return any(server.auth == "signed" for server in self.servers)
 
 
 class AgentIdentitySettings(BaseModel):
@@ -2479,8 +2647,11 @@ class PollableTool(BaseModel):
         )
     )
     tool: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$", description="Exact tool name.")
-    credential: Literal["agent", "owner", "none"] = Field(
-        description='The one credential a poll may use; native readers use "none".'
+    credential: Literal["agent", "owner", "relay", "none"] = Field(
+        description=(
+            'The one credential a poll may use; native readers use "none", and "relay" '
+            "needs this Daimon's own signed-identity relay URL."
+        )
     )
     returns_chat: bool = Field(
         description=(
@@ -2524,6 +2695,14 @@ class PollableTool(BaseModel):
                 )
         elif self.returns_chat or self.tool in CHAT_TOOLS:
             raise ValueError(f"{self.tool} returns chat; MCP server tools that do cannot be polled")
+        elif self.credential == "relay":
+            from daimon.core.mcp_identity import RELAY_PATH
+
+            parts = urlsplit(self.server)
+            if parts.query or not re.fullmatch(
+                rf"(/[^/]+)*{RELAY_PATH}/[a-z0-9][a-z0-9-]{{0,62}}", parts.path
+            ):
+                raise ValueError(f'credential "relay" needs a <root>{RELAY_PATH}/<name> URL')
         return self
 
 
@@ -2575,20 +2754,49 @@ class WatchesSettings(BaseModel):
             "tool can be polled: a watch on a tool taken off the list pauses at its next "
             'poll and its owner is told. Each entry has server ("daimon-mcp" for a native '
             "reader, otherwise an https MCP server URL, never a server name), tool (exact "
-            'name), credential ("none" for native readers; "agent" or "owner" for '
-            "MCP servers), returns_chat (required: true only for native readers, which "
+            'name), credential ("none" for native readers; "agent", "owner" or "relay" '
+            "for MCP servers), returns_chat (required: true only for native readers, which "
             "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
             "least 60, default 300) and label (shown on the approval card). Native "
             "entries must be read_thread or read_channel. Daimon's chat readers and chat_tools "
             "are refused on MCP servers. Credential owner polls with each watch owner's "
             "own read-only key, which they send once through a private form: for example "
-            "a read-scoped API key the person creates on that server. A server's read-only "
+            "a read-scoped API key the person creates on that server. Credential relay "
+            "polls a signed-identity relay server (<root>/mcp-identity/<name>) as the "
+            "watch owner, marked unattended, at the place the watch reports to. "
+            "A server's read-only "
             "annotation never allows a poll; only this "
             "list does, and a server can still write when it says it only reads. A "
             "watch below a raised floor polls at the "
             "floor. Default (also used when the value is empty): read_thread and "
             "read_channel on daimon-mcp, credential none, returns_chat true, floor 60. "
             "Set [] to allow no polls."
+        ),
+    )
+
+    callback_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Public https address of the callback endpoint, with no path, query or "
+            "trailing slash (for example https://hooks.example.com). Callback watches "
+            "give their owner a secret link under it once; unset refuses new callback "
+            "watches and leaves existing ones working. Route "
+            "/callbacks/watches/ on the sidecar to it, and keep proxy access logs "
+            "off that path, since the secret is part of it."
+        ),
+    )
+
+    callback_max_body_bytes: int = Field(
+        default=4096,
+        ge=4096,
+        le=524288,
+        description=(
+            "Largest body, in bytes, that one post to a callback watch link may carry; "
+            "a larger post is refused. Default 4096 (4 KiB); up to 524288 (512 KiB). "
+            "Raise it for senders that post a whole record, for example 262144 for "
+            "256 KiB. The per-watch, per-owner and per-server evidence limits grow "
+            "with it, and a wake that would carry more than 512 KiB of evidence drops "
+            "its oldest posts. Signed page events keep their own 4 KiB limit."
         ),
     )
 
@@ -2602,6 +2810,29 @@ class WatchesSettings(BaseModel):
             "refused there. Default: none."
         ),
     )
+
+    @field_validator("callback_base_url", mode="before")
+    @classmethod
+    def _callback_base_url(cls, value: object) -> object:
+        if value is None or not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            return None
+        parts = urlsplit(value)
+        if (
+            parts.scheme != "https"
+            or not parts.hostname
+            or parts.path not in ("", "/")
+            or parts.query
+            or parts.fragment
+            or parts.username
+            or parts.password
+        ):
+            raise ValueError(
+                "DAIMON_WATCHES__CALLBACK_BASE_URL must be an https address with no path"
+            )
+        return f"https://{parts.netloc}"
 
     @field_validator("pollable_tools", mode="before")
     @classmethod
@@ -2659,37 +2890,93 @@ class ComputeProfile(BaseModel):
     image: str = Field(
         description="Operator-reviewed thin MCP image reference, preferably a digest."
     )
-    regions: list[str] = Field(default_factory=lambda: ["iad"], description="Allowed Fly regions.")
-    cpu_kind: Literal["shared", "performance"] = Field(
-        default="shared", description="Fly CPU class."
+    regions: list[str] = Field(
+        default_factory=lambda: list[str](),
+        description="Allowed Google Cloud regions, such as us-central1. At least one.",
     )
-    cpus: int = Field(default=2, gt=0, le=16, description="Fixed CPU count for this image profile.")
-    memory_mb: int = Field(default=4096, ge=256, le=131072, description="Fixed RAM in MB.")
+    cpus: int = Field(
+        default=2,
+        gt=0,
+        le=16,
+        description="Fixed CPU count for this image profile: 1, 2, 4, 6 or 8.",
+    )
+    memory_mb: int = Field(
+        default=4096,
+        ge=256,
+        le=131072,
+        description="Fixed RAM in MB: 512 to 32768, within the range its CPU count permits.",
+    )
+    description: str = Field(
+        default="",
+        max_length=1000,
+        description=(
+            "What this image holds and how to use it, for the agent. Shown when profiles are "
+            "listed and when a session starts. Plain text; no secrets."
+        ),
+    )
+
+
+_CLOUD_RUN_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
+# Cloud Run's memory range in MiB for each CPU count it accepts. The floor is 512 MiB
+# because sessions use the second generation environment and instance-based billing.
+_CLOUD_RUN_MEMORY_MB: Mapping[int, tuple[int, int]] = {
+    1: (512, 4096),
+    2: (512, 8192),
+    4: (2048, 16384),
+    6: (4096, 24576),
+    8: (4096, 32768),
+}
+
+
+def _cloud_run_profile_error(name: str, profile: ComputeProfile) -> str | None:
+    """Why Cloud Run would refuse this profile, so a launch never finds out first."""
+    bad = [region for region in profile.regions if not _CLOUD_RUN_REGION.fullmatch(region)]
+    if not profile.regions or bad:
+        return (
+            f"compute profile {name!r} needs Google Cloud regions such as us-central1; "
+            f"got {profile.regions}"
+        )
+    limits = _CLOUD_RUN_MEMORY_MB.get(profile.cpus)
+    if limits is None:
+        return (
+            f"compute profile {name!r}: Cloud Run allows 1, 2, 4, 6 or 8 CPUs, not {profile.cpus}"
+        )
+    if not limits[0] <= profile.memory_mb <= limits[1]:
+        return (
+            f"compute profile {name!r}: Cloud Run allows {limits[0]} to {limits[1]} MB "
+            f"with {profile.cpus} CPUs, not {profile.memory_mb}"
+        )
+    return None
 
 
 class ComputeSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Allow attended owners to launch Fly sessions. Disabling launch does not "
+            "Allow attended owners to launch compute sessions. Disabling launch does not "
             "disable cleanup."
         ),
     )
     deployment_id: str = Field(
         default="",
         description=(
-            "Stable unique deployment identifier fencing Fly resources. Required to use compute."
+            "Stable unique deployment identifier fencing session resources. Required to "
+            "use compute."
         ),
     )
-    api_token: SecretStr | None = Field(
-        default=None,
-        repr=False,
+    cloud_run_project: str = Field(
+        default="",
         description=(
-            "Fly API token, control plane and scheduler only. Never mounted in compute machines."
+            "Google Cloud project id that holds the session services. Required to use "
+            "compute. Daimon signs in with application default credentials."
         ),
     )
-    org_slug: str = Field(
-        default="", description="Fly organization for this deployment's disposable sessions."
+    cloud_run_service_account: str = Field(
+        default="",
+        description=(
+            "Email of the service account session containers run as. Give it no roles. "
+            "Required to use compute."
+        ),
     )
     session_auth_key: SecretStr | None = Field(
         default=None,
@@ -2729,13 +3016,47 @@ class ComputeSettings(BaseModel):
             "command may run for at most max_ttl_hours."
         ),
     )
-    profiles: dict[str, ComputeProfile] = Field(
-        default_factory=dict,
+    wake_run_limit: int = Field(
+        default=20,
+        ge=1,
+        le=200,
         description=(
-            "Operator-managed image profiles. Empty means no images can be launched. "
-            "No environment or credentials are copied from template apps."
+            "How many wake turns in a row may act on one session. The count starts again "
+            "when the owner runs a command or writes a file on it; a chat message alone "
+            "does not."
         ),
     )
+    profiles: dict[str, ComputeProfile] = Field(
+        default_factory=dict,
+        description=("Operator-managed image profiles. Empty means no images can be launched."),
+    )
+
+    @property
+    def provider_configured(self) -> bool:
+        """Whether the provider has the settings its API calls need."""
+        return bool(self.cloud_run_project and self.cloud_run_service_account)
+
+    @model_validator(mode="after")
+    def _cloud_run_is_complete(self) -> ComputeSettings:
+        """Refuse a half-configured provider, or a profile Cloud Run could not run.
+
+        Nothing is checked until a Cloud Run setting is given: an installation that
+        does not use compute, or still carries settings of a removed provider, starts.
+        """
+        fields = ("cloud_run_project", "cloud_run_service_account")
+        given = [field for field in fields if getattr(self, field)]
+        missing = [field for field in fields if field not in given]
+        if not given:
+            return self
+        if missing:
+            raise ValueError(
+                f"DAIMON_COMPUTE__{given[0].upper()} also needs "
+                f"DAIMON_COMPUTE__{missing[0].upper()}"
+            )
+        for name, profile in self.profiles.items():
+            if (error := _cloud_run_profile_error(name, profile)) is not None:
+                raise ValueError(error)
+        return self
 
 
 class LongJobsSettings(BaseModel):
@@ -2762,6 +3083,52 @@ class LongJobsSettings(BaseModel):
         default=2,
         gt=0,
         description="Maximum launching and running long jobs per owner within a tenant.",
+    )
+
+
+class MonitoringSettings(BaseModel):
+    retention_days: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Days a monitored question, answer or tool call is kept before the scheduler "
+            "deletes it, default 90."
+        ),
+    )
+
+
+class OpsEventsSettings(BaseModel):
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a failure or warning shown on the admin Issues page is kept before the "
+            "scheduler deletes it, default 30."
+        ),
+    )
+
+
+class ProviderLimitsSettings(BaseModel):
+    """How many turns one provider key serves at once (`DAIMON_PROVIDER_LIMITS__*`)."""
+
+    key_turns: int = Field(
+        default=16,
+        gt=0,
+        description=(
+            "Most turns running at once on one provider API key, across every replica. "
+            "A turn past the cap waits, then is refused as busy."
+        ),
+    )
+    tenant_turns: int = Field(
+        default=4,
+        gt=0,
+        description="Most of those turns one workspace may hold on one provider API key.",
+    )
+    wait_s: float = Field(
+        default=20.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="Seconds a turn waits for a free slot before it is refused as busy.",
     )
 
 
@@ -2870,6 +3237,8 @@ class RetentionSettings(BaseModel):
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
+    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    ops_events: OpsEventsSettings = Field(default_factory=OpsEventsSettings)
     retention: RetentionSettings = Field(default_factory=RetentionSettings)
     security_audit_retention_days: int | None = Field(
         default=None,
@@ -2909,7 +3278,9 @@ class Settings(BaseSettings):
             "invalid keys rejected). Default is "
             "members (live membership required). Set mode=disabled to disable DMs, "
             "or mode=allowlist with recipient_ids to restrict delivery to listed "
-            "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
+            "members. Deprecated: checked with per-agent DM access on every path, the "
+            "stricter wins; `daimon dm import-policies` copies it into stored access. "
+            "Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
         ),
     )
     table_rendering: dict[uuid.UUID, bool] = Field(
@@ -2986,8 +3357,12 @@ class Settings(BaseSettings):
     report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
     sentry: SentrySettings = Field(default_factory=SentrySettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
+    provider_daily_ceiling_usd: ProviderDailyCeilingSettings = Field(
+        default_factory=ProviderDailyCeilingSettings
+    )
     support: SupportSettings = Field(default_factory=SupportSettings)
     turn: TurnSettings = Field(default_factory=TurnSettings)
+    provider_limits: ProviderLimitsSettings = Field(default_factory=ProviderLimitsSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     outbound: OutboundSettings = Field(default_factory=OutboundSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
@@ -3099,6 +3474,24 @@ class Settings(BaseSettings):
         self.tool_safety = policy
         return self
 
+    @model_validator(mode="after")
+    def _relay_polls_name_this_deployment(self) -> Settings:
+        """A relay poll sends Daimon's own credential, so its URL must be this relay's."""
+        from daimon.core.mcp_identity import relay_server_name
+
+        public_url = self.mcp.public_url
+        for entry in self.watches.pollable_tools:
+            if (
+                entry.credential == "relay"
+                and public_url is not None
+                and relay_server_name(entry.server, str(public_url)) is None
+            ):
+                raise ValueError(
+                    "DAIMON_WATCHES__POLLABLE_TOOLS: a relay entry's server must be "
+                    "<MCP public URL root>/mcp-identity/<name>"
+                )
+        return self
+
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_",
         env_nested_delimiter="__",
@@ -3117,11 +3510,25 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     (`_env_file=None`) so they only see `monkeypatch.setenv` values.
     """
     settings = Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
-    if settings.turn.path == "mux" and settings.turn.channel_backends:
+    if settings.turn.channel_backends:
         from daimon.core.turn.runtime_manifest import validate_configured_runtime_manifest
 
         validate_configured_runtime_manifest()
     return settings
+
+
+class AnthropicEnvSettings(BaseSettings):
+    """Only `DAIMON_ANTHROPIC__*`, for the provider default handed no `Settings`."""
+
+    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
+
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
 
 def _registered_features(value: dict[str, str]) -> dict[str, str]:
@@ -3184,7 +3591,7 @@ class _TurnSettingsSource(BaseSettings):
 def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
     """Read the same turn flag without unrelated API/database configuration."""
     turn = _TurnSettingsSource(_env_file=_env_file).turn  # pyright: ignore[reportCallIssue]
-    if turn.path == "mux" and turn.channel_backends:
+    if turn.channel_backends:
         from daimon.core.turn.runtime_manifest import validate_configured_runtime_manifest
 
         validate_configured_runtime_manifest()

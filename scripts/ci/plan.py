@@ -36,6 +36,9 @@ FILES: dict[str, str] = {
     ".gitignore": "tooling",
     ".pre-commit-config.yaml": "tooling",
     "azure.yaml": "repo",
+    # The scripts the migration-upgrade and image-smoke jobs run.
+    "scripts/ci/migration_upgrade.py": "migration-check",
+    "scripts/ci/image_tls_check.py": "image-check",
     ".github/workflows/ci.yml": "all",
     # Their contract tests are repo tests, but a change deploys everything it can break.
     ".github/workflows/deploy.yml": "deploy-workflow",
@@ -45,7 +48,7 @@ FILES: dict[str, str] = {
 }
 #: Prose no test or image reads; code trees keep their own (skills, fixtures).
 _PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
-#: Prose lint still scans for private material (TREES in scripts/lint_designators.sh).
+#: Prose the lint job checks (scripts/lint_designators.sh runs on every change in the changes job).
 _LINTED_PROSE = re.compile(r"^(?:apps|scripts|\.github)/\S*\.md$")
 #: First match wins, so narrower prefixes come first.
 RULES: tuple[tuple[str, str], ...] = (
@@ -56,7 +59,8 @@ RULES: tuple[tuple[str, str], ...] = (
     # Read only by the repo tests (tests/test_*.py), which run in the core suite.
     (".github/workflows/", "repo"),
     ("deploy/azure/", "repo"),
-    ("deploy/lanes/", "repo"),
+    # The lane proxy tests (sidecar suite) read the lane files as well.
+    ("deploy/lanes/", "lanes"),
     ("scripts/azure/", "repo"),
     # The Teams package builder is tested beside the manifest it fills in.
     ("scripts/teams/", "teams-builder"),
@@ -65,6 +69,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("tests/parity/", "parity"),
     ("tests/harness_conformance/", "harness"),
     ("tests/golden/", "golden"),
+    ("tests/simulated/", "simulated"),
     ("tests/", "tests"),
     ("qa/", "tests"),
     ("packages/mux/", "mux"),
@@ -74,10 +79,11 @@ RULES: tuple[tuple[str, str], ...] = (
     ("packages/adapters/teams/", "teams"),
     ("packages/adapters/mcp/", "mcp"),
     ("packages/adapters/scheduler/", "scheduler"),
-    # Every pytest run loads its stop_leg_default plugin (pyproject addopts).
     ("packages/testing/", "testing"),
-    # Only a migration needs the migrate job; any other core change skips it.
+    # Only a migration or a change to the table models needs the migrate job; any other
+    # core change skips it.
     ("packages/core/alembic/", "migrations"),
+    ("packages/core/daimon/core/_models.py", "migrations"),
     # Core and the CLI, which migrations and the smoke turn run through.
     ("packages/", "core"),
     ("defaults/", "core"),
@@ -85,6 +91,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("docker/", "core"),
     ("assets/", "core"),
     ("apps/harness/", "harness"),
+    ("apps/compute-session/", "compute-session"),
     ("apps/notebook-host/", "notebook-host"),
     ("apps/report-host/", "report-host"),
     ("scripts/check_report_host_lock.py", "report-host"),
@@ -96,9 +103,7 @@ RULES: tuple[tuple[str, str], ...] = (
 #: (daimon.testing) import every adapter but web, so those adapters select them all.
 DAIMON = (
     "core", "mcp", "slack", "teams", "web", "parity", "discord",
-    "turn-mux", "parity-mux", "slack-mux", "discord-mux", "teams-mux",
-    "sidecar-mux", "scheduler-mux", "cli-run-mux", "nonchat-mux",
-    "staging-config", "journeys", "lint", "shard-check",
+    "staging-config", "journeys", "lint", "shard-check", "simulated",
 )  # fmt: skip
 _HOSTS = (*DAIMON, "image-daimon")
 
@@ -110,23 +115,37 @@ SUITES: dict[str, tuple[str, ...]] = {
     "tooling": ("lint",),
     "repo": ("core", "lint", "shard-check"),
     "deploy-workflow": ("core", "lint", "shard-check"),
+    "lanes": ("core", "lint", "shard-check"),
     "mcp-catalogue": ("lint", "core", "mux"),
-    "slack-manifest": ("slack", "slack-mux", "parity", "parity-mux"),
-    "teams-manifest": ("teams", "teams-mux", "parity", "parity-mux"),
+    "slack-manifest": ("slack", "parity"),
+    "teams-manifest": ("teams", "parity"),
     # A script, so ruff and the public-repo scan run on it as well.
-    "teams-builder": ("teams", "teams-mux", "parity", "parity-mux", "lint"),
-    "formal": ("discord", "discord-mux", "lint"),
+    "teams-builder": ("teams", "parity", "lint"),
+    "formal": ("discord", "lint"),
     # tests/parity reads web/src for the plain-words rules.
-    "spa": ("spa", "parity", "parity-mux", "image-daimon"),
-    "web": ("web", "parity", "parity-mux", "lint", "shard-check", "image-daimon"),
-    "web-links": ("spa", "web", "parity", "parity-mux", "image-daimon"),
-    "parity": ("parity", "parity-mux", "staging-config", "lint", "shard-check"),
+    "spa": ("spa", "parity", "image-daimon"),
+    "web": ("web", "parity", "lint", "shard-check", "image-daimon"),
+    "web-links": ("spa", "web", "parity", "image-daimon"),
+    "parity": ("parity", "staging-config", "lint", "shard-check"),
     "tests": DAIMON,
+    "simulated": ("simulated", "lint"),
     # The mux tests read the golden scenarios, defaults/ (core) and the agent-chat tool (mcp).
     "golden": (*DAIMON, "mux"),
-    "testing": (*DAIMON, "mux", "harness", "harness-conformance", "report-host", "notebook-host"),
-    "core": (*_HOSTS, "mux"),
-    "migrations": (*_HOSTS, "mux"),
+    "testing": (
+        *DAIMON,
+        "mux",
+        "harness",
+        "harness-conformance",
+        "report-host",
+        "notebook-host",
+        "compute-session",
+    ),
+    # The compute-session tests drive the server with core's own caller and task scripts.
+    "core": (*_HOSTS, "mux", "compute-session"),
+    "migrations": (*_HOSTS, "mux", "migration-upgrade"),
+    # A script, so ruff runs on it as well.
+    "migration-check": ("lint", "migration-upgrade"),
+    "image-check": ("lint", "image-daimon"),
     "discord": _HOSTS,
     "slack": _HOSTS,
     "teams": _HOSTS,
@@ -138,6 +157,7 @@ SUITES: dict[str, tuple[str, ...]] = {
     # Core's tests and daimon.testing import both hosts.
     "notebook-host": (*DAIMON, "notebook-host", "image-notebook-host"),
     "report-host": (*DAIMON, "report-host", "image-report-host"),
+    "compute-session": ("compute-session", "image-compute-session", "lint"),
 }
 
 Leg = dict[str, str | int]
@@ -154,22 +174,11 @@ _CORE = (
     " packages/adapters/sidecar packages/testing tests/integration tests/platform_contract"
     " tests/test_*.py tests/performance tests/write_workflows"
 )
-_NONCHAT = " ".join(
-    [
-        *(f"packages/core/tests/test_{name}.py" for name in (
-            "headless_runner", "headless_ports", "headless_tool_safety",
-            "routine_delivery_headless", "scheduler_dispatch", "smoke", "workspace_transfer",
-            "transfer_checkpoint_paths", "session_preparation", "channel_backend", "shared_threads",
-        )),
-        "tests/integration/test_routines_end_to_end.py",
-        "tests/integration/test_direct_messages.py",
-    ]
-)  # fmt: skip
 #: The legs of the ci.yml jobs whose matrix the plan fills in: a pull request gets only
 #: the legs of its selected suites, so an unselected leg never starts. Add a shard here.
 MATRICES: dict[str, list[Leg]] = {
     "pytest-db": [
-        *_shards("core", 6, _CORE, **{"fetch-depth": 0}),
+        *_shards("core", 4, _CORE, **{"fetch-depth": 0}),
         *_shards("mcp", 2, "packages/adapters/mcp", **{"fetch-depth": 1}),
         *(
             leg
@@ -178,24 +187,16 @@ MATRICES: dict[str, list[Leg]] = {
                 ("teams", "packages/adapters/teams"),
                 ("web", "packages/adapters/web"),
                 ("parity", "tests/parity"),
+                # Whole turns on each provider, from a fresh install, over faked HTTP.
+                ("simulated", "tests/simulated"),
             )
             for leg in _shards(suite, 1, paths, **{"fetch-depth": 1})
         ),
     ],
-    "pytest-mux-leg": [
-        *_shards("turn-mux", 1, "packages/core/tests/turn"),
-        *_shards("parity-mux", 1, "tests/parity"),
-        *_shards("slack-mux", 1, "packages/adapters/slack"),
-        *_shards("discord-mux", 2, "packages/adapters/discord"),
-        *_shards("teams-mux", 1, "packages/adapters/teams"),
-        *_shards("sidecar-mux", 1, "packages/adapters/sidecar"),
-        *_shards("scheduler-mux", 1, "packages/adapters/scheduler"),
-        *_shards("cli-run-mux", 1, "packages/adapters/cli/tests/run"),
-        *_shards("nonchat-mux", 1, _NONCHAT),
-    ],
     "pytest-light": [
         {"suite": "report-host", "paths": "apps/report-host"},
         {"suite": "harness", "paths": "apps/harness"},
+        {"suite": "compute-session", "paths": "apps/compute-session"},
         {"suite": "mux", "paths": "packages/mux"},
         {"suite": "harness-conformance", "paths": "tests/harness_conformance"},
     ],
@@ -215,7 +216,15 @@ JOBS: dict[str, tuple[str, ...]] = {
     "mux-standalone": ("mux",),
     "pytest-notebook-host": ("notebook-host",),
     "shard-check": ("shard-check",),
-    "docker-build": ("image-daimon", "image-notebook-host", "image-report-host"),
+    "docker-build": (
+        "image-daimon",
+        "image-notebook-host",
+        "image-report-host",
+        "image-compute-session",
+    ),
+    # The simulated turns run inside the built image.
+    "image-smoke": ("image-daimon", "simulated"),
+    "migration-upgrade": ("migration-upgrade",),
     "harness-image": ("image-harness",),
 }
 ALL_SUITES = tuple(sorted({s for suites in (*SUITES.values(), *JOBS.values()) for s in suites}))

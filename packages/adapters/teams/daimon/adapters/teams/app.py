@@ -41,7 +41,7 @@ from daimon.adapters.teams.admissions import (
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.billing_panel import TeamChannels
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
-from daimon.adapters.teams.budget_notice import with_budget_notifier
+from daimon.adapters.teams.budget_notice import teams_budget_alerter, with_budget_notifier
 from daimon.adapters.teams.card import CANCELLED_NOTICE, notice_card
 from daimon.adapters.teams.card_actions import replace_card, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -89,6 +89,7 @@ from daimon.adapters.teams.lifecycle import (
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
+from daimon.adapters.teams.personal_chat import chat_groups, route_personal_chat
 from daimon.adapters.teams.private_replies import SENDER_ONLY, PrivateReplies, reply_privately
 from daimon.adapters.teams.provider_actions import TeamsProviderActions
 from daimon.adapters.teams.provisioning import provision_configured_tenant
@@ -103,6 +104,8 @@ from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.channel_budget_notice import run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -116,14 +119,19 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
+from daimon.core.direct_messages import DirectMessageAccessRevoked, require_dm_turn_grant
+from daimon.core.dm_debounce import DmBursts, debounce_seconds
+from daimon.core.dm_debounce import React as BurstMark
 from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
+from daimon.core.host_calls import wake_prefix
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
+from daimon.core.owner_notices import OwnerDm
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -165,11 +173,13 @@ from daimon.core.turn.errors import (
     TurnNotStarted,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
-from daimon.core.turn.prepare import ContinuityOutcome, bind_session
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -187,7 +197,11 @@ from daimon.core.turn.thread_queue import (
     release_thread,
 )
 from daimon.core.turn_hold import RequesterOrg
-from daimon.core.turn_keys import list_mounted_key_names, render_keys_element
+from daimon.core.turn_keys import (
+    answering_env_sha256,
+    list_mounted_key_names,
+    render_keys_element,
+)
 from daimon.core.turn_origin import (
     HandoffNotice,
     build_handoff_notice,
@@ -200,6 +214,7 @@ from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivity,
+    MessageActivityInput,
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ExecuteAction
@@ -289,6 +304,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "provider_hold_cap_reached": "turn.skipped.provider_hold_cap_reached",
     "provider_setup_pending": "turn.skipped.provider_setup_pending",
     "provider_daily_cap_reached": "turn.skipped.provider_daily_cap_reached",
+    "provider_daily_ceiling_reached": "turn.skipped.provider_daily_ceiling_reached",
     "provider_price_unavailable": "turn.skipped.provider_price_unavailable",
 }
 
@@ -326,6 +342,14 @@ def _as_mention(inbound: TeamsInbound) -> TeamsInbound:
     """A typed "@<bot name>" read as a mention: the tenant's switch is on."""
     text = strip_typed_name(inbound.text, inbound.bot_name)
     return dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)
+
+
+def _history_depth(inbound: TeamsInbound, admission: Admission) -> HistoryDepth:
+    """How much earlier chat a turn reads; a personal chat carries what a DM does."""
+    depth = admission.history_depth
+    if inbound.kind != "dm":
+        return depth
+    return HistoryDepth(min(depth.replay, admission.dm_history.turns))
 
 
 def _by_author(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
@@ -410,6 +434,7 @@ class TeamsApp:
         installs: TeamInstalls | None = None,
         direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
+        owner_dm: OwnerDm | None = None,
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
         catch_up: RestartCatchUp | None = None,
@@ -421,6 +446,7 @@ class TeamsApp:
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime = with_budget_notifier(runtime, direct)
+        self._budget_alerter = None if direct is None else teams_budget_alerter(runtime, direct)
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
@@ -444,6 +470,7 @@ class TeamsApp:
         )
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
+        self._owner_dm = owner_dm
         # Support is on: answers carry an Ask a human button.
         self._ask_human = ask_human
         # Graph subscriptions to private and shared channels; None leaves them mention-only.
@@ -468,6 +495,8 @@ class TeamsApp:
         self.provider_actions = TeamsProviderActions(self._sender, feed=feed)
         self._processing: HeldThreads[str] = HeldThreads()
         self._pending: dict[str, list[TeamsInbound]] = {}
+        # Each personal chat's open burst: the messages its next turns answer.
+        self._dm_bursts: DmBursts[str, TeamsInbound] = DmBursts(lambda item: item.text)
         # Controls held for a turn's output sweep, by conversation: the next turn
         # there posts them before its own card.
         self._held_controls: dict[str, TeamsTurnLifecycle] = {}
@@ -487,6 +516,7 @@ class TeamsApp:
         self._serving = asyncio.Event()
         self._wake_poller: asyncio.Task[None] | None = None
         self._delivery_poller: asyncio.Task[None] | None = None
+        self._budget_alert_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
         # queued continuation work (Bot Framework cannot list a chat's history).
         self._last_message_at: dict[str, datetime] = {}
@@ -542,9 +572,21 @@ class TeamsApp:
                         platform="teams",
                         post=self._routine_poster,
                         should_stop=lambda: self.draining,
+                        owner_dm=self._owner_dm,
                     )
                     self._delivery_poller = asyncio.create_task(
                         deliveries, name="teams.routine-delivery"
+                    )
+                if self._budget_alerter is not None:
+                    alerts = run_budget_alert_poller(
+                        self.runtime.sessionmaker,
+                        platform="teams",
+                        alerter=self._budget_alerter,
+                        settings=self.runtime.settings,
+                        should_stop=lambda: self.draining,
+                    )
+                    self._budget_alert_poller = asyncio.create_task(
+                        alerts, name="teams.budget-alerts"
                     )
                 if self._team_channels is not None:
                     listing = run_channel_listing(
@@ -859,11 +901,13 @@ class TeamsApp:
         session's next sweep.
         """
         self.draining = True
+        self._dm_bursts.stop()
         if self._participation is not None:
             self._participation.cancel_all()
         pollers = (
             self._wake_poller,
             self._delivery_poller,
+            self._budget_alert_poller,
             self._reclaimer,
             self._renewals,
             self._channel_listing,
@@ -1205,6 +1249,33 @@ class TeamsApp:
             inbound.conversation_id, notice_card(text, error=error), service_url=inbound.service_url
         )
 
+    def _post_to(self, inbound: TeamsInbound) -> Callable[[MessageActivityInput], Awaitable[None]]:
+        async def post(card: MessageActivityInput) -> None:
+            await self._sender.send(inbound.conversation_id, card, service_url=inbound.service_url)
+
+        return post
+
+    async def _personal_grant(
+        self, inbound: TeamsInbound, tenant_id: uuid.UUID, admission: Admission
+    ) -> bool:
+        """Whether the admitted agent still admits this person in their personal chat."""
+        groups = await chat_groups(
+            self.runtime, tenant_id=tenant_id, user_id=inbound.user_id, fresh=False
+        )
+        try:
+            await require_dm_turn_grant(
+                self.runtime.turn_deps,
+                admission,
+                tenant_id=tenant_id,
+                platform="teams",
+                user_id=inbound.user_id.lower(),
+                groups=groups,
+            )
+        except DirectMessageAccessRevoked as err:
+            await self._post_to(inbound)(notice_card(str(err)))
+            return False
+        return True
+
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
         """True only for an unprotected target; a protected or unreadable one gets nothing."""
         return (await self._post_state(channel_id, thread_id)).may_post
@@ -1245,6 +1316,7 @@ class TeamsApp:
             status, error_code = send_error_details(exc)
             log.error(
                 "teams.message.failed",
+                causes=backend_refusal_causes(exc),
                 conversation_id=inbound.conversation_id,
                 status=status,
                 error_code=error_code,
@@ -1293,7 +1365,13 @@ class TeamsApp:
         # Read first: no await may split the queue check from the claim below.
         cap = await self._turn_cap(tenant_id)
         if replayed := self._replay_queued.get((key, inbound.activity_id)):
-            replayed.set()  # wakes only at the next await, after the claim or enqueue
+            replayed.set()  # wakes only at the next await, after the claim, join or enqueue
+        personal = inbound.kind == "dm" and not inbound.setup_thread_id
+        if personal and (burst := self._dm_bursts.join(key, inbound)) is not None:
+            # The turn waiting or running here answers this message too.
+            self._last_message_at[key] = datetime.now(UTC)
+            await burst.mark(inbound, self._burst_mark(tenant_id))
+            return
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._thread_queue.enqueue(key, inbound)
@@ -1332,12 +1410,76 @@ class TeamsApp:
         self._last_message_at[key] = datetime.now(UTC)
         self._supersede_batch(inbound)
         async with self._holding(key, ticket):
-            await self._run_turns(key, tenant_id, [inbound])
+            if personal:
+                await self._answer_burst(key, tenant_id, [inbound])
+            else:
+                await self._run_turns(key, tenant_id, [inbound])
+
+    async def _answer_burst(self, key: str, tenant_id: uuid.UUID, held: list[TeamsInbound]) -> None:
+        """A personal chat's burst, as on Discord and Slack (`DmBurst`): its first message
+        waits for the rest (`dm_debounce_seconds`), and what arrives while it waits or a
+        turn runs joins it with 👀 (`_orchestrate`), so one turn answers each group. A chat
+        with no agent is routed first (`route_personal_chat`), held while the person picks;
+        a refusal or an expired pick settles the burst. Messages that queued behind other
+        work in the chat (`_run_turns`) open one too.
+
+        Opened before any await, so no message slips past it into the chat's queue. As
+        that queue's drain does, an error or cancellation leaves only the messages no turn
+        took yet, and they go back to it, which `_holding` answers or holds.
+        """
+        burst = self._dm_bursts.open(key, held[0])
+        for item in held[1:]:
+            burst.add(item)
+        taken: set[int] = set()
+        mark = self._burst_mark(tenant_id)
+
+        async def answer(group: list[TeamsInbound]) -> None:
+            taken.update(map(id, group))
+            await self._run_turns(key, tenant_id, group, burst=True)
+
+        try:
+            routed = await route_personal_chat(
+                self.runtime,
+                held[0],
+                tenant_id=tenant_id,
+                post=self._post_to(held[0]),
+                burst=burst,
+                mark=mark,
+            )
+            if not routed:
+                if not burst.stopped:  # one notice speaks for the whole burst
+                    await self._finish(await self._dm_bursts.end(key, burst))
+                return
+            seconds = await debounce_seconds(
+                self.runtime.sessionmaker, self.runtime.settings, tenant_id, "teams"
+            )
+            await burst.answer(seconds, mark, answer)
+        finally:
+            left = await self._dm_bursts.end(key, burst)
+            if left := [item for item in left if id(item) not in taken]:
+                self._pending.setdefault(key, []).extend(left)
+
+    def wake_dm(self, chat: str) -> None:
+        """An agent was picked for personal chat `chat`: its held burst, if here, looks now."""
+        self._dm_bursts.wake(chat)
+
+    def refuse_dm(self, chat: str) -> None:
+        """A pick in personal chat `chat` was refused: its held burst, if here, ends now."""
+        self._dm_bursts.refuse(chat)
+
+    def _burst_mark(self, tenant_id: uuid.UUID) -> BurstMark[TeamsInbound]:
+        """A burst's 👀, only where admission would let the message start a turn."""
+
+        async def mark(item: TeamsInbound, on: bool) -> None:
+            allowed = functools.partial(self._may_start_turn, item, tenant_id)
+            self._reactions.mark_waiting(item, on=on, allowed=allowed if on else None)
+
+        return mark
 
     async def _may_start_turn(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> bool:
         """Whether admission's people-and-place gates let `inbound` start a turn there.
 
-        ⌛ says an answer is coming, so a protected place or someone off the
+        ⌛ and a burst's 👀 say an answer is coming, so a protected place or someone off the
         invoker allowlist gets none; nor does anyone while the policy cannot be read.
         """
         try:
@@ -1383,14 +1525,20 @@ class TeamsApp:
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
         return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
-    async def _run_turns(self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound]) -> None:
-        """One turn per author, composed of the messages its fence still held."""
+    async def _run_turns(
+        self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound], *, burst: bool = False
+    ) -> None:
+        """One turn per author, composed of the messages its fence still held. Outside a
+        `burst`, a personal chat's queued messages open one, which routes them first."""
 
         async def run(batch: list[TeamsInbound]) -> None:
             self._reactions.clear_queued(batch)
             if self.draining:
                 # A turn started now would be cut off: `_holding` holds these instead.
                 self._pending.setdefault(key, []).extend(batch)
+                return
+            if not burst and batch[0].kind == "dm" and not batch[0].setup_thread_id:
+                await self._answer_burst(key, tenant_id, batch)
                 return
             kept = await self._finish(batch)  # one another process has drops alone
             if not kept:
@@ -1412,7 +1560,12 @@ class TeamsApp:
         try:
             await self._run_turn(inbound, tenant_id)
         except _TURN_ERRORS as exc:
-            log.error("teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc)
+            log.error(
+                "teams.turn.failed",
+                causes=backend_refusal_causes(exc),
+                conversation_id=inbound.conversation_id,
+                exc_info=exc,
+            )
             capture_exception_with_scope(exc)
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
                 await self._say(inbound, _FAILED)
@@ -1488,6 +1641,8 @@ class TeamsApp:
         """
         deps, role = self.runtime.turn_deps, await self._role(inbound)
         org, home_id = _requester_org(inbound)
+        # Routed by its burst (`_answer_burst`); the pinned agent's grant is rechecked below.
+        personal = inbound.kind == "dm" and continuation is None and not inbound.setup_thread_id
         try:
             admission = await admit(
                 deps,
@@ -1514,6 +1669,8 @@ class TeamsApp:
                 await self._say(inbound, refusal, sender_only=private)
             if reraise:
                 raise
+            return
+        if personal and not await self._personal_grant(inbound, tenant_id, admission):
             return
         if continuation is not None:
             # A wake runs only as the agent it was queued for: refused before any card.
@@ -1573,8 +1730,8 @@ class TeamsApp:
                 vote_buttons=admission.shown("message_feedback", "teams"),
                 direct_chat=inbound.kind == "dm",
                 foreign=inbound.is_foreign,
-                agent_name=admission.agent.name,
-                model_id=admission.agent.model.id,
+                agent_name=admission.display_name(admission.agent.name),
+                model_id=shown_model(admission).id,
                 markup=self.runtime.turn_deps.markup,
                 sessionmaker=self.runtime.sessionmaker,
                 budget_channel_id=admission.budget_channel_id,
@@ -1646,23 +1803,36 @@ class TeamsApp:
                             raise AdmissionDenied(reason=slot)
                         raise TurnNotStarted(slot)
                     return
-                await self._bind_and_run(
-                    inbound,
-                    tenant_id,
-                    admission,
-                    cancel,
-                    holder,
-                    markers,
-                    new_lifecycle,
-                    watch_row=continuation
-                    if continuation and continuation.reason == "watch_fired"
-                    else None,
-                    role=role or Role.USER,  # admission's: one read per turn
-                    handoff=handoff,
-                    reraise=reraise,
-                    attended=continuation is None or continuation_attended(continuation),
-                    continued=continuation is not None,
+                prefix = (
+                    wake_prefix(
+                        self.runtime.sessionmaker,
+                        self.runtime.settings.mcp,
+                        tenant_id=tenant_id,
+                        platform="teams",
+                        thread_id=continuation.thread_id,
+                        target_ma_agent_id=continuation.target_ma_agent_id,
+                    )
+                    if continuation is not None and continuation.reason == "confirmed_call"
+                    else None
                 )
+                async with send_prefix(prefix):
+                    await self._bind_and_run(
+                        inbound,
+                        tenant_id,
+                        admission,
+                        cancel,
+                        holder,
+                        markers,
+                        new_lifecycle,
+                        watch_row=continuation
+                        if continuation and continuation.reason == "watch_fired"
+                        else None,
+                        role=role or Role.USER,  # admission's: one read per turn
+                        handoff=handoff,
+                        reraise=reraise,
+                        attended=continuation is None or continuation_attended(continuation),
+                        continuation=continuation,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1709,6 +1879,7 @@ class TeamsApp:
                         self.runtime.anthropic,
                         error.source_agent_id,
                         scope=resource_scope(tenant_id=str(tenant_id)),
+                        records=self.runtime.sessionmaker,
                     )
                 ).name
         text = render_responder_changed_without_handoff(
@@ -1737,7 +1908,7 @@ class TeamsApp:
         handoff: HandoffFactory | None,
         reraise: bool,
         attended: bool,
-        continued: bool = False,
+        continuation: TaskContinuationRow | None = None,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1745,7 +1916,7 @@ class TeamsApp:
         if bare and self._reader is None:
             await lifecycle.close_with_notice(_NO_CONTEXT)
             return
-        deadline = turn_deadline(now=datetime.now(UTC))
+        deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         try:
             prepared = await bind_session(
                 deps,
@@ -1779,7 +1950,7 @@ class TeamsApp:
         # The messages this turn answers and its status card are not history.
         skip = frozenset(filter(None, (*inbound.message_ids, lifecycle.message_id)))
         watermark = prepared.watermark if prepared.reused else None
-        depth = admission.history_depth
+        depth = _history_depth(inbound, admission)
         history = await self._history(inbound, watermark=watermark, skip_ids=skip, depth=depth)
         read = [history]
         # An unprompted turn without its thread has nothing to answer: it stays silent.
@@ -1795,6 +1966,7 @@ class TeamsApp:
                     active_turn_message_id=lifecycle.message_id,
                     active_turn_channel_id=inbound.conversation_id,
                     now=datetime.now(UTC),
+                    deadline=deadline,
                 )
             markers.add(prepared.mapping_id)
 
@@ -1819,6 +1991,8 @@ class TeamsApp:
             history_images=history.image_urls if history else (),
         )
         config = admission.config
+        # A queued turn's id names its row, not a message the person sent.
+        message_ref = None if inbound.from_form or continuation is not None else inbound.activity_id
         async with turn_origin(
             self.runtime.sessionmaker,
             attended=attended,
@@ -1836,8 +2010,7 @@ class TeamsApp:
             sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
             platform_channel_id=inbound.conversation_id,
-            # A queued turn's id names its row, not a message the person sent.
-            platform_message_id=None if inbound.from_form or continued else inbound.activity_id,
+            platform_message_id=message_ref,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
@@ -1854,7 +2027,9 @@ class TeamsApp:
                 controls,
                 inbound,
                 is_admin=admission.is_admin,
-                keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
+                keys=render_keys_element(
+                    await self._key_names(tenant_id, inbound, admission, prepared)
+                ),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
                 own_posts=await self._own_posts(
@@ -1884,7 +2059,12 @@ class TeamsApp:
                 watch_row=watch_row,
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
-                request_text=None if inbound.unprompted else inbound.text,
+                # Queued work carries on a question kept when it was asked, if any.
+                request_text=(
+                    None if inbound.unprompted or continuation is not None else inbound.text
+                ),
+                request_ref=message_ref,
+                continues=continuation,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,
@@ -1905,15 +2085,7 @@ class TeamsApp:
             markers.add(outcome.mapping_id)
         final = holder[-1]
         if final.output_authorization is None:
-            await self._finish_outputs(
-                inbound,
-                outcome,
-                final,
-                selfhosted=(
-                    admission.backend_revision is not None
-                    and admission.backend_revision.backend == "selfhosted"
-                ),
-            )
+            await self._finish_outputs(inbound, outcome, final)
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
             if inbound.kind != "dm":
@@ -1932,16 +2104,14 @@ class TeamsApp:
         inbound: TeamsInbound,
         outcome: RunOutcome,
         final: TeamsTurnLifecycle,
-        *,
-        selfhosted: bool,
     ) -> None:
-        """Release controls immediately when no Anthropic file sweep applies."""
-        if not selfhosted and any(
+        """Release controls immediately when no file sweep applies."""
+        if outcome.outputs is not None and any(
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             sweep = self.outputs.sweep(
                 inbound,
-                outcome.ma_session_id,
+                outcome.outputs,
                 append=final.append_to_answer,
                 quiet_s=final.outputs_quiet_s(),
             )
@@ -2015,7 +2185,11 @@ class TeamsApp:
         )
 
     async def _key_names(
-        self, tenant_id: uuid.UUID, inbound: TeamsInbound, admission: Admission
+        self,
+        tenant_id: uuid.UUID,
+        inbound: TeamsInbound,
+        admission: Admission,
+        prepared: PreparedTurn,
     ) -> tuple[str, ...]:
         """This agent's stored key names while the mounted `.env` still matches them."""
         async with self.runtime.sessionmaker() as session:
@@ -2026,14 +2200,13 @@ class TeamsApp:
                 thread_id=inbound.thread_id,
                 account_id=admission.account_id,
             )
-            config = None if live is None else live.effective_config
             return await list_mounted_key_names(
                 session,
                 tenant_id=tenant_id,
                 agent_id=derive_agent_uuid(
                     tenant_id=tenant_id, ma_agent_id=str(admission.agent.id)
                 ),
-                env_sha256=None if config is None else config.env_sha256,
+                env_sha256=answering_env_sha256(prepared, live),
             )
 
     def _release(self, key: str) -> None:
@@ -2141,7 +2314,12 @@ class TeamsApp:
                 dispatch_errors=(Exception,),
             )
         except _TURN_ERRORS as exc:
-            log.error("teams.continuation.dispatch_failed", conversation_id=key, exc_info=exc)
+            log.error(
+                "teams.continuation.dispatch_failed",
+                causes=backend_refusal_causes(exc),
+                conversation_id=key,
+                exc_info=exc,
+            )
 
     async def _asking_agent_id(self, row: TaskContinuationRow, tenant_id: uuid.UUID) -> str | None:
         """The agent that asked for a private input, while the requester's live session is

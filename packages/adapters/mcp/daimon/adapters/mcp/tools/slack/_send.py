@@ -51,11 +51,13 @@ from daimon.adapters.mcp.tools.slack._visibility import (
     map_slack_api_error,
 )
 from daimon.core.agent_identity import (
+    agent_display_name,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
 )
 from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.slack_customize_scope import (
@@ -240,7 +242,11 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
         return None
     try:
         agent = await find_agent_by_derived_uuid_cached(
-            runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=agent_id
+            runtime.client,
+            runtime.resolver_cache,
+            tenant_id=auth.tenant_id,
+            agent_id=agent_id,
+            records=runtime.session_factory,
         )
         if agent is None:
             return None
@@ -249,6 +255,12 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
                 session,
                 tenant_id=auth.tenant_id,
                 agent_name=agent.name,
+                display_name=await agent_display_name(
+                    runtime.session_factory,
+                    tenant_id=auth.tenant_id,
+                    agent_id=agent.id,
+                    fallback=agent.name,
+                ),
                 is_builtin=is_builtin_agent(
                     name=agent.name,
                     metadata=agent.metadata,
@@ -260,7 +272,11 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
                 wait_for_face=True,
             )
     except (anthropic.APIError, SQLAlchemyError) as exc:
-        log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+        log.warning(
+            "slack.agent_identity_lookup_failed",
+            error_type=type(exc).__name__,
+            causes=backend_refusal_causes(exc),
+        )
         return None
     if identity.builtin:
         return None

@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -61,9 +61,6 @@ from daimon.core.stores.domain import ServerSkillRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
-
-if TYPE_CHECKING:
-    from daimon.core.turn.deps import TurnDeps
 
 _ACCESS: dict[str, str] = {
     "no_account": "{label} serves only chat accounts here.",
@@ -138,26 +135,11 @@ def _exchange(runtime: McpRuntime) -> NodeExchange:
 
 
 def _sync_deps(runtime: McpRuntime, node: SkillsNode) -> SyncDeps:
-    def turn_deps() -> TurnDeps:
-        from daimon.core.ma_resolver import new_resolver_cache
-        from daimon.core.turn.deps import build_turn_deps
-
-        return build_turn_deps(
-            runtime.settings,
-            runtime.client,
-            runtime.session_factory,
-            deployment_default=runtime.deployment_default,
-            resolver_cache=new_resolver_cache(),
-            billing_config=None,
-        )
-
     return skill_sync_deps(
         node=node,
         exchange=_exchange(runtime),
         shared=None,
         edit=_edit_deps(runtime),
-        turn_settings=runtime.settings.turn,
-        turn_deps=turn_deps,
         now=_now,
     )
 
@@ -402,7 +384,7 @@ def register_server_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def add_server_skill(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, skill: _Uri | None = None, origin_context_id: _OriginId | None = None
     ) -> ServerSkills:
-        """Only for the connected data server: list what it serves, or take one of its offers
+        """Only for the connected data server: list the skills it offers, or take one
         by name or URI into the library, kept current with that server. A person confirms on
         a card, and you pass your ``origin_context_id``. Not for any other source, nor for giving
         an agent what the library already holds."""

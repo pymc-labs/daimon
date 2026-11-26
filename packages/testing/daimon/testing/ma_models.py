@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Literal, TypedDict, Unpack
+from typing import Any, Literal, TypedDict, Unpack
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_environment import Config as EnvironmentConfig
@@ -87,6 +87,19 @@ def ma_agent(
         name=name,
         metadata=_merge_metadata(tenant_id=tenant_id, name=name, metadata=metadata),
         **fields,
+    )
+
+
+def ma_agent_payload(
+    *,
+    name: str = DEFAULT_AGENT_NAME,
+    tenant_id: uuid.UUID | str | None = None,
+    metadata: Mapping[str, str] | None = None,
+    **fields: Unpack[_AgentFields],
+) -> dict[str, Any]:
+    """`ma_agent` as the JSON body an API reply carries."""
+    return ma_agent(name=name, tenant_id=tenant_id, metadata=metadata, **fields).model_dump(
+        mode="json"
     )
 
 

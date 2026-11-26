@@ -29,7 +29,7 @@ from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAcce
 from daimon.core.agent_fork import fork_agent, fork_host_agent
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.agent_reach import load_agent_reach
-from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.authz import Action, AgentRef, Decision, Place, Subject, authorize
 from daimon.core.channel_environments import (
     LIMITED_OPEN_NETWORK_WARNING,
     limited_readers_network_warning,
@@ -45,6 +45,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import (
+    SEALED_REFUSAL,
     WEB_PLACE_ID,
     AgentRule,
     ChannelRule,
@@ -53,6 +54,7 @@ from daimon.core.permissions import (
     channel_rule,
     check_channel_rule,
     runs_only_in,
+    sealed_outside,
     with_agent_rule,
     with_category_rule,
     with_channel_rule,
@@ -87,6 +89,7 @@ _log = structlog.get_logger(__name__)
 
 RuleRefusal = Literal[
     "admin_required",
+    "sealed_channel",
     "invalid",
     "own_on_both",
     "keeps_own_agents",
@@ -154,6 +157,8 @@ def render_rule_refusal(
     match reason:
         case "admin_required":
             return "Only an admin can change channel and agent rules."
+        case "sealed_channel":
+            return SEALED_REFUSAL
         case "invalid":
             return "That rule can't be set there."
         case "own_on_both":
@@ -218,6 +223,13 @@ class ChannelRuleRefused(DaimonError):
             message or render_rule_refusal(reason, agent_name=agent_name, channel_id=channel_id)
         )
         self.reason: RuleRefusal = reason
+
+
+def _settings_refusal(decision: Decision) -> ChannelRuleRefused:
+    """Why `authorize` refused a rule change: an admin is needed, or it must come from inside."""
+    return ChannelRuleRefused(
+        "sealed_channel" if decision.reason == "sealed_channel" else "admin_required"
+    )
 
 
 @dataclass(frozen=True)
@@ -416,6 +428,7 @@ async def _channel_agent(
     default: DeploymentDefault,
     known: Mapping[str, _PolicyAgent | None],
     resource_host: NeutralResourceHost | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> _ChannelAgent:
     """The channel's default agent and why it can't be the channel's own, if it can't.
 
@@ -433,7 +446,9 @@ async def _channel_agent(
         if name in known
         else await resource_host.find(name)
         if resource_host is not None
-        else await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name)
+        else await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=name, records=records
+        )
     )
     if agent is None:
         return _ChannelAgent(name, answering, "no_channel_agent")
@@ -472,7 +487,9 @@ async def _lookup_channel_agent(
     return {
         row.agent_name: await resource_host.find(row.agent_name)
         if resource_host is not None
-        else await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=row.agent_name)
+        else await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=row.agent_name, records=sessionmaker
+        )
     }
 
 
@@ -499,18 +516,20 @@ async def _write_rule(
     default: DeploymentDefault,
     known: Mapping[str, _PolicyAgent | None],
     resource_host: NeutralResourceHost | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[RuleChange, _ChannelAgent | None]:
     """Under the policy lock: write the rule, or say why the channel's agent can't be its own."""
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not authorize(
+    decision = authorize(
         policy,
         subject=ask.subject,
         action=Action.SET_CHANNEL_RULE,
         place=Place(channel_id=ask.channel_id),
-    ):
-        raise ChannelRuleRefused("admin_required")
+    )
+    if not decision:
+        raise _settings_refusal(decision)
     before = channel_rule(policy, ask.channel_id)
     if ask.expected is not None and ask.expected != before:
         raise StaleChannelValue("access", rule_json(before))
@@ -534,6 +553,7 @@ async def _write_rule(
             default=default,
             known=known,
             resource_host=resource_host,
+            records=records,
         )
         if found.refusal is not None or found.name is None:
             return RuleChange(ask.channel_id, before, before, False), found
@@ -680,7 +700,12 @@ async def _archive_unused_copy(
             return False
     try:
         if resource_host is None:
-            await archive_agent(anthropic, agent_id, scope=resource_scope(tenant_id=str(tenant_id)))
+            await archive_agent(
+                anthropic,
+                agent_id,
+                scope=resource_scope(tenant_id=str(tenant_id)),
+                records=sessionmaker,
+            )
         else:
             made = await resource_host.find(name)
             if made is None or made.id != agent_id:
@@ -733,7 +758,12 @@ async def _with_network_warning(
         return replace(change, network_warning=LIMITED_OPEN_NETWORK_WARNING)
     async with sessionmaker() as session:
         warning = await limited_readers_network_warning(
-            session, anthropic, tenant_id=tenant_id, channel_id=change.channel_id, default=default
+            session,
+            anthropic,
+            tenant_id=tenant_id,
+            channel_id=change.channel_id,
+            default=default,
+            records=sessionmaker,
         )
     return replace(change, network_warning=warning)
 
@@ -820,6 +850,7 @@ async def set_channel_rule(
             default=default,
             known=known,
             resource_host=resource_host,
+            records=sessionmaker,
         )
     if found is None or found.refusal is None:
         return await _with_network_warning(
@@ -839,12 +870,14 @@ async def set_channel_rule(
     if resource_host is None:
         taken = {
             agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
-            for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+            for agent in await list_agents_by_tenant(
+                anthropic, tenant_id=tenant_id, records=sessionmaker
+            )
         }
         new_name = copy_name(channel_label, channel_id, taken=taken, ruled=ruled)
         # The agent looked up before the lock (`known`) when it's there.
         source_agent = known.get(source) or await find_agent_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=source
+            anthropic, tenant_id=tenant_id, name=source, records=sessionmaker
         )
         if start_copy is None:
             if source_agent is None:
@@ -924,6 +957,7 @@ async def set_channel_rule(
                 default=default,
                 known={new_name: made.agent},
                 resource_host=resource_host,
+                records=sessionmaker,
             )
             if found is not None and found.refusal is not None:
                 raise ChannelRuleRefused(found.refusal, agent_name=new_name)
@@ -1079,12 +1113,20 @@ async def set_agent_rule(
     # Checked first too, so whether an agent exists is no one else's to learn.
     async with sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-    if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
-        raise ChannelRuleRefused("admin_required")
-    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
+    decision = authorize(
+        policy, subject=subject, action=Action.SET_AGENT_RULE, agent=AgentRef.of(agent_name)
+    )
+    if not decision:
+        raise _settings_refusal(decision)
+    agent = await find_agent_by_daimon_tag(
+        anthropic, tenant_id=tenant_id, name=agent_name, records=sessionmaker
+    )
     if agent is None and (
         runs_in is not None
-        or agent_name in agent_aliases(await list_agents_by_tenant(anthropic, tenant_id=tenant_id))
+        or agent_name
+        in agent_aliases(
+            await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=sessionmaker)
+        )
     ):
         raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
     pins = agent_pin_names(agent.name, agent.metadata) if agent is not None else ()
@@ -1094,8 +1136,19 @@ async def set_agent_rule(
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not authorize(policy, subject=subject, action=Action.SET_AGENT_RULE):
-            raise ChannelRuleRefused("admin_required")
+        decision = authorize(
+            policy, subject=subject, action=Action.SET_AGENT_RULE, agent=AgentRef.of(*names)
+        )
+        if not decision:
+            raise _settings_refusal(decision)
+        # Keeping an agent to a private channel, or releasing it, changes that channel too.
+        if sealed_outside(
+            policy,
+            subject.inside,
+            channel_ids=target or (),
+            operator=subject.operator,
+        ):
+            raise ChannelRuleRefused("sealed_channel")
         if agent is None and agent_name not in policy.agent_rules:
             raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
         if expected_kept is not None:
@@ -1190,13 +1243,25 @@ async def set_agent_invoker_roles(
     """Set the human invoker roles, preserving spatial rules on every alias."""
     if platform != "discord":
         raise RuleRefused("agent invoker roles are not supported on this platform")
-    if not authorize(TenantAccessPolicy(), subject=subject, action=Action.SET_AGENT_RULE):
-        raise ChannelRuleRefused("admin_required")
+    async with sessionmaker() as session:
+        current = await load_access_policy(session, tenant_id=tenant_id)
+    decision = authorize(
+        current, subject=subject, action=Action.SET_AGENT_RULE, agent=AgentRef.of(agent_name)
+    )
+    if not decision:
+        raise _settings_refusal(decision)
     roles = AgentRule(invoker_role_ids=tuple(role_ids)).invoker_role_ids
-    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        anthropic, tenant_id=tenant_id, name=agent_name, records=sessionmaker
+    )
     if agent is None:
         raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
     names = tuple(dict.fromkeys((agent_name, *agent_pin_names(agent.name, agent.metadata))))
+    decision = authorize(
+        current, subject=subject, action=Action.SET_AGENT_RULE, agent=AgentRef.of(*names)
+    )
+    if not decision:
+        raise _settings_refusal(decision)
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
         await lock_access_policy(session, tenant_id=tenant_id)

@@ -4,7 +4,7 @@ import contextlib
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Literal, Self, cast
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -24,6 +24,8 @@ from mux.errors import ScopeViolation
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .shared_fakes import SessionFactory
 
 TENANT = uuid.UUID(int=1)
 ACCOUNT = uuid.UUID(int=2)
@@ -323,14 +325,6 @@ async def test_account_purge_refuses_platform_and_legacy_scope_before_io(scope: 
     assert not transport.requests
 
 
-class SessionFactory:
-    def __call__(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
-
-    def begin(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
-
-
 @pytest.mark.parametrize(
     "metadata",
     [
@@ -419,9 +413,8 @@ async def test_legacy_identity_lookup_keeps_partial_sdk_reply_and_one_request(
 
 
 @pytest.mark.parametrize("status", [200, 404])
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_dm_quarantine_keeps_archive_wire_and_sealed_error(
-    status: int, path: Literal["legacy", "mux"], monkeypatch: pytest.MonkeyPatch
+    status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     factory = cast(async_sessionmaker[AsyncSession], SessionFactory())
     conversation = DirectMessageRow(
@@ -438,7 +431,7 @@ async def test_dm_quarantine_keeps_archive_wire_and_sealed_error(
         memory_read_only=False,
         history=[],
         recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )
     monkeypatch.setattr(
         direct_messages, "quarantine_conversation", AsyncMock(return_value=["sess_dm"])
@@ -466,9 +459,8 @@ async def test_dm_quarantine_keeps_archive_wire_and_sealed_error(
             return resource_ref(backend, "session", session_id, scope=authorized)
 
         deps = replace(
-            deps_for(client if path == "legacy" else unused_client, factory),
-            turn_path=path,
-            backend=backend if path == "mux" else None,
+            deps_for(unused_client, factory),
+            backend=backend,
             backend_session_ref=session_ref,
         )
         with pytest.raises(DaimonError) as caught:

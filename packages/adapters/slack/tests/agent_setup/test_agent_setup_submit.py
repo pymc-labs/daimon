@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -242,7 +241,7 @@ def _build_runtime_with_db(
         billing_config=None,
         http_client=_build_http_client(),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
 

@@ -2,18 +2,30 @@
 
 import asyncio
 import copy
+import hashlib
+import logging
+import posixpath
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import NoReturn
+from typing import Final, NoReturn, Protocol
 from uuid import uuid4
 
 from pydantic import JsonValue
 
 from mux.contracts.actions import InputEvent, UserMessage, UserToolResult
 from mux.contracts.config import ConfigRevision
-from mux.contracts.events import Event, TextPart
-from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Revision, Scope, ThreadRef
+from mux.contracts.events import Event, ImagePart, TextPart
+from mux.contracts.ids import (
+    ModelRef,
+    Page,
+    PageRequest,
+    ResourceRef,
+    Revision,
+    Scope,
+    SkillRef,
+    ThreadRef,
+)
 from mux.contracts.receipts import (
     CancelReceipt,
     DeletionReceipt,
@@ -24,6 +36,7 @@ from mux.contracts.receipts import (
     UpdateReceipt,
 )
 from mux.contracts.resources import (
+    SESSION_CREATED,
     Agent,
     AgentFilter,
     AgentPatch,
@@ -40,9 +53,21 @@ from mux.contracts.resources import (
     SessionExport,
     SessionFilter,
     SessionSpec,
+    SkillUpload,
     UpdatePlan,
 )
-from mux.drivers.gemini.bundles import inline_files, skill_sources, target_path, validate_targets
+from mux.drivers.gemini.bundles import (
+    UPLOAD_ROOT,
+    file_archive,
+    inline_files,
+    owned_skill,
+    relative_path,
+    skill_archive,
+    skill_sources,
+    target_path,
+    uploaded_pins,
+    validate_targets,
+)
 from mux.drivers.gemini.mcp_auth import (
     LEGACY_SERVER_NAME,
     GCSSecretResolver,
@@ -52,12 +77,27 @@ from mux.drivers.gemini.mcp_auth import (
     model_request,
     server_names,
     validate_intent,
+    validate_network,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
-from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner, read_records
+from mux.drivers.gemini.packages import package_sources
+from mux.drivers.gemini.storage import (
+    ACCOUNT,
+    Keys,
+    Records,
+    RowKey,
+    SessionRecord,
+    Storage,
+    UploadedBundle,
+    owner,
+    session_keys,
+    session_refs,
+    skill_keys,
+)
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
+    EnvironmentTransport,
     Object,
     OwnedStream,
     Transport,
@@ -65,7 +105,7 @@ from mux.drivers.gemini.transport import (
     object_value,
     string,
 )
-from mux.drivers.gemini.usage import observation_from_interaction
+from mux.drivers.gemini.usage import observation_from_interaction, provider_time
 from mux.errors import (
     ContinuityLost,
     ExtensionVersionError,
@@ -75,7 +115,9 @@ from mux.errors import (
     ScopeViolation,
     UnsupportedCapability,
 )
+from mux.profiles import PACKAGE_MANAGERS, network_effect
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
+from mux.profiles.gemini import SESSION_NAMESPACE, WITHHOLD_BUILTINS
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
 
@@ -89,6 +131,8 @@ re-created or resent. Callers bound the whole read with their own deadline.
 The backoff sleeps outside the storage transaction: holding the per-account
 lock for seconds would make sibling sessions on the account fail as busy.
 """
+
+log = logging.getLogger(__name__)
 
 
 def now() -> datetime:
@@ -128,6 +172,20 @@ def page_values[T](values: Sequence[T], page: PageRequest) -> Page[T]:
     )
 
 
+#: Waits between tries of one skill's upload; past them the skill is left out.
+UPLOAD_RETRY_DELAYS_S = (1.0, 4.0)
+
+
+class SkillFiles(Protocol):
+    """The host's bytes of an uploaded skill version, read only at session start.
+
+    Raise a `ProviderError`: a retryable one retries the session, any other
+    leaves that skill out.
+    """
+
+    async def __call__(self, scope: Scope, skill: SkillRef) -> SkillUpload: ...
+
+
 class Base:
     def __init__(
         self,
@@ -139,15 +197,24 @@ class Base:
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
+        skill_files: SkillFiles | None = None,
     ) -> None:
+        self._skill_files = skill_files
         self._max_output_tokens = max_output_tokens
+        self._thinking_level = thinking_level
         self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
         self._mcp_secrets = mcp_secrets
         self._gcs_secrets = gcs_secrets
 
-    def _mcp_request(self, records: Records, scope: Scope, spec: SessionSpec) -> Object:
-        """Rebuild owned intent before authentication; never trust a saved tool list."""
+    def _mcp_request(
+        self, records: Records, scope: Scope, spec: SessionSpec, *, omit: Sequence[str] = ()
+    ) -> Object:
+        """Rebuild owned intent before authentication; never trust a saved tool list.
+
+        `omit`: skill ids the session goes without (an upload that failed).
+        """
         self._check(scope, spec.agent, "agent")
         agent = records.agents.get(spec.agent.id)
         if agent is None or agent.ref != spec.agent:
@@ -164,9 +231,25 @@ class Base:
             agent.spec,
             authenticated_mcp=self._mcp_secrets is not None,
             max_output_tokens=self._max_output_tokens,
+            thinking_level=self._thinking_level,
         )
+        session = spec.extensions.get(SESSION_NAMESPACE)
+        if session is not None and session.value.get(WITHHOLD_BUILTINS) is True:
+            # Each interaction sends its tools, so a session leaves its agent's out.
+            tools = request["tools"]
+            kept = [
+                t
+                for t in (tools if isinstance(tools, list) else [])
+                if _tool_type(t) not in BUILTIN_TOOLS
+            ]
+            request["tools"] = kept or [copy.deepcopy(NO_TOOLS_TOOL)]
         if self._max_output_tokens is not None:
-            if self._native_agent is not None or spec.environment is not None or spec.resources:
+            if (
+                self._native_agent is not None
+                or spec.environment is not None
+                or spec.resources
+                or spec.skills
+            ):
                 refuse("model_interaction_resources")
             return request
         if self._native_agent is not None:
@@ -182,7 +265,9 @@ class Base:
             environment = compile_environment(
                 env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
             )
-        mounted = skill_sources(records, scope, self._account, agent.spec.skills)
+        # A session's own skills (a template's copies) mount beside the agent's.
+        pins = tuple(p for p in (*(agent.spec.skills or ()), *spec.skills) if p.id not in omit)
+        mounted = skill_sources(records, scope, self._account, pins)
         if mounted:
             configuration = object_value(environment)
             sources = configuration.get("sources", [])
@@ -221,6 +306,11 @@ class Base:
             raise ScopeViolation(ref.id, "no owned logical session record")
         if record.session.state == "terminated":
             raise ContinuityLost(record.session.binding.id, ("logical session was archived",))
+        if record.pruned:
+            raise ContinuityLost(
+                record.session.binding.id,
+                ("Gemini conversation pruned after it sat idle; explicitly start a new thread.",),
+            )
         if record.workspace_expires_at is not None and now() >= record.workspace_expires_at:
             raise ContinuityLost(
                 record.session.binding.id,
@@ -298,22 +388,38 @@ class Base:
                 record.session.binding.id, ("Gemini replaced the reused workspace.",)
             )
 
-    async def _fetch_interactions(
-        self, scope: Scope, session: ResourceRef
-    ) -> tuple[tuple[str, str, Object], ...]:
-        """Read every interaction of the session from the provider, holding no lock.
-
-        The interactions come from a committed snapshot and the GETs run outside the
-        records transaction, so a slow provider read never holds the account's
-        records row (every other session in the account waits on it).
-        """
-        async with read_records(self._storage) as snapshot:
+    async def _reconciled(self, scope: Scope, session: ResourceRef) -> SessionRecord:
+        """Read the session's open interactions from the provider, holding no lock, and
+        apply them; an unchanged poll writes nothing. Open: unfinished, or the current
+        one, whose usage the provider may still correct. Older finished ones are skipped."""
+        async with self._storage.read(session_keys(session.id)) as snapshot:
             seen = self._record(snapshot, scope, session)
-            pending = tuple(seen.interactions.items())
         fetched: list[tuple[str, str, Object]] = []
-        for interaction, root in pending:
-            fetched.append((interaction, root, await self._get(seen, interaction)))
-        return tuple(fetched)
+        for interaction, root in seen.interactions.items():
+            observed = seen.observations.get(interaction)
+            if observed is None or not observed.final or interaction == seen.current:
+                fetched.append((interaction, root, await self._get(seen, interaction)))
+        return await self._applied(
+            scope, session, seen, lambda record: self._apply_fetched(record, tuple(fetched))
+        )
+
+    async def _applied(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        seen: SessionRecord,
+        apply: Callable[[SessionRecord], None],
+    ) -> SessionRecord:
+        """Apply provider reads to a copy of the read snapshot `seen`, and again to the
+        locked row only when that changes it. Returns the record as applied."""
+        record = copy.deepcopy(seen)
+        apply(record)
+        if record == seen:
+            return record
+        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
+            record = self._record(records, scope, session)
+            apply(record)
+            return record
 
     def _apply_fetched(
         self, record: SessionRecord, fetched: tuple[tuple[str, str, Object], ...]
@@ -372,13 +478,8 @@ class Base:
             interaction = string(raw["id"])
             # Provider chronology is independent of meter changes and survives
             # restart. Parse offsets rather than ordering timestamp strings.
-            active = raw.get("updated") or raw.get("created")
-            stamp: datetime | None = None
-            if active is not None:
-                stamp = datetime.fromisoformat(string(active).replace("Z", "+00:00"))
-                if stamp.tzinfo is None:
-                    raise ValueError("provider timestamp has no timezone")
-                stamp = stamp.astimezone(UTC)
+            stamp = provider_time(raw)
+            if stamp is not None:
                 watermark = record.native_updated.get(interaction)
                 if watermark is not None and stamp.microsecond == 0:
                     # The create reply can carry microseconds (23:07:10.142775)
@@ -499,32 +600,34 @@ class GeminiAgents(Base):
                 "spec": spec.model_dump(mode="json"),
             }
         )
-        async with self._storage.transaction() as records:
+        keys = Keys(lock=(ACCOUNT,), read=skill_keys(spec.skills), create=("agent",))
+        async with self._storage.transaction(keys) as records:
             skill_sources(records, scope, self._account, spec.skills)
             id_ = self._creation(records, scope, key, digest)
-            if id_ is not None:
-                return records.agents[id_]
-            id_ = str(uuid4())
-            record = Agent(
-                ref=self._ref(scope, id_, "agent"),
-                revision=Revision(local=1),
-                spec=spec,
-                created_at=now(),
-            )
-            records.agents[id_] = record
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return record
+            if id_ is None:
+                id_ = str(uuid4())
+                record = Agent(
+                    ref=self._ref(scope, id_, "agent"),
+                    revision=Revision(local=1),
+                    spec=spec,
+                    created_at=now(),
+                )
+                records.agents[id_] = record
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return record
+        async with self._storage.read(Keys(read=(("agent", id_),))) as records:
+            return records.agents[id_]
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
         self._check(scope, ref, "agent")
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(read=(("agent", ref.id),))) as records:
             result = records.agents.get(ref.id)
             if result is None or result.ref != ref:
                 raise ScopeViolation(ref.id, "no owned inline agent configuration")
             return result
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(scan=("agent",))) as records:
             return page_values(
                 [
                     a
@@ -553,11 +656,20 @@ class GeminiAgents(Base):
         refuse("agent_delete")
 
 
+BUILTIN_TOOLS: Final = ("code_execution", "google_search", "url_context")
+"""Gemini's own tools an agent may name; the rest are functions and MCP servers."""
+
+
+def _tool_type(tool: JsonValue) -> JsonValue:
+    return tool.get("type") if isinstance(tool, dict) else None
+
+
 def compile_agent(
     spec: AgentSpec,
     *,
     authenticated_mcp: bool = False,
     max_output_tokens: int | None = None,
+    thinking_level: str | None = None,
 ) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
         refuse("model")
@@ -566,18 +678,22 @@ def compile_agent(
     if max_output_tokens is not None:
         if spec.tools or spec.skills or spec.mcp_servers:
             refuse("model_interaction_resources")
-        result: Object = {
-            "model": spec.model.id,
-            "generation_config": {"max_output_tokens": max_output_tokens},
-            "tools": [],
-        }
+        generation: Object = {"max_output_tokens": max_output_tokens}
+        if thinking_level is not None:
+            generation["thinking_level"] = thinking_level
+        result: Object = {"model": spec.model.id, "generation_config": generation, "tools": []}
         if spec.system is not None:
             result["system_instruction"] = spec.system
         model_request(result)
         return result
+    if thinking_level is not None:
+        # The API rejects it ("Unknown parameter 'thinking_level' at 'agent_config'",
+        # measured 2026-11-15); generation_config is refused beside `agent`.
+        refuse("agent_thinking_level")
+    config: Object = {"type": "antigravity", "model": spec.model.id}
     result = {
         "agent": BASE_AGENT,
-        "agent_config": {"type": "antigravity", "model": spec.model.id},
+        "agent_config": config,
         # Omission would enable provider defaults, including billable web tools.
         "tools": [],  # filled below; never sent empty
     }
@@ -588,11 +704,7 @@ def compile_agent(
         for tool in spec.tools or ():
             if tool.permission != "auto":
                 refuse("tool_confirmation")
-            if tool.kind == "builtin" and tool.name in (
-                "code_execution",
-                "google_search",
-                "url_context",
-            ):
+            if tool.kind == "builtin" and tool.name in BUILTIN_TOOLS:
                 tools.append({"type": tool.name})
             elif tool.kind == "mcp_toolset" and any(
                 connection.name == tool.name for connection in spec.mcp_servers or ()
@@ -634,27 +746,32 @@ class GeminiEnvironments(Base):
                 "spec": spec.model_dump(mode="json"),
             }
         )
-        async with self._storage.transaction() as records:
+        files: tuple[RowKey, ...] = tuple(
+            ("artifact", s.artifact.id) for s in spec.sources or () if s.artifact
+        )
+        keys = Keys(lock=(ACCOUNT,), read=files, create=("environment",))
+        async with self._storage.transaction(keys) as records:
             compile_environment(
                 spec, files=inline_files(records, scope, self._account, spec.sources)
             )
             id_ = self._creation(records, scope, key, digest)
-            if id_ is not None:
-                return records.environments[id_]
-            id_ = str(uuid4())
-            result = Environment(
-                ref=self._ref(scope, id_, "environment"),
-                revision=Revision(local=1),
-                spec=spec,
-                created_at=now(),
-            )
-            records.environments[id_] = result
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return result
+            if id_ is None:
+                id_ = str(uuid4())
+                result = Environment(
+                    ref=self._ref(scope, id_, "environment"),
+                    revision=Revision(local=1),
+                    spec=spec,
+                    created_at=now(),
+                )
+                records.environments[id_] = result
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return result
+        async with self._storage.read(Keys(read=(("environment", id_),))) as records:
+            return records.environments[id_]
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
         self._check(scope, ref, "environment")
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(read=(("environment", ref.id),))) as records:
             result = records.environments.get(ref.id)
             if result is None or result.ref != ref:
                 raise ScopeViolation(ref.id, "no owned inline environment configuration")
@@ -663,7 +780,7 @@ class GeminiEnvironments(Base):
     async def list(
         self, scope: Scope, *, filters: EnvironmentFilter, page: PageRequest
     ) -> Page[Environment]:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(scan=("environment",))) as records:
             return page_values(
                 [
                     e
@@ -703,8 +820,13 @@ def compile_environment(
         if spec != EnvironmentSpec(name=spec.name, execution="none"):
             refuse("model_interaction_resources")
         return {}
-    if spec.execution != "hosted" or spec.network or spec.packages or spec.native_config:
+    if spec.execution != "hosted" or spec.native_config:
         refuse("environment_configuration")
+    network = network_effect(spec.network)
+    packages = {k: v for k, v in (spec.packages or {}).items() if v}
+    # The install hook fetches from the package registries, so it needs open egress.
+    if packages and (network.mode != "unrestricted" or set(packages) - set(PACKAGE_MANAGERS)):
+        refuse("environment_packages")
     sources: list[JsonValue] = []
     for source in spec.sources or ():
         target = target_path(source.target_path)
@@ -721,8 +843,15 @@ def compile_environment(
             "target": target,
         }
         sources.append(obj)
+    sources.extend(package_sources(packages))
     validate_targets(sources)
-    return {"type": "remote", "sources": sources}
+    result: Object = {"type": "remote", "sources": sources}
+    # Omitting the network allows all egress (Environments API reference).
+    if network.mode == "none":
+        result["network"] = "disabled"
+    elif network.mode == "limited":
+        result["network"] = {"allowlist": [{"domain": host} for host in network.allowed_hosts]}
+    return result
 
 
 class GeminiSessions(Base):
@@ -732,13 +861,22 @@ class GeminiSessions(Base):
         self._check(scope, spec.agent, "agent")
         if spec.resources or spec.state_mode != "continue" or initial is not None:
             refuse("session_resources", "initial_input_or_fresh_state")
-        ext = spec.extensions.get("gemini.session")
-        if set(spec.extensions) != {"gemini.session"} or ext is None:
+        ext = spec.extensions.get(SESSION_NAMESPACE)
+        if set(spec.extensions) != {SESSION_NAMESPACE} or ext is None:
             refuse("gemini.session")
         if ext.version != 1:
             raise ExtensionVersionError("gemini.session", ext.version, (1,))
-        if set(ext.value) != {"thread", "binding_id"}:
-            raise ValueError("gemini.session accepts only thread and binding_id")
+        if (
+            not {"thread", "binding_id"}
+            <= set(ext.value)
+            <= {
+                "thread",
+                "binding_id",
+                WITHHOLD_BUILTINS,
+            }
+            or ext.value.get(WITHHOLD_BUILTINS, True) is not True
+        ):
+            raise ValueError("gemini.session accepts thread, binding_id and withhold_builtins")
         thread = ThreadRef.model_validate(ext.value["thread"])
         if thread.channel.tenant_id != scope.tenant_id:
             raise ScopeViolation(thread.thread_id, "thread is outside tenant scope")
@@ -749,62 +887,389 @@ class GeminiSessions(Base):
                 "spec": spec.model_dump(mode="json"),
             }
         )
-        async with self._storage.transaction() as records:
+        refs = await self._session_refs(spec)
+        keys = Keys(lock=(ACCOUNT,), read=refs, create=("session",))
+        async with self._storage.transaction(keys) as records:
             id_ = self._creation(records, scope, key, digest)
-            if id_ is not None:
-                return self._record(records, scope, self._ref(scope, id_, "session")).session
+            replay = id_ is not None
+            if id_ is None:
+                id_ = self._new_session(
+                    records, scope, spec, key, digest, thread, string(ext.value["binding_id"]), refs
+                )
+        if replay:
+            async with self._storage.read(session_keys(id_)) as records:
+                prior = self._record(records, scope, self._ref(scope, id_, "session"))
+                if not prior.uploading:
+                    # The mark says the session is new, so a host tells what it left out
+                    # once: a replay of the create is not new.
+                    native = prior.session.native
+                    kept = (
+                        {k: v for k, v in native.items() if k != SESSION_CREATED}
+                        if isinstance(native, dict)
+                        else native
+                    )
+                    return prior.session.model_copy(update={"native": kept})
+        # Past the transaction: an upload never holds the account's records.
+        return await self._prepare(scope, self._ref(scope, id_, "session"))
+
+    async def _session_refs(self, spec: SessionSpec) -> tuple[RowKey, ...]:
+        """The rows a new session reads, from its agent and environment read first."""
+        env = spec.environment
+        named: list[RowKey] = [("agent", spec.agent.id)]
+        if env is not None:
+            named.append(("environment", env.id))
+        async with self._storage.read(Keys(read=tuple(named))) as records:
             agent = records.agents.get(spec.agent.id)
-            if agent is None or agent.ref != spec.agent:
-                raise ScopeViolation(spec.agent.id, "no owned inline agent")
-            if agent.revision != spec.agent_revision:
-                raise ProviderError("conflict", retryable=False)
-            request = self._mcp_request(records, scope, spec)
-            id_ = str(uuid4())
-            session = Session(
-                ref=self._ref(scope, id_, "session"),
-                binding=ProviderBinding(
-                    id=string(ext.value["binding_id"]),
-                    thread=thread,
-                    provider="gemini",
-                    profile=PROFILE.profile_id,
-                    native_refs={"session": id_, "agent": spec.agent.id},
-                    generation=1,
-                    config_revision=spec.config_revision,
-                ),
-                continuity=Continuity(
-                    conversation="interaction_chain",
-                    workspace="native_reuse" if self._max_output_tokens is None else "none",
-                    processes="unknown" if self._max_output_tokens is None else "none",
-                    retention_known=True,
-                ),
-                requested_revision=spec.agent_revision,
-                effective_revision=spec.agent_revision,
-                state="idle",
+            environment = records.environments.get(env.id) if env else None
+        return session_refs(agent, environment, spec) if agent else tuple(named)
+
+    def _new_session(
+        self,
+        records: Records,
+        scope: Scope,
+        spec: SessionSpec,
+        key: str,
+        digest: str,
+        thread: ThreadRef,
+        binding_id: str,
+        refs: tuple[RowKey, ...],
+    ) -> str:
+        agent = records.agents.get(spec.agent.id)
+        if agent is None or agent.ref != spec.agent:
+            raise ScopeViolation(spec.agent.id, "no owned inline agent")
+        if agent.revision != spec.agent_revision:
+            raise ProviderError("conflict", retryable=False)
+        request = self._mcp_request(records, scope, spec)
+        id_ = str(uuid4())
+        session = Session(
+            ref=self._ref(scope, id_, "session"),
+            binding=ProviderBinding(
+                id=binding_id,
+                thread=thread,
+                provider="gemini",
+                profile=PROFILE.profile_id,
+                native_refs={"session": id_, "agent": spec.agent.id},
+                generation=1,
+                config_revision=spec.config_revision,
+            ),
+            continuity=Continuity(
+                conversation="interaction_chain",
+                workspace="native_reuse" if self._max_output_tokens is None else "none",
+                processes="unknown" if self._max_output_tokens is None else "none",
+                retention_known=True,
+            ),
+            requested_revision=spec.agent_revision,
+            effective_revision=spec.agent_revision,
+            state="idle",
+            native={SESSION_CREATED: True},
+        )
+        pins = (*(agent.spec.skills or ()), *spec.skills)
+        records.sessions[id_] = SessionRecord(
+            owner(scope),
+            session,
+            spec,
+            agent.spec.model,
+            request,
+            mcp_server_names=server_names(agent.spec.mcp_servers or ()),
+            uploading=tuple(p.id for p in uploaded_pins(records, scope, self._account, pins)),
+            refs=refs,
+        )
+        records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+        return id_
+
+    async def _prepare(self, scope: Scope, ref: ResourceRef) -> Session:
+        """Make the environment and upload each large skill into it before any turn.
+
+        The id is saved before the uploads, so a retried create resumes. A skill that
+        will not upload is left out, and leaving one out drops the saved environment:
+        its inline SKILL.md would name missing files. Two creates of one key may run
+        this at once, so every write back acts only on the environment it worked in.
+        """
+        environments = (
+            self._transport if isinstance(self._transport, EnvironmentTransport) else None
+        )
+        replaced = 0
+        while True:
+            stale: str | None = None
+            pending: tuple[SkillRef, ...] = ()
+            manifests: dict[str, UploadedBundle] = {}
+            environment_id: str | None = None
+            async with self._storage.transaction(
+                session_keys(ref.id, lock=True, refs=True)
+            ) as records:
+                record = self._record(records, scope, ref)
+                if not record.uploading:
+                    return record.session
+                config = self._environment_config(record)
+                if environments is None or self._skill_files is None or replaced > 2:
+                    plain = False
+                else:
+                    plain = self._plain_sources(config) and self._valid_network(config)
+                if not plain:
+                    stale = self._leave_out(records, scope, record, record.uploading)
+                else:
+                    agent = records.agents[record.spec.agent.id]
+                    ids = set(record.uploading)
+                    pending = tuple(
+                        p for p in (*(agent.spec.skills or ()), *record.spec.skills) if p.id in ids
+                    )
+                    manifests = {
+                        p.id: owned_skill(records, scope, self._account, p.id).uploads[
+                            str(p.version)
+                        ]
+                        for p in pending
+                    }
+                    environment_id = record.environment_id
+            if not plain:
+                await self._discard(environments, stale)
+                continue
+            assert environments is not None, "checked above"
+            # Every file is read and packed before the environment exists: a skill the
+            # host can't supply is left out up front, not by replacing an environment.
+            archives = {p.id: await self._archive(scope, p, manifests[p.id]) for p in pending}
+            if unusable := tuple(i for i, archive in archives.items() if archive is None):
+                async with self._storage.transaction(
+                    session_keys(ref.id, lock=True, refs=True)
+                ) as records:
+                    record = self._record(records, scope, ref)
+                    stale = self._leave_out(
+                        records, scope, record, [i for i in unusable if i in record.uploading]
+                    )
+                await self._discard(environments, stale)
+                continue
+            if environment_id is None:
+                try:
+                    made = await environments.create_environment(config)
+                except ProviderError as error:
+                    if error.retryable:
+                        raise
+                    log.warning("gemini_environment_create_refused category=%s", error.category)
+                    async with self._storage.transaction(
+                        session_keys(ref.id, lock=True, refs=True)
+                    ) as records:
+                        record = self._record(records, scope, ref)
+                        stale = self._leave_out(records, scope, record, record.uploading)
+                    await self._discard(environments, stale)
+                    continue
+                async with self._storage.transaction(
+                    session_keys(ref.id, lock=True, refs=True)
+                ) as records:
+                    record = self._record(records, scope, ref)
+                    # Only into a record still waiting for an environment of this very
+                    # configuration: another create's, or a skill since left out, wins.
+                    saved = (
+                        record.environment_id is None
+                        and bool(record.uploading)
+                        and self._environment_config(record) == config
+                    )
+                    if saved:
+                        record.environment_id = made
+                        record.workspace_expires_at = now() + timedelta(days=7)
+                if not saved:
+                    await self._discard(environments, made)
+                    continue
+                environment_id = made
+            try:
+                failed: list[str] | None = [
+                    p.id
+                    for p in pending
+                    if not await self._upload(environment_id, p, archives[p.id], manifests[p.id])
+                ]
+            except ProviderError as error:
+                if error.category != "not_found":
+                    raise
+                failed = None  # the environment is gone: make it again, with every skill
+            stale = None
+            async with self._storage.transaction(
+                session_keys(ref.id, lock=True, refs=True)
+            ) as records:
+                record = self._record(records, scope, ref)
+                if record.environment_id != environment_id or not record.uploading:
+                    continue  # another create moved the record on; start from what it holds
+                if failed == []:
+                    record.uploading = ()
+                    record.session = record.session.model_copy(
+                        update={
+                            "native": {
+                                "skills_left_out": list(record.left_out),
+                                SESSION_CREATED: True,
+                            }
+                        }
+                    )
+                    return record.session
+                if failed:
+                    stale = self._leave_out(records, scope, record, failed)
+                else:
+                    record.environment_id = record.workspace_expires_at = None
+            replaced += 1
+            await self._discard(environments, stale)
+
+    @staticmethod
+    def _environment_config(record: SessionRecord) -> Object:
+        return {k: v for k, v in object_value(record.request["environment"]).items() if k != "type"}
+
+    @staticmethod
+    def _plain_sources(config: Object) -> bool:
+        """Whether every source is one the pre-created environment can carry."""
+        sources = config.get("sources")
+        return all(
+            not isinstance(source, dict) or source.get("type") in ("inline", "repository")
+            for source in (sources if isinstance(sources, list) else ())
+        )
+
+    @staticmethod
+    def _valid_network(config: Object) -> bool:
+        try:
+            validate_network({"environment": config})
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    async def _discard(
+        environments: EnvironmentTransport | None, environment_id: str | None
+    ) -> None:
+        """Delete an environment nobody keeps; a failure only leaves it to expire."""
+        if environments is None or environment_id is None:
+            return
+        try:
+            await environments.delete_environment(environment_id)
+        except ProviderError as error:
+            if error.category != "not_found":
+                log.warning("gemini_environment_delete_failed category=%s", error.category)
+
+    def _leave_out(
+        self, records: Records, scope: Scope, record: SessionRecord, ids: Sequence[str]
+    ) -> str | None:
+        """Go without these skills; returns the environment dropped, which the caller deletes.
+
+        The saved environment mounts their SKILL.md, so it can't stay.
+        """
+        if not ids:
+            return None
+        stale = record.environment_id
+        record.environment_id = record.workspace_expires_at = None
+        record.left_out = tuple(dict.fromkeys((*record.left_out, *ids)))
+        record.uploading = tuple(i for i in record.uploading if i not in record.left_out)
+        record.request = self._mcp_request(records, scope, record.spec, omit=record.left_out)
+        if not record.uploading:
+            record.session = record.session.model_copy(
+                update={"native": {"skills_left_out": list(record.left_out), SESSION_CREATED: True}}
             )
-            records.sessions[id_] = SessionRecord(
-                owner(scope),
-                session,
-                spec,
-                agent.spec.model,
-                request,
-                mcp_server_names=server_names(agent.spec.mcp_servers or ()),
-            )
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return session
+        return stale
+
+    async def _archive(self, scope: Scope, pin: SkillRef, uploaded: UploadedBundle) -> bytes | None:
+        """One skill's files packed and checked against its manifest; None: unusable."""
+        assert self._skill_files is not None, "checked by _prepare"
+        try:
+            return skill_archive(uploaded, await self._skill_files(scope, pin))
+        except ProviderError as error:
+            if error.retryable:
+                raise
+            log.warning("gemini_skill_files_unread category=%s", error.category)
+            return None
+
+    async def _upload(
+        self, environment_id: str, pin: SkillRef, archive: bytes | None, uploaded: UploadedBundle
+    ) -> bool:
+        """Place one skill's files in its own environment, then check their sizes."""
+        assert isinstance(self._transport, EnvironmentTransport), "checked by _prepare"
+        assert archive is not None, "checked by _prepare"
+        path = f"{UPLOAD_ROOT}/{pin.id}"
+        expected = {file: size for file, size, _ in uploaded.files}
+        for delay in (*UPLOAD_RETRY_DELAYS_S, None):
+            try:
+                # The environment was made for this session, so a conflict is only ever
+                # an earlier try of ours: replace it.
+                await self._transport.upload_archive(environment_id, path, archive, overwrite=True)
+                listed = await self._transport.list_files(environment_id, path)
+                if all(listed.get(file) == size for file, size in expected.items()):
+                    return True
+            except ProviderError as error:
+                if error.category == "not_found":
+                    raise
+                if not error.retryable:
+                    log.warning("gemini_skill_upload_refused category=%s", error.category)
+                    return False
+            if delay is not None:
+                await asyncio.sleep(random.uniform(delay / 2, delay))
+        return False
+
+    async def place_file(
+        self, scope: Scope, ref: ResourceRef, path: str, content: bytes | None
+    ) -> bool:
+        """Put a private file at this workspace path before the next send; False: not there.
+
+        Never in the environment config, which interactions echo and the record keeps;
+        only its hash is recorded, so an unchanged file is not sent again. A first
+        turn's environment is made here, as `_prepare` makes one, where its sources
+        allow. `None` empties a file placed before. Snapshots never offer it as an output.
+        """
+        environments = (
+            self._transport if isinstance(self._transport, EnvironmentTransport) else None
+        )
+        if environments is None or self._max_output_tokens is not None:
+            return False
+        directory, name = posixpath.split(relative_path(path))
+        async with self._storage.read(session_keys(ref.id)) as records:
+            record = self._record(records, scope, ref)
+            environment_id, placed = record.environment_id, record.placed.get(path)
+            config, fresh = self._environment_config(record), record.current is None
+        if content is None and (placed is None or environment_id is None):
+            return False
+        mark = f"{environment_id}:{hashlib.sha256(content or b'').hexdigest()}"
+        if placed == mark:
+            return content is not None
+        if environment_id is None:
+            if not fresh or not (self._plain_sources(config) and self._valid_network(config)):
+                return False
+            try:
+                made = await environments.create_environment(config)
+            except ProviderError as error:
+                if error.retryable:
+                    raise
+                log.warning("gemini_environment_create_refused category=%s", error.category)
+                return False
+            async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
+                record = self._record(records, scope, ref)
+                saved = (
+                    record.environment_id is None
+                    and record.current is None
+                    and self._environment_config(record) == config
+                )
+                if saved:
+                    record.environment_id = made
+                    record.workspace_expires_at = now() + timedelta(days=7)
+                environment_id = record.environment_id
+            if not saved:
+                await self._discard(environments, made)
+            if environment_id is None:
+                return False
+            return await self.place_file(scope, ref, path, content)
+        archive = file_archive({name: content or b""}, mode=0o600)
+        await environments.upload_archive(environment_id, directory, archive, overwrite=True)
+        async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
+            record = self._record(records, scope, ref)
+            if record.environment_id != environment_id:
+                return False
+            record.placed[path] = mark
+        return content is not None
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         return await self.retrying(lambda: self._retrieve(scope, ref))
 
     async def _retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
-        async with self._storage.transaction() as records:
-            record = self._record(records, scope, ref)
-            if record.current is not None:
-                self._observe(
-                    record,
-                    await self._get(record, record.current),
-                    record.interactions[record.current],
-                )
-            return record.session
+        async with self._storage.read(session_keys(ref.id)) as records:
+            seen = self._record(records, scope, ref)
+        if (current := seen.current) is None:
+            return seen.session
+        root, raw = seen.interactions[current], await self._get(seen, current)
+
+        def apply(record: SessionRecord) -> None:
+            if record.interactions.get(current) == root:
+                self._observe(record, raw, root)
+
+        return (await self._applied(scope, ref, seen, apply)).session
 
     async def list(
         self, scope: Scope, *, filters: SessionFilter, page: PageRequest
@@ -813,7 +1278,7 @@ class GeminiSessions(Base):
             refuse("session_list_filter")
         if filters.agent is not None:
             self._check(scope, filters.agent, "agent")
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(scan=("session",))) as records:
             return page_values(
                 [
                     r.session
@@ -826,7 +1291,7 @@ class GeminiSessions(Base):
             )
 
     async def plan_update(self, scope: Scope, ref: ResourceRef, desired: SessionSpec) -> UpdatePlan:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(session_keys(ref.id)) as records:
             record = self._record(records, scope, ref)
             return UpdatePlan(
                 session=ref,
@@ -887,6 +1352,7 @@ class GeminiEvents(Base):
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> None:
         super().__init__(
             transport,
@@ -896,6 +1362,7 @@ class GeminiEvents(Base):
             gcs_secrets=gcs_secrets,
             native_agent=native_agent,
             max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
         )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
@@ -970,10 +1437,31 @@ class GeminiEvents(Base):
                 "expected_turn": expected_turn,
             }
         )
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(
+            session_keys(session.id, lock=True, refs=True)
+        ) as records:
             record = self._record(records, scope, session)
-            expected = self._mcp_request(records, scope, record.spec)
+            if record.uploading:
+                # Its large skills are still uploading: create the session again first.
+                raise ProviderError("conflict", retryable=True, native_code="skill_upload_pending")
+            expected = self._mcp_request(records, scope, record.spec, omit=record.left_out)
             agent = records.agents[record.spec.agent.id]
+            if record.current is None and record.environment_id is None:
+                # Their SKILL.md would mount with none of their files beside it.
+                mounted = uploaded_pins(
+                    records,
+                    scope,
+                    self._account,
+                    tuple(
+                        p
+                        for p in (*(agent.spec.skills or ()), *record.spec.skills)
+                        if p.id not in record.left_out
+                    ),
+                )
+                if mounted:
+                    raise ProviderError(
+                        "conflict", retryable=False, native_code="skill_environment_missing"
+                    )
             connections = agent.spec.mcp_servers or ()
             try:
                 validate_intent(
@@ -989,7 +1477,7 @@ class GeminiEvents(Base):
                         "no longer accepts (mcp_server_name); start a new thread.",
                     ),
                 ) from None
-            prior = records.sends.get((*owner(scope), key))
+            prior = record.sends.get(key)
             if prior is not None:
                 if prior[0] != scope.principal_id:
                     raise ScopeViolation(key, "operation belongs to another principal")
@@ -1025,7 +1513,7 @@ class GeminiEvents(Base):
                         raw = await self._get(record, receipt.input_ids[0])
                         self._accept(record, raw, receipt.turn_id, events)
                         record.unknown_delivery = False
-                        records.sends[(*owner(scope), key)] = scope.principal_id, digest, receipt
+                        record.sends[key] = scope.principal_id, digest, receipt
                         return receipt
                 return prior[2]
             if record.unknown_delivery:
@@ -1066,7 +1554,7 @@ class GeminiEvents(Base):
                 for input_ in events:
                     if not isinstance(input_, UserMessage) or input_.mode != "new_turn":
                         refuse("native_input_or_confirmation_or_steer")
-                    inputs.append({"type": "text", "text": _text(input_.content)})
+                    inputs.extend(_message_content(input_.content))
             overrides.update({"input": inputs, "background": True, "store": True})
             authenticated = any(c.credential_ref is not None for c in connections)
             if record.current is not None:
@@ -1080,6 +1568,9 @@ class GeminiEvents(Base):
                 overrides["previous_interaction_id"] = record.current
                 if self._max_output_tokens is None:
                     overrides["environment"] = record.environment_id
+            elif record.environment_id is not None and self._max_output_tokens is None:
+                # Made before this first turn, with its large skills uploaded into it.
+                overrides["environment"] = record.environment_id
             request = await authenticated_template(
                 scope,
                 record.request,
@@ -1114,7 +1605,7 @@ class GeminiEvents(Base):
             # an accepted POST into a fresh request, even under a different key.
             unknown = SendReceipt(operation_id=key, status="outcome_unknown", input_ids=())
             record.unknown_delivery = True
-            records.sends[(*owner(scope), key)] = scope.principal_id, digest, unknown
+            record.sends[key] = scope.principal_id, digest, unknown
         try:
             raw = await self._transport.create(request)
         except ProviderError as exc:
@@ -1125,10 +1616,15 @@ class GeminiEvents(Base):
                 return unknown
             # Definite refusal permits a new operation, but never retries this key.
             await self._state_store.advance_operation(scope, key, "failed", now=now(), fence=None)
-            async with self._storage.transaction(after_dispatch=True) as records:
+            async with self._storage.transaction(
+                session_keys(session.id, lock=True), after_dispatch=True
+            ) as records:
                 record = self._record(records, scope, session)
                 record.unknown_delivery = False
-            if exc.category == "not_found" and request.get("previous_interaction_id") is not None:
+            if exc.category == "not_found" and (
+                request.get("previous_interaction_id") is not None
+                or isinstance(request.get("environment"), str)
+            ):
                 raise ContinuityLost(
                     record.session.binding.id,
                     ("Gemini reused environment expired or history was lost.",),
@@ -1141,7 +1637,9 @@ class GeminiEvents(Base):
             raise ProviderError(
                 "upstream", retryable=False, native_code="malformed_interaction"
             ) from None
-        async with self._storage.transaction(after_dispatch=True) as records:
+        async with self._storage.transaction(
+            session_keys(session.id, lock=True), after_dispatch=True
+        ) as records:
             record = self._record(records, scope, session)
             interaction = string(raw["id"])
             if not is_result:
@@ -1165,13 +1663,13 @@ class GeminiEvents(Base):
                 resource=session,
                 result=receipt.model_dump(mode="json"),
             )
-            # Persist the mount-header digests with the acceptance, before any read.
+            # Persist the mount and MCP header digests with the acceptance, before any read.
             dispatched = getattr(self._transport, "mount_echo_digests", None)
             if dispatched is not None and (sent := dispatched(interaction)):
                 record.mount_echo_digests[interaction] = sorted(sent)
             self._accept(record, raw, root, events)
             record.unknown_delivery = False
-            records.sends[(*owner(scope), key)] = scope.principal_id, digest, receipt
+            record.sends[key] = scope.principal_id, digest, receipt
             return receipt
 
     async def open_stream(
@@ -1182,7 +1680,7 @@ class GeminiEvents(Base):
         after: str | None = None,
         previews: bool = False,
     ) -> AsyncIterator[Event]:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             record = self._record(records, scope, session)
             interaction, root = record.current, record.root
             if interaction is not None:
@@ -1222,16 +1720,15 @@ class GeminiEvents(Base):
                                 native_type="step.delta",
                             )
                             preview_sequence += 1
-                    elif kind in ("interaction.completed", "interaction.status_update"):
+                    elif kind == "interaction.completed" or (
+                        kind == "interaction.status_update"
+                        and raw.get("status") in (None, "requires_action", *OUTCOMES)
+                    ):
                         # Status events alone have no saved final content. Fetch
                         # canonical steps; EOF or a child/native event is never an end.
-                        await self.reconcile(scope, session)
-                        # The reconcile just committed this turn's events: read them from
-                        # the committed snapshot, never waiting behind the account's
-                        # writers again (J6g PAKM6G failed busy here).
-                        async with read_records(self._storage) as records:
-                            current = self._record(records, scope, session)
-                            batch = tuple(e for e in current.events.values() if e.turn_id == root)
+                        # A plain progress update changes nothing a reconcile would see.
+                        current = await self.retrying(lambda: self._reconciled(scope, session))
+                        batch = tuple(e for e in current.events.values() if e.turn_id == root)
                         for item in batch:
                             if item.id not in delivered:
                                 delivered.add(item.id)
@@ -1253,7 +1750,9 @@ class GeminiEvents(Base):
                             now=now(),
                             native_type="error",
                         )
-                        async with self._storage.transaction() as records:
+                        async with self._storage.transaction(
+                            session_keys(session.id, lock=True)
+                        ) as records:
                             current = self._record(records, scope, session)
                             self._append(current, (gap,))
                             gap = current.events[gap.id]
@@ -1288,32 +1787,29 @@ class GeminiEvents(Base):
                 await close()
 
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
-        async with read_records(self._storage) as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             return page_values(tuple(self._record(records, scope, session).events.values()), page)
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         return await self.retrying(lambda: self._reconcile(scope, session))
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
-        fetched = await self._fetch_interactions(scope, session)
-        async with self._storage.transaction() as records:
-            record = self._record(records, scope, session)
-            self._apply_fetched(record, fetched)
-            s = record.session
-            return ProjectionSnapshot(
-                session=session,
-                cursor=str(len(record.events)),
-                state=s.state if s.state != "provisioning" else "running",
-                active_root_turn=s.active_root_turn,
-                required_actions=s.required_actions,
-                gaps=tuple(e.id for e in record.events.values() if e.type == "session.history_gap"),
-                taken_at=now(),
-            )
+        record = await self._reconciled(scope, session)
+        s = record.session
+        return ProjectionSnapshot(
+            session=session,
+            cursor=str(len(record.events)),
+            state=s.state if s.state != "provisioning" else "running",
+            active_root_turn=s.active_root_turn,
+            required_actions=s.required_actions,
+            gaps=tuple(e.id for e in record.events.values() if e.type == "session.history_gap"),
+            taken_at=now(),
+        )
 
     async def cancel(
         self, scope: Scope, session: ResourceRef, *, turn_id: str, key: str
     ) -> CancelReceipt:
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
             record = self._record(records, scope, session)
             if record.root != turn_id or record.current is None:
                 raise ProviderError("conflict", retryable=False)
@@ -1379,25 +1875,54 @@ class GeminiEvents(Base):
     async def _observe_stop(self, scope: Scope, receipt: CancelReceipt) -> StopObservation:
         # The provider read runs holding no lock (a stop waits on it repeatedly), then a
         # short transaction applies it to the same turn's same interaction only.
-        async with read_records(self._storage) as snapshot:
+        async with self._storage.read(session_keys(receipt.session.id)) as snapshot:
             seen = self._record(snapshot, scope, receipt.session)
             if seen.root != receipt.turn_id or seen.current is None:
                 raise ProviderError("conflict", retryable=False)
             interaction = seen.current
         raw = await self._get(seen, interaction)
-        async with self._storage.transaction() as records:
-            record = self._record(records, scope, receipt.session)
+
+        def apply(record: SessionRecord) -> None:
             if record.root != receipt.turn_id or record.current != interaction:
                 raise ProviderError("conflict", retryable=False)
             self._same_workspace(record, raw)
             self._observe(record, raw, receipt.turn_id)
-            outcome = OUTCOMES.get(string(raw["status"]))
-            return StopObservation(
-                receipt_operation_id=receipt.operation_id,
-                stopped=outcome is not None,
-                outcome=outcome,
-                observed_at=now(),
-            )
+
+        await self._applied(scope, receipt.session, seen, apply)
+        outcome = OUTCOMES.get(string(raw["status"]))
+        return StopObservation(
+            receipt_operation_id=receipt.operation_id,
+            stopped=outcome is not None,
+            outcome=outcome,
+            observed_at=now(),
+        )
+
+
+_IMAGE_TYPES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/heic",
+        "image/heif",
+        "image/gif",
+        "image/bmp",
+        "image/tiff",
+    }
+)
+"""The image types the Interactions API accepts inline."""
+
+
+def _message_content(parts: Sequence[object]) -> list[JsonValue]:
+    """A user message as Interactions input blocks: its text, then its inline images."""
+    images: list[JsonValue] = []
+    for part in parts:
+        if isinstance(part, ImagePart) and part.data_base64 and part.media_type in _IMAGE_TYPES:
+            images.append({"type": "image", "data": part.data_base64, "mime_type": part.media_type})
+        elif not isinstance(part, TextPart):
+            refuse("input_modality")
+    text = _text([part for part in parts if isinstance(part, TextPart)])
+    return [{"type": "text", "text": text}, *images] if text or not images else images
 
 
 def _text(parts: Sequence[object]) -> str:

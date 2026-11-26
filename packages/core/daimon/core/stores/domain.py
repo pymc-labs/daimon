@@ -11,12 +11,16 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
 
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
+from daimon.core.ops_catalog import OpsArea, OpsCode, OpsSeverity
 from daimon.core.session_snapshot import SessionSnapshot
-from mux.contracts.config import CapabilityRequirement, ThreadMode
-from mux.contracts.ids import PROVIDERS, Provider, Scope
-from mux.contracts.profile import Capability
+from daimon.core.stores.support_rows import SupportEscalationRow as SupportEscalationRow
+from daimon.core.windows import BudgetWindow as BudgetWindow
+from mux.contracts.config import DEFAULT_BACKEND, CapabilityRequirement, ThreadMode
+from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
+from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
     Agent,
     AgentSpec,
@@ -55,6 +59,7 @@ ContinuationReason = Literal[
     "watch_fired",
     "job_finished",
     "watch_report",
+    "confirmed_call",
 ]
 #: Where a watch reports each fire.
 WatchDelivery = Literal["thread", "dm", "new_thread"]
@@ -98,6 +103,37 @@ class AccountIdentityRow(BaseModel):
     # platform_principals.foreign_home_id: the principal was verified to belong to another
     # organisation (sticky), so it is a client on every call, even with no running turn.
     foreign_home_id: str | None = None
+
+
+class SkillSizeRow(BaseModel):
+    """One source skill version's measured bundle."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    skill_id: str
+    version: str
+    name: str
+    total_bytes: int
+    largest_file_bytes: int
+    file_count: int
+    text_only: bool
+    manifest_bytes: int | None = None
+    """The SKILL.md's bytes; -1: not text; None: measured before they were kept, or unreadable."""
+
+
+class SkillCopyRow(BaseModel):
+    """A source skill version's copy in one provider project."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    provider: str
+    account_scope_id: str
+    skill_id: str
+    version: str
+    copy_id: str
+    copy_version: str
 
 
 class ChannelSkillRow(BaseModel):
@@ -221,16 +257,6 @@ RoutineDestinationKind = Literal["channel", "thread", "dm"]
 RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
 
 
-class UnattendedRequester(BaseModel):
-    """Whose rights a routine or queued wake fires with: their stored role and role ids."""
-
-    model_config = ConfigDict(frozen=True)
-
-    platform_user_id: str
-    is_admin: bool = False
-    role_ids: tuple[str, ...] = ()
-
-
 @dataclass(frozen=True)
 class SandboxPin:
     """The agent version and environment revision an admin's routine opt-in covers."""
@@ -240,6 +266,50 @@ class SandboxPin:
     environment_id: str
     #: Environments are edited in place; their `updated_at` is their revision.
     environment_updated_at: datetime
+    #: The provider the routine ran on when opted in; another needs a new opt-in.
+    provider: str = DEFAULT_BACKEND
+
+
+@dataclass(frozen=True)
+class AgentSandboxPin:
+    """An operator's agent-level opt-in: the agent and the environment, never a version."""
+
+    agent_id: str
+    #: The environment's `daimon` name, resolved at each fire; edits to it are not drift.
+    environment_name: str
+    #: The provider the agent ran on when opted in; another needs a new opt-in.
+    provider: str = DEFAULT_BACKEND
+
+
+AnySandboxPin = SandboxPin | AgentSandboxPin
+"""What a `routine_sandbox_tools` On covers at the routine or the agent tier."""
+
+SANDBOX_KEY: Final = "routine_sandbox_tools"
+PinnedTier = Literal["agent", "routine"]
+_AGENT_PIN: Final = TypeAdapter(AgentSandboxPin)
+_ROUTINE_PIN: Final = TypeAdapter(SandboxPin)
+
+
+def pin_json(pin: AnySandboxPin) -> dict[str, JsonValue]:
+    """A pin as its feature value and the change record keep it; Anthropic is unnamed,
+    as in every pin stored before others existed."""
+    data: dict[str, JsonValue] = (
+        _AGENT_PIN.dump_python(pin, mode="json")
+        if isinstance(pin, AgentSandboxPin)
+        else _ROUTINE_PIN.dump_python(pin, mode="json")
+    )
+    if data.get("provider") == DEFAULT_BACKEND:
+        del data["provider"]
+    return data
+
+
+def stored_pin(row: FeatureValueRow) -> AnySandboxPin | None:
+    """The pin an agent's or a routine's `routine_sandbox_tools` row keeps; None without one."""
+    if row.pin is None:
+        return None
+    if row.tier == "agent":
+        return _AGENT_PIN.validate_python(row.pin)
+    return _ROUTINE_PIN.validate_python(row.pin)
 
 
 class RoutineRow(BaseModel):
@@ -277,6 +347,7 @@ class RoutineRow(BaseModel):
     delivery_status: RoutineDeliveryStatus | None = None
     delivery_note: str | None = None
     delivery_payload: str | None = None
+    delivery_hold: dict[str, Any] | None = None
     delivery_lease_owner: str | None = None
     delivery_lease_expires_at: datetime | None = None
     delivered_at: datetime | None = None
@@ -285,15 +356,6 @@ class RoutineRow(BaseModel):
     source_provenance_known: bool = False
     source_channel_id: str | None = None
     source_thread_id: str | None = None
-    #: An admin opted this routine's own runs in to built-in sandbox tools.
-    sandbox_tools_enabled: bool = False
-    sandbox_tools_set_by: str | None = None
-    sandbox_tools_set_at: datetime | None = None
-    #: The agent version and environment revision the opt-in covers.
-    sandbox_agent_id: str | None = None
-    sandbox_agent_version: int | None = None
-    sandbox_environment_id: str | None = None
-    sandbox_environment_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -320,6 +382,8 @@ class ThreadSessionRow(BaseModel):
     active_turn_message_id: str | None = None
     active_turn_started_at: datetime | None = None
     active_turn_channel_id: str | None = None
+    active_turn_deadline: datetime | None = None
+    model_marks: list[str] | None = None
     # The configuration the MA session froze at create time. NULL on rows
     # written before continuity existed — callers read that as "unknown".
     effective_config: SessionSnapshot | None = None
@@ -398,30 +462,6 @@ class TaskContinuationRow(BaseModel):
     lease_expires_at: datetime | None = None
     started_at: datetime | None = None
     attempts: int = 0
-
-
-class GitHubOauthStateRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    state: uuid.UUID
-    platform: str
-    platform_user_id: str
-    scopes: tuple[str, ...]
-    created_at: datetime
-    consumed_at: datetime | None
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID | None = None
-
-
-class GitHubCredentialRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    principal_id: uuid.UUID
-    github_login: str
-    encrypted_token: bytes
-    scopes: tuple[str, ...]
-    created_at: datetime
-    updated_at: datetime
 
 
 class AgentMcpCredentialRow(BaseModel):
@@ -515,6 +555,35 @@ class MicrosoftUserTokenRow(BaseModel):
     updated_at: datetime
 
 
+ConnectorRefreshOwner = Literal["ma", "daimon"]
+"""Who refreshes one connector grant: the Managed Agents vault, or Daimon's store."""
+
+
+class ConnectorTokenRow(BaseModel):
+    """One stored connector grant, ciphertext only; `account_id` None means agent-wide."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID | None
+    agent_id: uuid.UUID
+    server_url: str
+    access_token_encrypted: bytes
+    refresh_token_encrypted: bytes | None
+    token_endpoint: str
+    client_id: str
+    client_secret_encrypted: bytes | None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"]
+    scope: str | None
+    resource: str | None
+    expires_at: datetime | None
+    refresh_owner: ConnectorRefreshOwner
+    refresh_started_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class MicrosoftSignInRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -536,13 +605,6 @@ class SlackTurnContextRow(BaseModel):
     channel_id: str
     thread_ts: str
     started_at: datetime
-
-
-class AgentGithubBindingRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    agent_id: uuid.UUID
-    principal_id: uuid.UUID
 
 
 class AgentGoogleBindingRow(BaseModel):
@@ -581,7 +643,8 @@ class UsageEventRow(BaseModel):
     agent_id: str | None = None
 
 
-BudgetWindow = Literal["monthly", "total", "fixed"]
+BudgetOnLimit = Literal["stop", "alert"]
+"""What a channel budget does at its limit: refuse new turns, or only alert."""
 
 
 class ChannelBudgetRow(BaseModel):
@@ -601,10 +664,15 @@ class ChannelBudgetRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     exhausted_notice_key: str | None = None
+    on_limit: BudgetOnLimit = "stop"
+    alert_channel_id: str | None = None
+    alert_window_key: str | None = None
+    alert_level: int = 0
 
 
-ChangeSurface = Literal["web", "chat", "panel", "cli"]
-"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
+ChangeSurface = Literal["web", "chat", "panel", "cli", "system"]
+"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI, or
+Daimon itself (an opt-in a routine edit or a changed agent no longer covers)."""
 ChannelSetting = str
 """What a change record names: a legacy channel setting, a `thread_*` setting or any feature key.
 The `thread_*` settings are a thread's own, recorded under its channel with the thread id in the
@@ -878,29 +946,6 @@ class AgentRepoBindingRow(BaseModel):
     updated_at: datetime
 
 
-class AgentSkillRepoCredentialRow(BaseModel):
-    """Pydantic row for AgentSkillRepoCredential — a per-repo skill-import token.
-
-    Separate from `AgentRepoBindingRow` for the reason its ORM docstring
-    gives: one working repo per agent, any number of skill repos, and
-    enrolling one must never move the other.
-    """
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID
-    repo_url: str
-    default_branch: str
-    path: str
-    ma_secret_ref: str
-    proof_kind: RepoProofKind | None = None
-    proof_at: datetime | None = None
-    proof_account_id: uuid.UUID | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 class AgentMemoryStoreRow(BaseModel):
     """Pydantic row for AgentMemoryStore (agent memory feature)."""
 
@@ -908,19 +953,6 @@ class AgentMemoryStoreRow(BaseModel):
 
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
-    memory_store_id: str
-    created_at: datetime
-
-
-class AgentChannelMemoryStoreRow(BaseModel):
-    """Pydantic row for AgentChannelMemoryStore (a held channel's memory)."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID
-    platform: str
-    channel_id: str
     memory_store_id: str
     created_at: datetime
 
@@ -1211,27 +1243,9 @@ class FileUploadRow(BaseModel):
     created_at: datetime
 
 
-class SupportEscalationRow(BaseModel):
-    """Pydantic row for SupportEscalation — one human-support request."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    account_id: uuid.UUID | None
-    platform: str
-    platform_user_id: str
-    channel_id: str
-    message_id: str
-    ma_session_id: str | None
-    note: str
-    delivered_at: datetime | None
-    created_at: datetime
-
-
-FeatureTier = Literal["workspace", "agent", "channel", "thread"]
+FeatureTier = Literal["workspace", "agent", "channel", "thread", "routine"]
 """The tiers `feature_values` stores; the deployment tier is the `features` setting."""
-FeatureSurface = Literal["web", "chat", "panel", "cli", "spec", "migration"]
+FeatureSurface = Literal["web", "chat", "panel", "cli", "system", "spec", "migration"]
 """Where a feature was set: a `ChangeSurface`, an agent spec, or the 0187 migration."""
 
 
@@ -1243,6 +1257,7 @@ class FeatureTarget:
     agent_id: str | None = None
     channel_id: str | None = None
     thread_key: str | None = None
+    routine_id: uuid.UUID | None = None
 
 
 class FeatureValueRow(BaseModel):
@@ -1255,9 +1270,12 @@ class FeatureValueRow(BaseModel):
     agent_id: str
     channel_id: str
     thread_key: str
+    routine_id: uuid.UUID | None = None
     key: str
     value: str
     locked: bool
+    #: What a pinned feature's On covers (`pin_json`); None for every other value.
+    pin: dict[str, JsonValue] | None = None
     set_by: uuid.UUID | None
     surface: FeatureSurface
     set_at: datetime
@@ -1334,13 +1352,17 @@ class TurnOriginRow(BaseModel):
     platform_message_id: str | None = None
     helper_of: uuid.UUID | None = None
     serves_helpers: bool = False
+    self_helpers: bool = False
+    helper_key: str | None = None
+    own_dm_reach: bool = False
+    reach_read: bool = False
 
     @property
     def session_thread_id(self) -> str:
         """The thread key of this turn's session: a helper's own (`helper_thread_key`)."""
         if self.helper_of is None:
             return self.thread_id
-        return helper_thread_key(self.thread_id, self.responder_ma_agent_id)
+        return self.helper_key or helper_thread_key(self.thread_id, self.responder_ma_agent_id)
 
 
 HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
@@ -1396,6 +1418,16 @@ class SourceRepresentation(_Facts):
     # Whole capabilities a partial representation (an agent template) leaves out;
     # consent must declare each one.
     unavailable_capabilities: tuple[str, ...] = ()
+    # Source skills, at concrete versions, the target installs per session (not on
+    # its agent): every custom and channel skill within the profile's size limit.
+    session_skills: tuple[SkillRef, ...] = ()
+    # A measured skill's own name by id: a `skill:` drop keys it by id, people see this.
+    skill_names: dict[str, str] = Field(default_factory=dict)
+    # The target runs the source's execution tools in the provider's own sandbox
+    # (an agent template: OpenAI's hosted bash, Gemini's code_execution), set up as
+    # `environment` (None: the provider's default). `finer_drops.sandbox_losses`
+    # names what the source's environment had beyond it.
+    provider_execution: bool = False
 
 
 class BackendAgent(_Facts):
@@ -1413,8 +1445,11 @@ class BackendAgent(_Facts):
     # Owner-loaded preparation inputs are kept in memory, never in settings or logs.
     source: Agent | None = Field(default=None, exclude=True, repr=False)
     effective_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
-    # `effective_spec` before Daimon's own gating: what the consent pin hashes.
+    # `effective_spec` before Daimon's own gating: what earlier consent pins hashed.
     ungated_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
+    # The owner's setup alone, before any place (a channel's skills, a person's
+    # hidden servers) or Daimon's gating: what the consent pin hashes.
+    owner_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
     environment: Environment | None = Field(default=None, exclude=True, repr=False)
     resource_scope: Scope | None = Field(default=None, exclude=True, repr=False)
     resource_requirements: tuple[ResourceBinding, ...] = Field(default=(), exclude=True, repr=False)
@@ -1434,35 +1469,12 @@ class TenantBackendPolicy(_Facts):
     tenant_id: uuid.UUID
     revision: str
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
-    # False: the tenant follows the deployment's keyed providers. A snapshot from
+    # False: the tenant follows the deployment default (`default_enabled_backends`). A snapshot from
     # before this field reads as an admin's choice, as it was then.
     explicit: bool = True
 
 
-class _BackendDropConsent(_Facts):
-    declared_drops: tuple[str, ...]
-    source_pin: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
-    target_digest: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
-
-    @field_validator("declared_drops")
-    @classmethod
-    def _labels(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return TypeAdapter(
-            AgentSpec.model_fields["declared_drops"].rebuild_annotation()
-        ).validate_python(value)
-
-
-class _BackendConsentFacts(_Facts):
-    drop_consent: _BackendDropConsent | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-    @property
-    def declared_drops(self) -> tuple[str, ...]:
-        return self.drop_consent.declared_drops if self.drop_consent is not None else ()
-
-
-class AgentBackendRevision(_BackendConsentFacts):
+class AgentBackendRevision(_Facts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     local: int = Field(ge=1)
@@ -1472,14 +1484,23 @@ class AgentBackendRevision(_BackendConsentFacts):
     profile: str | None = None
     requires: dict[Capability, CapabilityRequirement] | None = None
     thread_mode: ThreadMode | None = None
+    effort: Effort | None = None
+    environment: str | None = Field(default=None, pattern=r"^sh_env_")
     agent_name: str
     preview_digest: str
     digest: str
     previous_local: int | None
     created_at: datetime
+    # Read and ignored: the losses a switch was confirmed with, before switches applied at once.
+    drop_consent: dict[str, JsonValue] | None = Field(default=None, exclude=True)
+
+    @property
+    def born(self) -> bool:
+        """`record_born_backend`'s row: where a record created there runs, not a switch."""
+        return self.preview_digest == self.digest
 
 
-class CompatibilityPreview(_BackendConsentFacts):
+class CompatibilityPreview(_Facts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     target_backend: Provider
@@ -1492,6 +1513,12 @@ class CompatibilityPreview(_BackendConsentFacts):
     cost_line: str
     allowed: bool
     digest: str
+    # What the target can't carry, from a captured source (`AgentSpec.declared_drops`).
+    declared_drops: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    # Run by the host in place of the native feature, never lost (`source_translations`).
+    translated_capabilities: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    # The name each lost skill shows; its `skill:` drop keys it by id.
+    skill_names: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
     # Set only when an admin picked a model other than the provider default.
     target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # The agent's own profile, requirements and thread mode, only when any is set.
@@ -1751,6 +1778,47 @@ class WebAgentGrantRow(BaseModel):
     groups: tuple[str, ...] = ()
 
 
+DmGrantMode = Literal["members", "listed", "excluded"]
+DmRuleSubject = Literal["user", "group", "everyone"]
+
+
+class DmAgentGrantRow(BaseModel):
+    """Who may DM one agent (see `DmAgentGrant`); `members` when unset."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_name: str
+    who: DmGrantMode = "members"
+    user_ids: tuple[str, ...] = ()
+    group_ids: tuple[str, ...] = ()
+    set_by: str | None = None
+
+
+class DmRuleRow(BaseModel):
+    """One ordered routing rule (see `DmRule`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    position: int
+    subject: DmRuleSubject
+    subject_id: str | None = None
+    agent_name: str | None = None
+    locked: bool = False
+    set_by: str | None = None
+
+
+class DmAgentPickRow(BaseModel):
+    """A person's chosen DM agent in a workspace (see `DmAgentPick`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    agent_name: str
+
+
 class WebWorkspaceSettingsRow(BaseModel):
     """A workspace's web app choices (see `WebWorkspaceSettings`); defaults when unset."""
 
@@ -1832,6 +1900,8 @@ class WebRefusalCard(BaseModel):
     title: str
     body: str
     help: str
+    # The one button the card offers an admin; None for everyone else.
+    action: Literal["switch_back_to_claude"] | None = None
 
 
 class WebCredentialCard(BaseModel):
@@ -1896,3 +1966,110 @@ class WebMessageRow(BaseModel):
     feedback: Literal["up", "down"] | None
     seq: int
     created_at: datetime
+
+
+MonitoredPlatform = Literal["discord", "slack", "teams", "web", "mcp"]
+MonitoredKind = Literal["question", "answer", "tool", "notice"]
+
+
+class MonitoredEventRow(BaseModel):
+    """A kept question, answer, MCP tool call or shown notice (`stores.monitoring`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    turn_ref: str | None
+    kind: MonitoredKind
+    content: str | None
+    tool_name: str | None
+    outcome: str | None
+    created_at: datetime
+
+
+class MonitoredConversationRow(BaseModel):
+    """One person's kept conversation with an agent: its question and tool counts and
+    span. MCP tool calls have no conversation, so a day of them is one (`conversation` is
+    None and `day` the UTC date); `cursor_id` pages the list (`stores.monitoring`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    day: str
+    questions: int
+    tools: int
+    first_at: datetime
+    last_at: datetime
+    cursor_id: uuid.UUID
+
+
+class PendingCarryOverRow(BaseModel):
+    """A replacement session's framing not yet sent (`stores.pending_carry_overs`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    user_prefix: str
+    system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...]
+
+
+OpsIssueStateName = Literal["resolved", "muted"]
+
+
+class OpsEventRow(BaseModel):
+    """One stored ops event (`stores.ops_events`), coalesced: `count` occurrences."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    occurred_at: datetime
+    count: int
+    code: OpsCode
+    area: OpsArea
+    severity: OpsSeverity
+    reason: str | None
+    fingerprint: str
+    agent_id: str | None
+    routine_id: uuid.UUID | None
+    watch_id: uuid.UUID | None
+    account_id: uuid.UUID | None
+    platform: str | None
+    channel_id: str | None
+    thread_id: str | None
+    session_id: str | None
+    subject_key: str | None
+    release: str | None
+    note: str | None
+
+
+class OpsIssueStateRow(BaseModel):
+    """An admin's resolve or mute of one issue."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    fingerprint: str
+    state: OpsIssueStateName
+    by_account_id: uuid.UUID | None
+    at: datetime
+
+
+class OpsIssueGroupRow(BaseModel):
+    """One fingerprint's events grouped: counted from `since`, seen over their whole life.
+
+    `latest` is the newest event, for what varies within an issue (agent, platform, release).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    fingerprint: str
+    events: int
+    people: int
+    first_seen: datetime
+    last_seen: datetime
+    latest: OpsEventRow
+    state: OpsIssueStateRow | None

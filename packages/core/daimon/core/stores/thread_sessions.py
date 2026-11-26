@@ -320,6 +320,48 @@ async def get_latest_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
+async def last_model_marks(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, platform: str, thread_id: str
+) -> tuple[str, ...] | None:
+    """The model and effort emoji a turn last showed in a thread.
+
+    `record_model_marks` writes them to every session of the thread, so the newest
+    marked row holds them. Only the emoji, never a session, is read across accounts.
+    """
+    marks = await session.scalar(
+        select(ThreadSession.model_marks)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+            ThreadSession.model_marks.is_not(None),
+        )
+        .order_by(ThreadSession.created_at.desc())
+        .limit(1)
+    )
+    return None if marks is None else tuple(marks)
+
+
+async def record_model_marks(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    marks: tuple[str, ...],
+) -> None:
+    """Record the emoji a turn has just shown in a thread, on each of the thread's sessions."""
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+        )
+        .values(model_marks=list(marks))
+    )
+
+
 async def create_thread_session(
     session: AsyncSession,
     *,
@@ -391,7 +433,12 @@ async def create_thread_session(
     session.add(orm)
     await session.flush()
     await session.refresh(orm)
-    return ThreadSessionRow.model_validate(orm)
+    row = ThreadSessionRow.model_validate(orm)
+    # Imported here: the watch store reads live sessions from this module.
+    from daimon.core.stores.watches import follow_live_session
+
+    await follow_live_session(session, row)
+    return row
 
 
 async def set_budget_channel_stamp(
@@ -432,6 +479,7 @@ async def mark_turn_active(
     now: datetime,
     owner_key: int | None = None,
     active_turn_channel_id: str | None = None,
+    deadline: datetime | None = None,
 ) -> None:
     """Record that a turn is running and which message is rendering it.
 
@@ -443,6 +491,9 @@ async def mark_turn_active(
     globally addressable on its own, while a Slack message is identified by
     (channel, ts). A caller that omits it stores NULL, which is the correct
     reading for Discord.
+
+    `deadline` is the turn's own, stored so a turn allowed longer than the standard window
+    is not read as abandoned; omitted, the standard window applies.
     """
     await session.execute(
         update(ThreadSession)
@@ -452,6 +503,7 @@ async def mark_turn_active(
             active_turn_owner_key=owner_key,
             active_turn_started_at=now,
             active_turn_channel_id=active_turn_channel_id,
+            active_turn_deadline=deadline,
         )
     )
     await session.flush()
@@ -475,6 +527,7 @@ async def clear_active_turn(
             active_turn_owner_key=None,
             active_turn_started_at=None,
             active_turn_channel_id=None,
+            active_turn_deadline=None,
         )
     )
     await session.flush()
@@ -516,6 +569,7 @@ async def clear_active_turn_if_message_id(
             active_turn_owner_key=None,
             active_turn_started_at=None,
             active_turn_channel_id=None,
+            active_turn_deadline=None,
         )
     )
     rowcount = cast(CursorResult[Any], result).rowcount
@@ -563,10 +617,12 @@ async def transfer_active_turn(
     target.active_turn_owner_key = source.active_turn_owner_key
     target.active_turn_started_at = source.active_turn_started_at
     target.active_turn_channel_id = source.active_turn_channel_id
+    target.active_turn_deadline = source.active_turn_deadline
     source.active_turn_message_id = None
     source.active_turn_owner_key = None
     source.active_turn_started_at = None
     source.active_turn_channel_id = None
+    source.active_turn_deadline = None
     await session.flush()
     return True
 

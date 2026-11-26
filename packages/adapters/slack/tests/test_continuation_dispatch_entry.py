@@ -20,6 +20,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,6 +53,11 @@ from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import register_conversations_info
+
+_get_or_create_platform_principal = partial(
+    get_or_create_platform_principal, platform="slack", external_id="U_REQUESTER"
+)
+
 
 _AGENT_ID = "agent_continuation_entry"
 _ENV_ID = "env_continuation_entry"
@@ -141,9 +147,7 @@ async def _seed_pending_row(
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     """Seed one pending continuation; return (tenant_id, account_id, key)."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
 
     idempotency_key = uuid.uuid4()
@@ -349,9 +353,7 @@ async def _run_continuation_and_capture_controls(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     if prior_role is not None:
         await set_role(db_session, requester.account_id, prior_role)
     await db_session.commit()
@@ -428,6 +430,9 @@ async def _run_continuation_and_capture_controls(
 
     assert run_turn.await_args is not None, "the follow-up turn should have run"
     assert run_turn.await_args.kwargs["attended"] is (row.attended and row.reason != "timer")
+    # The answer is kept with the question the work was queued under, never the seed.
+    assert run_turn.await_args.kwargs["continues"] == row
+    assert run_turn.await_args.kwargs.get("request_text") is None
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message
@@ -632,9 +637,7 @@ async def test_continuation_whose_requester_lookup_failed_is_denied_and_runs_not
     written, no session bound.
     """
     tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_CONT_DENIED_{reason}")
-    principal = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    principal = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await set_role(db_session, principal.account_id, Role.USER)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
@@ -699,9 +702,7 @@ async def test_continuation_runs_with_the_requesters_organisation_from_users_inf
     """An external requester's queued follow-up is admitted as another organisation
     (held, never an admin) instead of being denied; a host member keeps running as one."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_CONT_ENTRY")
-    principal = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    principal = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     register_conversations_info(fake_slack_web_client.mock, is_ext_shared=True)
@@ -797,9 +798,7 @@ async def _run_continuation_with_card_intent(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     row = _make_continuation_row(
@@ -1197,9 +1196,7 @@ async def test_a_timer_set_with_another_agent_is_refused_before_bind(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     row = _make_continuation_row(
@@ -1259,9 +1256,7 @@ async def test_continuation_admits_a_dm_scope_as_a_dm(
     """A continuation owed to a private DM conversation must be admitted as a DM:
     outside every pin and under the DM memory rule."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_DM_{is_dm}")
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     row = _make_continuation_row(
@@ -1293,17 +1288,13 @@ async def test_continuation_admits_a_dm_scope_as_a_dm(
     assert admit.await_args.kwargs["is_dm"] is is_dm
 
 
-async def test_continuation_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_continuation_turn_admin_cards_read_no_agent_source(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A follow-up (continuation) turn's Confirm card reads the switched agent's
-    source as that turn's own admitted caller, exactly like a mention turn's card.
-    Built without the admission, every backend-switch card on this call site
-    refuses `source_unavailable`.
-    """
+    """A continuation turn builds its admin cards once, and they read no agent source."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
 
@@ -1316,13 +1307,13 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_CONT_ADMISSION"
+    requester = await _get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, external_id="U_CONT_ADMISSION"
     )
     await db_session.commit()
 
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
-    app.runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    app.runtime.settings.turn = TurnSettings(channel_backends=True)
     row = _make_continuation_row(
         tenant_id=tenant.id, account_id=requester.account_id, reason="task_handoff"
     )
@@ -1335,9 +1326,6 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
-    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
         patch(
@@ -1372,18 +1360,9 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         )
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert (context.platform, context.channel_id, context.thread_id) == (
-        "slack",
-        _CHANNEL,
-        _THREAD_ID,
-    )
+    read_only = service._read_only  # pyright: ignore[reportPrivateUsage]
+    assert read_only, "an allowlist or pin card changes no agent"
+    assert service._capture_source is None, "and reads no agent source"  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("attended", [False, True])

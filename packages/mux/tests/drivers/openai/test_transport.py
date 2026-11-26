@@ -93,6 +93,35 @@ async def test_errors_are_owned_redacted_and_mutations_never_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "code", "wait"),
+    [
+        ({"retry-after-ms": "1500", "retry-after": "9"}, "rate_limit_exceeded", 1.5),
+        ({"retry-after": "12"}, "rate_limit_exceeded", 12.0),
+        ({"retry-after": "100000"}, "rate_limit_exceeded", 600.0),
+        ({}, "rate_limit_exceeded", 30.0),
+        ({"retry-after": "5"}, "insufficient_quota", None),
+    ],
+)
+async def test_a_429_carries_its_bounded_wait_unless_the_quota_never_refills(
+    headers: dict[str, str], code: str, wait: float | None
+) -> None:
+    """`retry-after-ms`, then `retry-after`, else 30 s, at most 10 minutes; billing quota none."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers=headers, json={"error": {"code": code}})
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(sdk).request("POST", "/agents/sessions/s/events", body={})
+    assert exc.value.retry_after_s == wait, "wait from the 429's headers"
+
+
+@pytest.mark.asyncio
 async def test_real_sdk_sse_and_close_before_first_event() -> None:
     wire = {"type": "agent.session.idle", "event_id": "idle", "session": {"id": "s"}}
 
@@ -250,3 +279,29 @@ async def test_native_validation_details_keep_the_cause_but_redact_wire_credenti
     )
     assert secret not in error.native_message and "offline-placeholder" not in error.native_message
     assert "[redacted]" in error.native_message and secret not in str(error)
+
+
+def test_mcp_error_details_mask_known_secrets_fragments_and_bearers() -> None:
+    """MCP flows keep the provider's reason but never a known credential or part of one."""
+    from mux.drivers.openai.transport import suppress_mcp_error_details
+
+    secret = "opaque-user-token-0123456789"
+    leaks = (secret, secret[5:13], "Bearer unrelated-bearer-value")
+    for leak in leaks:
+        error = ProviderError(
+            "invalid_request",
+            retryable=False,
+            native_code="400",
+            native_message=f"skill archive mismatch near {leak}",
+            native_error_code=leak,
+            native_param=f"tools[0].{leak}",
+        )
+        with pytest.raises(ProviderError), suppress_mcp_error_details([secret]):
+            raise error
+        fields = (error.native_message, error.native_error_code, error.native_param)
+        assert error.native_message and "skill archive mismatch" in error.native_message, (
+            "the provider's reason must survive redaction"
+        )
+        assert not any(part in str(fields) for part in (secret[5:13], "unrelated-bearer")), (
+            f"{leak!r} reached a native field: {fields}"
+        )

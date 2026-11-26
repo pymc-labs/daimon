@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
@@ -14,6 +15,7 @@ from daimon.core.platform_words import Place, words_for
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
 from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
+from daimon.core.turn.status_lines import format_duration
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.drivers.selfhosted.wire import CLEANUP_EXHAUSTED
@@ -226,7 +228,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
     "client_requester": _Copy("I only answer in the channel we share.", "Mention me there."),
     "backend_unsupported": _Copy(
-        "This agent's model provider isn't available here right now.",
+        "This agent's model provider can't run this conversation here.",
         "Ask {who} to check which provider {agent_mid} uses.",
     ),
     "provider_hold_cap_reached": _Copy(
@@ -244,6 +246,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "provider_daily_cap_reached": _Copy(
         "Today's {model} budget for this {scope} is used up.",
         "It resets at midnight UTC; use another model until then.",
+    ),
+    "provider_daily_ceiling_reached": _Copy(
+        "Today's {provider} budget for this Daimon install is used up.",
+        "It resets at midnight UTC; use another provider until then.",
     ),
 }
 # A provider refusal names its real cause and the chat words that fix it.
@@ -264,22 +270,41 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{agent} runs on {provider}, which isn't set up here yet.",
         'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',
     ),
-    # The provider is set up; the stored switch consent is stale. Never say the
-    # provider is missing (J6g): a fresh preview and Confirm is the fix. Only a
-    # conversation already on the provider gets this; a new one runs on Anthropic.
-    "re_confirm": _Copy(
-        "{agent}'s model-provider switch needs to be confirmed again.",
-        "In a new conversation, ask {agent_mid} to switch to {provider} again, then Confirm.",
-    ),
-    # Nothing is missing: say so, and that the same message works shortly.
+    # Nothing is missing (a blip, or a change mid-read): the same message works shortly.
     "preparation_busy": _Copy(
-        "Daimon is busy right now and couldn't get {agent} ready on {provider}.",
+        "Daimon couldn't get {agent} ready on {provider} just now.",
         "Try again in a minute.",
     ),
     # The cause is unknown, so never claim the provider isn't set up.
     "preparation_failed": _Copy(
         "Daimon couldn't get {agent} ready on {provider}.",
         "Try again; if it keeps happening, give {who} the reference.",
+    ),
+    "channel_row_missing": _Copy(
+        "This channel is pinned to {provider}, which isn't set up for it yet.",
+        'Ask whoever runs Daimon to set it up, or ask {who} to say "clear this channel\'s pin".',
+    ),
+    "provider_busy": _Copy(
+        "{Provider} is busy with other conversations right now.",
+        "Try again in a minute.",
+    ),
+    "provider_cooling": _Copy(
+        "{Provider} asked Daimon to slow down.",
+        "Try again in a few minutes, or ask {who} to switch {agent_mid} to {default}.",
+    ),
+    "anthropic_unconfigured": _Copy(
+        "{agent} runs on Anthropic, which isn't set up on this Daimon install.",
+        "Ask {who} to make a copy of {agent_mid} on another provider, or ask whoever runs"
+        " Daimon to add the Anthropic key.",
+    ),
+    # The provider no longer holds this thread's conversation or files (idle too long).
+    "session_lost": _Copy(
+        "This conversation can't be continued.",
+        "Start a new thread to keep going.",
+    ),
+    "tool_limits": _Copy(
+        "This {scope} limits the agent's tools, and {provider} can't apply that limit.",
+        'Ask {who} to turn those tools back on, or to say "switch {agent_mid} to {default}".',
     ),
 }
 _PROVIDER_NAMES = {
@@ -307,6 +332,21 @@ def _model_label(model: str | None) -> str:
 def provider_name(provider: str | None) -> str:
     """How copy names a model provider: "OpenAI", or "a model provider" when unknown."""
     return _PROVIDER_NAMES.get(provider or "", "a model provider")
+
+
+def uses_phrase(provider: str | None, model: str | None) -> str:
+    """What an agent runs on, as a person says it: "Gemini 4 Argon", else the provider.
+
+    A self-hosted model keeps its id, which has no everyday name.
+    """
+    from daimon.core.agent_model_names import model_name
+    from mux.contracts.ids import ModelRef, Provider
+
+    if not model:
+        return provider_name(provider)
+    if provider is None or provider == LOOP.provider:
+        return f"{provider_name(provider)} ({model})"
+    return model_name(ModelRef(provider=cast("Provider", provider), id=model))
 
 
 def conversations_follow_line(
@@ -343,7 +383,8 @@ def default_agent_switch_text(agent: str, wanted: str, *, place: str, me: bool) 
     provider = provider_name(wanted)
     return (
         f"Switching {agent} changes it for everyone on this {place}. To try {provider} "
-        f"just here, I can make a copy of {'me' if me else agent} on {provider}."
+        f"just here, I can switch only this conversation to {provider}, or make a copy of "
+        f"{'me' if me else agent} on {provider}."
     )
 
 
@@ -366,7 +407,31 @@ def admission_refusal_text(
     cause: BackendRefusalCause | None = None,
     provider: str | None = None,
 ) -> str:
-    """Two approved lines for an admission refusal.
+    """Two approved lines for an admission refusal, as one text."""
+    return "\n\n".join(
+        admission_refusal_lines(
+            reason,
+            nouns,
+            bot_name=bot_name,
+            agent_name=agent_name,
+            in_dm=in_dm,
+            cause=cause,
+            provider=provider,
+        )
+    )
+
+
+def admission_refusal_lines(
+    reason: AdmissionDenialReason,
+    nouns: RefusalNouns,
+    *,
+    bot_name: str | None = None,
+    agent_name: str | None = None,
+    in_dm: bool = False,
+    cause: BackendRefusalCause | None = None,
+    provider: str | None = None,
+) -> tuple[str, str]:
+    """The two approved lines for an admission refusal: what happened, what to do.
 
     `bot_name` remains accepted for adapter callers; a pinned agent's name
     must come from `agent_name`, not the deployment bot's display name.
@@ -399,7 +464,7 @@ def admission_refusal_text(
         "who": nouns.who,
         "Who": _capitalised(nouns.who),
     }
-    return "\n\n".join((copy.title.format(**words), copy.next_step.format(**words)))
+    return copy.title.format(**words), copy.next_step.format(**words)
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,6 +506,29 @@ class TerminationNotice:
         if (ref := self.ref_line) is not None:
             lines.append(ref)
         return "\n\n".join(lines)
+
+
+_STOPPED_ENDS = frozenset(
+    {
+        TerminationReason.INTERRUPTED,
+        TerminationReason.INTERRUPT_TIMEOUT,
+        TerminationReason.RECOVERY_CANCELLED,
+    }
+)
+_NOT_STARTED_PREFIXES = ("admission_", "missing_config", "resolver_miss", "session_")
+_STARTED_SESSION_ENDS = frozenset({TerminationReason.SESSION_TERMINATED})
+
+
+def ended_label(reason: TerminationReason, elapsed_seconds: float) -> str:
+    """What happened to a turn that gave no answer, and how long it ran: "Stopped after 3m 5s"."""
+    if reason.value.startswith(_NOT_STARTED_PREFIXES) and reason not in _STARTED_SESSION_ENDS:
+        return "Not started"
+    took = format_duration(elapsed_seconds)
+    if reason in _STOPPED_ENDS:
+        return f"Stopped after {took}"
+    if reason is TerminationReason.CEILING:
+        return f"Timed out after {took}"
+    return f"Ended with an error after {took}"
 
 
 def render_termination_notice(
@@ -549,13 +637,18 @@ def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
     """
     for cause in _error_chain(error):
         if isinstance(cause, ProviderError) and cause.category == "rate_limited":
-            if cause.native_code not in ("quota_zero", "quota_exhausted"):
+            if cause.native_code not in ("quota_zero", "quota_daily", "quota_exhausted"):
                 continue
             model = _model_words(cause.native_param)
             if cause.native_code == "quota_zero":
                 return (
                     f"{_capitalised(model)} isn't available on this server's Google plan.",
                     "Pick another model or ask an admin to upgrade it.",
+                )
+            if cause.native_code == "quota_daily":
+                return (
+                    f"Today's Google quota for {model} is used up.",
+                    "It refills daily; use another model until then, or ask an admin to raise it.",
                 )
             return (
                 f"Google is rate-limiting {model} right now.",

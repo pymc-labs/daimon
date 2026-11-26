@@ -13,6 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
+from daimon.core.config import Settings
 from daimon.core.features.registry import (
     BACKEND_NAMES,
     DEFAULT,
@@ -30,6 +31,7 @@ from daimon.core.features.service import (
     TierSetting,
     where,
 )
+from daimon.core.features.snapshot import FeaturePlace, lacks_only_server_setup
 
 CATEGORIES: Final[Mapping[Category, str]] = {
     "model_input": "What the agent sees",
@@ -48,20 +50,48 @@ PAGE_MARK: Final = "~"
 """Splits a token from the pages its screen sat on: `~<list page>[~<agent picker page>]`."""
 
 
-def listed(views: Iterable[FeatureView]) -> tuple[FeatureView, ...]:
+def listed(
+    views: Iterable[FeatureView], settings: Settings | None, place: FeaturePlace
+) -> tuple[FeatureView, ...]:
     """The views a chat or agent listing shows: a feature that is not available here and has
     no saved value at any tier is left out, as the web does (`Settings.tsx`), so nobody is
-    offered a row they cannot use. The one place that rule lives; every listing calls it."""
+    offered a row they cannot use. One lacking only setup the MCP server may carry stays: its
+    Off still applies (`unseen_setup_allows`). The one place that rule lives; every listing
+    calls it."""
     return tuple(
         view
         for view in views
-        if view.resolved.unavailable is None or any(t.value != DEFAULT for t in view.tiers)
+        if view.resolved.unavailable is None
+        or any(t.value != DEFAULT for t in view.tiers)
+        or lacks_only_server_setup(view.spec, settings, place)
     )
+
+
+def agent_listed(
+    views: Iterable[FeatureView], settings: Settings | None, place: FeaturePlace
+) -> tuple[FeatureView, ...]:
+    """`listed` for an agent: with `web_awareness` Off here it also leaves out that row and the
+    web app's own (`web.*`), so the agent is not told the web app exists. `change_setting`
+    still takes their keys."""
+    views = tuple(views)
+    web = next((view for view in views if view.spec.key == "web_awareness"), None)
+    if web is not None and not web.resolved.on:
+        views = tuple(v for v in views if v is not web and not v.spec.key.startswith("web."))
+    return listed(views, settings, place)
 
 
 def value_text(spec: FeatureSpec, value: str, locked: bool = False) -> str:
     text = spec.label(value)
     return f"{text}, locked" if locked and value != DEFAULT else text
+
+
+def ask_to_turn_on(spec: FeatureSpec) -> str:
+    """Who to ask to turn `spec` on: the last sentence of every refusal for a feature that
+    is off. Only a server admin changes one that leaves out agent owners and delegated
+    admins (long jobs, cloud computers); anything else an admin or an owner can."""
+    if spec.authority.action is None and not spec.authority.agent_owner:
+        return "Ask a server admin to turn it on."
+    return "Ask an admin or an owner to turn it on."
 
 
 def unavailable_text(spec: FeatureSpec, reason: str) -> str:
@@ -211,6 +241,7 @@ def feature_schema() -> list[dict[str, Any]]:
             "combine": spec.combine,
             "values": [{"value": v, "label": label} for v, label in spec.values.items()],
             "default": spec.default,
+            "maxLength": spec.max_length,
             "tiers": list(spec.tiers),
             "lockable": [t for t in spec.tiers if t in LOCKABLE and not spec.authority.native],
             "backendTiers": {b: list(t) for b, t in spec.backend_tiers.items()},

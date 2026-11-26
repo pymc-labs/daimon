@@ -29,7 +29,7 @@ features:
     always_online: true
   slash_commands:
     - command: /dm-me
-      description: Continue privately (an admin turns it on)
+      description: Continue in a direct message (an admin turns it on)
       should_escape: false
     - command: /help
       description: This list
@@ -58,6 +58,11 @@ features:
     - command: /privacy
       description: See, export or delete your data
       should_escape: false
+  shortcuts:
+    - name: Model
+      type: message
+      callback_id: thread_model
+      description: Pick the model for this conversation
 
 oauth_config:
   redirect_urls:
@@ -78,6 +83,7 @@ oauth_config:
       - files:write
       - channels:read
       - groups:read
+      - usergroups:read
     # Requested only when a member opts in via "Connect Slack"; reads then run
     # with that member's own permissions. See docs/slack.md for the trust model.
     user:

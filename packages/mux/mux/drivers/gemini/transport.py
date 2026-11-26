@@ -11,7 +11,8 @@ import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, NoReturn, Protocol, cast, runtime_checkable
+from urllib.parse import quote
 
 import httpx
 from google import genai
@@ -19,7 +20,7 @@ from google.genai import errors as genai_errors
 from google.genai._interactions import APIConnectionError, APIError, APIStatusError
 from pydantic import JsonValue
 
-from mux.contracts.errors import ProviderErrorCategory
+from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after, redact_native_text
 from mux.drivers.gemini.mcp_auth import (
     RedactedCredential,
     contains_secret,
@@ -29,6 +30,16 @@ from mux.drivers.gemini.mcp_auth import (
 from mux.errors import ProviderError
 
 API_REVISION = "2026-05-20"
+STREAM_TIMEOUT = httpx.Timeout(60.0, read=1200.0)
+"""An event stream's HTTP timeouts: 60 s to connect, 20 min between bytes.
+
+The SDK builds its interactions client with no timeout, so without this a stream had
+no HTTP read bound at all. Other interaction calls are unchanged.
+
+Google: "Set HTTP read timeouts to 15 to 20 minutes per stream"
+(https://aistudio.google.com/docs/long-decode). The turn's own idle clock is shorter
+and decides when to reconnect; this only keeps the HTTP layer from cutting first.
+"""
 log = logging.getLogger(__name__)
 type Object = dict[str, JsonValue]
 
@@ -41,6 +52,18 @@ class Transport(Protocol):
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None
     ) -> AsyncIterator[Object]: ...
+
+
+@runtime_checkable
+class EnvironmentTransport(Protocol):
+    """The Environments API: one made before any interaction, to upload files into."""
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str: ...
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None: ...
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]: ...
+    async def delete_environment(self, environment_id: str) -> None: ...
 
 
 #: The one tool an agent request with no tools of its own allows: listing it keeps
@@ -99,7 +122,7 @@ MOUNT_ECHO_LIMIT = 1024
 
 
 class MountEchoBook:
-    """Interaction id -> digests of the mount headers sent for it, bounded LRU.
+    """Interaction id -> digests of the mount and MCP headers sent for it, bounded LRU.
 
     A long-lived deployment transport sees every interaction it serves, so the
     book keeps only the most recently used ones. Losing an entry is safe: the
@@ -136,6 +159,15 @@ class MountEchoBook:
 def mount_header_digest(header: str) -> str:
     """The persisted fingerprint of a mount Authorization header we sent; never the token."""
     return hashlib.sha256(header.encode()).hexdigest()
+
+
+def mcp_header_digest(header: str) -> str:
+    """The persisted fingerprint of an MCP Authorization header we sent; never the token.
+
+    Domain-separated from `mount_header_digest`, so a digest recorded for one
+    location never clears an echo at the other.
+    """
+    return hashlib.sha256(b"mcp_server\0" + header.encode()).hexdigest()
 
 
 def _known_digest(candidate: str, digests: AbstractSet[str]) -> bool:
@@ -299,7 +331,13 @@ def _secret_path(value: JsonValue, secret: str, path: str = "$") -> str | None:
     return None
 
 
-def scrub_mcp_echo(value: Object, tokens: AbstractSet[RedactedCredential]) -> Object:
+def scrub_mcp_echo(
+    value: Object,
+    tokens: AbstractSet[RedactedCredential],
+    *,
+    interaction_id: str | None = None,
+    digests: AbstractSet[str] = frozenset(),
+) -> tuple[Object, set[RedactedCredential]]:
     """Remove the echo of our own MCP server credential header, and nothing else.
 
     If an interaction echoes its request tools, our `mcp_server` entry may carry
@@ -307,11 +345,14 @@ def scrub_mcp_echo(value: Object, tokens: AbstractSet[RedactedCredential]) -> Ob
     template turns alike). Only that exact location is cleaned:
     `tools[i].headers` of an `mcp_server` tool on the interaction or on a stream
     event's `interaction`, equal to a header we sent, either as that object or
-    as a list of exactly one such object (the shape the storage echo took).
-    Any other shape, key, casing or value refuses with its key path.
+    as a list of exactly one such object (the shape the storage echo took), or,
+    for `interaction_id` only, matching a recorded digest (a worker restart).
+    Any other shape, key, casing or value refuses with its key path. Returns the
+    scrubbed copy and the tokens matched by digest, for the caller's leak check.
     """
     result = copy.deepcopy(value)
     ours = [{"Authorization": "Bearer " + token} for token in tokens]
+    matched: set[RedactedCredential] = set()
     nested = result.get("interaction")
     owners = [("$", result)] + ([("$.interaction", nested)] if isinstance(nested, dict) else [])
     for base, owner in owners:
@@ -332,9 +373,20 @@ def scrub_mcp_echo(value: Object, tokens: AbstractSet[RedactedCredential]) -> Ob
             if set(headers) != {"Authorization"}:
                 raise _mcp_echo_refused(path, "header_keys")
             if headers not in ours:
-                raise _mcp_echo_refused(path, "header_value_not_dispatched")
+                # Otherwise only a digest recorded for this very interaction.
+                header = headers["Authorization"]
+                if (
+                    interaction_id is None
+                    or owner.get("id") != interaction_id
+                    or not isinstance(header, str)
+                    or not header.startswith("Bearer ")
+                    or len(header) == len("Bearer ")
+                    or not _known_digest(mcp_header_digest(header), digests)
+                ):
+                    raise _mcp_echo_refused(path, "header_value_not_dispatched")
+                matched.add(RedactedCredential(header[len("Bearer ") :]))
             del tool["headers"]
-    return result
+    return result, matched
 
 
 def checked_storage_response(
@@ -354,8 +406,12 @@ def checked_storage_response(
         value, tokens or set(), interaction_id=interaction_id, digests=digests
     )
     known = {*(tokens or ()), *matched}
-    if mcp:
-        value = scrub_mcp_echo(value, mcp)
+    mcp_known = set(mcp)
+    if mcp or digests:
+        value, mcp_matched = scrub_mcp_echo(
+            value, mcp, interaction_id=interaction_id, digests=digests
+        )
+        mcp_known |= mcp_matched
     # The token anywhere else (model output, a tool result, another field, a
     # key) is a leak: check decoded keys/values and the re-encoded bytes of the
     # scrubbed payload FIRST, before any diagnostic path is built or logged.
@@ -363,7 +419,7 @@ def checked_storage_response(
     if any(contains_secret(value, t) or t.encode() in encoded for t in known):
         log.warning("gemini mount token echo refused: reason=token_outside_mount_location")
         raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
-    for token in mcp:
+    for token in mcp_known:
         if contains_secret(value, token) or token.encode() in encoded:
             raise _mcp_echo_refused(
                 _secret_path(value, token) or "$", "token_outside_header", code="mcp_token_echo"
@@ -390,32 +446,87 @@ def high_demand(error: Exception) -> bool:
 
 
 _QUOTA_FAILURE = "type.googleapis.com/google.rpc.QuotaFailure"
+_RETRY_INFO = "type.googleapis.com/google.rpc.RetryInfo"
+_RETRY_DELAY = re.compile(r"(\d+(?:\.\d+)?)s")
 # "limit: 0" wherever the line ends: before ", model:", a newline or the end.
 _ZERO_LIMIT = re.compile(r"limit: 0\b")
 
 
-def quota_failure(error: Exception) -> tuple[str, str | None] | None:
-    """A 429's quota cause: ("quota_zero" | "quota_exhausted", model) or None.
-
-    `quota_zero` is a quota of 0 for the model on this project's plan (the
-    free tier gives some models none): retrying never helps. Any other spent
-    quota is a rate limit that refills. Only Google's own structured fields are
-    read; the message is checked for its "limit: 0" line alone.
-    """
+def _error_payload(error: Exception) -> dict[str, object] | None:
+    """The `error` object of Google's JSON error body, wherever the SDK kept the body."""
     body: object = getattr(error, "body", None) or getattr(error, "details", None)
     if not isinstance(body, dict):
         return None
     outer = cast(dict[str, object], body)
     nested: object = outer.get("error", outer)
-    if not isinstance(nested, dict):
+    return cast(dict[str, object], nested) if isinstance(nested, dict) else None
+
+
+#: Longest provider reason kept on a 4xx `ProviderError`.
+NATIVE_MESSAGE_LIMIT = 300
+
+
+def refusal_reason(error: Exception) -> str | None:
+    """Why Google refused a request, safe to log: its status and message.
+
+    Used only where the request carried no body (opening an interaction's
+    stream), so the text cannot echo a prompt or a credential the request
+    sent. Keys, tokens, URLs and quoted values are masked anyway and the text
+    is capped at `NATIVE_MESSAGE_LIMIT`. None when the body has neither.
+    """
+    payload = _error_payload(error)
+    if payload is None:
+        # Only google-genai's own error keeps a parsed message. Another SDK error's
+        # message can be the raw response body, which is never logged.
+        if not isinstance(error, genai_errors.APIError):
+            return None
+        message: object = error.message
+        status: object = error.status
+    else:
+        message, status = payload.get("message"), payload.get("status")
+    parts = [p for p in (status, message) if isinstance(p, str) and p.strip()]
+    if not parts:
         return None
-    payload = cast(dict[str, object], nested)
+    return redact_native_text(": ".join(parts), values=True, limit=NATIVE_MESSAGE_LIMIT)
+
+
+def _error_details(payload: dict[str, object]) -> list[dict[str, object]]:
     details = payload.get("details")
+    return [
+        cast(dict[str, object], item)
+        for item in (cast(list[object], details) if isinstance(details, list) else [])
+        if isinstance(item, dict)
+    ]
+
+
+def retry_delay(error: Exception) -> float | None:
+    """Seconds Google's `RetryInfo.retryDelay` asks a 429 to wait, if it names one."""
+    payload = _error_payload(error)
+    for detail in _error_details(payload) if payload is not None else []:
+        delay = detail.get("retryDelay")
+        if (
+            detail.get("@type") == _RETRY_INFO
+            and isinstance(delay, str)
+            and (match := _RETRY_DELAY.fullmatch(delay)) is not None
+        ):
+            return float(match.group(1))
+    return None
+
+
+def quota_failure(error: Exception) -> tuple[str, str | None] | None:
+    """A 429's quota cause: ("quota_zero" | "quota_daily" | "quota_exhausted", model) or None.
+
+    `quota_zero` is a quota of 0 for the model on this project's plan (the
+    free tier gives some models none): retrying never helps. `quota_daily` is a
+    spent per-day quota, which refills only at the day's end. Any other spent
+    quota is a rate limit that refills within minutes. Only Google's own structured fields are
+    read; the message is checked for its "limit: 0" line alone.
+    """
+    payload = _error_payload(error)
+    if payload is None:
+        return None
     violations: list[dict[str, object]] = []
-    for item in cast(list[object], details) if isinstance(details, list) else []:
-        if not isinstance(item, dict):
-            continue
-        detail = cast(dict[str, object], item)
+    for detail in _error_details(payload):
         if detail.get("@type") == _QUOTA_FAILURE:
             found = detail.get("violations")
             violations += [
@@ -434,7 +545,8 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
     model = next(iter(models)) if len(models) == 1 else None
     message = payload.get("message")
     zero = isinstance(message, str) and _ZERO_LIMIT.search(message) is not None
-    return ("quota_zero" if zero else "quota_exhausted"), model
+    daily = any("PerDay" in str(v.get("quotaId", "")) for v in violations)
+    return ("quota_zero" if zero else "quota_daily" if daily else "quota_exhausted"), model
 
 
 def connect_failure(error: BaseException) -> bool:
@@ -486,13 +598,14 @@ def normalize_error(error: Exception) -> ProviderError:
         )
     if status == 429 and (quota := quota_failure(error)) is not None:
         code, model = quota
-        # A quota of 0 never refills: retrying it only looks like a stall.
+        # A zero quota never refills and a daily one not for hours: retrying looks like a stall.
         return ProviderError(
             "rate_limited",
-            retryable=code != "quota_zero",
+            retryable=code == "quota_exhausted",
             native_code=code,
             native_error_code=http,
             native_param=model,
+            retry_after_s=None if code == "quota_zero" else bounded_retry_after(retry_delay(error)),
         )
     category = categories.get(status or 0, "upstream")
     return ProviderError(
@@ -500,6 +613,7 @@ def normalize_error(error: Exception) -> ProviderError:
         retryable=status == 429 or (status is not None and status >= 500),
         native_code="503" if status == 503 else None,
         native_error_code=http,
+        retry_after_s=bounded_retry_after(retry_delay(error)) if status == 429 else None,
     )
 
 
@@ -508,6 +622,17 @@ async def provider_call[T](call: Awaitable[T]) -> T:
         return await call
     except (APIError, genai_errors.APIError, httpx.HTTPError) as error:
         raise normalize_error(error) from None
+
+
+async def stream_open_call[T](call: Awaitable[T]) -> T:
+    """`provider_call` for opening a stream: a refusal (4xx) also keeps its reason."""
+    try:
+        return await call
+    except (APIError, genai_errors.APIError, httpx.HTTPError) as error:
+        normalized = normalize_error(error)
+        if (normalized.native_error_code or "").startswith("http_4"):
+            normalized.native_message = refusal_reason(error)
+        raise normalized from None
 
 
 class OwnedStream[T](AsyncIterator[T]):
@@ -573,6 +698,7 @@ class SDKTransport:
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
         self._interactions = nextgen.with_options(max_retries=0).interactions
+        self._raw = nextgen.with_options(max_retries=0)
         self._files = client.aio.files
         self._models = client.aio.models
 
@@ -625,6 +751,92 @@ class SDKTransport:
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await provider_call(self._files.download(file=f"files/environment-{environment_id}"))
 
+    def _environment_path(
+        self, environment_id: str, path: str = "", *, upload: bool = False
+    ) -> str:
+        prefix = "/upload" if upload else ""
+        name = quote(environment_id, safe="")
+        tail = f"/files/{quote(path)}" if path else ""
+        return f"{prefix}/{self._raw.api_version}/environments/{name}{tail}"
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        response = await provider_call(
+            self._raw.post(
+                f"/{self._raw.api_version}/environments",
+                cast_to=httpx.Response,
+                body=dict(config),
+                options={"headers": {"Api-Revision": API_REVISION}},
+            )
+        )
+        try:
+            return string(object_value(cast(JsonValue, response.json()))["id"])
+        except (KeyError, ValueError, TypeError):
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_environment"
+            ) from None
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        params = {"extract": "true", **({"overwrite": "true"} if overwrite else {})}
+        await provider_call(
+            self._raw.put(
+                # A trailing slash names the directory the archive unpacks into.
+                self._environment_path(environment_id, path.rstrip("/") + "/", upload=True),
+                cast_to=httpx.Response,
+                content=archive,
+                options={
+                    "headers": {
+                        "Api-Revision": API_REVISION,
+                        "Content-Type": "application/gzip",
+                    },
+                    "params": params,
+                },
+            )
+        )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        """Each file's size under `path`, by its path relative to `path`."""
+        prefix = path.strip("/") + "/"
+        sizes: dict[str, int] = {}
+        token: str | None = None
+        for _ in range(100):
+            params = {"recursive": "true", **({"page_token": token} if token else {})}
+            response = await provider_call(
+                self._raw.get(
+                    self._environment_path(environment_id, path),
+                    cast_to=httpx.Response,
+                    options={"headers": {"Api-Revision": API_REVISION}, "params": params},
+                )
+            )
+            try:
+                body = object_value(cast(JsonValue, response.json()))
+                files = body.get("files") or []
+                for item in files if isinstance(files, list) else ():
+                    entry = object_value(item)
+                    size = entry.get("size_bytes", "0")  # an int64, sent as a string
+                    if entry.get("type", "FILE") == "FILE" and isinstance(size, str | int):
+                        listed = string(entry["path"]).lstrip("/")
+                        sizes[listed.partition(prefix)[2] or listed] = int(size)
+                next_token = body.get("next_page_token")
+            except (KeyError, ValueError, TypeError):
+                raise ProviderError(
+                    "upstream", retryable=False, native_code="malformed_file_list"
+                ) from None
+            if not isinstance(next_token, str) or not next_token:
+                return sizes
+            token = next_token
+        raise ProviderError("upstream", retryable=False, native_code="file_list_unbounded")
+
+    async def delete_environment(self, environment_id: str) -> None:
+        await provider_call(
+            self._raw.delete(
+                self._environment_path(environment_id),
+                cast_to=httpx.Response,
+                options={"headers": {"Api-Revision": API_REVISION}},
+            )
+        )
+
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         # An omitted list is made explicit here, but for an AGENT request an empty
         # list still means Gemini's built-ins (billable search among them). That is
@@ -642,7 +854,8 @@ class SDKTransport:
         token = storage_request_token(bounded)
         if token is not None:
             self._storage_tokens.add(token)
-        self._mcp_tokens |= mcp_request_tokens(bounded)
+        mcp_sent = mcp_request_tokens(bounded)
+        self._mcp_tokens |= mcp_sent
         protected = (
             self._protect_storage_credentials
             or bool(self._storage_tokens)
@@ -682,6 +895,9 @@ class SDKTransport:
         if token is not None and isinstance(identity, str) and identity:
             # Keyed to the accepted interaction, so it can clear only that echo later.
             self._mount_echoes.add(identity, {mount_header_digest("Bearer " + token)})
+        if isinstance(identity, str) and identity:
+            # Persisted with the acceptance, so a restarted worker can clear this echo.
+            self._mount_echoes.add(identity, {mcp_header_digest("Bearer " + t) for t in mcp_sent})
         return created
 
     async def get(self, interaction_id: str) -> Object:
@@ -713,12 +929,13 @@ class SDKTransport:
     ) -> AsyncIterator[Object]:
         from google.genai._interactions import omit
 
-        source = await provider_call(
+        source = await stream_open_call(
             self._interactions.get(
                 id=interaction_id,
                 stream=True,
                 last_event_id=after if after is not None else omit,
                 extra_headers={"Api-Revision": API_REVISION},
+                timeout=STREAM_TIMEOUT,
             )
         )
 

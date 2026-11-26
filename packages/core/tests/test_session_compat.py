@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import pytest
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.github_app_auth import PermissionProfile, group_repository_access
 from daimon.core.github_app_session import (
     AppToken,
     _working_alias,  # pyright: ignore[reportPrivateUsage]
     token_scopes_for_groups,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -26,9 +30,22 @@ from daimon.core.session_compat import (
     decide_session_compatibility,
     identity_change_reasons,
 )
-from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
+from daimon.core.session_snapshot import (
+    SessionSnapshot,
+    desired_snapshot,
+    fingerprint_identity,
+)
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
+
+_decide_session_compatibility = partial(
+    decide_session_compatibility, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+)
 
 
 def make_snapshot(**overrides: Any) -> SessionSnapshot:
@@ -88,9 +105,7 @@ def test_helper_map_changes_replace_a_multi_installation_session() -> None:
     )
     assert identity_change_reasons(recorded, moved) == ("repo_set", "github_helper")
     assert isinstance(
-        decide_session_compatibility(
-            recorded=recorded, desired=moved, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-        ),
+        _decide_session_compatibility(recorded=recorded, desired=moved),
         ReplaceSession,
     )
 
@@ -132,15 +147,7 @@ def test_single_installation_multi_group_fingerprint_and_compat_stay_legacy(
     )
     assert fingerprint_identity(snapshot) == golden
     assert "token_scopes" not in snapshot.model_dump(mode="json")
-    assert (
-        decide_session_compatibility(
-            recorded=snapshot,
-            desired=snapshot,
-            capabilities=DEFAULT_MA_CAPABILITIES,
-            now=NOW,
-        )
-        == ReuseAsIs()
-    )
+    assert _decide_session_compatibility(recorded=snapshot, desired=snapshot) == ReuseAsIs()
 
 
 def test_single_installation_chunking_keeps_main_alias_for_out_of_order_grants() -> None:
@@ -185,12 +192,7 @@ def test_only_aged_installation_rotates() -> None:
         },
         vault_id="session-vault",
     )
-    decision = decide_session_compatibility(
-        recorded=recorded,
-        desired=recorded,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
+    decision = _decide_session_compatibility(recorded=recorded, desired=recorded)
     assert decision == UpdateInPlace(
         ops=(RotateAppTokens(resource_ids={}, installation_ids=(1,)), RemirrorVaultCredentials()),
         reasons=("repo_token_age",),
@@ -200,11 +202,9 @@ def test_only_aged_installation_rotates() -> None:
             "token_issued_at_by_installation": {1: int(NOW.timestamp()), 2: int(NOW.timestamp())}
         }
     )
-    forced = decide_session_compatibility(
+    forced = _decide_session_compatibility(
         recorded=fresh,
         desired=fresh,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
         force_app_token_rotation=True,
         forced_app_installation_ids=(2,),
     )
@@ -232,12 +232,7 @@ def test_any_aged_chunk_rotates_its_installation_even_when_other_chunks_are_fres
         token_issued_at_by_installation={1: fresh, 2: fresh},
         vault_id="session-vault",
     )
-    assert decide_session_compatibility(
-        recorded=recorded,
-        desired=recorded,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    ) == UpdateInPlace(
+    assert _decide_session_compatibility(recorded=recorded, desired=recorded) == UpdateInPlace(
         ops=(RotateAppTokens(resource_ids={}, installation_ids=(1,)), RemirrorVaultCredentials()),
         reasons=("repo_token_age",),
     )
@@ -272,12 +267,7 @@ def test_new_unmounted_repo_refreshes_only_its_installation() -> None:
             "token_scopes": ((1, (101,)), (2, (102, 103))),
         }
     )
-    assert decide_session_compatibility(
-        recorded=recorded,
-        desired=desired,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    ) == UpdateInPlace(
+    assert _decide_session_compatibility(recorded=recorded, desired=desired) == UpdateInPlace(
         ops=(RotateAppTokens(resource_ids={}, installation_ids=(2,)), RemirrorVaultCredentials()),
         reasons=("repo_set",),
     )
@@ -300,11 +290,9 @@ def test_scope_expansion_and_other_installation_refresh_use_one_rotation() -> No
             "token_scopes": ((1, (101,)), (2, (102, 103))),
         }
     )
-    assert decide_session_compatibility(
+    assert _decide_session_compatibility(
         recorded=recorded,
         desired=desired,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
         force_app_token_rotation=True,
         forced_app_installation_ids=(1,),
     ) == UpdateInPlace(
@@ -325,11 +313,9 @@ def test_removed_unmounted_installation_leaves_other_token_current() -> None:
         vault_id="session-vault",
     )
     desired = recorded.model_copy(update={"token_repo_urls": (b,), "token_scopes": ()})
-    assert decide_session_compatibility(
+    assert _decide_session_compatibility(
         recorded=recorded,
         desired=desired,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
         force_app_token_rotation=True,
         forced_app_installation_ids=(1,),
     ) == UpdateInPlace(
@@ -351,12 +337,7 @@ def test_adding_second_installation_refreshes_all_tokens_into_multi_mode() -> No
     desired = recorded.model_copy(
         update={"token_repo_urls": (a, b), "token_scopes": ((1, (101,)), (2, (102,)))}
     )
-    assert decide_session_compatibility(
-        recorded=recorded,
-        desired=desired,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    ) == UpdateInPlace(
+    assert _decide_session_compatibility(recorded=recorded, desired=desired) == UpdateInPlace(
         ops=(RotateAppTokens(resource_ids={}, installation_ids=()), RemirrorVaultCredentials()),
         reasons=("repo_set",),
     )
@@ -364,12 +345,7 @@ def test_adding_second_installation_refreshes_all_tokens_into_multi_mode() -> No
 
 def test_decision_is_reuse_when_recorded_and_desired_are_identical() -> None:
     recorded = make_snapshot()
-    decision = decide_session_compatibility(
-        recorded=recorded,
-        desired=make_snapshot(),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
+    decision = _decide_session_compatibility(recorded=recorded, desired=make_snapshot())
     assert decision == ReuseAsIs(), "identical snapshots must reuse the session untouched"
 
 
@@ -384,12 +360,7 @@ def test_app_token_swap_keeps_session_but_repo_set_change_replaces_it() -> None:
         vault_id="session-vault",
     )
     desired = recorded.model_copy(update={"repo_resource_ids": {}})
-    decision = decide_session_compatibility(
-        recorded=recorded,
-        desired=desired,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
+    decision = _decide_session_compatibility(recorded=recorded, desired=desired)
     assert decision == UpdateInPlace(
         ops=(
             RotateAppTokens(resource_ids={url: "repo-resource"}),
@@ -398,21 +369,9 @@ def test_app_token_swap_keeps_session_but_repo_set_change_replaces_it() -> None:
         reasons=("repo_token_age",),
     )
     fresh = recorded.model_copy(update={"repo_token_issued_at": int(NOW.timestamp())})
-    assert (
-        decide_session_compatibility(
-            recorded=fresh,
-            desired=desired,
-            capabilities=DEFAULT_MA_CAPABILITIES,
-            now=NOW,
-        )
-        == ReuseAsIs()
-    )
-    assert decide_session_compatibility(
-        recorded=fresh,
-        desired=desired,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-        force_app_token_rotation=True,
+    assert _decide_session_compatibility(recorded=fresh, desired=desired) == ReuseAsIs()
+    assert _decide_session_compatibility(
+        recorded=fresh, desired=desired, force_app_token_rotation=True
     ) == UpdateInPlace(
         ops=(
             RotateAppTokens(resource_ids={url: "repo-resource"}),
@@ -421,12 +380,9 @@ def test_app_token_swap_keeps_session_but_repo_set_change_replaces_it() -> None:
         reasons=("repo_token_age",),
     )
     expanded = desired.model_copy(update={"repo_urls": (url, "https://github.com/example/two")})
-    assert decide_session_compatibility(
-        recorded=recorded,
-        desired=expanded,
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    ) == ReplaceSession(reasons=("repo_set",))
+    assert _decide_session_compatibility(recorded=recorded, desired=expanded) == ReplaceSession(
+        reasons=("repo_set",)
+    )
 
 
 def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> None:
@@ -438,12 +394,7 @@ def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> No
         agent_version=9,
         agent_name="renamed-bot",
     )
-    decision = decide_session_compatibility(
-        recorded=recorded,
-        desired=make_snapshot(),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
-    )
+    decision = _decide_session_compatibility(recorded=recorded, desired=make_snapshot())
     assert decision == ReuseAsIs(), "handles and diagnostics are not configuration differences"
 
 
@@ -452,6 +403,7 @@ def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> No
     [
         ("ma_agent_id", "agent_other", "agent_identity"),
         ("model_id", "claude-haiku-4-5", "model"),
+        ("model_effort", "low", "model"),
         ("system_sha256", "other-system-hash", "system_prompt"),
         ("skills_sha256", "other-skills-hash", "skills"),
         ("environment_id", "env_other", "environment"),
@@ -465,11 +417,8 @@ def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> No
 def test_decision_replaces_session_when_one_identity_field_differs(
     field: str, value: str, reason: ChangeReason
 ) -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(),
-        desired=make_snapshot(**{field: value}),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
+    decision = _decide_session_compatibility(
+        recorded=make_snapshot(), desired=make_snapshot(**{field: value})
     )
     assert decision == ReplaceSession(reasons=(reason,)), (
         f"a change to {field} is only reachable by replacing the session, reported as {reason!r}"
@@ -492,7 +441,7 @@ def test_identity_reasons_are_in_fixed_order_when_several_fields_differ() -> Non
 
 
 def test_decision_replaces_without_ops_when_identity_and_mutable_both_differ() -> None:
-    decision = decide_session_compatibility(
+    decision = _decide_session_compatibility(
         recorded=make_snapshot(vault_id="vault_1", env_resource_id="res_env_1"),
         desired=make_snapshot(
             vault_id="vault_1",
@@ -500,8 +449,6 @@ def test_decision_replaces_without_ops_when_identity_and_mutable_both_differ() -
             tools_sha256="other-tools-hash",
             env_sha256="other-env-hash",
         ),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
     )
     assert decision == ReplaceSession(reasons=("model",)), (
         "an identity change short-circuits: the replacement carries the mutable changes anyway"
@@ -509,11 +456,9 @@ def test_decision_replaces_without_ops_when_identity_and_mutable_both_differ() -
 
 
 def test_decision_replaces_env_file_when_env_hash_differs_and_swap_is_supported() -> None:
-    decision = decide_session_compatibility(
+    decision = _decide_session_compatibility(
         recorded=make_snapshot(env_resource_id="res_env_1", env_file_id="file_env_1"),
         desired=make_snapshot(env_sha256="other-env-hash"),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
     )
     assert decision == UpdateInPlace(
         ops=(ReplaceEnvFile(old_resource_id="res_env_1", old_file_id="file_env_1"),),
@@ -523,11 +468,9 @@ def test_decision_replaces_env_file_when_env_hash_differs_and_swap_is_supported(
 
 def test_agent_env_file_off_removes_the_mounted_env_file() -> None:
     """`agent_env_file` Off: the desired session has no `.env`, so the swap only removes."""
-    decision = decide_session_compatibility(
+    decision = _decide_session_compatibility(
         recorded=make_snapshot(env_resource_id="res_env_1", env_file_id="file_env_1"),
         desired=make_snapshot(env_sha256=None),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
     )
     assert decision == UpdateInPlace(
         ops=(ReplaceEnvFile(old_resource_id="res_env_1", old_file_id="file_env_1", keep=False),),
@@ -541,11 +484,10 @@ def test_replace_env_file_op_defaults_to_the_dot_env_mount_path() -> None:
 
 
 def test_decision_replaces_session_when_env_differs_and_swap_is_unsupported() -> None:
-    decision = decide_session_compatibility(
+    decision = _decide_session_compatibility(
         recorded=make_snapshot(env_resource_id="res_env_1"),
         desired=make_snapshot(env_sha256="other-env-hash"),
         capabilities=MaCapabilities(env_replaceable_in_place=False),
-        now=NOW,
     )
     assert decision == ReplaceSession(reasons=("env_file",)), (
         "without an in-place swap, new credentials are only reachable by a new session"
@@ -553,11 +495,9 @@ def test_decision_replaces_session_when_env_differs_and_swap_is_unsupported() ->
 
 
 def test_decision_refreshes_env_when_recorded_hash_is_unknown_and_desired_is_set() -> None:
-    decision = decide_session_compatibility(
+    decision = _decide_session_compatibility(
         recorded=make_snapshot(env_sha256=None, env_resource_id="res_env_1"),
         desired=make_snapshot(env_sha256="env-hash"),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
     )
     assert decision == UpdateInPlace(
         ops=(ReplaceEnvFile(old_resource_id="res_env_1", old_file_id=None),),
@@ -566,11 +506,8 @@ def test_decision_refreshes_env_when_recorded_hash_is_unknown_and_desired_is_set
 
 
 def test_decision_reuses_when_neither_recorded_nor_desired_has_an_env_file() -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(env_sha256=None),
-        desired=make_snapshot(env_sha256=None),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
+    decision = _decide_session_compatibility(
+        recorded=make_snapshot(env_sha256=None), desired=make_snapshot(env_sha256=None)
     )
     assert decision == ReuseAsIs(), "no env file on either side is not a change"
 
@@ -589,11 +526,8 @@ def test_decision_reuses_when_neither_recorded_nor_desired_has_an_env_file() -> 
 def test_decision_updates_agent_arrays_when_tools_or_mcp_servers_differ(
     overrides: dict[str, str], expected_reasons: tuple[ChangeReason, ...]
 ) -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(),
-        desired=make_snapshot(**overrides),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
+    decision = _decide_session_compatibility(
+        recorded=make_snapshot(), desired=make_snapshot(**overrides)
     )
     assert decision == UpdateInPlace(
         ops=(ReplaceToolsAndMcpServers(),), reasons=expected_reasons
@@ -601,11 +535,10 @@ def test_decision_updates_agent_arrays_when_tools_or_mcp_servers_differ(
 
 
 def test_decision_replaces_session_when_tools_differ_and_agent_update_is_unsupported() -> None:
-    decision = decide_session_compatibility(
+    decision = _decide_session_compatibility(
         recorded=make_snapshot(),
         desired=make_snapshot(tools_sha256="other-tools-hash"),
         capabilities=MaCapabilities(session_agent_updatable=False),
-        now=NOW,
     )
     assert decision == ReplaceSession(reasons=("tools",)), (
         "without sessions.update, a tool change needs a new session"
@@ -613,11 +546,9 @@ def test_decision_replaces_session_when_tools_differ_and_agent_update_is_unsuppo
 
 
 def test_decision_appends_vault_remirror_last_when_a_vault_is_attached_and_ops_exist() -> None:
-    decision = decide_session_compatibility(
+    decision = _decide_session_compatibility(
         recorded=make_snapshot(vault_id="vault_1", env_resource_id="res_env_1"),
         desired=make_snapshot(vault_id="vault_1", tools_sha256="other-tools-hash"),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
     )
     assert decision == UpdateInPlace(
         ops=(ReplaceToolsAndMcpServers(), RemirrorVaultCredentials()), reasons=("tools",)
@@ -625,11 +556,8 @@ def test_decision_appends_vault_remirror_last_when_a_vault_is_attached_and_ops_e
 
 
 def test_decision_reuses_when_a_vault_is_attached_and_nothing_else_differs() -> None:
-    decision = decide_session_compatibility(
-        recorded=make_snapshot(vault_id="vault_1"),
-        desired=make_snapshot(vault_id="vault_1"),
-        capabilities=DEFAULT_MA_CAPABILITIES,
-        now=NOW,
+    decision = _decide_session_compatibility(
+        recorded=make_snapshot(vault_id="vault_1"), desired=make_snapshot(vault_id="vault_1")
     )
     assert decision == ReuseAsIs(), (
         "an attached vault alone is not a change; the caller re-mirrors every turn as it does today"
@@ -638,11 +566,8 @@ def test_decision_reuses_when_a_vault_is_attached_and_nothing_else_differs() -> 
 
 def test_decision_raises_when_now_is_naive() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
-        decide_session_compatibility(
-            recorded=make_snapshot(),
-            desired=make_snapshot(),
-            capabilities=DEFAULT_MA_CAPABILITIES,
-            now=datetime(2026, 9, 13, 12, 0, 0),
+        _decide_session_compatibility(
+            recorded=make_snapshot(), desired=make_snapshot(), now=datetime(2026, 9, 13, 12, 0, 0)
         )
 
 
@@ -671,16 +596,9 @@ def test_token_only_app_session_is_reused_and_still_rotates() -> None:
         repo_token_issued_at=int(NOW.timestamp()),
     )
     desired = recorded.model_copy(update={"repo_token_issued_at": None})
-    assert (
-        decide_session_compatibility(
-            recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-        )
-        == ReuseAsIs()
-    )
+    assert _decide_session_compatibility(recorded=recorded, desired=desired) == ReuseAsIs()
     stale = recorded.model_copy(update={"repo_token_issued_at": int(NOW.timestamp()) - 2400})
-    decision = decide_session_compatibility(
-        recorded=stale, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-    )
+    decision = _decide_session_compatibility(recorded=stale, desired=desired)
     assert isinstance(decision, UpdateInPlace)
     assert RotateAppTokens(resource_ids={}) in decision.ops
 
@@ -696,12 +614,7 @@ def test_app_session_without_tokens_never_rotates() -> None:
         vault_id="session-vault",
         repo_token_issued_at=None,
     )
-    assert (
-        decide_session_compatibility(
-            recorded=recorded, desired=recorded, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-        )
-        == ReuseAsIs()
-    )
+    assert _decide_session_compatibility(recorded=recorded, desired=recorded) == ReuseAsIs()
 
 
 def test_new_token_only_grant_replaces_the_session() -> None:
@@ -717,9 +630,7 @@ def test_new_token_only_grant_replaces_the_session() -> None:
         vault_id="session-vault",
     )
     desired = recorded.model_copy(update={"token_repo_urls": (url,)})
-    decision = decide_session_compatibility(
-        recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-    )
+    decision = _decide_session_compatibility(recorded=recorded, desired=desired)
     assert decision == ReplaceSession(reasons=("repo_set",))
 
 
@@ -734,9 +645,9 @@ def test_removed_token_only_grant_replaces_the_session() -> None:
         vault_id="session-vault",
     )
     desired = recorded.model_copy(update={"token_repo_urls": ()})
-    assert decide_session_compatibility(
-        recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-    ) == ReplaceSession(reasons=("repo_set",))
+    assert _decide_session_compatibility(recorded=recorded, desired=desired) == ReplaceSession(
+        reasons=("repo_set",)
+    )
 
 
 def test_a_live_session_is_not_replaced_only_to_add_the_callers_personal_store() -> None:
@@ -750,12 +661,7 @@ def test_a_live_session_is_not_replaced_only_to_add_the_callers_personal_store()
 
     assert recorded.personal_memory_store_id is None
     assert identity_change_reasons(recorded, desired) == ()
-    assert (
-        decide_session_compatibility(
-            recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-        )
-        == ReuseAsIs()
-    )
+    assert _decide_session_compatibility(recorded=recorded, desired=desired) == ReuseAsIs()
 
 
 @pytest.mark.parametrize("desired_store", ["memstore_other", None])
@@ -765,19 +671,14 @@ def test_a_session_whose_personal_store_changed_or_went_away_is_replaced(
     recorded = make_snapshot(personal_memory_store_id="memstore_alice")
     desired = make_snapshot(personal_memory_store_id=desired_store)
 
-    assert decide_session_compatibility(
-        recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-    ) == ReplaceSession(reasons=("personal_memory_store",))
+    assert _decide_session_compatibility(recorded=recorded, desired=desired) == ReplaceSession(
+        reasons=("personal_memory_store",)
+    )
 
 
 def test_an_unchanged_personal_store_reuses_the_session() -> None:
     snapshot = make_snapshot(personal_memory_store_id="memstore_alice")
-    assert (
-        decide_session_compatibility(
-            recorded=snapshot, desired=snapshot, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
-        )
-        == ReuseAsIs()
-    )
+    assert _decide_session_compatibility(recorded=snapshot, desired=snapshot) == ReuseAsIs()
 
 
 def test_a_difference_in_the_mounted_credentials_hold_replaces_the_session() -> None:
@@ -787,15 +688,13 @@ def test_a_difference_in_the_mounted_credentials_hold_replaces_the_session() -> 
     capabilities = DEFAULT_MA_CAPABILITIES
 
     for recorded, desired in ((unheld, held), (held, unheld), (held, other)):
-        decision = decide_session_compatibility(
-            recorded=recorded, desired=desired, capabilities=capabilities, now=NOW
+        decision = _decide_session_compatibility(
+            recorded=recorded, desired=desired, capabilities=capabilities
         )
         assert isinstance(decision, ReplaceSession)
         assert decision.reasons == ("credential_hold",)
     assert isinstance(
-        decide_session_compatibility(
-            recorded=held, desired=held, capabilities=capabilities, now=NOW
-        ),
+        _decide_session_compatibility(recorded=held, desired=held, capabilities=capabilities),
         ReuseAsIs,
     )
 
@@ -807,3 +706,43 @@ def test_an_unheld_snapshot_keeps_the_form_and_fingerprint_it_was_recorded_with(
     assert fingerprint_identity(unheld) != fingerprint_identity(
         make_snapshot(mcp_hold="slack:C-SYN-1:client")
     )
+
+
+async def test_a_managed_agents_session_is_reused_across_the_records_seam() -> None:
+    """An agent read with and without the records seam gives one snapshot, so a stored session lives."""
+    tenant = "00000000-0000-0000-0000-0000000000a1"
+    agent = ma_agent(
+        id="ag_stored",
+        name="stored",
+        model=ma_model_config("claude-sonnet-4-6", speed="standard"),
+        metadata={MA_METADATA_KEY_TENANT: tenant, MA_METADATA_KEY_NAME: "stored"},
+    )
+    router = MARouter()
+    router.add_agent(agent)
+    client = build_fake_anthropic(router.dispatch)
+    scope = resource_scope(tenant_id=tenant)
+
+    def snapshot_of(read: Any) -> SessionSnapshot:
+        return desired_snapshot(
+            read,
+            hidden_mcp_server_names=frozenset(),
+            environment_id="env_baseline",
+            env_sha256=None,
+            repo_url=None,
+            repo_branch=None,
+            memory_store_id=None,
+            vault_id=None,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+
+    before = await retrieve_agent(client, "ag_stored", scope=scope)
+    after = await retrieve_agent(client, "ag_stored", scope=scope, records=async_sessionmaker())
+    assert after.model_dump() == before.model_dump(), (
+        "an Anthropic id reads the same through records"
+    )
+    recorded, desired = snapshot_of(before), snapshot_of(after)
+    assert fingerprint_identity(recorded) == fingerprint_identity(desired), (
+        "the records seam must not move the identity a stored session was recorded with"
+    )
+    decision = _decide_session_compatibility(recorded=recorded, desired=desired)
+    assert decision == ReuseAsIs(), "the stored session is reused untouched after the seam"

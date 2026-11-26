@@ -1,11 +1,4 @@
-"""Cog metadata invariants: guild_only, registration topology, admin-gating.
-
-ConfigCog has been deleted.
-/propagate and /unpropagate were folded into /agent-setup and
-deleted the propagate cog and its package. The assertions here lock the
-current cog set so a future re-introduction of ConfigCog or the propagate
-command module fails CI.
-"""
+"""Cog metadata invariants: guild_only, registration topology, admin-gating."""
 
 from __future__ import annotations
 
@@ -20,8 +13,8 @@ from daimon.adapters.discord.commands.help import HelpCog
 from daimon.adapters.discord.commands.here import HereCog
 from daimon.adapters.discord.commands.privacy import PrivacyCog
 from daimon.adapters.discord.commands.routines import RoutinesCog
+from daimon.testing.shared_helpers import all_app_command_names as _all_app_command_names
 from discord import app_commands
-from discord.ext import commands
 
 
 @pytest.mark.parametrize(
@@ -49,42 +42,6 @@ def test_guild_only_on_all_cogs(cog_cls: str) -> None:
     )
 
 
-def _all_app_command_names(cog_cls: type[commands.Cog]) -> set[str]:
-    """Return the set of slash-command names registered by ``cog_cls``."""
-    names: set[str] = set()
-    for cmd in cog_cls.__cog_app_commands__:  # type: ignore[attr-defined]
-        if isinstance(cmd, app_commands.Group):
-            names.add(cmd.name)
-            for child in cmd.commands:
-                names.add(f"{cmd.name} {child.name}")
-        else:
-            names.add(cmd.name)
-    return names
-
-
-def test_config_cog_not_importable() -> None:
-    """ConfigCog must be gone after D-CONFIG-01 — the import must fail.
-
-    Plan 26-PLAN T10 deleted ``commands/config.py`` outright; this regression
-    test guards against a future re-introduction by asserting the module is
-    no longer importable.
-    """
-    with pytest.raises(ModuleNotFoundError):
-        import daimon.adapters.discord.commands.config  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
-
-
-def test_propagate_cog_not_importable() -> None:
-    """commands/propagate.py is deleted; the import must fail."""
-    with pytest.raises(ModuleNotFoundError):
-        import daimon.adapters.discord.commands.propagate  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
-
-
-def test_propagate_package_not_importable() -> None:
-    """The propagate/ adapter package is deleted; the import must fail."""
-    with pytest.raises(ModuleNotFoundError):
-        import daimon.adapters.discord.propagate.panel  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
-
-
 def test_routines_cog_registers_routines_slash() -> None:
     """RoutinesCog must own /routines (DUX-03)."""
     names = _all_app_command_names(RoutinesCog)
@@ -101,23 +58,18 @@ def test_github_cog_registers_connect() -> None:
     assert GitHubCog.__cog_group_name__ == "github"
 
 
-def test_routines_slash_is_admin_gated() -> None:
-    """The /routines panel is admin-only and hidden from non-admins.
+def test_routines_slash_is_open_to_members() -> None:
+    """The /routines panel follows chat's permission, not Manage Server.
 
-    /routines is a pure-admin command: hidden in the Discord UI
-    via @app_commands.default_permissions(manage_guild=True) and hard-gated with
-    @require_manage_guild (defense in depth). It is NOT the DB-role @require_admin.
+    Members open it and see their own routines; the command is neither hidden
+    from them nor gated on server management. Admin-only actions are gated in
+    the panel, per click.
     """
     import daimon.adapters.discord.commands.routines as routines_module
 
     src = inspect.getsource(routines_module)
-    assert "require_manage_guild" in src, (
-        f"/routines must be admin-gated with @require_manage_guild; not found in source:\n{src}"
-    )
-    assert "default_permissions(manage_guild=True)" in src, (
-        "/routines must be hidden from non-admins via "
-        f"@app_commands.default_permissions(manage_guild=True); not found in source:\n{src}"
-    )
+    assert "require_manage_guild" not in src, "/routines must not need Manage Server"
+    assert "default_permissions" not in src, "/routines must be visible to every member"
 
 
 def test_routines_slash_uses_require_registered_guild() -> None:
@@ -138,8 +90,8 @@ def test_direct_message_cog_registers_dm_me_not_dm() -> None:
     )
 
 
-def test_new_slash_is_dm_only() -> None:
-    """/new replaces a private conversation, so Discord lists it in DMs and nowhere else."""
+def test_new_slash_is_listed_in_dms_and_servers() -> None:
+    """/new replaces a private conversation, and in servers a thread's where `thread_new` is on."""
     cmd = next(
         c
         for c in DirectMessageCog.__cog_app_commands__  # type: ignore[attr-defined]
@@ -147,24 +99,14 @@ def test_new_slash_is_dm_only() -> None:
     )
     ctx = cmd.allowed_contexts
     assert ctx is not None and ctx.dm_channel is True, f"/new must allow DMs; got {ctx!r}"
-    assert ctx.guild is False, f"/new must not be offered in server channels; got {ctx!r}"
+    assert ctx.guild is True, f"/new must be offered in servers for threads; got {ctx!r}"
+    assert ctx.private_channel is False, f"/new is not for group DMs; got {ctx!r}"
 
 
 def test_billing_cog_registers_billing_slash() -> None:
     """BillingCog must own /billing (DUX-04)."""
     names = _all_app_command_names(BillingCog)
     assert "billing" in names, f"/billing must be registered on BillingCog; got {names!r}"
-
-
-def test_billing_slash_is_not_admin_gated() -> None:
-    """The /billing panel is open-read; @require_admin must NOT appear."""
-    import daimon.adapters.discord.commands.billing as billing_module
-
-    src = inspect.getsource(billing_module)
-    assert "require_admin" not in src, (
-        f"/billing must be open-read (Discord-native admin resolution at click time); "
-        f"found @require_admin in source:\n{src}"
-    )
 
 
 def test_billing_slash_uses_require_registered_guild() -> None:

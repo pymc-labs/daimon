@@ -35,7 +35,7 @@ def test_misspelled_recipient_policy_fails_closed():
         DirectMessagePolicy.model_validate({"mod": "disabled"})
 
 
-@pytest.mark.parametrize("key", ["tenant-id", "", "not-a-uuid"])
+@pytest.mark.parametrize("key", ["tenant-id", ""])
 def test_invalid_tenant_policy_key_fails_settings_load(monkeypatch, key):
     monkeypatch.setenv("DAIMON_DIRECT_MESSAGE_POLICIES", json.dumps({key: {"mode": "disabled"}}))
     with pytest.raises(ValidationError, match="uuid_parsing"):

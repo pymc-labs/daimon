@@ -91,7 +91,7 @@ describe("agents", () => {
 
 describe("filterChannels", () => {
   const rows = [
-    channel("1", "clv-models", { ...inCategory("Projects"), budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 1, remaining_usd: 24, percent_used: 4, active: true, exceeded: false }, agent: { value: "clv", source: "channel" } }),
+    channel("1", "clv-models", { ...inCategory("Projects"), budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 1, remaining_usd: 24, percent_used: 4, active: true, exceeded: false, on_limit: "stop", alert_channel_id: null }, agent: { value: "clv", source: "channel" } }),
     channel("2", "board", { tags: ["locked"], platform: "slack" }),
     channel("3", "general"),
   ]
@@ -139,7 +139,7 @@ describe("accessAsk", () => {
 
 describe("budget stops", () => {
   const withBudget = (spent: number, window: "monthly" | "total") => ({
-    budget: { limit_usd: "10.00", window, starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: 0, percent_used: 0, active: true, exceeded: false },
+    budget: { limit_usd: "10.00", window, starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: 0, percent_used: 0, active: true, exceeded: false, on_limit: "stop" as const, alert_channel_id: null },
     spend: { month_usd: 4, last_30_days_usd: 9 },
   })
   it("compares with the budget's spend while its window holds, else this month's", () => {
@@ -184,6 +184,15 @@ describe("describeChange", () => {
   })
   it("reads budgets", () => {
     expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: ["None"], to: ["$25.00 monthly"] })
+  })
+  it("reads support limits, menus, the request channel and requests", () => {
+    const limit = { scope: "channel", scope_id: "c1", person: false, shared: "5", each_person: "2", window: "monthly", starts_at: null, ends_at: null, revision: 1 }
+    expect(describeChange(entry("support_limit", null, limit), labels)).toEqual({ what: "Support limit", from: ["None"], to: ["5 credits, 2 per person, each month"] })
+    expect(describeChange(entry("support_limit", { ...limit, shared: null, each_person: null, window: "total" }, null), labels).from).toEqual(["Default credits"])
+    expect(describeChange(entry("support_menu", null, { key: "main", name: "Help", options: [] }), labels)).toEqual({ what: "Support menu", from: ["None"], to: ["Help"] })
+    expect(describeChange(entry("support_menu_use", { menu: "main" }, { menu: "extra" }), labels)).toEqual({ what: "Support menu in use", from: ["main"], to: ["extra"] })
+    expect(describeChange(entry("support_channel", null, { platform: "slack", channel_id: "C1", revision: 1 }), labels)).toEqual({ what: "Support requests go to", from: ["None"], to: ["C1"] })
+    expect(describeChange(entry("support_settle", null, { request: "r", status: "settled", charge: "2" }), labels)).toEqual({ what: "Support request", from: ["None"], to: ["Done, 2 credits"] })
   })
 })
 

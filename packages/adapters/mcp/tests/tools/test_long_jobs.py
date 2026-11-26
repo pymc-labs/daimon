@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import long_jobs as tools
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
@@ -28,8 +27,12 @@ from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from ..harness import auth_identity
 
-@pytest.mark.parametrize("mode", ["approved", "unapproved", "different_command", "deadline_over"])
+
+@pytest.mark.parametrize(
+    "mode", ["approved", "provider_sealed", "unapproved", "different_command", "deadline_over"]
+)
 async def test_start_binds_approved_provider_identity_before_any_launch(
     db_engine, db_clean, monkeypatch, mode
 ):
@@ -52,13 +55,14 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
             set_by=None,
             surface="chat",
         )
-    auth = AuthIdentity(
-        tenant_id=tenant.id,
-        account_id=owner.id,
-        platform="discord",
+    auth = auth_identity(
+        owner.id,
+        tenant.id,
         role=Role.USER,
+        platform="discord",
         platform_user_id="user",
         chat_session_id="chat",
+        seal_ids=frozenset({"provider-seal"}) if mode == "provider_sealed" else frozenset(),
     )
     origin_id = str(uuid.uuid4())
     origin = SimpleNamespace(
@@ -120,7 +124,7 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
             "daimon_account": str(owner.id),
             "daimon_channel": "channel",
             "daimon_thread": "thread",
-            "daimon_sealed": "prior-seal",
+            **({} if mode == "provider_sealed" else {"daimon_sealed": "prior-seal"}),
             "daimon_private_dm": "private-grant",
         },
     )
@@ -142,7 +146,7 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
     )
     try:
         async with Client(mcp) as client:
-            if mode != "approved":
+            if mode not in {"approved", "provider_sealed"}:
                 with pytest.raises(ToolError):
                     await client.call_tool("start_long_job", arguments)
             else:
@@ -155,13 +159,13 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
                 )
         async with sm.begin() as db:
             rows = await store.list_jobs(db, tenant_id=tenant.id, owner_account_id=owner.id)
-            assert len(rows) == (1 if mode == "approved" else 0)
+            assert len(rows) == (1 if mode in {"approved", "provider_sealed"} else 0)
             if rows:
                 [row] = rows
                 assert row.source_metadata == {
                     "daimon_channel": "channel",
                     "daimon_thread": "thread",
-                    "daimon_sealed": "prior-seal",
+                    "daimon_sealed": "provider-seal" if mode == "provider_sealed" else "prior-seal",
                     "daimon_private_dm": "private-grant",
                 }
                 assert row.owner_account_id == owner.id and row.parent_session_id == parent.id
@@ -179,12 +183,8 @@ async def test_start_refuses_origins_without_completion_before_registration_or_s
 ):
     from unittest.mock import MagicMock
 
-    auth = AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        platform="discord",  # The verified origin, not the token platform, controls delivery.
-        role=Role.USER,
-        platform_user_id="user",
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", platform_user_id="user"
     )
     origin = SimpleNamespace(attended=True, platform=platform, helper_of=None)
     monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
@@ -230,5 +230,51 @@ async def test_start_refuses_origins_without_completion_before_registration_or_s
         registration.assert_not_awaited()
         admission.assert_not_awaited()
         sm.begin.assert_not_called()
+    finally:
+        await ma.close()
+
+
+async def test_start_refuses_a_daimon_owned_agent_before_any_read(monkeypatch):
+    from unittest.mock import MagicMock
+
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", platform_user_id="user"
+    )
+    origin = SimpleNamespace(
+        attended=True, platform="discord", helper_of=None, responder_ma_agent_id="dm_agent_1"
+    )
+    monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
+    monkeypatch.setattr(tools, "require_turn_origin", AsyncMock(return_value=origin))
+    registration = AsyncMock()
+    monkeypatch.setattr(tools.store, "register", registration)
+    sm = MagicMock(spec=async_sessionmaker)
+    sm.begin.side_effect = AssertionError("A refused agent must not access job storage")
+    ma = build_fake_anthropic(MARouter().dispatch)
+    mcp = FastMCP("owned agent long jobs")
+    tools.register_long_job_tools(
+        mcp,
+        McpRuntime(
+            session_factory=sm,
+            client=ma,
+            settings=Settings(
+                database=DatabaseSettings(url="postgresql+asyncpg://unused/db"),
+                anthropic=AnthropicSettings(api_key=SecretStr("fake")),
+                _env_file=None,
+            ),
+            deployment_default=DeploymentDefault(),
+        ),
+    )
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match="Long jobs are not available for this agent"):
+                await client.call_tool(
+                    "start_long_job",
+                    {
+                        "command": "sleep 600",
+                        "title": "fit",
+                        "origin_context_id": str(uuid.uuid4()),
+                    },
+                )
+        registration.assert_not_awaited()
     finally:
         await ma.close()

@@ -22,13 +22,12 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import record_snapshot
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn.admission import AdmissionGrant
-from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import run_prepared
 from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
     list_response,
@@ -132,7 +131,7 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
 
     client = build_fake_anthropic(transport)
     deps = dataclasses.replace(
-        _deps(sessionmaker=db_session_factory, router=router), anthropic=client, turn_path="legacy"
+        _deps(sessionmaker=db_session_factory, router=router), anthropic=client
     )
     prepared = _prepared_turn(
         deps=deps,
@@ -181,20 +180,16 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
         shared_channel=False,
     ) as origin:
         task = asyncio.create_task(
-            run_prepared_turn(
+            run_prepared(
                 deps,
                 prepared,
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="thread-1",
                 external_user_id="user",
                 user_message="human work",
-                lifecycle=RecordingLifecycle(),
-                cancel=asyncio.Event(),
                 reseed_user_message=_reseed,
                 recovery_lifecycle=_recovery_lifecycle,
                 attended=True,
-                render_interval_s=0.001,
             )
         )
         try:

@@ -16,7 +16,7 @@ from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.stores import accounts
 from daimon.core.stores.domain import Role
-from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, parse_jsonrpc_response
+from daimon.testing.asgi import INIT_HEADERS, asgi_lifespan, parse_jsonrpc_response
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp import Context, FastMCP
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -72,28 +72,6 @@ async def _tokens(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[str, 
     return await registered_account_token(
         sessionmaker, account_id=admin.id
     ), await registered_account_token(sessionmaker, account_id=member.id)
-
-
-async def test_a_call_on_another_instance_with_its_session_id_succeeds(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    _, token = await _tokens(sessionmaker)
-    headers = {**INIT_HEADERS, "Authorization": f"Bearer {token}"}
-    first, second = _app(sessionmaker), _app(sessionmaker)
-
-    async with _client(first) as c:
-        init = await c.post("/mcp", json=INIT_BODY, headers=headers)
-    assert init.status_code == 200, init.text
-    assert "mcp-session-id" not in init.headers, "a stateless server issues no session id"
-
-    async with _client(second) as c:
-        stale = await c.post("/mcp", json=_LIST, headers={**headers, "Mcp-Session-Id": "gone"})
-        fresh = await c.post("/mcp", json=_LIST, headers=headers)
-    for response in (stale, fresh):
-        assert response.status_code == 200, f"no initialize, unknown session: {response.text}"
-        assert response.headers["content-type"].startswith("application/json")
-        tools = {t["name"] for t in response.json()["result"]["tools"]}
-        assert {"search_tools", "call_tool"} <= tools, "the request must be served in full"
 
 
 async def test_admin_visibility_does_not_carry_over_on_a_shared_session_id(

@@ -18,6 +18,7 @@ from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conformance_support import patch_hosted
 from .test_provider_dispatch import ACCOUNT, REVISION, SCOPE, TENANT, admission, deps_for_pinned_mux
 
 NOW = datetime(2026, 10, 12, tzinfo=UTC)
@@ -128,7 +129,7 @@ async def test_component_readback_is_awaited_once_and_retained(counterpart: Agen
     assert request.counterpart is None, "proof completion cannot mutate an earlier request"
 
 
-@pytest.mark.parametrize("disabled", ["agent", "channel", "legacy", "no-runtime", "no-reader"])
+@pytest.mark.parametrize("disabled", ["agent", "channel", "no-runtime", "no-reader"])
 async def test_unconfigured_or_unproven_selection_refuses_before_hook_or_transport(
     counterpart: AgentRevision, disabled: str
 ) -> None:
@@ -141,8 +142,6 @@ async def test_unconfigured_or_unproven_selection_refuses_before_hook_or_transpo
         request = replace(request, deps=replace(request.deps, agent_backends=False))
     elif disabled == "channel":
         request = replace(request, deps=replace(request.deps, channel_backends=False))
-    elif disabled == "legacy":
-        request = replace(request, deps=replace(request.deps, turn_path="legacy"))
     elif disabled == "no-runtime":
         request = replace(request, deps=replace(request.deps, turn_runtimes={}))
     else:
@@ -218,9 +217,7 @@ async def test_public_bind_refuses_component_readback_as_execution_authority(
 
     runtime = TurnRuntime(no_transport, object(), object(), read_agent_counterpart=read)
     request = request_for(counterpart, runtime)
-    monkeypatch.setitem(
-        module._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, prepare
-    )
+    patch_hosted(monkeypatch, request.admission.backend_revision.profile, prepare=prepare)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await module.bind_session_impl(
             request.deps,
@@ -238,7 +235,7 @@ async def test_public_bind_refuses_component_readback_as_execution_authority(
 
 
 @pytest.mark.parametrize(
-    "defect", ["flag-off", "legacy", "missing-reader", "error", "foreign", "changed-proof"]
+    "defect", ["flag-off", "missing-reader", "error", "foreign", "changed-proof"]
 )
 async def test_public_bind_refuses_before_native_preparer_or_transport(
     monkeypatch, counterpart, defect
@@ -269,8 +266,6 @@ async def test_public_bind_refuses_before_native_preparer_or_transport(
     request = request_for(counterpart, runtime)
     if defect == "flag-off":
         request = replace(request, deps=replace(request.deps, agent_backends=False))
-    elif defect == "legacy":
-        request = replace(request, deps=replace(request.deps, turn_path="legacy"))
     elif defect == "missing-reader":
         request = request_for(counterpart, TurnRuntime(no_transport, object(), object()))
     elif defect == "changed-proof":
@@ -283,9 +278,7 @@ async def test_public_bind_refuses_before_native_preparer_or_transport(
                 ),
             ),
         )
-    monkeypatch.setitem(
-        module._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, prepare
-    )
+    patch_hosted(monkeypatch, request.admission.backend_revision.profile, prepare=prepare)
     with pytest.raises(AdmissionDenied) as refused:
         await module.bind_session_impl(
             request.deps,
@@ -308,8 +301,6 @@ async def test_source_projection_timeout_refuses_and_cancels_capture_without_pre
     monkeypatch, counterpart
 ):
     import asyncio
-
-    from daimon.core.turn import prepare as module
 
     cancelled = asyncio.Event()
 
@@ -340,9 +331,7 @@ async def test_source_projection_timeout_refuses_and_cancels_capture_without_pre
     monkeypatch.setattr(
         sessions, "project_session_resources", lambda *args, **kwargs: read(request)
     )
-    monkeypatch.setitem(
-        module._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, prepare
-    )
+    patch_hosted(monkeypatch, request.admission.backend_revision.profile, prepare=prepare)
     with pytest.raises(AdmissionDenied) as refused:
         await read_preparation_counterpart(request)
     assert refused.value.reason == "backend_unsupported"
@@ -353,8 +342,6 @@ async def test_cancellation_drains_pending_source_capture_without_preparation(
     monkeypatch, counterpart
 ):
     import asyncio
-
-    from daimon.core.turn import prepare as module
 
     entered, closed = asyncio.Event(), asyncio.Event()
 
@@ -370,9 +357,7 @@ async def test_cancellation_drains_pending_source_capture_without_preparation(
 
     runtime = TurnRuntime(no_transport, object(), object(), read_agent_counterpart=read)
     request = request_for(counterpart, runtime)
-    monkeypatch.setitem(
-        module._PROVIDER_PREPARATIONS, request.admission.backend_revision.profile, prepare
-    )
+    patch_hosted(monkeypatch, request.admission.backend_revision.profile, prepare=prepare)
     from daimon.core import sessions
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mux_compat import source_agent_record

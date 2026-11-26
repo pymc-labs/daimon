@@ -7,17 +7,15 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import (
-    AnthropicSettings,
     ComputeSettings,
     CryptoSettings,
-    DatabaseSettings,
-    DiscordSettings,
     GeminiSettings,
     MicrosoftAccountsSettings,
     NotebookSettings,
     RepoMemorySettings,
     ReportHostSettings,
     Settings,
+    SupportSettings,
 )
 from daimon.core.features.registry import FEATURES, Tier
 from daimon.core.features.service import (
@@ -28,18 +26,9 @@ from daimon.core.features.service import (
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores.channel_changes import list_changes
 from daimon.testing.factories import make_tenant
-from pydantic import HttpUrl, PostgresDsn, SecretStr
+from daimon.testing.shared_helpers import settings as _settings
+from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-
-def _settings() -> Settings:
-    return Settings.model_validate(
-        {
-            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
-            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
-            "discord": DiscordSettings(bot_token=SecretStr("test")),
-        }
-    )
 
 
 async def _admin(_: object) -> bool:
@@ -64,8 +53,8 @@ def _integrated_settings() -> Settings:
             "compute": ComputeSettings(
                 enabled=True,
                 deployment_id="d",
-                api_token=SecretStr("s"),
-                org_slug="o",
+                cloud_run_project="p",
+                cloud_run_service_account="s@p.iam.gserviceaccount.com",
                 session_auth_key=SecretStr("s"),
             ),
             "microsoft_accounts": MicrosoftAccountsSettings(
@@ -83,6 +72,7 @@ def _integrated_settings() -> Settings:
             ),
             "gemini": GeminiSettings(api_key=SecretStr("s")),
             "repo_memory": RepoMemorySettings(enabled=True),
+            "support": SupportSettings(escalation_channel_id="9"),
         }
     )
 

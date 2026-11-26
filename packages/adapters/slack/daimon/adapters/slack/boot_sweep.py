@@ -41,7 +41,6 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 
 import aiohttp
@@ -57,25 +56,21 @@ from daimon.adapters.slack.blockkit import (
 from daimon.adapters.slack.card_recovery import CardLookupStatus, find_turn_card_by_key
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError
-from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import ThreadSessionRow, TurnCardIntentRow
 from daimon.core.stores.tenants import list_tenants_by_platform, set_provision_status
-from daimon.core.stores.thread_sessions import (
-    clear_active_turn_if_message_id,
-    list_orphaned_turns,
-)
+from daimon.core.stores.thread_sessions import list_orphaned_turns
 from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
     record_turn_card_message,
     retire_turn_card_intent,
 )
-from daimon.core.turn.bookkeeping import reconcile_found_card, recover_orphan_marker
-from mux.contracts.ids import Scope
+from daimon.core.turn.bookkeeping import reconcile_found_card, retire_orphan_marker
 from slack_sdk.errors import SlackApiError
 from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 from slack_sdk.web.async_client import AsyncWebClient
@@ -171,8 +166,12 @@ async def _seed_tenant_defaults(
             if agent_name is None:
                 log.info("slack.boot_sweep_roster_check_skipped", tenant_id=str(tenant_id))
             else:
-                default_agent = await find_agent_by_daimon_tag(
-                    anthropic, tenant_id=tenant_id, name=agent_name
+                default_agent = await find_agent_or_builtin(
+                    anthropic,
+                    tenant_id=tenant_id,
+                    name=agent_name,
+                    records=sessionmaker,
+                    surface="slack_roster",
                 )
                 if default_agent is None:
                     seed_ok = False
@@ -197,7 +196,12 @@ async def _seed_tenant_defaults(
     except (DaimonError, _anthropic.APIError, SQLAlchemyError) as exc:
         # Per-tenant supervisor boundary: one tenant's provider or DB error
         # must not stop the sweep over its siblings.
-        log.warning("slack.boot_sweep_tenant_failed", tenant_id=str(tenant_id), error=str(exc))
+        log.warning(
+            "slack.boot_sweep_tenant_failed",
+            tenant_id=str(tenant_id),
+            error=str(exc),
+            causes=backend_refusal_causes(exc),
+        )
         await _record_failure(
             sessionmaker,
             tenant_id=tenant_id,
@@ -616,22 +620,8 @@ async def retire_orphaned_turns(runtime: SlackRuntime, *, now: datetime) -> None
                     log.warning(
                         "slack.turn.orphan_retire_failed", thread_id=row.thread_id, error=str(err)
                     )
-            cleared = await recover_orphan_marker(
-                runtime.sessionmaker,
-                row,
-                clear=clear_active_turn_if_message_id,
-                interrupt=partial(
-                    interrupt_orphaned_session,
-                    runtime.anthropic,
-                    scope=Scope(
-                        tenant_id=str(row.tenant_id),
-                        account_id=str(row.account_id),
-                        principal_id="daimon",
-                        authorization_id="slack-orphan-sweep",
-                    )
-                    if row.account_id is not None
-                    else None,
-                ),
+            cleared = await retire_orphan_marker(
+                runtime.sessionmaker, runtime.anthropic, row, platform="slack"
             )
             if not cleared:
                 log.info(

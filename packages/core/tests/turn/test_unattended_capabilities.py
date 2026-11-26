@@ -43,6 +43,7 @@ from daimon.core.turn.unattended_capabilities import (
 from daimon.testing import ma_agent
 from daimon.testing.ma_sessions import session_turn_sse
 from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_leg import LEG_SCOPE
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -54,6 +55,11 @@ from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import BaseModel
 
 from .conftest import make_status_idle
+
+_constrain_capabilities = partial(
+    constrain_capabilities, public_url=None, session_factory=None, tenant_id=None
+)
+
 
 ENTRY_POINTS: tuple[UnattendedEntryPoint, ...] = tuple(
     entry for entry in get_args(UnattendedEntryPoint) if entry != "long_job"
@@ -283,7 +289,7 @@ async def _drive(
                 lifecycle=RecordingLifecycle(),
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="cli-operator-run"),
-                path="legacy",
+                scope=LEG_SCOPE,
                 tool_confirmation=unattended_posture(
                     policy,
                     session=snapshot,
@@ -596,12 +602,9 @@ async def test_allowlist_keeps_only_named_tools_and_asks() -> None:
         ],
         mcp_servers=[*SERVERS, {"name": "github", "type": "url", "url": "https://gh.example"}],
     )
-    constrained = await constrain_capabilities(
+    constrained = await _constrain_capabilities(
         session,
         ToolSafetyPolicy(enabled=True),
-        public_url=None,
-        session_factory=None,
-        tenant_id=None,
         tool_allowlist=frozenset({ServerTool("linear", "get_issue")}),
     )
     tools = constrained.send.tools
@@ -656,12 +659,10 @@ async def test_allowlist_drops_management_endpoint_aliases(query: str) -> None:
             ],
         )
     )
-    constrained = await constrain_capabilities(
+    constrained = await _constrain_capabilities(
         session,
         ToolSafetyPolicy(),
         public_url="https://daimon.invalid/mcp",
-        session_factory=None,
-        tenant_id=None,
         tool_allowlist=frozenset(
             {ServerTool("renamed", "get_agent"), ServerTool("daimon-mcp", "get_agent")}
         ),
@@ -717,13 +718,8 @@ async def test_a_server_name_with_a_slash_is_refused_before_mutation(
     update = AsyncMock()
     monkeypatch.setattr(caps, "update_session_record", update)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await constrain_capabilities(
-            _bridged_session(),
-            ToolSafetyPolicy(),
-            public_url=None,
-            session_factory=None,
-            tenant_id=None,
-            tool_allowlist=allowlist,
+        await _constrain_capabilities(
+            _bridged_session(), ToolSafetyPolicy(), tool_allowlist=allowlist
         )
     update.assert_not_awaited()
 
@@ -742,24 +738,18 @@ def test_a_slash_in_either_server_name_is_refused(where: str) -> None:
 async def test_an_allowlist_pair_never_reaches_another_server() -> None:
     """A tool name may hold `/`; it stays that tool on that server."""
     session = _root_session()
-    constrained = await constrain_capabilities(
+    constrained = await _constrain_capabilities(
         session,
         ToolSafetyPolicy(),
-        public_url=None,
-        session_factory=None,
-        tenant_id=None,
         tool_allowlist=frozenset({ServerTool("linear", "bridge/get_issue")}),
     )
     [linear] = [t for t in constrained.send.tools if t["type"] == "mcp_toolset"]
     assert linear["mcp_server_name"] == "linear"
     assert [c["name"] for c in linear["configs"]] == ["bridge/get_issue"]
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await constrain_capabilities(
+        await _constrain_capabilities(
             session,
             ToolSafetyPolicy(),
-            public_url=None,
-            session_factory=None,
-            tenant_id=None,
             tool_allowlist=frozenset({ServerTool("linear/bridge", "get_issue")}),
         )
     posture = capability_posture(
@@ -811,13 +801,7 @@ async def test_apply_invalidates_cached_tools_before_mutating(
     assert order == ["update"]
     order.clear()
     session = _root_session()
-    constrained = await constrain_capabilities(
-        session,
-        ToolSafetyPolicy(enabled=True),
-        public_url=None,
-        session_factory=None,
-        tenant_id=None,
-    )
+    constrained = await _constrain_capabilities(session, ToolSafetyPolicy(enabled=True))
     await caps.apply_capabilities(
         MagicMock(), session, constrained, scope=_scope(), session_factory=factory
     )
@@ -853,13 +837,7 @@ async def test_a_restore_registered_between_invalidation_and_send_survives_a_fai
     monkeypatch.setattr(caps, "update_session_record", update)
     session = _root_session()
     original = caps.SessionToolConfig.of(session)
-    constrained = await constrain_capabilities(
-        session,
-        ToolSafetyPolicy(enabled=True),
-        public_url=None,
-        session_factory=None,
-        tenant_id=None,
-    )
+    constrained = await _constrain_capabilities(session, ToolSafetyPolicy(enabled=True))
     await caps.invalidate_cached_tools(session, constrained, session_factory=factory)
     order.append("register_restore")
     try:

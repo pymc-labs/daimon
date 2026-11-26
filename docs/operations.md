@@ -234,22 +234,55 @@ These events carry identifiers, counts and durations, never message text:
 | --- | --- | --- |
 | `runtime.started` | info | `process`, `release`; once per process start |
 | `runtime.health` | info | `process` and the window's measurements, every [`DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`](configuration.md#daimon_observability__health_interval_s) seconds |
-| `scheduler.tick_completed` | info | `duration_ms`; at most once a minute |
-| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `release`, `turn_id`, `tenant_id`; once for a turn that ended without an answer |
+| `scheduler.tick_completed` | info | `duration_ms` of one check for due routines; at most once a minute |
+| `scheduler.housekeeping_completed` | info | `duration_ms` of one clean-up pass; at most once a minute |
+| `scheduler.github_sessions_completed` | info | `duration_ms` of one GitHub token pass over live sessions; at most once a minute |
+| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `provider`, `release`, `turn_id`, `tenant_id`, `is_dm`, `agent_id`; once for a turn that ended without an answer |
+| `turn.finished` | info | `tenant_id`, `platform`, `origin`, `reason`, `failed`, `is_dm`, `agent_id`, `duration_ms`, `recovered`, `tool_errors`; once per answered turn, so a failure rate has its denominator |
+| `turn.shed` | warning | `tenant_id`, `reason`, `channel_id` or `path`; a turn turned away at a concurrency cap or a full queue |
+| `routine.fire_failed` | warning | `tenant_id`, `routine_id`, `agent_id`, `reason`, `error_class`; a fire that did not start a turn. A benign skip logs `routine.fire_skipped` at info |
+| `routine.finished` | info | `tenant_id`, `routine_id`, `agent_id`, `outcome`, `skip_reason`, `duration_ms`; once per fire |
+| `routine.delivery_failed` | warning | `tenant_id`, `routine_id`, `status`, `note` or `error_type`; a result that could not be posted |
+| `watch.poll_failed` | warning | `tenant_id`, `watch_id`, `kind`, `error_class`, `consecutive_errors`; info when the source was only busy or capped |
+| `watch.paused_failing` | warning | `tenant_id`, `watch_id`, `consecutive_errors`; a watch paused after repeated errors |
+| `wake.abandoned`, `wake.lease_lost`, `continuation.dispatch_failed`, `watch_report.dispatch_failed` | warning | `tenant_id`, `kind`, `thread_id` or `row_id`, `skip_reason` or `error_type`; a follow-up that will not run, shown on the Issues page as `wake.failed` |
 | `turn.would_stall` | warning | `step_s`, `silent_s`, `frame_silent_s`, `tool_open`, `last_status`, `session_id`; once per step (5, 10, 15, 30 minutes) since the turn's provider last sent an event; usage-only frames do not count. Measurement only: it never ends a turn. `tool_open` false does not rule out an OpenAI provider-side tool, whose previews Daimon never sees; `last_status` is the last status Daimon read while the turn was quiet, not the current one |
 
 `turn.user_failure` covers upstream errors, lost connections, the turn
 ceiling, failed recovery and queue-full shedding. Its `backend` names the
 backend and profile, such as `gemini/gemini.inline_reuse`, or `unknown`
-before one is chosen, so alerts can split by backend. Lines logged while a
-chat or routine turn's reply is driven and finalized also carry `backend`,
-`profile` and `model`. It is not logged for
-completed turns, stops the user asked for, model refusals, admission refusals
-such as an empty balance, or missing setup. An uncaught exception is logged
-as `process.uncaught_exception` at critical.
+when it fails before one is known. `provider` is its first part (`gemini`),
+the label for a per-provider count or alert. Lines logged while a chat or
+routine turn's reply runs also carry `backend`, `profile` and `model`. It is
+not logged for completed turns, stops the user asked for, model refusals,
+admission refusals such as an empty balance, or missing setup.
+
+An uncaught exception is logged as `process.uncaught_exception` at critical.
 
 `release` is the commit the image was built from, set by the `DAIMON_RELEASE`
 build argument. An image built without it reports the package version.
+
+## Read failures and warnings
+
+Daimon records each failed answer, routine, delivery, watch, follow-up and bridged-tool call
+once per issue, with no message content, and keeps it for
+`DAIMON_OPS_EVENTS__RETENTION_DAYS` days. Admins read the issues on the Overview and Issues
+pages of the web app, and can resolve or mute them there or by asking an agent. The
+operator can use the command line:
+
+```bash
+daimon issues summary <tenant-uuid> [--period 1h|24h|7d|30d] [--json]
+daimon issues list <tenant-uuid> [--since 24h] [--area routine] [--severity error] [--active] [--json]
+daimon issues show <tenant-uuid> <fingerprint> [--events 50] [--json]
+daimon issues resolve|mute|reopen <tenant-uuid> <fingerprint> [--account <member>]
+```
+
+A resolved issue returns as open when it happens again. A muted one stays hidden until
+reopened. An operator token with the `issues:read` scope reads the same data through the
+`get_ops_overview`, `list_issues` and `get_issue` tools.
+
+The change commands record the `--account` member as the actor, or Daimon via the CLI
+without one. An operator token never changes issues.
 
 ## Audit security events
 
@@ -269,30 +302,22 @@ daimon audit prune <tenant-uuid>
 export. Repeat per tenant for a person in several workspaces. It uses local
 database access and is not an MCP tool.
 
-Retention is 90 days
-([`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](configuration.md#daimon_retention__security_audit_days);
-`0` keeps rows indefinitely). The scheduler deletes older rows daily, and
-`daimon audit prune` does the same for one tenant on demand. Include your backup
-expiry in your retention policy. Privacy
-erasure clears a person's identifiers from audit rows, and deleting a tenant
-removes its rows. Database triggers block ordinary updates and deletes. They
-guard against application mistakes, not against a database administrator.
+The scheduler deletes audit rows after
+[`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](configuration.md#daimon_retention__security_audit_days)
+(90 days); `daimon audit prune` prunes one tenant now. Erasure
+clears a person's identifiers, and deleting a tenant removes its rows. Database
+triggers block ordinary updates and deletes against application mistakes.
 
 ## Set retention
 
-The scheduler deletes operational records past their age every day. Each
-`DAIMON_RETENTION__*` setting in [the configuration reference](configuration.md#daimon_retention__security_audit_days)
-sets one age in days, and `0` keeps that record. [How Daimon handles data](https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md)
-lists every record and its default. Conversation history is the
-[Conversation history kept](features.md#conversation-history-kept) feature, on
-at one year; `DAIMON_FEATURES__CONVERSATION_RETENTION=0` turns it off.
+Each [`DAIMON_RETENTION__*`](configuration.md#daimon_retention__security_audit_days)
+setting is the age in days at which the scheduler deletes a record; `0` keeps it.
+[How Daimon handles data](https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md) lists every record and its default; conversation history is a
+[feature](features.md#conversation-history-kept).
 
-Report and notebook hosts delete on their own: reports after
-[`DAIMON_REPORT__RETENTION_DAYS`](configuration.md#daimon_report__retention_days),
-notebooks at their expiry. Blogs have no expiry. Charts in artifacts are not
-purged, so give their bucket a lifecycle rule. Database backups, log storage and object-store
-buckets sit outside Daimon, so give each its own expiry and keep it no longer
-than the shortest age you promise users.
+Reports expire after [`DAIMON_REPORT__RETENTION_DAYS`](configuration.md#daimon_report__retention_days)
+and notebooks at their expiry. Give chart buckets, backups and logs an expiry
+no longer than the shortest age you promise users.
 
 ## Manage operator tokens
 
@@ -319,6 +344,7 @@ token.
 | `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
 | `agents:archive` | `archive_channel_copy` |
 | `promo:redeem` | `redeem_promo_code` |
+| `issues:read` | `get_ops_overview`, `list_issues`, `get_issue` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
 On each request the token must be unrevoked and unexpired, and its account must

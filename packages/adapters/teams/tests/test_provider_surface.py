@@ -4,39 +4,29 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Literal, NoReturn, cast
 
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types import RawMessageStreamEvent
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsAgentMessageEvent,
-    BetaManagedAgentsEventParams,
-    BetaManagedAgentsSessionEndTurn,
-    BetaManagedAgentsSessionEvent,
-    BetaManagedAgentsSessionStatusIdleEvent,
-    BetaManagedAgentsStreamSessionEvents,
-    BetaManagedAgentsTextBlock,
-)
 from daimon.adapters.teams import lifecycle as teams_lifecycle
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.adapters.teams.tool_confirmation import confirmation_adaptive_card
 from daimon.core.confirmation import ConfirmationPrompt
 from daimon.core.posted_controls.confirmation import ConfirmationCardState, build_confirmation_card
 from daimon.core.turn import driver
-from daimon.core.turn.io import TurnEvent, TurnStream
+from daimon.core.turn.io import TurnEvent
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.run import _DeferredFailureLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_totals import ProviderUsageTotals
+from daimon.testing.shared_helpers import Codec, native_events
 from daimon.testing.turn_fakes import FakeAnthropic
 from mux import profiles
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
-from mux.contracts.receipts import StopObservation
 from mux.contracts.usage import UsageObservation
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
@@ -256,62 +246,6 @@ def test_provider_prompt_keeps_only_existing_confirmation_controls(
     assert ('"title":"Approve"' in rendered) == (state == "pending")
     assert ('"title":"Deny"' in rendered) == (state == "pending")
     assert "browser_origin_access" not in rendered and "browser_authentication" not in rendered
-
-
-class Stream:
-    def __init__(self, events: Sequence[TurnEvent]) -> None:
-        self.events = iter(events)
-
-    def __aiter__(self) -> Stream:
-        return self
-
-    async def __anext__(self) -> TurnEvent:
-        try:
-            return next(self.events)
-        except StopIteration:
-            raise StopAsyncIteration from None
-
-    async def close(self) -> None:
-        pass
-
-
-class Codec:
-    def __init__(self, events: Sequence[TurnEvent]) -> None:
-        self.events = events
-
-    async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
-        return Stream(self.events)
-
-    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        pass
-
-    async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
-        return []
-
-    async def status(self) -> str:
-        return "idle"
-
-    async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
-        return None
-
-    async def archive(self) -> None:
-        pass
-
-
-def native_events() -> tuple[BetaManagedAgentsStreamSessionEvents, ...]:
-    text = BetaManagedAgentsAgentMessageEvent(
-        id="native-message",
-        type="agent.message",
-        content=[BetaManagedAgentsTextBlock(type="text", text="Actual answer")],
-        processed_at=NOW,
-    )
-    done = BetaManagedAgentsSessionStatusIdleEvent(
-        id="native-done",
-        type="session.status_idle",
-        stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
-        processed_at=NOW,
-    )
-    return text, done
 
 
 @pytest.mark.parametrize("with_usage", [True, False])

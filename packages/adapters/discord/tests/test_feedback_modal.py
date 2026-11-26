@@ -10,18 +10,23 @@ function's docstring) and returns the current row, which is exactly the
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 import structlog
-from daimon.adapters.discord.feedback_modal import FeedbackModal
+from daimon.adapters.discord import feedback_modal
+from daimon.adapters.discord.feedback_modal import (
+    FeedbackModal,
+    _in_private_channel,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.message_feedback import record_vote
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,16 +35,37 @@ _VOTER_ID = "100000000000000001"
 _OTHER_USER_ID = "200000000000000002"
 
 
+@pytest.fixture(autouse=True)
+def _in_a_server_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The seeded ids are not Discord's, so the channel type is faked; tested on its own below."""
+    monkeypatch.setattr(feedback_modal, "_in_private_channel", AsyncMock(return_value=False))
+
+
+@pytest.mark.parametrize(
+    ("found", "private"),
+    [
+        (MagicMock(spec=discord.DMChannel), True),
+        (MagicMock(spec=discord.TextChannel), False),
+        (discord.NotFound(MagicMock(status=404), "gone"), True),
+    ],
+)
+async def test_feedback_privacy_comes_from_the_channel_type(found: object, private: bool) -> None:
+    bot = MagicMock()
+    bot.get_channel.return_value = None
+    bot.fetch_channel = AsyncMock(side_effect=[found])
+    assert await _in_private_channel(bot, "123") is private
+
+
 def _runtime(*, sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
     return DiscordRuntime(
-        settings=MagicMock(),
+        settings=mock_settings(),
         anthropic=build_stub_anthropic(),
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # feedback-modal tests never run a turn
+        turn_deps=deps_for(),  # feedback-modal tests never run a turn
     )
 
 

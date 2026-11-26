@@ -1,11 +1,11 @@
-"""Run frozen main dispatchers and adapter callers over identical Postgres rows."""
+"""Pin continuation dispatch effects (writes, leases, retries, notices) for each platform caller."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import anthropic
@@ -28,22 +28,16 @@ from daimon.testing.db import (  # noqa: F401
     db_session_factory,
 )
 from daimon.testing.factories import clear_task_continuations, make_task_continuation, make_tenant
+from daimon.testing.recorded_effects import Recording
 from slack_sdk.errors import SlackApiError
 
 _NOW = datetime(2026, 10, 3, tzinfo=UTC)
-_BASE = Path(__file__).with_name("continuation_base")
+_RECORDING = Recording(Path(__file__).with_name("continuation_effects.json"), epoch=_NOW)
 _NEW = {"discord": discord_dispatch, "slack": slack_dispatch, "core": core_dispatch}
 
 
 class ProcessDeath(BaseException):
     """Uncaught termination leaves lease recovery to the real store."""
-
-
-def _base(platform: str) -> ModuleType:
-    module = ModuleType(f"base_{platform}")
-    path = _BASE / f"{platform}.txt"
-    exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
-    return module
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "core"])
@@ -77,7 +71,13 @@ def _base(platform: str) -> ModuleType:
         "start_lost",
     ],
 )
-async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, wake, scenario):  # noqa: F811
+async def test_dispatch_effects_match_recording(
+    db_session_factory,  # noqa: F811
+    monkeypatch,
+    platform,
+    wake,
+    scenario,
+):
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord" if platform == "core" else platform)
     keys = [uuid.uuid4() for _ in range(3)]
@@ -107,7 +107,8 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
                     created_at=_NOW - timedelta(minutes=3 - index),
                 )
 
-    async def exercise(module):
+    async def exercise():
+        module = _NEW[platform]
         events = []
         ticks = 0
 
@@ -118,23 +119,42 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
             events.append(("clock", value))
             return value
 
-        async def snapshot():
+        async def rows():
             async with db_session_factory() as session:
-                rows = [await get_continuation(session, idempotency_key=key) for key in keys]
+                found = [await get_continuation(session, idempotency_key=key) for key in keys]
             # Random IDs and lease owner values are opaque. Compare owner presence and all
             # transition fields, including lease expiry, attempts, start and delivery times.
             return [
                 row.model_dump(exclude={"id", "lease_owner"})
                 | {"lease_owner": row.lease_owner is not None}
-                for row in rows
+                for row in found
             ]
+
+        last = await rows()
+
+        async def snapshot():
+            # Only the fields that changed since the previous snapshot, so the recording
+            # stays readable.
+            nonlocal last
+            current = await rows()
+            changed = [
+                {field: value for field, value in row.items() if value != before[field]}
+                for before, row in zip(last, current, strict=True)
+            ]
+            last = current
+            return changed
 
         def trace(name):
             real = getattr(wakes, name)
 
             async def wrapped(*args, **kwargs):
-                # An omitted skip reason and the explicit default None have the same write.
-                call = {k: v for k, v in kwargs.items() if k != "skip_reason" or v is not None}
+                # An omitted skip reason and the explicit default None have the same write;
+                # the row and error class only label the ops issue a failed skip reports.
+                call = {
+                    k: v
+                    for k, v in kwargs.items()
+                    if (k != "skip_reason" or v is not None) and k not in ("row", "error_class")
+                }
                 events.append((name, call))
                 if scenario == "claim_lost" and name == "claim_wake":
                     return None
@@ -159,7 +179,16 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
             return SimpleNamespace(active_turn_message_id="busy" if scenario == "active" else None)
 
         async def decide(*args, **kwargs):
-            events.append(("decision", kwargs))
+            request = kwargs.pop("request")
+            events.append(
+                (
+                    "decision",
+                    kwargs,
+                    request.model_dump(
+                        include={"platform", "parent_channel_id", "thread_id", "requested_work"}
+                    ),
+                )
+            )
             if scenario == "decision_boundary":
                 raise DaimonError("decision failed")
             if scenario == "save_only":
@@ -236,9 +265,9 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
                 return clock()
 
         with monkeypatch.context() as patch:
-            # The new adapter calls the real shared ladder. Only external decisions and
-            # I/O are injected; every queue operation below uses the real base store.
-            ladder = module if module is not _NEW[platform] else core_dispatch
+            # The adapters call the real shared ladder. Only external decisions and
+            # I/O are injected; every queue operation below uses the real store.
+            ladder = core_dispatch
             for name in [
                 "list_dispatchable_wakes",
                 "claim_wake",
@@ -300,11 +329,9 @@ async def test_dispatch_matches_main(db_session_factory, monkeypatch, platform, 
             return events
 
     await seed()
-    old = await exercise(_base(platform))
-    await seed()
-    new = await exercise(_NEW[platform])
-    assert any(event[0] == "claim_wake" for event in old)
+    events = await exercise()
+    assert any(event[0] == "claim_wake" for event in events), "no wake was claimed"
     if scenario in {"deliver", "slow_delivery"}:
-        assert any(event[0] == "run" for event in old)
-        assert not any(event[0] == "raised" for event in old)
-    assert new == old
+        assert any(event[0] == "run" for event in events), "delivery never ran"
+        assert not any(event[0] == "raised" for event in events), "delivery raised"
+    _RECORDING.check(f"{platform}-{wake}-{scenario}", events)

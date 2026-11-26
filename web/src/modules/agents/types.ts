@@ -8,8 +8,9 @@ export type Backend = "anthropic" | "openai" | "gemini" | "selfhosted"
 export type ToolRule = "allow" | "ask" | "deny"
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max"
 
-export type ModelChoice = { id: string; backend: Backend; speed: "standard" | "fast"; effort: Effort }
-export type CatalogModel = { id: string; label: string; backend: Backend; in_usd: number; out_usd: number; fast?: boolean }
+/** `effort` null runs the model's own default. */
+export type ModelChoice = { id: string; backend: Backend; speed: "standard" | "fast"; effort: Effort | null }
+export type CatalogModel = { id: string; label: string; backend: Backend; in_usd: number; out_usd: number; fast?: boolean; efforts?: Effort[] }
 
 /** `agent_toolset_20260401` configs. */
 export type BuiltinTool = { name: string; enabled: boolean }
@@ -96,7 +97,7 @@ export type AgentSummary = Pick<Agent, "id" | "name" | "purpose" | "avatar" | "v
   draft_changes: number
   model_label: string
   backend: Backend
-  runs_in: ("discord" | "slack" | "teams" | "dm" | "web")[]
+  runs_in: ("discord" | "slack" | "teams" | "web")[]
 }
 
 export type Change = {
@@ -110,6 +111,18 @@ export type Change = {
   after?: string
   /** Long text (prompt, skill files): diffed by line. */
   text?: boolean
+}
+
+/** What picking a model changes: `lines` say what is off on the new provider, as information. */
+export type ModelPreview = {
+  moves: boolean
+  allowed: boolean
+  skills: string[]
+  servers: string[]
+  capabilities: string[]
+  lines: string[]
+  drops: string[]
+  refusal: { line: string; action: string | null } | null
 }
 
 export type Draft = { base_version: number; config: AgentConfig; changes: Change[]; stale: boolean }
@@ -224,7 +237,7 @@ export type MirrorCheck = { result: "unchanged" | "updated" | "pending" | "unava
 export type ServerSkillOption = { uri: string; name: string; description: string; skill_id: string | null; taken: boolean }
 export type ServerSkillMenu = { label: string; skills: ServerSkillOption[] }
 /** An agent's choice for one mirrored skill, and the newest version it can be pinned to. */
-/** `needs_reconfirm`: an update waits because it would change what the agent's backend drops. `managed`: settings fix the agent. */
+/** `needs_reconfirm`: an update an earlier sync held back waits for the owner. `managed`: settings fix the agent. */
 export type SkillFollow = { follow: boolean; status: MirrorStatus | "needs_reconfirm" | "managed"; version: string | null }
 export type SkillDetail = LibrarySkill & { source_url: string | null }
 export type SkillVersion = { version: string; created_at: string; author: string | null }

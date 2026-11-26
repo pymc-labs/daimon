@@ -9,7 +9,6 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills.version_list_response import VersionListResponse
 from cryptography.fernet import Fernet
 from daimon.core import agent_github
@@ -23,6 +22,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import create_platform_principal
 from daimon.core.stores.user_skills import upsert_user_skill
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import (
     make_account,
     make_github_app_installation,
@@ -193,12 +193,11 @@ async def test_get_panel_when_version_lookup_fails_then_null_time_and_retried_th
     pinned = {"type": "custom", "skill_id": "skill_pin", "version": "1"}
     agents, owner, _other = await agent_people(db_session, skills=[pinned])
     agents.skills = [
-        SkillListResponse(
+        skill_listed(
             id="skill_pin",
             created_at="2030-01-01T00:00:00Z",
             display_title="Deploy",
             latest_version="3",
-            source="custom",
             type="skill",
             updated_at="2030-01-03T00:00:00Z",
         ).model_dump(mode="json")
@@ -569,3 +568,47 @@ async def test_actions_when_agent_of_another_workspace_then_404(
     assert {k: r.status_code for k, r in replies.items()} == dict.fromkeys(replies, 404), {
         k: r.text for k, r in replies.items()
     }
+
+
+async def test_an_admin_outside_a_private_channels_own_agent_changes_no_repo(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The web app proves no channel, so a sealed agent's repos are refused for an admin too."""
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    agents, owner, other = await agent_people(db_session)
+    await _repos(db_session_factory, owner.tenant_id, owner.account_id)
+    async with db_session_factory.begin() as db:
+        await set_role(db, other.account_id, Role.ADMIN)
+    token = await sign_in_token(db_session_factory, other)
+    url = "/api/agents/ag_w/github"
+
+    async def changes() -> list[int]:
+        async with agent_client(
+            agents, owner.tenant_id, db_session_factory, token, settings=_configured()
+        ) as client:
+            return [
+                (
+                    await client.put(f"{url}/working", json={"repo": "acme/app"}, headers=OWN)
+                ).status_code,
+                (await client.delete(f"{url}/repos/acme/app", headers=OWN)).status_code,
+            ]
+
+    assert await changes() == [200, 200], "an open agent is an admin's to change, as before"
+    await _repos(db_session_factory, owner.tenant_id, owner.account_id, {103: "acme/app2"})
+    async with db_session_factory.begin() as db:
+        await set_access_policy(
+            db,
+            tenant_id=owner.tenant_id,
+            policy=TenantAccessPolicy(
+                channel_rules={"C1": ChannelRule(readers="own", writers="own")},
+                agent_rules={"helper": AgentRule(runs_in=("C1",))},
+            ),
+        )
+    async with agent_client(
+        agents, owner.tenant_id, db_session_factory, token, settings=_configured()
+    ) as client:
+        put = await client.put(f"{url}/working", json={"repo": "acme/app2"}, headers=OWN)
+        gone = await client.delete(f"{url}/repos/acme/app2", headers=OWN)
+    assert (put.status_code, gone.status_code) == (403, 403), (put.text, gone.text)

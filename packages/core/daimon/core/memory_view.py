@@ -29,6 +29,7 @@ from typing import Literal
 import anthropic as anthropic_errors
 from anthropic import AsyncAnthropic
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -44,7 +45,6 @@ from daimon.core.stores.agent_memory_stores import (
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
-from daimon.core.stores.shared_channels import is_channel_shared
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -87,9 +87,11 @@ async def held_place(
     if (
         client
         or channel_shared is True
-        or await is_channel_shared(
-            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
-        )
+        or (
+            await channel_has_outsiders(
+                session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+            )
+        ).contained
     ):
         return TurnHold(platform, channel_id, client)
     return None
@@ -139,7 +141,9 @@ async def resolve_channel_agent(
         )
     if config.agent_name is None:
         return None
-    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=config.agent_name)
+    agent = await find_agent_by_daimon_tag(
+        anthropic, tenant_id=tenant_id, name=config.agent_name, records=sessionmaker
+    )
     if agent is None:
         raise DaimonError(f"Configured agent '{config.agent_name}' not found.")
     names = (config.agent_name, *agent_pin_names(agent.name, agent.metadata))

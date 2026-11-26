@@ -59,6 +59,7 @@ from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_OUTPUTS_DIR,
@@ -78,7 +79,6 @@ from daimon.core.handoff_context import (
     select_recent_turns,
     supports_system_message,
 )
-from daimon.core.ma import replay_events
 from daimon.core.mux_backend import managed_agents
 from daimon.core.mux_compat import legacy_call
 from daimon.core.output_ports_compat import (
@@ -95,6 +95,7 @@ from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.persistence import current_persistence
@@ -390,7 +391,12 @@ async def _rehost_bundle(
     try:
         content = await read_output_record(client, bundle.id, scope=scope)
     except anthropic.APIStatusError as err:
-        log.warning("workspace_transfer.download_failed", file_id=bundle.id, error=str(err)[:300])
+        log.warning(
+            "workspace_transfer.download_failed",
+            file_id=bundle.id,
+            error=str(err)[:300],
+            causes=backend_refusal_causes(err),
+        )
         return "archive_missing"
 
     # Already gone (a concurrent sweep, a retried transfer) is not an error.
@@ -414,7 +420,11 @@ async def _rehost_bundle(
             )
         )
     except anthropic.APIStatusError as err:
-        log.warning("workspace_transfer.upload_failed", error=str(err)[:300])
+        log.warning(
+            "workspace_transfer.upload_failed",
+            error=str(err)[:300],
+            causes=backend_refusal_causes(err),
+        )
         return "upload_failed"
 
     async with sessionmaker() as session, session.begin():
@@ -448,7 +458,6 @@ async def transfer_workspace(
     before_send: Callable[[], Awaitable[None]] | None = None,
     account_id: uuid.UUID | None = None,
     fernet: MultiFernet | None = None,
-    turn_path: Literal["legacy", "mux"] | None = None,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -473,9 +482,6 @@ async def transfer_workspace(
     choice reaches the checkpoint prompt and, when it was `"leave"`, is also
     reported as something the successor did not get.
 
-    `turn_path` is the turn path the checkpoint turn runs on, resolved by the
-    caller; `None` reads settings in the driver.
-
     Never raises for an expected degradation — every rung below the top is a
     returned value. It does raise for an unexpected upstream failure (a 500
     on `events.list`, a DB error), because those are bugs or outages the
@@ -497,14 +503,15 @@ async def transfer_workspace(
         call_site="workspace_transfer:transfer_workspace",
     )
     try:
-        if turn_scope is None:
-            events = await replay_events(client, session_id=old_session_id)
-        else:
-            events = await replay_events(client, session_id=old_session_id, scope=turn_scope)
+        events = await turn_io(client, old_session_id, scope=turn_scope or scope).replay()
     except anthropic.APIStatusError as err:
         if not _is_not_found(err):
             raise
-        log.info("workspace_transfer.events_unavailable", session_id=old_session_id)
+        log.info(
+            "workspace_transfer.events_unavailable",
+            session_id=old_session_id,
+            causes=backend_refusal_causes(err),
+        )
         return HistoryOnly(gap_reason="events_unavailable")
 
     turns = select_recent_turns(events)
@@ -518,7 +525,9 @@ async def transfer_workspace(
         access = await load_access_policy(db, tenant_id=tenant_id)
     if any(rule.invoker_role_ids for rule in access.agent_rules.values()):
         try:
-            predecessor = await retrieve_agent(client, old_snapshot.ma_agent_id, scope=scope)
+            predecessor = await retrieve_agent(
+                client, old_snapshot.ma_agent_id, scope=scope, records=sessionmaker
+            )
         except anthropic.APIStatusError as err:
             if not _is_not_found(err):
                 raise
@@ -527,6 +536,7 @@ async def transfer_workspace(
                 "workspace_transfer.checkpoint_failed",
                 session_id=old_session_id,
                 status=err.status_code,
+                causes=backend_refusal_causes(err),
             )
             return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
         ref = build_agent_ref(predecessor.name, predecessor.metadata, old_snapshot.agent_name)
@@ -568,7 +578,11 @@ async def transfer_workspace(
     except anthropic.APIStatusError as err:
         if not _is_not_found(err):
             raise
-        log.warning("workspace_transfer.checkpoint_failed", session_id=old_session_id)
+        log.warning(
+            "workspace_transfer.checkpoint_failed",
+            session_id=old_session_id,
+            causes=backend_refusal_causes(err),
+        )
         return TranscriptOnly(transcript=transcript or "", gap_reason="session_dead")
     try:
         # A session the unattended gate cannot constrain (a coordinator roster,
@@ -632,7 +646,6 @@ async def transfer_workspace(
                     channel_id=session_rules_channel(old_session, platform=platform),
                     entry_point="checkpoint",
                 ),
-                path=turn_path,
                 deadline=checkpoint_deadline,
                 # The checkpoint executes the old session: decided again right before.
                 before_send=before_send,
@@ -855,8 +868,6 @@ class WorkspaceTransferRunner:
     fernet: MultiFernet | None = None
     account_id: uuid.UUID | None = None
     """The account from the caller's existing tenant authorization decision."""
-    turn_path: Literal["legacy", "mux"] | None = None
-    """The turn path the checkpoint turn runs on; `None` reads settings in the driver."""
 
     async def __call__(
         self,
@@ -897,7 +908,6 @@ class WorkspaceTransferRunner:
             unsaved_work=unsaved_work,
             channel_id=self.channel_id,
             before_send=before_send,
-            turn_path=self.turn_path,
         )
         prepared = as_prepared_replacement(
             outcome,

@@ -13,7 +13,7 @@ import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import structlog
 from daimon.core.stores.web_notices import (
     WEB_NOTICE_CHANNEL,
-    WebCredentialNotice,
+    WebNotice,
     parse_web_notice,
 )
 from sqlalchemy.exc import SQLAlchemyError
@@ -24,7 +24,7 @@ log = structlog.get_logger(__name__)
 #: Pause before reopening a lost connection.
 RETRY_S = 5.0
 
-Handle = Callable[[WebCredentialNotice], Awaitable[None]]
+Handle = Callable[[WebNotice], Awaitable[None]]
 _CONNECTION_ERRORS = (OSError, SQLAlchemyError, asyncpg.PostgresError, asyncpg.InterfaceError)
 
 
@@ -73,7 +73,7 @@ class NoticeListener:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _handled(self, notice: WebCredentialNotice) -> None:
+    async def _handled(self, notice: WebNotice) -> None:
         try:
             await self._handle(notice)
         except Exception:

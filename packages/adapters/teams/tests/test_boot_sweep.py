@@ -58,7 +58,7 @@ async def test_markers_and_intents_are_interrupted_cleared_and_retired(
     sender = FakeSender(fail_on={1})
 
     with patch(
-        "daimon.adapters.teams.boot_sweep.interrupt_orphaned_session", new_callable=AsyncMock
+        "daimon.core.turn.bookkeeping.interrupt_orphaned_session", new_callable=AsyncMock
     ) as interrupt:
         await retire_orphaned_turns(
             anthropic=AsyncMock(),
@@ -124,7 +124,7 @@ async def test_failed_orphan_interrupt_detaches_busy_session_and_retires_card(
     await db_session.commit()
     sender = FakeSender()
     with patch(
-        "daimon.adapters.teams.boot_sweep.interrupt_orphaned_session",
+        "daimon.core.turn.bookkeeping.interrupt_orphaned_session",
         new_callable=AsyncMock,
         return_value=False,
     ) as interrupt:

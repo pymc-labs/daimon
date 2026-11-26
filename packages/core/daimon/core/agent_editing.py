@@ -31,10 +31,11 @@ from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, owns_agent, record_agent_creator
 from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize
+from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule
-from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -61,14 +62,22 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.mcp_attach import replaced_server_url
 from daimon.core.model_presets import ModelSelection, model_choice_id
+from daimon.core.models_catalog import is_priced_claude_model, priced_claude_ids
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent
 from daimon.core.mux_compat import update_agent as ma_update_agent
-from daimon.core.permissions import WEB_PLACE_ID, agent_permissions, with_agent_rule
+from daimon.core.permissions import (
+    SEALED_REFUSAL,
+    WEB_PLACE_ID,
+    agent_permissions,
+    is_barred_from_web_chat,
+    sealed_outside,
+    with_agent_rule,
+)
 from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec, merge_default_agent_toolset
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.channel_changes import write_channel_default
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.tenants import get_tenant
@@ -83,6 +92,7 @@ BuiltinToolName = Literal[
     "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
 ]
 BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
+WEB_CHAT_BARRED: Final = "The web chat can't run a channel's own agent. Nothing was saved."
 
 AgentEditRefusal = Literal[
     "forbidden", "invalid", "conflict", "stale", "not_found", "taken", "unavailable"
@@ -328,8 +338,8 @@ def unknown_model_refusal(model: ModelSelection) -> str | None:
     None for a model it has no rates for, so the turn would be recorded as free.
     """
     choice_id = model_choice_id(model)
-    if choice_id not in ALLOWED_MODEL_IDS:
-        allowed = ", ".join(ALLOWED_MODEL_IDS)
+    if not is_priced_claude_model(choice_id):
+        allowed = ", ".join(priced_claude_ids())
         return f"Model '{choice_id}' is not available. Choose one of: {allowed}"
     return None
 
@@ -520,7 +530,12 @@ async def write_agent_patch(
             if turned_on:
                 raise AgentEditError(forbidden_builtins_message(turned_on), kind="forbidden")
         return await ma_update_agent(
-            deps.client, fresh.id, version=fresh.version, payload=body, scope=actor.scope()
+            deps.client,
+            fresh.id,
+            version=fresh.version,
+            payload=body,
+            scope=actor.scope(),
+            records=deps.session_factory,
         )
 
     # An MCP server change is serialized with the token forms' attach-then-publish
@@ -537,7 +552,7 @@ async def write_agent_patch(
     try:
         async with mcp_lock:
             updated = await update_agent_with_version_retry(
-                deps.client, agent.id, _apply, scope=actor.scope()
+                deps.client, agent.id, _apply, scope=actor.scope(), records=deps.session_factory
             )
     except anthropic.ConflictError as exc:
         raise AgentEditError(
@@ -577,11 +592,12 @@ async def write_builtin_tool(
             version=fresh.version,
             payload={"tools": tools},
             scope=actor.scope(),
+            records=deps.session_factory,
         )
 
     try:
         updated = await update_agent_with_version_retry(
-            deps.client, ma_agent_id, _apply, scope=actor.scope()
+            deps.client, ma_agent_id, _apply, scope=actor.scope(), records=deps.session_factory
         )
     except anthropic.ConflictError as exc:
         raise AgentEditError(
@@ -640,7 +656,9 @@ async def load_tenant_agent(
 ) -> BetaManagedAgentsAgent:
     """The tenant's live agent ``ma_agent_id``, for reading."""
     try:
-        agent = await retrieve_agent(deps.client, ma_agent_id, scope=actor.scope())
+        agent = await retrieve_agent(
+            deps.client, ma_agent_id, scope=actor.scope(), records=deps.session_factory
+        )
     except (anthropic.NotFoundError, ScopeViolation) as exc:
         raise AgentEditError("No such agent.", kind="not_found") from exc
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
@@ -672,11 +690,14 @@ async def check_may_edit(
         owned = await owns_agent(
             session, tenant_id=actor.tenant_id, ma_agent_id=agent.id, account_id=actor.account_id
         )
+    async with deps.session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
     decision = authorize(
-        TenantAccessPolicy(),
+        policy,
         subject=actor.subject,
         action=Action.CHANGE_SHARED_AGENT,
         surface=actor.surface,
+        agent=build_agent_ref(agent.name, agent.metadata),
         operation_family="spec",
         reach=AgentReach(managed=rejection is not None, owned=owned),
     )
@@ -684,6 +705,8 @@ async def check_may_edit(
         message = (
             rejection
             if rejection is not None
+            else SEALED_REFUSAL
+            if decision.reason == "sealed_channel"
             else f"Changing '{agent.name}' needs its owner or an admin."
         )
         raise AgentEditError(message, kind="forbidden")
@@ -752,6 +775,15 @@ async def check_places(
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
                 cleared.append(channel_id)
+    added = set(_place_ids(after)) - set(_place_ids(before))
+    if WEB_PLACE_ID in added and is_barred_from_web_chat(policy, names):
+        raise AgentEditError(WEB_CHAT_BARRED, kind="invalid")
+    # A private channel's pick is its setting, changed only from inside it, admins too.
+    picks = tuple(c for c in (*turn_on, *cleared) if c != WEB_PLACE_ID)
+    if picks and sealed_outside(
+        policy, actor.subject.inside, channel_ids=picks, operator=actor.subject.operator
+    ):
+        raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
     refusal = places_refusal(
         places_policy(
             policy, names=names, agent_name=name, runs_in=_rule_target(policy, names, before, after)
@@ -829,7 +861,22 @@ async def set_places(
         raise AgentEditError(str(exc), kind="invalid") from exc
     turn_on, turn_off = default_changes(before, after)
     async with deps.session_factory.begin() as session:
+        # Re-checked at the write: a pick an inside admin made after `check_places`
+        # read it is still that private channel's setting.
+        await lock_access_policy(session, tenant_id=actor.tenant_id)
+        locked = await load_access_policy(session, tenant_id=actor.tenant_id)
+
+        def refuse_sealed(channel_id: str) -> None:
+            if sealed_outside(
+                locked,
+                actor.subject.inside,
+                channel_ids=(channel_id,),
+                operator=actor.subject.operator,
+            ):
+                raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
+
         for channel_id in turn_on:
+            refuse_sealed(channel_id)
             await write_channel_default(
                 session,
                 tenant_id=actor.tenant_id,
@@ -844,6 +891,7 @@ async def set_places(
             scope = ChannelScopeRef(tenant_id=actor.tenant_id, channel_id=channel_id)
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
+                refuse_sealed(channel_id)
                 await write_channel_default(
                     session,
                     tenant_id=actor.tenant_id,
@@ -860,14 +908,21 @@ async def reject_name_taken(deps: AgentEditDeps, *, tenant_id: uuid.UUID, name: 
 
     Tenant-scoped, as the resolver's (daimon_tenant, daimon_name) identity is.
     """
-    if await find_agents_by_daimon_tag(deps.client, tenant_id=tenant_id, name=name):
+    if not anthropic_configured(deps.client):
+        return  # Daimon records: the create-only reconcile refuses a taken name.
+    # The singular lookup: `daimon` stays taken by the seeded agent renamed from it.
+    if await find_agent_by_daimon_tag(
+        deps.client, tenant_id=tenant_id, name=name, records=deps.session_factory
+    ):
         raise AgentNameTakenError(name)
 
 
 async def discard_created(deps: AgentEditDeps, actor: AgentActor, ma_agent_id: str) -> bool:
     """Archive an agent this create made and couldn't finish; False when that failed too."""
     try:
-        await archive_agent(deps.client, ma_agent_id, scope=actor.scope())
+        await archive_agent(
+            deps.client, ma_agent_id, scope=actor.scope(), records=deps.session_factory
+        )
     except Exception as exc:  # boundary: the caller reports the original failure either way
         log.error(
             "create_agent.discard_failed",

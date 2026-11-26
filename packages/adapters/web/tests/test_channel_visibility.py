@@ -42,10 +42,10 @@ def _runtime(handler: httpx.MockTransport) -> tuple[WebRuntime, httpx.AsyncClien
 async def _postable(
     handler: httpx.MockTransport, monkeypatch: pytest.MonkeyPatch, *, platform: str, ids: list[str]
 ) -> frozenset[str]:
-    async def token(_runtime: object, _team: str) -> str:
+    async def token(*_args: object) -> str:
         return "xoxb"
 
-    monkeypatch.setattr(channel_visibility, "_slack_token", token)
+    monkeypatch.setattr(channel_visibility, "slack_token", token)
     forget_visibility()
     runtime, http = _runtime(handler)
     async with http:

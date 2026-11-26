@@ -335,6 +335,14 @@ async def update_lifecycle(
             values[name] = value
     if archived or deleted:
         values["handoff_summary"] = None  # a released binding hands nothing on
+    if deleted:
+        await _delete_shared_copies(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent_channel_id,
+            thread_ids=[thread_id],
+        )
     await session.execute(
         update(ThreadAgentBinding)
         .where(
@@ -347,6 +355,24 @@ async def update_lifecycle(
         .values(**values)
     )
     await session.flush()
+
+
+async def _delete_shared_copies(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_ids: Collection[str],
+) -> None:
+    """A deleted thread's shared owner (no account row) keeps no catalogue copies."""
+    # Imported here: `shared_threads` reaches the backend service, which reaches stores.
+    from daimon.core.shared_threads import shared_owner, shared_slot
+    from daimon.core.stores.neutral_catalog import delete_owner_rows
+
+    for thread_id in thread_ids:
+        owner = shared_owner(shared_slot(tenant_id, platform, parent_channel_id, thread_id))
+        await delete_owner_rows(session, tenant_id=tenant_id, owner_id=owner)
 
 
 async def update_channel_lifecycle(
@@ -365,6 +391,23 @@ async def update_channel_lifecycle(
         values["deleted"] = deleted
     if archived or deleted:
         values["handoff_summary"] = None  # a released binding hands nothing on
+    if deleted:
+        await _delete_shared_copies(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent_channel_id,
+            thread_ids=tuple(
+                await session.scalars(
+                    select(ThreadAgentBinding.thread_id).where(
+                        ThreadAgentBinding.tenant_id == tenant_id,
+                        ThreadAgentBinding.platform == platform,
+                        ThreadAgentBinding.parent_channel_id == parent_channel_id,
+                        ThreadAgentBinding.deleted.is_(False),
+                    )
+                )
+            ),
+        )
     await session.execute(
         update(ThreadAgentBinding)
         .where(

@@ -15,16 +15,30 @@ from mux.contracts.config import BackendConfig, ResolvedBackend, ThreadMode, res
 from mux.contracts.errors import InvalidConfig
 from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
-from mux.contracts.resources import AgentSpec, ToolSpec
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, NetworkPolicy, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
-from mux.profiles.openai import ASTRA_MODEL, CONVERSATION_ONLY, LUNA_MODEL, PERSISTENT_WORKSPACE
+from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
+from mux.profiles.openai import (
+    ASTRA_6_2_MODEL,
+    ASTRA_MODEL,
+    CONVERSATION_ONLY,
+    LUNA_MODEL,
+    MAX_ALLOWED_HOSTS,
+    PERSISTENT_WORKSPACE,
+    SOL_MODEL,
+)
 from mux.profiles.selfhosted import LOOP
 
 PROFILES: Mapping[str, Profile] = {
     p.profile_id: p
     for p in (MANAGED_AGENTS, PERSISTENT_WORKSPACE, CONVERSATION_ONLY, INLINE_REUSE, LOOP)
 }
+
+DAIMON_RECORD_PROVIDERS: tuple[Provider, ...] = (
+    PERSISTENT_WORKSPACE.provider,
+    INLINE_REUSE.provider,
+)
+"""Providers whose agent definitions Daimon stores and serves itself, not the provider."""
 
 PROVIDER_LABELS: Mapping[Provider, str] = {
     "anthropic": "Anthropic",
@@ -88,7 +102,8 @@ def represented_execution_tools(
     """Map supported filesystem capabilities through the profile's execution tool.
 
     MCP remains a separate capability. Unknown tools and permission prompts
-    cannot acquire an execution mapping by resembling a known tool name.
+    cannot acquire an execution mapping by resembling a known tool name. Web tools
+    map alone when the source has none of the filesystem tools.
     """
     if profile.profile_id not in (INLINE_REUSE.profile_id, PERSISTENT_WORKSPACE.profile_id):
         raise InvalidConfig("profile has no source execution mapping")
@@ -99,20 +114,60 @@ def represented_execution_tools(
         else {"web_search": "web_search"}
     )
     actual = {tool.name for tool in tools}
+    runs = names.issubset(actual)
     if (
-        len(tools) != len(actual)
-        or not names.issubset(actual)
+        not tools
+        or len(tools) != len(actual)
+        or not (runs or actual.isdisjoint(names))
         or not actual.issubset(names | web_tools.keys())
         or any(tool.kind != "builtin" or tool.permission != "auto" for tool in tools)
     ):
         raise InvalidConfig("source execution tools are not representable")
     return (
-        ToolSpec(name=profile.execution_tool, kind="builtin"),
+        *((ToolSpec(name=profile.execution_tool, kind="builtin"),) if runs else ()),
         *(
             ToolSpec(name=target, kind="builtin")
             for source, target in web_tools.items()
             if source in actual
         ),
+    )
+
+
+PACKAGE_MANAGERS = ("system", "python", "npm")
+"""Package lists both OpenAI templates and Gemini environments install."""
+
+
+def network_effect(policy: NetworkPolicy | None) -> NetworkPolicy:
+    """The egress a policy allows: none set is open, and limited to no hosts is none."""
+    if policy is None:
+        return NetworkPolicy()
+    if policy.mode == "limited" and not policy.allowed_hosts:
+        return NetworkPolicy(mode="none")
+    return policy
+
+
+def carried_environment(profile: Profile, spec: EnvironmentSpec) -> EnvironmentSpec:
+    """The part of a source environment the profile's template sandbox recreates.
+
+    Workspace files are provider-bound and never carry. OpenAI restricts egress to
+    1 to MAX_ALLOWED_HOSTS hosts. Gemini installs packages over the network at the
+    first tool call, so they carry only while egress is open.
+    """
+    if profile.profile_id not in (INLINE_REUSE.profile_id, PERSISTENT_WORKSPACE.profile_id):
+        raise InvalidConfig("profile has no source execution mapping")
+    if spec.execution != "hosted" or spec.native_config is not None:
+        return EnvironmentSpec(name=spec.name)
+    network = network_effect(spec.network)
+    packages = {k: v for k, v in (spec.packages or {}).items() if v and k in PACKAGE_MANAGERS}
+    if profile.profile_id == INLINE_REUSE.profile_id and network.mode != "unrestricted":
+        packages = {}
+    too_many = len(network.allowed_hosts) > MAX_ALLOWED_HOSTS
+    return EnvironmentSpec(
+        name=spec.name,
+        network=None
+        if too_many and profile.profile_id == PERSISTENT_WORKSPACE.profile_id
+        else network,
+        packages=packages or None,
     )
 
 
@@ -162,19 +217,22 @@ def meters_cache_writes_for(provider: Provider) -> bool:
 
 
 __all__ = [
-    "CONSENTED_DEFAULT_MODELS",
+    "DAIMON_RECORD_PROVIDERS",
     "CONVERSATION_ONLY",
     "PROVIDER_ALIASES",
     "INLINE_REUSE",
     "MANAGED_AGENTS",
     "LOOP",
     "PERSISTENT_WORKSPACE",
+    "PACKAGE_MANAGERS",
     "PROFILES",
     "PROVIDER_LABELS",
+    "carried_environment",
     "get_profile",
     "meters_cache_writes_for",
     "emits_legacy_events_for",
     "native_agent_tools",
+    "network_effect",
     "neutral_catalog_profile_for",
     "accounting_mode_for",
 ]
@@ -196,26 +254,19 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "anthropic": BackendSelection(BackendConfig(), ("per_caller", "shared")),
     "openai": BackendSelection(
         BackendConfig(backend="openai", profile="openai.persistent_workspace", model=LUNA_MODEL),
-        ("per_caller",),
-        allowed_models=(ASTRA_MODEL,),
+        ("per_caller", "shared"),
+        allowed_models=(ASTRA_MODEL, ASTRA_6_2_MODEL, SOL_MODEL),
     ),
     "selfhosted": BackendSelection(
         BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6.1-sol"),
-        ("per_caller",),
+        ("per_caller", "shared"),
     ),
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
-        ("per_caller",),
-        allowed_models=(ARGON_MODEL,),
-        tariff_gated_models=(ARGON_MODEL,),
+        ("per_caller", "shared"),
+        allowed_models=OPT_IN_MODELS,
+        tariff_gated_models=OPT_IN_MODELS,
     ),
-}
-#: The provider defaults that backend-switch consents on a default-model setting
-#: were recorded under. Frozen: they must not follow a later default change, which
-#: is what tells an old consent it was confirmed for another model.
-CONSENTED_DEFAULT_MODELS: Mapping[Provider, str] = {
-    "gemini": "gemini-3.8-flash",
-    "openai": "gpt-6-luna",
 }
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
     profile

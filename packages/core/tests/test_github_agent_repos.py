@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from functools import partial
 from typing import Literal
 
 import pytest
@@ -162,6 +163,11 @@ async def _connect(
     )
 
 
+_connect_with = partial(
+    _connect, agent_name="TeamA", ma_agent_id="ma_team_a", repo_ids=(101,), manages=True
+)
+
+
 async def _rows(db_session: AsyncSession, world: World, repo_id: int) -> list[TenantGitHubRepo]:
     return list(
         await db_session.scalars(
@@ -206,15 +212,7 @@ async def test_server_admin_connects_for_agent_and_rows_are_scoped(
         db_session, world, agent_name="TeamA", ma_agent_id="ma_team_a", user_id="admin"
     )
     team_a = world.agent("ma_team_a")
-    result = await _connect(
-        db_session,
-        world,
-        requester_id=world.admin_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-    )
+    result = await _connect_with(db_session, world, requester_id=world.admin_id)
     assert result == github_connect.ConfirmedActivation(status="activated")
     rows = await _rows(db_session, world, 101)
     assert [(row.scope_agent_id, row.authorized_by_account_id) for row in rows] == [
@@ -234,14 +232,8 @@ async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
 ) -> None:
     world = await _world(db_session)
     agent_id = world.agent("ma_team_a")
-    assert await _connect(
-        db_session,
-        world,
-        requester_id=world.member_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101, 102),
-        manages=True,
+    assert await _connect_with(
+        db_session, world, requester_id=world.member_id, repo_ids=(101, 102)
     ) == github_connect.ConfirmedActivation(status="activated")
     with pytest.raises(ValueError, match="not on this agent's list"):
         await github_access.set_working_repo(
@@ -334,14 +326,8 @@ async def test_reconnecting_adds_repos_and_keeps_existing_ones(db_session: Async
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
     for repo_ids in ((101,), (102,)):
-        assert await _connect(
-            db_session,
-            world,
-            requester_id=world.member_id,
-            agent_name="TeamA",
-            ma_agent_id="ma_team_a",
-            repo_ids=repo_ids,
-            manages=True,
+        assert await _connect_with(
+            db_session, world, requester_id=world.member_id, repo_ids=repo_ids
         )
     assert await _live_ids(db_session, world, team_a) == {101, 102}
 
@@ -352,15 +338,7 @@ async def test_scoped_repo_is_never_granted_or_minted_for_another_agent(
 ) -> None:
     world = await _world(db_session)
     other = world.agent("ma_other")
-    assert await _connect(
-        db_session,
-        world,
-        requester_id=world.member_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-    )
+    assert await _connect_with(db_session, world, requester_id=world.member_id)
     # Not even a server admin can grant TeamA's repo to another agent.
     with pytest.raises(ValueError, match="not actively authorized"):
         await github_access.stage_grant(
@@ -407,13 +385,12 @@ async def test_one_repo_on_two_agents_is_two_rows_and_removal_is_per_agent(
     world = await _world(db_session)
     team_a, other = world.agent("ma_team_a"), world.agent("ma_other")
     for name, ma_agent_id in (("TeamA", "ma_team_a"), ("OtherBot", "ma_other")):
-        assert await _connect(
+        assert await _connect_with(
             db_session,
             world,
             requester_id=world.admin_id,
             agent_name=name,
             ma_agent_id=ma_agent_id,
-            repo_ids=(101,),
             manages=False,
         )
     assert {row.scope_agent_id for row in await _rows(db_session, world, 101)} == {team_a, other}
@@ -449,13 +426,12 @@ async def test_server_wide_and_scoped_rows_coexist_and_the_agents_own_row_wins(
             ceiling_access="write",
             granted_by_account_id=world.admin_id,
         )
-    assert await _connect(
+    assert await _connect_with(
         db_session,
         world,
         requester_id=world.admin_id,
         agent_name="Loose",
         ma_agent_id="ma_loose",
-        repo_ids=(101,),
         manages=False,
         access="write",
     )
@@ -484,15 +460,8 @@ async def test_server_wide_and_scoped_rows_coexist_and_the_agents_own_row_wins(
 async def test_confirm_refuses_a_non_admin_requester(db_session: AsyncSession) -> None:
     world = await _world(db_session)
     assert (
-        await _connect(
-            db_session,
-            world,
-            requester_id=world.member_id,
-            agent_name="TeamA",
-            ma_agent_id="ma_team_a",
-            repo_ids=(101,),
-            manages=True,
-            manages_at_confirm=False,
+        await _connect_with(
+            db_session, world, requester_id=world.member_id, manages_at_confirm=False
         )
         is None
     )
@@ -506,16 +475,7 @@ async def test_read_only_confirmation_still_connects_the_working_repo_with_write
     # App grants remain writable when the person's confirmed repo access is read-only.
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
-    assert await _connect(
-        db_session,
-        world,
-        requester_id=world.member_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-        access="read",
-    )
+    assert await _connect_with(db_session, world, requester_id=world.member_id, access="read")
     [grant] = await github_access.list_agent_grants(
         db_session, tenant_id=world.tenant_id, agent_id=team_a
     )
@@ -546,15 +506,7 @@ async def test_pinned_agent_refuses_a_server_wide_grant_but_takes_its_own(
     await github_access.remove_grant(
         db_session, tenant_id=world.tenant_id, agent_id=team_a, repo_id=102
     )
-    assert await _connect(
-        db_session,
-        world,
-        requester_id=world.member_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-    )
+    assert await _connect_with(db_session, world, requester_id=world.member_id)
 
 
 @pytest.mark.asyncio
@@ -563,25 +515,8 @@ async def test_reconnecting_with_read_only_access_keeps_write(
 ) -> None:
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
-    assert await _connect(
-        db_session,
-        world,
-        requester_id=world.member_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-    )
-    await _connect(
-        db_session,
-        world,
-        requester_id=world.member_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-        access="read",
-    )
+    assert await _connect_with(db_session, world, requester_id=world.member_id)
+    await _connect_with(db_session, world, requester_id=world.member_id, access="read")
     [grant] = await github_access.list_agent_grants(
         db_session, tenant_id=world.tenant_id, agent_id=team_a
     )
@@ -597,15 +532,7 @@ async def test_panel_manages_only_pinned_agents_own_repos(
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
     await _server_wide(db_session, world, 102)
-    assert await _connect(
-        db_session,
-        world,
-        requester_id=world.member_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-    )
+    assert await _connect_with(db_session, world, requester_id=world.member_id)
     panel = await load_grants_panel(
         db_session, tenant_id=world.tenant_id, agent_id=team_a, agent_name="TeamA"
     )

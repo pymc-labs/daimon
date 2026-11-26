@@ -31,6 +31,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import (
+    enable_all_providers,
     make_account,
     make_ledger_entry,
     make_platform_principal,
@@ -141,6 +142,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     admin = request.param == "admin"
     async with sessions.begin() as session:
         tenant = await make_tenant(session)
+        await enable_all_providers(session, tenant=tenant)
         account = await make_account(session, tenant=tenant)
         await make_platform_principal(
             session, tenant=tenant, account=account, platform="discord", external_id="123"
@@ -199,7 +201,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
         settings = Settings(
             database={"url": "postgresql+asyncpg://fixture:fixture@localhost/fixture"},
             anthropic={"api_key": "test-fixture-key"},
-            turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
+            turn=TurnSettings(channel_backends=True, agent_backends=True),
             mcp=McpSettings(public_url="https://mcp.invalid"),
         )
         runtime = McpRuntime(
@@ -240,8 +242,9 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
     async with chat.runtime.session_factory() as session:
         owner = await agent_owners.owner_of(session, chat.auth.tenant_id, copy_id)
     assert owner == chat.auth.account_id
-    # Hand this thread to the copy while it is still on this provider: it answers
-    # nowhere yet, and it is theirs, so they may.
+    # Made without this turn's origin, the copy is an ordinary agent, so they may hand it
+    # this thread before its switch; a copy stamped as made here waits for its switch (j1).
+    assert "daimon_forked_in" not in chat.ma.agents[copy.id]["metadata"], "no stamp"
     from daimon.adapters.mcp.tools.task_continuity import (
         _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
     )
@@ -250,24 +253,14 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
         chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
     )
     assert handed.destination_ma_agent_id == copy.id
-    # Switch the copy to GPT: preview, then the confirmed call (what the card runs).
-    preview = await _request_agent_backend_switch_impl(
-        chat.runtime,
-        chat.auth,
-        agent_name=copy.name,
-        target_backend="openai",
-        origin_context_id=str(chat.origin.id),
-    )
-    assert preview.status == "preview"
+    # Switch the copy to GPT: it applies on the first call.
     changed = await _request_agent_backend_switch_impl(
         chat.runtime,
         chat.auth,
         agent_name=copy.name,
         target_backend="openai",
         origin_context_id=str(chat.origin.id),
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        accepted_drops=preview.declared_drops,
+        expected_revision=0,
     )
     assert changed.status == "changed"
     # The thread is the copy's now, so the switch moves this very conversation.

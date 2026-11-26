@@ -1,13 +1,17 @@
 // Turn store: threads and running streams live outside React, so a turn survives route changes
 // (the shell remounts the page when a new chat gets its id) and keeps streaming while you look elsewhere.
-import type { QueryClient } from "@tanstack/react-query"
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { useSyncExternalStore } from "react"
+import { useMatch, useNavigate } from "react-router"
+import { toast } from "sonner"
 
 import { api, ApiError, qs, stream, upload } from "@/lib/api"
-import type { CreditMeter, Me } from "@/lib/types"
-import type { Card, CardAnswer, Msg, SessionDetail, StreamEvent } from "./types"
+import { useConfirm } from "@/lib/confirm"
+import type { ChatSession, CreditMeter, Me } from "@/lib/types"
+import type { Card, CardAnswer, Msg, Notice, SessionDetail, StreamEvent } from "./types"
 
-type Thread = { messages: Msg[]; busy: boolean; reconnecting: boolean; next?: number; loadingEarlier: boolean }
+/** `monitoring` is set when admins began reading this chat after the page opened. */
+type Thread = { messages: Msg[]; busy: boolean; reconnecting: boolean; next?: number; loadingEarlier: boolean; monitoring?: Notice }
 const threads = new Map<string, Thread>()
 const ctrls = new Map<string, AbortController>()
 const subs = new Set<() => void>()
@@ -51,6 +55,28 @@ export function evict(sid: string) {
   subs.forEach((f) => f())
 }
 
+/** Delete a thread once confirmed, leaving it if it is open. */
+export function useDeleteThread() {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const confirm = useConfirm()
+  const open = useMatch("/chat/:id")?.params.id
+  const del = useMutation({
+    mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
+    onSuccess: (_, s) => {
+      evict(s.id)
+      qc.removeQueries({ queryKey: ["chat", "session", s.id] })
+      qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
+      if (s.id === open) navigate("/chat")
+      toast("Thread deleted")
+    },
+  })
+  return async (s: ChatSession) => { if (await confirm({ title: "Delete thread?", body: s.title, action: "Delete", destructive: true })) del.mutate(s) }
+}
+
+/** Forget every chat and cut every stream: they belong to the workspace just left. */
+export const reset = () => [...threads.keys()].forEach(evict)
+
 /** Ask the server to stop the turn; the stream then ends with the stopped reply. Cut it locally if that fails or stalls. */
 export async function stop(sid: string) {
   const ctrl = ctrls.get(sid)
@@ -82,6 +108,7 @@ function apply(sid: string, e: StreamEvent) {
   else if (e.type === "text") patchLast(sid, (m) => ({ ...m, content: e.text }))
   else if (e.type === "card") patchLast(sid, (m) => ({ ...m, card: e.card }))
   else if (e.type === "done") patchLast(sid, () => e.message)
+  else if (e.type === "monitoring") set(sid, (t) => ({ ...t, monitoring: e.notice }))
   else if (e.type === "settled") {
     // A card answered with no follow-up: the card's message is updated, and the placeholder goes.
     set(sid, (t) => ({ ...t, messages: t.messages.slice(0, -1).map((m) => (m.id === e.message?.id ? e.message : m)) }))
@@ -110,13 +137,13 @@ async function refreshMeter(qc: QueryClient) {
   } catch { /* the next visit reads it */ }
 }
 
-type RunOpts = { body?: () => Promise<unknown>; from?: string; retry?: boolean }
+type RunOpts = { body?: () => Promise<unknown>; from?: string; retry?: boolean; sent?: (d: SessionDetail) => boolean }
 
 /**
  * Stream one turn into the thread. `body` posts; without it, re-attach to the running turn after event `from`.
  * A dropped stream re-attaches in a loop with backoff while the server says the turn runs.
  */
-async function run(qc: QueryClient, sid: string, path: string, { body, from, retry = false }: RunOpts) {
+async function run(qc: QueryClient, sid: string, path: string, { body, from, retry = false, sent }: RunOpts) {
   const ctrl = new AbortController()
   const { signal } = ctrl
   ctrls.set(sid, ctrl)
@@ -124,6 +151,7 @@ async function run(qc: QueryClient, sid: string, path: string, { body, from, ret
   let first = true
   let done = false
   let last = from
+  let accepted = !body
   const on = (e: StreamEvent) => {
     if (threads.get(sid)?.reconnecting) set(sid, (t) => ({ ...t, reconnecting: false }))
     if (first) { first = false; qc.invalidateQueries({ queryKey: ["chat", "sessions"] }) }   // the server now says running
@@ -134,10 +162,16 @@ async function run(qc: QueryClient, sid: string, path: string, { body, from, ret
   const attach = async () => { last = await stream(`/api/chat/sessions/${sid}/stream`, on, { signal, retry: true, lastEventId: last }) }
   try {
     try {
-      last = await stream(path, on, { body: body && await body(), signal, retry: retry || !body, lastEventId: last })
+      const onOpen = () => { accepted = true }
+      last = await stream(path, on, { body: body && await body(), signal, retry: retry || !body, lastEventId: last, onOpen })
     } catch (e) {
-      // Refused or aborted before any event: no reply to re-attach to.
+      // Refused or aborted: no reply to re-attach to. A post with no answer may still have reached the server: ask it.
       if (e instanceof ApiError || signal.aborted) throw e
+      if (!accepted) {
+        const d = await api.get<SessionDetail>(`/api/chat/sessions/${sid}`).catch(() => undefined)
+        if (!d || (sent ? !sent(d) : d.resume_from === undefined)) throw e
+        if (d.resume_from === undefined) { set(sid, (t) => withDetail(t, d)); done = true }
+      }
     }
     for (let i = 0; !done && !signal.aborted; i++) {
       set(sid, (t) => ({ ...t, reconnecting: true }))
@@ -182,7 +216,7 @@ export function send(qc: QueryClient, sid: string, content: string, files: File[
   }))
   // Files upload first; the message names them by id. The message id makes a retried post safe.
   const body = async () => ({ id, content, attachments: await Promise.all(files.map(upload)) })
-  return run(qc, sid, `/api/chat/sessions/${sid}/messages`, { body, retry: true })
+  return run(qc, sid, `/api/chat/sessions/${sid}/messages`, { body, retry: true, sent: (d) => d.messages.some((m) => m.id === id) })
 }
 
 export function answer(qc: QueryClient, sid: string, cardId: string, a: CardAnswer) {
@@ -190,7 +224,16 @@ export function answer(qc: QueryClient, sid: string, cardId: string, a: CardAnsw
     ...t,
     messages: [...t.messages.map((m) => (m.card?.id === cardId ? { ...m, card: settle(m.card, a) } : m)), placeholder()],
   }))
-  return run(qc, sid, `/api/chat/sessions/${sid}/cards/${cardId}`, { body: async () => a })
+  const sent = (d: SessionDetail) => d.messages.some((m) => m.card?.id === cardId && m.card.kind !== "refusal" && m.card.state !== "pending")
+  return run(qc, sid, `/api/chat/sessions/${sid}/cards/${cardId}`, { body: async () => a, sent })
+}
+
+/** The refusal card's way back: the agent answers on Claude again; says what changed. */
+export async function switchBack(qc: QueryClient, sid: string) {
+  const { line } = await api.post<{ line: string }>(`/api/chat/sessions/${sid}/switch-back`)
+  await refetchThread(sid).catch(() => undefined)
+  void qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
+  return line
 }
 
 function settle(c: Card, a: CardAnswer): Card {

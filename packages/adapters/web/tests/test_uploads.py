@@ -11,12 +11,15 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.web.files import file_kind, open_attachment, seal_attachment
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.output_delivery import DeliverableFile
+from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import build_turns, funded_workspace, one_session, signed_in, sse_frames
@@ -38,6 +41,13 @@ def _tool_state() -> TurnState:
     return TurnState(content=[tool, TextBlock(kind="text", text="Here it is.")])
 
 
+_OUTPUTS = AnthropicOutputRuntime(
+    AsyncAnthropic(api_key="test-key"),
+    "sesn_web",
+    scope=Scope.legacy_host_authorized(call_site="test_web_outputs"),
+)
+
+
 async def _chat(
     web_client: WebClientFactory,
     factory: async_sessionmaker[AsyncSession],
@@ -56,7 +66,7 @@ async def _chat(
         asked.append(kw["user_message"])
         state = _tool_state()
         await kw["lifecycle"].on_render(state)
-        return SimpleNamespace(state=state, ma_session_id="sesn_web")
+        return SimpleNamespace(state=state, ma_session_id="sesn_web", outputs=_OUTPUTS)
 
     async def sweep(*_args: object, post: Any, **_kw: Any) -> int:
         await post(
@@ -73,7 +83,7 @@ async def _chat(
     with (
         one_session(),
         patch("daimon.adapters.web.turns.run_prepared_turn", turn),
-        patch("daimon.adapters.web.turns.sweep_session_outputs", sweep),
+        patch("daimon.adapters.web.turns.sweep_outputs", sweep),
     ):
         async with web_client(web_settings(), sessionmaker=factory, turns=turns) as client:
             client.cookies.set("__Host-daimon_web", token, domain="web.example.com")

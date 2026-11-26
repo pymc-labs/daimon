@@ -18,6 +18,7 @@ import types
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,7 +33,6 @@ from daimon.core.continuity.messages import (
     render_current_work_must_finish,
 )
 from daimon.core.ma_resolver import ResolverCache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
@@ -47,12 +47,17 @@ from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import render_turn_origin as real_render_turn_origin
 from daimon.core.turn_origin import turn_origin as real_turn_origin
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
+
+_run_outcome = partial(RunOutcome, ma_session_id="sess_test", recovered=False)
+
 
 _TENANT_UUID_NS = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
 
@@ -93,20 +98,6 @@ def _final_answer_text(message: MagicMock) -> str:
     ]
     assert contents, "the answer must have replaced the embed"
     return str(contents[-1])
-
-
-class _AsyncIter:
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 def _stub_resolved_config(
@@ -166,12 +157,10 @@ def _make_runtime(
 
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=_make_turn_deps(
@@ -401,12 +390,7 @@ async def test_is_setup_false_for_a_handoff_binding(
     prepared = _make_prepared_turn(
         continuity=ContinuityOutcome(), account_id=account_id, mapping_id=mapping_id
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-    )
+    run_outcome = _run_outcome(state=TurnState(), mapping_id=mapping_id)
 
     with (
         patch(
@@ -520,12 +504,8 @@ async def test_ordinary_turn_posts_no_system_message(
     prepared = _make_prepared_turn(
         continuity=ContinuityOutcome(), account_id=account_id, mapping_id=mapping_id
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=ContinuityOutcome(),
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=ContinuityOutcome()
     )
 
     with (
@@ -575,9 +555,7 @@ async def test_pending_change_posts_must_finish_copy_after_the_answer(
         account_id=account_id,
         mapping_id=mapping_id,
     )
-    run_outcome = RunOutcome(
-        state=TurnState(), ma_session_id="sess_test", mapping_id=mapping_id, recovered=False
-    )
+    run_outcome = _run_outcome(state=TurnState(), mapping_id=mapping_id)
 
     with (
         patch(
@@ -634,12 +612,8 @@ async def test_replaced_leaves_the_reply_as_the_agents_text_and_tells_the_agent(
         account_id=uuid.uuid4(),
         mapping_id=mapping_id,
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=prepared.continuity,
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=prepared.continuity
     )
 
     with (
@@ -700,12 +674,8 @@ async def test_replaced_with_no_answer_posts_no_summary_message(
         account_id=uuid.uuid4(),
         mapping_id=mapping_id,
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=prepared.continuity,
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=prepared.continuity
     )
 
     with (
@@ -833,7 +803,7 @@ async def test_session_busy_for_a_seal_says_to_send_again(
 @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
 @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
 @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-async def test_mention_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_mention_turn_admin_settings_card_reads_no_agent_source(
     mock_build_context_xml: AsyncMock,
     mock_resolve_config: AsyncMock,
     mock_resolve_env: AsyncMock,
@@ -842,12 +812,8 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ordinary mention turn's Confirm card reads the switched agent's source as
-    that turn's own admitted caller, exactly like a wizard-submitted turn's card
-    (test_a_wizard_turns_backend_switch_card_captures_through_its_own_admission in
-    tests/integration/test_wizard_submit_turn.py). Built without the admission,
-    every backend-switch card on this call site refuses `source_unavailable`.
-    """
+    """A mention turn's admin settings cards (allowed providers, channel pin) read no
+    agent source: a model switch has no card of its own, so nothing captures one."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
 
@@ -859,7 +825,7 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
     mock_resolve_env.return_value = "env_test"
 
     runtime = _make_runtime(db_session_factory)
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     bot = make_bot(runtime)
     message = _make_thread_message(guild_id=int(guild_id))
     account_id = uuid.uuid4()
@@ -867,12 +833,8 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
     prepared = _make_prepared_turn(
         continuity=ContinuityOutcome(), account_id=account_id, mapping_id=mapping_id
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=ContinuityOutcome(),
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=ContinuityOutcome()
     )
 
     services: list[Any] = []
@@ -883,8 +845,7 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
+    capture_backend_source = AsyncMock()
     monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
@@ -902,15 +863,7 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         await bot.on_message(message)
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert (context.platform, context.channel_id, context.thread_id) == (
-        "discord",
-        "789",
-        "5555",
+    assert service._capture_source is None, (  # pyright: ignore[reportPrivateUsage]
+        "the admin cards read no agent source"
     )
+    capture_backend_source.assert_not_awaited()

@@ -1,4 +1,4 @@
-"""Optional provider installation uses the runtime registry without default discovery."""
+"""The hosted backend table loads one provider module on first use, never by default."""
 
 from __future__ import annotations
 
@@ -8,29 +8,33 @@ import os
 import subprocess
 import sys
 from dataclasses import replace
-from importlib.metadata import EntryPoint, EntryPoints
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.turn import runtimes
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.runtimes import HostedBackend
 from mux.errors import ScopeViolation, UnsupportedCapability
 
 from .test_provider_dispatch import PROFILE, REVISION, SCOPE, admission
 
 
+def _forbidden_import(name):
+    raise AssertionError(f"provider module {name} was imported")
+
+
 @pytest.fixture
 def registry(monkeypatch):
-    monkeypatch.setattr(runtimes, "_RUNTIME_FACTORIES", {})
+    monkeypatch.setattr(runtimes, "_BACKENDS", {})
     return runtimes
 
 
 def selected_request(**changes):
     return SimpleNamespace(
         admission=admission(),
-        deps=SimpleNamespace(turn_path="mux", channel_backends=True),
+        deps=SimpleNamespace(channel_backends=True),
         scope=SCOPE,
         platform="slack",
         tenant_id=REVISION.channel.tenant_id,
@@ -40,30 +44,7 @@ def selected_request(**changes):
     )
 
 
-def installed_entry(monkeypatch, install):
-    module = ModuleType("offline_provider")
-    module.install = install
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-    entry = EntryPoint(name=PROFILE, value="offline_provider:install", group="daimon.turn_runtimes")
-    return entry
-
-
-def test_installed_workspace_profile_is_discoverable_in_a_cold_process():
-    code = """
-from importlib.metadata import entry_points
-from daimon.core.turn import runtimes
-from mux.profiles.openai import PERSISTENT_WORKSPACE
-
-assert not entry_points(group="daimon.turn_runtimes", name="openai.conversation_only")
-profile = PERSISTENT_WORKSPACE.profile_id
-entries = entry_points(group="daimon.turn_runtimes", name=profile)
-assert len(entries) == 1, "Missing installed workspace profile; refresh package metadata with uv sync"
-assert not runtimes._RUNTIME_FACTORIES
-assert runtimes.ensure_channel_runtime(profile)
-registration = runtimes._RUNTIME_FACTORIES[profile]
-assert registration.authorizations is not None
-assert registration.tariffs is not None
-"""
+def _cold(code):
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -79,22 +60,36 @@ assert registration.tariffs is not None
         check=False,
     )
     assert result.returncode == 0, result.stderr
+    return result.stdout
 
 
-def test_default_profile_never_discovers_optional_distributions(registry, monkeypatch):
-    def forbidden(**kwargs):
-        raise AssertionError("default turn discovered provider distributions")
+def test_every_hosted_profile_loads_in_a_cold_process():
+    _cold("""
+from daimon.core.turn import runtimes
 
-    monkeypatch.setattr(registry, "entry_points", forbidden)
-    assert not registry.ensure_channel_runtime("anthropic.managed_agents")
+assert not runtimes._BACKENDS
+for profile in runtimes.hosted_profiles():
+    backend = runtimes.hosted_backend(profile)
+    hooks = (backend.runtime, backend.backend, backend.codec, backend.prepare, backend.reader)
+    assert None not in hooks, profile
+    assert backend.tariffs is not None, profile
+for profile in ("openai.persistent_workspace", "selfhosted.loop"):
+    assert runtimes.hosted_backend(profile).authorizations is not None, profile
+assert runtimes.hosted_backend("openai.conversation_only") is None
+""")
+
+
+def test_default_profile_never_imports_a_provider_module(registry, monkeypatch):
+    monkeypatch.setattr(registry, "import_module", _forbidden_import)
+    assert registry.hosted_backend("anthropic.managed_agents") is None
     request = selected_request()
     request.admission = replace(request.admission, backend_revision=None)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         registry.build_channel_runtime(request)
-    assert registry._RUNTIME_FACTORIES == {}
+    assert registry._BACKENDS == {}
 
 
-def test_explicit_registration_takes_precedence_without_package_discovery(registry, monkeypatch):
+def test_an_injected_backend_is_used_without_importing_the_provider(registry, monkeypatch):
     runtime = TurnRuntime(lambda config, scope: object(), object(), object())
     calls = []
 
@@ -102,86 +97,28 @@ def test_explicit_registration_takes_precedence_without_package_discovery(regist
         calls.append(request)
         return runtime
 
-    def forbidden(**kwargs):
-        raise AssertionError("registered provider was discovered again")
-
-    registry.register_channel_runtime(PROFILE, factory)
-    monkeypatch.setattr(registry, "entry_points", forbidden)
+    monkeypatch.setattr(registry, "import_module", _forbidden_import)
+    registry._BACKENDS[PROFILE] = HostedBackend(runtime=factory)
     request = selected_request()
     assert registry.build_channel_runtime(request) is runtime
     assert calls == [request]
 
 
-def test_selected_package_installs_once_without_constructing_a_runtime(registry, monkeypatch):
-    effects = []
-    runtime = TurnRuntime(lambda config, scope: object(), object(), object())
+def test_an_unloadable_provider_refuses_without_a_provider_call(registry, monkeypatch):
+    def missing(name):
+        raise ModuleNotFoundError(name)
 
-    def factory(request):
-        effects.append("construct")
-        return runtime
-
-    def install():
-        effects.append("install")
-        registry.register_channel_runtime(PROFILE, factory)
-
-    entry = installed_entry(monkeypatch, install)
-
-    def discover(**kwargs):
-        assert kwargs == {"group": "daimon.turn_runtimes", "name": PROFILE}
-        effects.append("discover")
-        return EntryPoints((entry,))
-
-    monkeypatch.setattr(registry, "entry_points", discover)
-    assert registry.ensure_channel_runtime(PROFILE)
-    assert registry.ensure_channel_runtime(PROFILE)
-    assert effects == ["discover", "install"]
-    assert registry.build_channel_runtime(selected_request()) is runtime
-    assert effects == ["discover", "install", "construct"]
-
-
-@pytest.mark.parametrize("kind", ["absent", "ambiguous", "uninstalled", "invalid", "wrong_profile"])
-def test_unavailable_or_ambiguous_installation_refuses_without_a_provider_call(
-    registry,
-    monkeypatch,
-    kind,
-):
-    effects = []
-
-    def install():
-        effects.append("install")
-        registry.register_channel_runtime("gemini.inline_reuse", lambda request: None)
-
-    entry = installed_entry(monkeypatch, install)
-    if kind == "absent":
-        entries = EntryPoints(())
-    elif kind == "ambiguous":
-        entries = EntryPoints((entry, entry))
-    elif kind == "uninstalled":
-        entries = EntryPoints(
-            (EntryPoint(name=PROFILE, value="absent_provider:install", group=entry.group),)
-        )
-    elif kind == "invalid":
-        sys.modules["offline_provider"].install = object()
-        entries = EntryPoints((entry,))
-    else:
-        entries = EntryPoints((entry,))
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: entries)
+    monkeypatch.setattr(registry, "import_module", missing)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         registry.build_channel_runtime(selected_request())
-    assert effects == (["install"] if kind == "wrong_profile" else [])
 
 
 @pytest.mark.parametrize(
-    "invalid", ["legacy", "disabled", "foreign_scope", "foreign_provider", "missing_model"]
+    "invalid", ["disabled", "foreign_scope", "foreign_provider", "missing_model"]
 )
-def test_invalid_turn_refuses_before_package_discovery(registry, monkeypatch, invalid):
-    def forbidden(**kwargs):
-        raise AssertionError("invalid request reached provider installation")
-
+def test_invalid_turn_refuses_before_loading_a_provider(registry, monkeypatch, invalid):
     request = selected_request()
-    if invalid == "legacy":
-        request.deps.turn_path = "legacy"
-    elif invalid == "disabled":
+    if invalid == "disabled":
         request.deps.channel_backends = False
     elif invalid == "foreign_scope":
         request.scope = SCOPE.model_copy(update={"tenant_id": "foreign"})
@@ -193,27 +130,40 @@ def test_invalid_turn_refuses_before_package_discovery(registry, monkeypatch, in
         request.admission = replace(
             request.admission, backend_revision=REVISION.model_copy(update={"model": None})
         )
-    monkeypatch.setattr(registry, "entry_points", forbidden)
+    monkeypatch.setattr(registry, "import_module", _forbidden_import)
     with pytest.raises((AdmissionDenied, ScopeViolation)):
         registry.build_channel_runtime(request)
 
 
-def test_duplicate_registration_cannot_replace_the_operator_grant_reader(registry):
-    def reader(tenant):
-        return ()
+def test_granted_tariffs_are_a_read_only_snapshot_built_without_a_runtime(registry, monkeypatch):
+    import uuid
+    from datetime import date
+    from decimal import Decimal
 
-    def factory(request):
-        return None
+    from daimon.core.pricing import ProviderPrice
 
-    registry.register_channel_runtime(PROFILE, factory, authorizations=reader)
-    with pytest.raises(ValueError):
-        registry.register_channel_runtime(PROFILE, factory, authorizations=lambda tenant: ())
-    assert registry._RUNTIME_FACTORIES[PROFILE].authorizations is reader
+    def forbidden(*args, **kwargs):
+        raise AssertionError("tariff lookup constructed a runtime")
+
+    price = ProviderPrice(
+        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
+    )
+    source = {("openai", "gpt-6-luna"): price}
+    grant = SimpleNamespace(source_agent_id=uuid.uuid4())
+    monkeypatch.setattr(registry, "_MODULES", {})
+    registry._BACKENDS[PROFILE] = HostedBackend(
+        runtime=forbidden, agent_grants=lambda tenant: (grant,), tariffs=lambda: source
+    )
+    prices = registry.agent_granted_prices("tenant")
+    assert dict(prices) == source
+    source.clear()
+    assert prices[("openai", "gpt-6-luna")] is price
+    with pytest.raises(TypeError):
+        prices[("openai", "gpt-6-luna")] = price  # type: ignore[index]
+    assert dict(registry.agent_granted_prices("tenant", uuid.uuid4())) == {}
 
 
-def test_resource_authorization_rereads_the_provider_validated_manifest_each_time(
-    registry, monkeypatch
-):
+def test_resource_authorization_rereads_the_provider_validated_manifest_each_time(registry):
     grants = SimpleNamespace(
         account_id="caller",
         platform="slack",
@@ -230,7 +180,7 @@ def test_resource_authorization_rereads_the_provider_validated_manifest_each_tim
     def forbidden(request):
         raise AssertionError("resource authorization constructed a turn runtime")
 
-    registry.register_channel_runtime(PROFILE, forbidden, authorizations=read)
+    registry._BACKENDS[PROFILE] = HostedBackend(runtime=forbidden, authorizations=read)
     assert registry.authorized_channel_deployments(PROFILE, "tenant") == (grants,)
     assert registry.authorized_channel_deployments(PROFILE, "tenant") == ()
     assert calls == ["tenant", "tenant"]
@@ -240,7 +190,7 @@ def test_missing_resource_authorizer_refuses_without_runtime_or_legacy_fallback(
     def forbidden(request):
         raise AssertionError("missing authorizer constructed a runtime")
 
-    registry.register_channel_runtime(PROFILE, forbidden)
+    registry._BACKENDS[PROFILE] = HostedBackend(runtime=forbidden)
     with pytest.raises(UnsupportedCapability):
         registry.authorized_channel_deployments(PROFILE, "tenant")
 
@@ -248,16 +198,14 @@ def test_missing_resource_authorizer_refuses_without_runtime_or_legacy_fallback(
 _NATIVE_MODULES = frozenset(
     {
         "daimon.core.turn.openai_host",
-        "daimon.core.turn.openai_codec",
-        "daimon.core.turn.openai_io",
+        "daimon.core.turn.hosted_codec",
+        "daimon.core.turn.hosted_io",
         "daimon.core.turn.openai_state",
         "daimon.core.turn.openai_deployment",
-        "daimon.core.turn.openai_credential_requests",
         "daimon.core.turn.gemini",
         "daimon.core.turn.gemini_prepare",
         "daimon.core.turn.gemini_state",
         "daimon.core.turn.gemini_deployment",
-        "daimon.core.turn.gemini_credential_requests",
     }
 )
 
@@ -289,7 +237,6 @@ def test_cold_default_and_selected_refusal_work_without_provider_only_modules():
 import importlib.abc
 import json
 import sys
-from importlib.metadata import EntryPoints
 from types import SimpleNamespace
 
 blocked = {set(_NATIVE_MODULES)!r}
@@ -303,20 +250,13 @@ from daimon.core.turn import io, prepare, runtimes
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef, Scope
-calls = []
-def discover(**kwargs):
-    calls.append(kwargs)
-    return EntryPoints(())
-runtimes.entry_points = discover
-assert not runtimes.ensure_channel_runtime("anthropic.managed_agents")
-assert calls == []
-assert set(io._TURN_CODECS) == {{"anthropic.managed_agents"}}
-assert set(mux_backend._TURN_BACKENDS) == {{"anthropic.managed_agents"}}
+assert runtimes.hosted_backend("anthropic.managed_agents") is None
+assert not runtimes._BACKENDS
 scope = Scope(tenant_id="tenant", account_id="account", principal_id="caller", authorization_id="authorized")
 revision = ConfigRevision.create(ChannelRef(tenant_id="tenant", platform="slack", channel_id="channel"), 1,
     resolve_default(BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna")))
-request = SimpleNamespace(admission=SimpleNamespace(backend_revision=revision),
-    deps=SimpleNamespace(turn_path="mux", channel_backends=True), scope=scope,
+request = SimpleNamespace(admission=SimpleNamespace(backend_revision=revision, shared_owner=None),
+    deps=SimpleNamespace(channel_backends=True), scope=scope,
     platform="slack", tenant_id="tenant", session_account_id="account", thread_id="thread")
 try:
     runtimes.build_channel_runtime(request)
@@ -324,26 +264,10 @@ except AdmissionDenied as error:
     assert error.reason == "backend_unsupported"
 else:
     raise AssertionError("missing provider ran or fell back")
-assert len(calls) == 1
 assert not blocked.intersection(sys.modules)
 print(json.dumps({{"default_discovery": 0, "selected_refused": True, "native_modules": 0}}))
 """
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key != "PYTHONPATH"
-        and not key.startswith(("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_"))
-    }
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
+    assert json.loads(_cold(code)) == {
         "default_discovery": 0,
         "selected_refused": True,
         "native_modules": 0,
@@ -369,9 +293,9 @@ from daimon.core.turn import runtimes
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef
 
-def forbidden(**kwargs):
-    raise AssertionError("default CLI discovered an optional provider")
-runtimes.entry_points = forbidden
+def forbidden(name):
+    raise AssertionError("default CLI imported an optional provider")
+runtimes.import_module = forbidden
 class Session:
     async def __aenter__(self):
         return self
@@ -399,203 +323,13 @@ async def prove():
     return {{"default_cli_cases": 2, "native_modules": 0}}
 print(json.dumps(asyncio.run(prove())))
 """
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key != "PYTHONPATH"
-        and not key.startswith(("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_"))
-    }
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {"default_cli_cases": 2, "native_modules": 0}
-
-
-def test_missing_host_edge_installs_without_replacing_explicit_constructor_or_reader(
-    registry, monkeypatch
-):
-    runtime = TurnRuntime(lambda config, scope: object(), object(), object())
-    effects = []
-    host = {"ready": False}
-
-    def explicit(request):
-        effects.append("explicit_constructor")
-        return runtime
-
-    def reader(tenant):
-        effects.append(("explicit_reader", tenant))
-        return ()
-
-    def forbidden(*args):
-        raise AssertionError("provider default replaced an explicit application callback")
-
-    registry.register_channel_runtime(PROFILE, explicit, authorizations=reader)
-
-    def install():
-        effects.append("install")
-        host["ready"] = True
-        registry.register_channel_runtime(
-            PROFILE, forbidden, authorizations=forbidden, fallback=True
-        )
-
-    entry = installed_entry(monkeypatch, install)
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints((entry,)))
-    assert registry.ensure_channel_runtime(PROFILE, ready=lambda: host["ready"])
-    assert effects == ["install"]
-    assert registry._RUNTIME_FACTORIES[PROFILE].factory is explicit
-    assert registry._RUNTIME_FACTORIES[PROFILE].authorizations is reader
-    assert registry.ensure_channel_runtime(PROFILE, ready=lambda: host["ready"])
-    assert effects == ["install"], "completed host installation must not rediscover the package"
-    assert registry.build_channel_runtime(selected_request()) is runtime
-    assert registry.authorized_channel_deployments(PROFILE, "tenant") == ()
-    assert effects == ["install", "explicit_constructor", ("explicit_reader", "tenant")]
-
-
-def test_constructor_without_requested_edge_is_not_a_complete_installation(registry, monkeypatch):
-    def forbidden(*args):
-        raise AssertionError("incomplete installation constructed a runtime")
-
-    registry.register_channel_runtime(PROFILE, forbidden)
-    entry = installed_entry(
-        monkeypatch, lambda: registry.register_channel_runtime(PROFILE, forbidden, fallback=True)
-    )
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints((entry,)))
-    assert not registry.ensure_channel_runtime(PROFILE, ready=lambda: False)
-    assert registry._RUNTIME_FACTORIES[PROFILE].factory is forbidden
-    assert registry._RUNTIME_FACTORIES[PROFILE].authorizations is None
-
-
-def test_absent_provider_cannot_complete_an_explicit_runtime_host_edge(registry, monkeypatch):
-    def forbidden(*args):
-        raise AssertionError("missing package constructed a runtime")
-
-    registry.register_channel_runtime(PROFILE, forbidden)
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
-    assert not registry.ensure_channel_runtime(PROFILE, ready=lambda: False)
-    assert registry._RUNTIME_FACTORIES[PROFILE].factory is forbidden
-
-
-@pytest.mark.parametrize("kind", ["backend", "codec", "preparation"])
-def test_provider_fallback_preserves_explicit_host_hooks_and_rejects_application_duplicates(
-    monkeypatch, kind
-):
-    from daimon.core import mux_backend
-    from daimon.core.turn import io, prepare
-
-    owner, name, register = {
-        "backend": (mux_backend, "_TURN_BACKENDS", mux_backend.register_turn_backend),
-        "codec": (io, "_TURN_CODECS", io.register_turn_codec),
-        "preparation": (prepare, "_PROVIDER_PREPARATIONS", prepare.register_turn_preparation),
-    }[kind]
-    monkeypatch.setattr(owner, name, {})
-
-    def explicit(*args):
-        raise AssertionError("registration invoked the explicit host hook")
-
-    def fallback(*args):
-        raise AssertionError("registration invoked the provider fallback")
-
-    register(PROFILE, explicit)
-    register(PROFILE, fallback, fallback=True)
-    assert getattr(owner, name)[PROFILE] is explicit
-    with pytest.raises(ValueError, match="already registered"):
-        register(PROFILE, fallback)
-    assert getattr(owner, name)[PROFILE] is explicit
-
-
-def test_registered_tariffs_are_cold_immutable_and_do_not_construct_a_runtime(
-    registry, monkeypatch
-):
-    from datetime import date
-    from decimal import Decimal
-
-    from daimon.core.pricing import ProviderPrice
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("tariff lookup constructed a runtime or read deployment authorization")
-
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
-    monkeypatch.setattr(os.environ, "get", forbidden)
-    price = ProviderPrice(
-        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
-    )
-    source = {("openai", "gpt-6-luna"): price}
-    registry.register_channel_runtime(
-        PROFILE, forbidden, authorizations=forbidden, tariffs=lambda: source
-    )
-    context = registry.channel_runtime_prices()
-    assert dict(context) == source
-    source.clear()
-    assert context[("openai", "gpt-6-luna")] is price
-    with pytest.raises(TypeError):
-        context[("openai", "gpt-6-luna")] = price
-
-
-def test_registered_tariffs_never_fabricate_missing_prices(registry, monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("tariff lookup constructed a runtime")
-
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
-    registry.register_channel_runtime(PROFILE, forbidden)
-    assert dict(registry.channel_runtime_prices()) == {}
-
-
-def test_conflicting_registered_tariffs_refuse_before_runtime_construction(registry, monkeypatch):
-    from datetime import date
-    from decimal import Decimal
-
-    from daimon.core.pricing import ProviderPrice
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("conflicting tariffs constructed a runtime")
-
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
-    price = ProviderPrice(
-        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
-    )
-    key = (price.provider, price.model)
-    registry.register_channel_runtime(PROFILE, forbidden, tariffs=lambda: {key: price})
-    registry.register_channel_runtime(
-        "gemini.inline_reuse", forbidden, tariffs=lambda: {key: replace(price, input=Decimal("3"))}
-    )
-    with pytest.raises(UnsupportedCapability, match="conflicting_runtime_price"):
-        registry.channel_runtime_prices()
-
-
-def test_conversation_registration_preserves_explicit_openai_tariff_owner(registry, monkeypatch):
-    from datetime import date
-    from decimal import Decimal
-
-    from daimon.core.pricing import ProviderPrice
-    from daimon.core.turn.openai_deployment import register_runtime
-
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
-    price = ProviderPrice(
-        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
-    )
-
-    def explicit(*args):
-        raise AssertionError("tariff lookup constructed a runtime")
-
-    source = {("openai", "gpt-6-luna"): price}
-    registry.register_channel_runtime(PROFILE, explicit, tariffs=lambda: source)
-    register_runtime()
-    assert registry._RUNTIME_FACTORIES[PROFILE].factory is explicit
-    assert "openai.conversation_only" not in registry._RUNTIME_FACTORIES
-    assert dict(registry.channel_runtime_prices()) == source
+    assert json.loads(_cold(code)) == {"default_cli_cases": 2, "native_modules": 0}
 
 
 def test_openai_authorization_reads_only_the_selected_profile(registry, monkeypatch, tmp_path):
     from daimon.core.turn.openai_deployment import (
         OpenAIDeployment,
         authorized_deployments,
-        register_runtime,
     )
 
     common = dict(
@@ -612,8 +346,6 @@ def test_openai_authorization_reads_only_the_selected_profile(registry, monkeypa
     path = tmp_path / "runtime.json"
     path.write_text(json.dumps([persistent.model_dump(mode="json")]))
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
-    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
-    register_runtime()
     assert authorized_deployments("tenant") == (persistent,)
     assert registry.authorized_channel_deployments(PROFILE, "tenant") == (persistent,)
     with pytest.raises(UnsupportedCapability, match="host_deployment_authorization"):

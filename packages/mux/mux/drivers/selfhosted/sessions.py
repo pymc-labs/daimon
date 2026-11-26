@@ -64,6 +64,7 @@ class SelfHostedSessions:
             initial is not None
             or spec.resources
             or spec.extensions
+            or spec.skills
             or spec.state_mode != "continue"
         ):
             raise self._c.unsupported("session_create_options")

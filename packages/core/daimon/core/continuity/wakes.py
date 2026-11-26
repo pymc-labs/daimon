@@ -10,8 +10,8 @@ The ladder, every step one conditional UPDATE:
 
 - `enqueue_wake` writes `pending` with `available_at`.
 - `claim_wake` takes it with an owner and a lease (`WAKE_CLAIM_LEASE`).
-- `start_wake` commits the fence right before the turn begins, and stretches
-  the lease over the whole turn.
+- `start_wake` commits the fence right before the turn begins; `keep_wake`
+  renews the lease while the turn runs, however long its time limit.
 - `settle_wake` / `release_wake` close it out or hand it back.
 
 Why the fence: a process can die after its turn became visible and before it
@@ -31,12 +31,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
@@ -47,11 +49,14 @@ from daimon.core.stores.task_continuations import (
     list_due_wake_rows,
     record_continuation,
     release_wake_row,
+    renew_wake_row,
     settle_wake_row,
     start_wake_row,
 )
-from daimon.core.turn.ceiling import TURN_CEILING_S
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_origin import wake_turn
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -60,6 +65,7 @@ __all__ = [
     "WAKE_CLAIM_LEASE",
     "WAKE_MAX_ATTEMPTS",
     "WAKE_POLL_INTERVAL_S",
+    "WAKE_RENEW_INTERVAL",
     "WAKE_RETRY_DELAY",
     "WAKE_RUN_LEASE",
     "WAKE_UNAVAILABLE_DELAY",
@@ -71,6 +77,8 @@ __all__ = [
     "cancel_wake",
     "claim_wake",
     "enqueue_wake",
+    "is_transient_denial",
+    "keep_wake",
     "list_dispatchable_wakes",
     "list_due_wake_threads",
     "poll_wakes_once",
@@ -85,9 +93,13 @@ __all__ = [
 #: and the platform history fetch, nothing slow.
 WAKE_CLAIM_LEASE: Final[timedelta] = timedelta(minutes=5)
 
-#: The lease once the fence is committed: the whole turn, plus room for the
-#: settle write. After this a started row is `interrupted`, never re-run.
-WAKE_RUN_LEASE: Final[timedelta] = timedelta(seconds=TURN_CEILING_S) + timedelta(minutes=5)
+#: The lease once the fence is committed. The running process renews it every
+#: `WAKE_RENEW_INTERVAL`, so a turn runs to its time limit while a row whose process
+#: died settles `interrupted` within this, never re-run.
+WAKE_RUN_LEASE: Final[timedelta] = timedelta(minutes=5)
+
+#: How often a running turn renews its lease; a few missed renewals still hold it.
+WAKE_RENEW_INTERVAL: Final[timedelta] = timedelta(minutes=1)
 
 #: Claims per row before it settles `attempts_exhausted`. Only claims that were
 #: lost to a crash count (a release refunds its claim), so a row that keeps
@@ -236,6 +248,99 @@ async def start_wake(
         )
 
 
+#: Skips nobody is waiting on: a newer request, a changed target, save-only work.
+_NOT_FAILURES: Final = frozenset(
+    {"skip_save_only", "skip_superseded", "skip_target_changed", "skip_turn_running"}
+)
+#: Reasons a person, a policy or an operator caused rather than a fault: warnings.
+_WARNINGS: Final = ("not_started:", "admission_denied:", "provider_guard_denied", "thread_")
+
+
+def wake_failure_severity(reason: str) -> Literal["error", "warning"]:
+    """The design's severity per reason: faults are errors, refusals and stops warnings."""
+    return "warning" if reason.startswith(_WARNINGS) else "error"
+
+
+def report_wake_failed(
+    sm: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID | None,
+    kind: str | None,
+    reason: str,
+    *,
+    thread_id: str | None = None,
+    logged: bool = False,
+) -> None:
+    """Record a wake that will not run; the caller logs its own line unless `logged`."""
+    report_ops_event(
+        sm,
+        OpsEvent(
+            "wake.failed",
+            tenant_id,
+            reason=reason,
+            severity=wake_failure_severity(reason),
+            thread_id=thread_id,
+            subject_key=kind,
+        ),
+        logged=logged,
+    )
+
+
+@asynccontextmanager
+async def keep_wake(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    claim: WakeClaim,
+    *,
+    now: Callable[[], datetime],
+    tenant_id: uuid.UUID | None = None,
+    kind: str | None = None,
+) -> AsyncIterator[None]:
+    """Renew a started wake's lease while its turn runs, and stop when it ends.
+
+    The turn's origin is bound to the claim (`daimon.core.turn_origin.wake_turn`).
+    `tenant_id` and `kind` only label the log line when the lease is lost."""
+
+    async def renew() -> None:
+        while True:
+            await asyncio.sleep(WAKE_RENEW_INTERVAL.total_seconds())
+            try:
+                async with sessionmaker.begin() as session:
+                    held = await renew_wake_row(
+                        session,
+                        idempotency_key=claim.idempotency_key,
+                        owner=claim.owner,
+                        now=now(),
+                        lease=WAKE_RUN_LEASE,
+                    )
+            except SQLAlchemyError:
+                # Retried next interval; the lease outlasts a few misses.
+                log.warning(
+                    "wake.renew_failed", idempotency_key=str(claim.idempotency_key), exc_info=True
+                )
+                continue
+            if not held:
+                # Cancelled or settled elsewhere: this turn's settle write is refused too.
+                log.warning(
+                    "wake.lease_lost",
+                    idempotency_key=str(claim.idempotency_key),
+                    tenant_id=str(tenant_id) if tenant_id is not None else None,
+                    kind=kind,
+                )
+                report_wake_failed(sessionmaker, tenant_id, kind, "lease_lost")
+                return
+
+    renewer = asyncio.create_task(renew())
+    try:
+        with wake_turn(claim.owner):
+            yield
+    finally:
+        renewer.cancel()
+        await asyncio.wait([renewer])
+        if not renewer.cancelled() and (error := renewer.exception()) is not None:
+            log.error(
+                "wake.renewer_crashed", idempotency_key=str(claim.idempotency_key), exc_info=error
+            )
+
+
 async def settle_wake(
     sessionmaker: async_sessionmaker[AsyncSession],
     claim: WakeClaim,
@@ -243,8 +348,13 @@ async def settle_wake(
     status: Literal["delivered", "skipped"],
     now: datetime,
     skip_reason: str | None = None,
+    row: TaskContinuationRow | None = None,
+    error_class: str | None = None,
 ) -> bool:
-    """Close out a claim; False when it had already been taken over."""
+    """Close out a claim; False when it had already been taken over.
+
+    A skip of `row` that is a failure is reported as `wake.failed`, under `error_class`
+    when an exception ended it, else its skip reason."""
     async with sessionmaker.begin() as session:
         settled = await settle_wake_row(
             session,
@@ -256,6 +366,15 @@ async def settle_wake(
         )
     if not settled:
         log.warning("wake.settle_lost_claim", idempotency_key=str(claim.idempotency_key))
+    elif row is not None and status == "skipped" and skip_reason not in _NOT_FAILURES:
+        report_wake_failed(
+            sessionmaker,
+            row.tenant_id,
+            row.reason,
+            error_class or skip_reason or "skipped",
+            thread_id=row.thread_id,
+            logged=True,
+        )
     return settled
 
 
@@ -264,6 +383,7 @@ async def release_wake(
     claim: WakeClaim,
     *,
     retry_at: datetime | None,
+    refund: bool = True,
 ) -> bool:
     """Hand a claim back when the caller KNOWS its turn did not run.
 
@@ -272,7 +392,7 @@ async def release_wake(
     `WAKE_MAX_ATTEMPTS`. `retry_at` is when a wake is offered again; None
     leaves `available_at` alone, which keeps a handoff (NULL) waiting for the
     next turn in its thread, as it did before the wake queue. False when the
-    claim had already been lost.
+    claim had already been lost. `refund=False` leaves the claim counted.
     """
     async with sessionmaker.begin() as session:
         return await release_wake_row(
@@ -280,21 +400,37 @@ async def release_wake(
             idempotency_key=claim.idempotency_key,
             owner=claim.owner,
             retry_at=retry_at,
+            refund=refund,
         )
 
 
+def is_transient_denial(denied: AdmissionDenied) -> bool:
+    """True when a refusal clears by itself: the provider key is busy or cooling.
+
+    Such a wake is offered again like a busy thread, not settled as skipped.
+    """
+    return denied.reason == "backend_unsupported" and denied.cause in (
+        "provider_busy",
+        "provider_cooling",
+    )
+
+
 def busy_retry_at(
-    row: TaskContinuationRow, *, now: datetime, not_before: datetime | None = None
+    row: TaskContinuationRow,
+    *,
+    now: datetime,
+    not_before: datetime | None = None,
+    delay: timedelta = WAKE_RETRY_DELAY,
 ) -> datetime | None:
     """When a row released because its thread was busy is offered again.
 
-    A wake is retried by the poller after `WAKE_RETRY_DELAY`, or at the busy
-    session's own `retry_after` (`not_before`) if that is later. A handoff (no
-    `available_at`) keeps waiting for the next turn in its thread.
+    A wake is retried by the poller after `delay` (`WAKE_RETRY_DELAY` unless the wait is
+    longer), or at the busy session's own `retry_after` (`not_before`) if that is later.
+    A handoff (no `available_at`) keeps waiting for the next turn in its thread.
     """
     if row.available_at is None:
         return None
-    retry_at = now + WAKE_RETRY_DELAY
+    retry_at = now + delay
     return retry_at if not_before is None else max(retry_at, not_before)
 
 
@@ -353,7 +489,9 @@ async def skip_thread_wakes(
         claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now)
         if claim is None:
             continue
-        if await settle_wake(sessionmaker, claim, status="skipped", now=now, skip_reason=reason):
+        if await settle_wake(
+            sessionmaker, claim, status="skipped", now=now, skip_reason=reason, row=row
+        ):
             skipped += 1
     return skipped
 
@@ -373,8 +511,13 @@ async def abandon_interrupted_wakes(
         log.warning(
             "wake.abandoned",
             idempotency_key=str(row.idempotency_key),
+            tenant_id=str(row.tenant_id),
+            kind=row.reason,
             thread_id=row.thread_id,
-            reason=row.skip_reason,
+            skip_reason=row.skip_reason,
+        )
+        report_wake_failed(
+            sessionmaker, row.tenant_id, row.reason, "abandoned", thread_id=row.thread_id
         )
     return rows
 

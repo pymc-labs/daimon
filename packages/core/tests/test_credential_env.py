@@ -20,9 +20,9 @@ from daimon.core.credential_env import (
     upload_github_repo_helpers_and_mount,
 )
 from daimon.core.github_app_auth import BotIdentity
-from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -203,22 +203,8 @@ async def test_upload_env_and_mount_uploads_env_and_returns_mount_dict(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="A",
-        content="1",
-        set_by_account_id=None,
-    )
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="B",
-        content="2",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="A", content="1")
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="B", content="2")
     await db_session.commit()
 
     capture = _UploadCapture(file_id="file_test123")
@@ -265,14 +251,7 @@ async def test_upload_env_and_mount_enqueues_ttl_delete(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="A",
-        content="1",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="A", content="1")
     await db_session.commit()
 
     capture = _UploadCapture(file_id="file_ttl")
@@ -302,22 +281,8 @@ async def test_upload_env_and_mount_is_tenant_isolated(
     tenant_a = await make_tenant(db_session)
     tenant_b = await make_tenant(db_session)
     agent_id = uuid.uuid4()  # same agent_id across tenants
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_a.id,
-        agent_id=agent_id,
-        key="A_KEY",
-        content="aval",
-        set_by_account_id=None,
-    )
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_b.id,
-        agent_id=agent_id,
-        key="B_KEY",
-        content="bval",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant_a, agent_id=agent_id, key="A_KEY", content="aval")
+    await new_agent_file(db_session, tenant_b, agent_id=agent_id, key="B_KEY", content="bval")
     await db_session.commit()
 
     capture = _UploadCapture(file_id="file_tenantA")
@@ -339,14 +304,7 @@ async def test_upload_env_and_mount_never_logs_secret_values(
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
     secret_value = "super-secret-value-xyz"
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="SECRET",
-        content=secret_value,
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="SECRET", content=secret_value)
     await db_session.commit()
 
     capture = _UploadCapture(file_id="file_log")
@@ -384,14 +342,7 @@ async def test_owned_env_metadata_projection_never_selects_or_decodes_content(
             (tenant, "OWNED", "secret-owned"),
             (foreign, "FOREIGN", "secret-foreign"),
         ]:
-            await put_agent_file(
-                db,
-                tenant_id=owner.id,
-                agent_id=agent_id,
-                key=key,
-                content=value,
-                set_by_account_id=None,
-            )
+            await new_agent_file(db, owner, agent_id=agent_id, key=key, content=value)
 
     def refuse_decode(*args, **kwargs):
         raise AssertionError("metadata projection decoded an environment value")

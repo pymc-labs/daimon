@@ -8,6 +8,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -52,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
@@ -61,6 +63,14 @@ from .conftest import (
     TeamsApiFake,
     make_card_action,
     shown_text,
+)
+
+_tool_rule_card_reference = partial(
+    ToolRuleCardReference,
+    agent_id="ma-1",
+    agent_name="Helper",
+    tool_key="linear/create_issue",
+    server_url="https://example.test/mcp",
 )
 
 
@@ -204,13 +214,7 @@ async def test_always_ack_precedes_live_admin_check() -> None:
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     checked = asyncio.Event()
@@ -247,14 +251,7 @@ async def test_always_action_refuses_nonadmin_privately(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="home",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4(), channel_id="home"),
         }
     )
     cards._controls.cards[token] = confirmation_module._PostedCard(
@@ -297,13 +294,7 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     posted = confirmation_module._PostedCard(
@@ -339,13 +330,7 @@ async def test_blocked_always_save_does_not_block_retirement(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     sender = FakeSender()
@@ -392,13 +377,7 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     sender = FakeSender()
@@ -686,7 +665,7 @@ async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
         team_owners=owners, group_members=GroupMembersCache(), sessionmaker=db_session_factory
     )
     runtime.settings.teams.tenant_id = ENTRA_TENANT_ID
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     runtime.settings.teams.admin_team_id = team
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
@@ -700,7 +679,7 @@ async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
     )
     kwargs = factory.call_args.kwargs
     assert (kwargs["tenant_id"], kwargs["account_id"]) == (tenant, account), "the turn's ids"
-    check = kwargs["current_admin"]
+    check = kwargs["current_platform_admin"]
     for _ in range(25):
         assert await check(OTHER_AAD_OBJECT_ID) is False, "a non-owner is no admin"
     assert owners.await_count == 1, "a cached no needs no further read"
@@ -717,7 +696,7 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model provider unchanged",
+            "denied_action": "Model unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -769,7 +748,7 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
     runtime = MagicMock(
         team_owners=AsyncMock(return_value=frozenset()), group_members=GroupMembersCache()
     )
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     runtime.settings.teams.admin_team_id = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
@@ -818,3 +797,56 @@ async def test_a_card_still_open_reminds_with_an_at_mention_of_its_requester(mon
     (mention,) = mentions
     assert mention.mentioned.id == AAD_OBJECT_ID
     assert mention.text in reminder.text
+
+
+@pytest.mark.parametrize(
+    ("chat", "inside"), [(CHANNEL_ID, True), (CONVERSATION_ID, False)], ids=["channel", "dm"]
+)
+async def test_always_click_carries_the_clicks_own_conversation_as_its_origin(
+    monkeypatch: pytest.MonkeyPatch, chat: str, inside: bool
+) -> None:
+    """A sealed channel's agent takes the rule from a click inside it, not from a DM."""
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize
+
+    cards = TeamsConfirmationCards(FakeSender())
+    token, _future = cards._controls.pending.open()
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
+        }
+    )
+    cards._controls.cards[token] = confirmation_module._PostedCard(
+        prompt,
+        CHANNEL_ID,
+        SERVICE_URL,
+        "m-1",
+        rule_factory=MagicMock(),
+        rule_subject=AsyncMock(
+            return_value=Subject(is_admin=True, platform_user_id=OTHER_AAD_OBJECT_ID)
+        ),
+    )
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    payload = make_card_action(VERB, "always", user=OTHER_AAD_OBJECT_ID, token=token)
+    payload["conversation"] = {**payload["conversation"], "id": chat}  # pyright: ignore[reportIndexIssue, reportGeneralTypeIssues]
+    click = SimpleNamespace(
+        activity=AdaptiveCardInvokeActivity.model_validate(payload), send=AsyncMock()
+    )
+    await cards._on_always(click, token)
+    await asyncio.gather(*cards._always_tasks)
+    subject = save.call_args.kwargs["subject"]
+    sealed = TenantAccessPolicy(
+        channel_rules={CHANNEL_ID: ChannelRule(readers="own", writers="own")},
+        agent_rules={"Helper": AgentRule(runs_in=(CHANNEL_ID,))},
+    )
+    decision = authorize(
+        sealed,
+        subject=subject,
+        action=Action.SET_AGENT_TOOL_RULE,
+        agent=AgentRef.of("Helper"),
+        place=Place(),
+    )
+    assert bool(subject.inside) is inside
+    assert bool(decision) is inside, decision.reason

@@ -3,9 +3,11 @@ import { ExternalLink } from "lucide-react"
 import { Ago, Money } from "@/components/common"
 import { AgentLink } from "@/components/links"
 import { DrawerTabs, Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
-import { QueryState } from "@/components/QueryState"
+import { ErrorState, QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { shortDate, usd } from "@/lib/format"
+import { ChannelSupport } from "@/modules/admin/support/ChannelSupport"
+import { SUPPORT_KEYS } from "@/modules/admin/support/lib"
 import { FeatureSettings } from "@/modules/features/Settings"
 import { Access } from "./Access"
 import { Answers } from "./Answers"
@@ -89,9 +91,11 @@ export function ChannelPanel({ id }: { id: string }) {
                 <Answers c={c} workspace={list?.default_agent} settings={s} />
                 {c.platform !== "web" && <Access c={c} />}
                 <Budget c={c} />
+                {c.platform !== "web" && !s && settings.isError && <ErrorState error={settings.error} onRetry={() => void settings.refetch()} className="py-6" />}
                 {c.platform !== "web" && s && (
                   <>
-                    <FeatureSettings place={{ channel: c.id }} tier="channel" edit={c.can_manage} />
+                    <FeatureSettings place={{ channel: c.id }} tier="channel" edit={c.can_manage} hide={SUPPORT_KEYS} />
+                    <ChannelSupport id={c.id} edit={c.can_manage} />
                     <Sandbox c={c} workspace={list?.default_environment} />
                     <Model c={c} s={s} />
                     <Skills c={c} s={s} />

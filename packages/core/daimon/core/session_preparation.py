@@ -35,7 +35,7 @@ import contextlib
 import datetime as dt
 import hashlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
@@ -44,6 +44,7 @@ import structlog
 from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
@@ -54,6 +55,7 @@ from daimon.core.mcp_hold import hold_key
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
+from daimon.core.relay_scope import relay_memory_is_on
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -142,6 +144,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 
 CONTINUED = ContinuityOutcome()
+
+SeedCarryOver = Callable[[str], Awaitable[ContinuityOutcome]]
+"""Carries a thread's earlier provider into the session just created, by its id."""
+FindCarryOver = Callable[[], Awaitable[SeedCarryOver | None]]
+"""What a new session should carry over, found before it is created: once its row
+commits it is the thread's newest, and the earlier session is no longer found."""
 
 
 def _leaves_memory_store(recorded: SessionSnapshot | None, desired: SessionSnapshot) -> bool:
@@ -342,6 +350,7 @@ async def _destination_may_carry(
             "session_preparation.handoff_source_unreadable",
             session_id=row.ma_session_id,
             error=type(error).__name__,
+            causes=backend_refusal_causes(error),
         )
         return False
     async with deps.sessionmaker() as session:
@@ -551,6 +560,7 @@ async def _run_replacement(
             mapping_id=str(row.id),
             session_id=row.ma_session_id,
             error=str(error),
+            causes=backend_refusal_causes(error),
         )
         if isinstance(error, AdmissionDenied | DmSourceSealedError | SessionBusyError):
             # Decided again just before the successor was created: refused or
@@ -588,11 +598,15 @@ async def _run_replacement(
         new_session_id=fresh.ma_session_id,
         transfer_kind=None if replacement is None else replacement.transfer_kind,
     )
-    return _Replaced(fresh=fresh, continuity=_replaced_outcome(reasons, replacement))
+    return _Replaced(
+        fresh=fresh, continuity=_replaced_outcome(reasons, replacement, row.ma_session_id)
+    )
 
 
 def _replaced_outcome(
-    reasons: tuple[ChangeReason, ...], replacement: PreparedReplacement | None
+    reasons: tuple[ChangeReason, ...],
+    replacement: PreparedReplacement | None,
+    predecessor_session_id: str,
 ) -> ContinuityOutcome:
     """Describe the switch, using what the transfer actually managed to carry.
 
@@ -600,10 +614,13 @@ def _replaced_outcome(
     copy this feeds must not claim work moved when none did.
     """
     if replacement is None:
-        return ContinuityOutcome(state="replaced", applied=reasons)
+        return ContinuityOutcome(
+            state="replaced", applied=reasons, predecessor_session_id=predecessor_session_id
+        )
     return ContinuityOutcome(
         state="replaced",
         applied=reasons,
+        predecessor_session_id=predecessor_session_id,
         transfer_kind=replacement.transfer_kind,
         user_prefix=replacement.user_prefix,
         system_blocks=replacement.system_blocks,
@@ -645,6 +662,7 @@ async def prepare_session_for_turn(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    find_carry_over: FindCarryOver | None = None,
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Queue before the advisory-lock transaction checks out a connection."""
 
@@ -664,6 +682,7 @@ async def prepare_session_for_turn(
                 transfer=transfer,
                 deadline=deadline,
                 now=now,
+                find_carry_over=find_carry_over,
             )
 
     return await retry_fences(attempt)
@@ -712,6 +731,7 @@ async def _resolve_legacy_budget_stamp(
             "session_preparation.budget_stamp_unreadable",
             session_id=row.ma_session_id,
             error=type(error).__name__,
+            causes=backend_refusal_causes(error),
         )
         return None
     stamp = observed.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
@@ -735,6 +755,7 @@ async def _prepare_session_for_turn_locked(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    find_carry_over: FindCarryOver | None = None,
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Find, refresh or replace this caller's session, then bind its recorder.
 
@@ -853,6 +874,11 @@ async def _prepare_session_for_turn_locked(
         )
 
         if row is None:
+            seed = (
+                await find_carry_over()
+                if find_carry_over is not None and not admission.relay_scoped
+                else None
+            )
             fresh = await ops.create_fresh(
                 deps,
                 admission,
@@ -861,9 +887,15 @@ async def _prepare_session_for_turn_locked(
                 thread_id=thread_id,
                 session_account_id=session_account_id,
             )
-            return await from_fresh(fresh, CONTINUED)
+            carried = await seed(fresh.ma_session_id) if seed is not None else None
+            return await from_fresh(fresh, carried or CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
+        # A relay agent's channel turn starts from nothing: an earlier turn's
+        # Grove results must not outlive the audience that was allowed to see them
+        # (`daimon.core.relay_scope`). Channel history still gives continuity.
+        relay_fresh = admission.relay_scoped and admission.hold is not None
+        fresh_start = fresh_start or relay_fresh
 
         await _heal_lineage(deps, db, row=row)
 
@@ -905,11 +937,13 @@ async def _prepare_session_for_turn_locked(
                 and not fresh_start
                 and not admission.memory_read_only
                 and admission.hold is None
+                and not admission.relay_scoped
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
                 # unreadable, which the turn's own recovery handles. Bind it as
-                # every pre-continuity turn did.
+                # every pre-continuity turn did. A relay agent's session is never
+                # reused unseen: it falls to the checks below and is replaced.
                 return prepared(
                     ma_session_id=row.ma_session_id,
                     mapping_id=row.id,
@@ -936,6 +970,15 @@ async def _prepare_session_for_turn_locked(
             )
         admission = await restrict_inherited_memory(deps, admission, inherited)
         agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+        if (
+            admission.relay_scoped
+            and not fresh_start
+            and not handed_over
+            and recorded is not None
+            and relay_memory_is_on(SessionIdentity.frozen(recorded.identity_features))
+        ):
+            # A relay agent's (DM) session recorded with memory on is replaced, never reused.
+            fresh_start = True
         # A live session keeps the identity features it was created with; a new one
         # (`/new`, a hand-over) is built with this place's current values.
         built_with = (
@@ -966,7 +1009,7 @@ async def _prepare_session_for_turn_locked(
             ),
             memory_read_only=admission.memory_read_only,
             asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
+            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id, admission.agent.id),
             daimon_rule_tools=admission.daimon_rule_tools,
             toolset=admission.toolset,
             channel_skills=built_with.extra_skills(
@@ -978,6 +1021,7 @@ async def _prepare_session_for_turn_locked(
             mcp_hold=hold_key(admission.hold) if admission.shared_owner is None else None,
             # A held place's memory is its channel's, shared thread or not.
             memory_hold=admission.hold,
+            model_effort=admission.model_effort,
         )
         if fresh_start:
             decision = ReplaceSession(reasons=())
@@ -1083,7 +1127,7 @@ async def _prepare_session_for_turn_locked(
                 or tightening_memory
                 or leaving_memory
             )
-            and turn_is_active(row, now=moment)
+            and await turn_is_active(row, now=moment, sessionmaker=deps.sessionmaker)
         ):
             # A changed billing channel, responder or memory restriction
             # cannot run against the old session while replacement is deferred.
@@ -1098,7 +1142,7 @@ async def _prepare_session_for_turn_locked(
                 retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
             )
 
-        if fresh_start and turn_is_active(row, now=moment):
+        if fresh_start and await turn_is_active(row, now=moment, sessionmaker=deps.sessionmaker):
             # A retired key may still be mounted in the old session. Never
             # hand that session back while its replacement waits for a turn.
             return PreparationBusy(
@@ -1106,7 +1150,9 @@ async def _prepare_session_for_turn_locked(
                 retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
             )
 
-        if not isinstance(decision, ReuseAsIs) and turn_is_active(row, now=moment):
+        if not isinstance(decision, ReuseAsIs) and await turn_is_active(
+            row, now=moment, sessionmaker=deps.sessionmaker
+        ):
             # Uniformly deferred: MA itself refuses `sessions.update` mid-turn,
             # and swapping a running session's `.env` or checkpointing it is a
             # race we have no reason to run.
@@ -1120,7 +1166,15 @@ async def _prepare_session_for_turn_locked(
         if isinstance(decision, ReplaceSession):
             # A handoff carries the old work only to an agent that could read
             # it itself from here; otherwise the new agent starts with nothing.
-            carry = not handed_over or await _destination_may_carry(deps, admission, row)
+            # A relay turn's work never moves to another session or agent, and a
+            # relay agent takes none in: the old session ran held with `:relay`
+            # in its hold key (`mcp_hold.hold_key`).
+            relay_source = recorded is not None and (recorded.mcp_hold or "").endswith(":relay")
+            carry = not handed_over or (
+                not admission.relay_scoped
+                and not relay_source
+                and await _destination_may_carry(deps, admission, row)
+            )
             await lock_session_mutation(db, row.ma_session_id)
             observed = None
             if source_exists:
@@ -1141,6 +1195,7 @@ async def _prepare_session_for_turn_locked(
                         "session_preparation.replacement_source_unreadable",
                         session_id=row.ma_session_id,
                         error=type(error).__name__,
+                        causes=backend_refusal_causes(error),
                     )
                     return PreparationBusy(
                         pending_reasons=decision.reasons,
@@ -1151,6 +1206,12 @@ async def _prepare_session_for_turn_locked(
                     pending_reasons=("session_active",),
                     retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
                 )
+            # A fresh start may be a move here from another provider: carry that over.
+            seed = (
+                await find_carry_over()
+                if fresh_start and not admission.relay_scoped and find_carry_over is not None
+                else None
+            )
             outcome = await _run_replacement(
                 deps,
                 admission,
@@ -1173,7 +1234,8 @@ async def _prepare_session_for_turn_locked(
             )
             if isinstance(outcome, PreparationFailure):
                 return outcome
-            return await from_fresh(outcome.fresh, outcome.continuity, recorded)
+            carried = await seed(outcome.fresh.ma_session_id) if seed is not None else None
+            return await from_fresh(outcome.fresh, carried or outcome.continuity, recorded)
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()
@@ -1205,13 +1267,17 @@ async def _prepare_session_for_turn_locked(
                 agent_github_app=deps.agent_github_app,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
-                confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
+                confirmed_tools=await confirmed_tools_for_tenant(
+                    deps, tenant_id, admission.agent.id
+                ),
                 daimon_rule_tools=admission.daimon_rule_tools,
                 toolset=admission.toolset,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
                 legacy_memory_servers=admission.toolset.legacy_memory_servers(
                     get_repo_memory_settings(deps).legacy_servers
                 ),
+                hold=admission.hold if admission.shared_owner is None else None,
+                slack_turn_context_id=admission.slack_turn_context_id,
             )
 
         if isinstance(decision, ReuseAsIs):
@@ -1266,6 +1332,7 @@ async def _prepare_session_for_turn_locked(
                 "session_preparation.update_failed",
                 session_id=row.ma_session_id,
                 error=str(error),
+                causes=backend_refusal_causes(error),
             )
             return PreparationFailure(reasons=decision.reasons, stage="update", retry_after=moment)
 

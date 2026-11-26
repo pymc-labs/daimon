@@ -14,20 +14,21 @@ from mux.contracts.ids import ModelRef
 from mux.contracts.resources import Agent
 from mux.drivers.gemini.mcp_auth import model_request
 from mux.drivers.gemini.transport import (
+    EnvironmentTransport,
     Object,
     Transport,
     object_value,
     string,
 )
-from mux.errors import ProviderError
-from mux.profiles.gemini import ARGON_MODEL
+from mux.errors import ProviderError, UnsupportedCapability
+from mux.profiles.gemini import OPT_IN_MODELS
 
 log = logging.getLogger(__name__)
 
 FLASH_PRIMARY = "gemini-3.8-flash"
 FLASH_MODELS = (FLASH_PRIMARY, "gemini-flash-latest", "gemini-3.5-flash-lite")
-# Every model an attempt may name. Argon is only ever its own single attempt.
-ATTEMPT_MODELS = (*FLASH_MODELS, ARGON_MODEL)
+# Every model an attempt may name. An opt-in model is only ever its own single attempt.
+ATTEMPT_MODELS = (*FLASH_MODELS, *OPT_IN_MODELS)
 
 
 @dataclass(frozen=True)
@@ -40,12 +41,15 @@ class FlashAttempt:
     # False only when the create provably never reached Google (its connection
     # failed): nothing was sent, so its hold is freed at once.
     sent: bool = True
+    # The wait Google named for a rate limit, in seconds.
+    retry_after_s: float | None = None
 
 
 class FlashAccounting(Protocol):
     """Caller persists a hold before each dispatch, and preserves its outcome.
 
-    A failed accounting operation stops the chain. Actuals arrive via scoped
+    A failed accounting operation stops the chain; a 503 `ProviderError` from
+    `before_attempt` instead skips that model, unsent. Actuals arrive via scoped
     Usage. Free calls are reported `refused`: an HTTP 4xx that rejected the
     request itself, a 503 that refused the work (both with their status, no
     interaction returned), or a create that never reached Google (`sent=False`).
@@ -70,7 +74,7 @@ def definite_rejection(error: ProviderError) -> int | None:
     QuotaFailure was not.
     """
     code = error.native_error_code or ""
-    if code == "http_429" and error.native_code in ("quota_zero", "quota_exhausted"):
+    if code == "http_429" and error.native_code in ("quota_zero", "quota_daily", "quota_exhausted"):
         return 429  # Google's QuotaFailure: refused before any interaction existed
     if error.category not in _DEFINITE or not code.startswith("http_4"):
         return None
@@ -99,8 +103,8 @@ class FlashTransport:
         native_agent: Agent | None = None,
         primary: str = FLASH_PRIMARY,
     ) -> None:
-        if primary not in (FLASH_PRIMARY, ARGON_MODEL):
-            raise ValueError("an explicit Flash or Argon primary is required")
+        if primary not in (FLASH_PRIMARY, *OPT_IN_MODELS):
+            raise ValueError("an explicit Flash or opt-in primary is required")
         self._primary = primary
         self._native_agent = native_agent
         self.source, self.accounting = source, accounting
@@ -117,16 +121,16 @@ class FlashTransport:
             self._native_agent.spec.model.id if self._native_agent is not None else self._primary
         )
         if (
-            required not in (FLASH_PRIMARY, ARGON_MODEL)
+            required not in (FLASH_PRIMARY, *OPT_IN_MODELS)
             or (request.get("model") if capped else original.get("model")) != required
         ):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
         models = FLASH_MODELS
-        if required == ARGON_MODEL:
-            # A 503 on Argon is the turn's answer, never a silent switch to Flash.
-            models = (ARGON_MODEL,)
+        if required in OPT_IN_MODELS:
+            # A 503 on an opt-in model is the turn's answer, never a silent switch to Flash.
+            models = (required,)
         if self._native_agent is not None:
             if capped:
                 raise ProviderError(
@@ -144,13 +148,14 @@ class FlashTransport:
             models = (self._native_agent.spec.model.id,)
         for index, name in enumerate(models):
             model = ModelRef(provider="gemini", id=name)
-            await self.accounting.before_attempt(model=model, attempt=index + 1)
             bounded = dict(request)
             if capped:
                 bounded["model"] = name
             else:
                 bounded["agent_config"] = {**original, "model": name}
             try:
+                # A 503 here skips this model, unsent, like Google's own.
+                await self.accounting.before_attempt(model=model, attempt=index + 1)
                 return await self._dispatch(bounded, model, index + 1)
             except ProviderError as error:
                 # Only a 503 moves down the chain; a rejected request is the answer.
@@ -191,6 +196,7 @@ class FlashTransport:
                 outcome="refused" if refused or rejected is not None or unsent else "unknown",
                 http_status=503 if refused else rejected,
                 sent=not unsent,
+                retry_after_s=error.retry_after_s if error.category == "rate_limited" else None,
             )
             raise
         finally:
@@ -261,6 +267,27 @@ class FlashTransport:
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await self.source.download_snapshot(environment_id)
+
+    def _environments(self) -> EnvironmentTransport:
+        if not isinstance(self.source, EnvironmentTransport):
+            raise UnsupportedCapability(("environment_upload",), "gemini.inline_reuse")
+        return self.source
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        return await self._environments().create_environment(config)
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        await self._environments().upload_archive(
+            environment_id, path, archive, overwrite=overwrite
+        )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        return await self._environments().list_files(environment_id, path)
+
+    async def delete_environment(self, environment_id: str) -> None:
+        await self._environments().delete_environment(environment_id)
 
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None

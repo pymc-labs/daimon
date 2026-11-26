@@ -4,7 +4,7 @@
   "source_commit": "0bfa591a7ee680f4e5e97d9aad72f204c48edbde",
   "provider": "anthropic",
   "profile": "anthropic.managed_agents",
-  "turn_path": "legacy",
+  "turn_path": "mux",
   "model": "claude-haiku-5-5",
   "run_admission": [
     "These are offline recipes, not callback implementations, a GO, provider receipts or LIVE PASS results. N9 owns callback registration and live admission. No key access or paid call by N3.",
@@ -44,7 +44,7 @@
   "common_assertions": [
     {
       "id": "real_provider",
-      "predicate": "Each BOUND success includes actual probe workspace/session provenance, exact admitted Haiku model, actual events/usage, and a recorded legacy run_turn invocation; a scripted/provider-free callback cannot pass.",
+      "predicate": "Each BOUND success includes actual probe workspace/session provenance, exact admitted Haiku model, actual events/usage, and a recorded run_turn invocation; a scripted/provider-free callback cannot pass.",
       "evidence": [
         "admission.receipt",
         "provider.provenance",
@@ -96,7 +96,7 @@
       "setup": [
         {
           "resource": "timer",
-          "instructions": "Local timer/continuation row and an agent lookup; source has no provider model turn or legacy run_turn."
+          "instructions": "Local timer/continuation row and an agent lookup; source has no provider model turn or run_turn."
         }
       ],
       "turns": [
@@ -126,7 +126,7 @@
       "blocked": {
         "code": "HOST_DECISION_ONLY",
         "reason": "This golden checks a local continuation decision and rendered seed; it never dispatches a provider turn. A live timer-to-agent run would add a new scenario and a clock/dispatch binding.",
-        "unblock": "Keep this exact decision golden offline; N9 may register a separately named live timer-dispatch extension with real due wake claiming and one admitted legacy turn."
+        "unblock": "Keep this exact decision golden offline; N9 may register a separately named live timer-dispatch extension with real due wake claiming and one admitted turn."
       },
       "judge_task": {
         "id": "golden_timer",
@@ -201,7 +201,7 @@
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver.py::test_run_turn_folds_full_stream_and_returns_terminal_state",
       "golden_sha256": "61125893d15aad5f1d5d4c248d9656fe572eb4624320d1991d5d9e9b0cbdd51a",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -227,7 +227,7 @@
           "number": 1,
           "actor": "user",
           "text": "Say hello in one short sentence. Do not use tools.",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [],
@@ -258,7 +258,7 @@
       "judge_task": {
         "id": "golden_plain_turn",
         "core": true,
-        "goal": "A real legacy turn folds a nonempty response and finishes once on observed end_turn.",
+        "goal": "A real turn folds a nonempty response and finishes once on observed end_turn.",
         "critical": [],
         "prompts": [
           "Say hello in one short sentence. Do not use tools."
@@ -270,7 +270,7 @@
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver_policy_approval.py::test_chat_read_runs_without_a_card",
       "golden_sha256": "931f0acfcff11dbda0ebb3ced60b501d4a585d4893f281c5e6fb42494bd4773c",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -300,7 +300,7 @@
           "number": 1,
           "actor": "user",
           "text": "Use linear.list_teams exactly once and report the returned team name. Do not write anything.",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [],
@@ -359,7 +359,7 @@
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver_policy_approval.py::test_chat_write_shows_a_card_and_runs_only_after_confirm",
       "golden_sha256": "ecc4cdc42ae73630d40bae279e1eb2a41ffeed9196f0a3ed55de3e6f4aa77cc1",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -393,7 +393,7 @@
           "number": 1,
           "actor": "user",
           "text": "Use linear.create_issue once with title Bug. Wait for my approval; do not create another issue.",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [
@@ -456,7 +456,7 @@
     {
       "name": "approval_card_discord",
       "status": "BLOCKED",
-      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_base_and_new[approve-discord]",
+      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_effects_match_recording[approve-discord]",
       "golden_sha256": "fabfef23e6730a78398b42ab9508a7e2b94b470d8d4e16a6339ef6eef1adc657",
       "host_entry_point": "daimon.adapters.discord.tool_confirmation",
       "platform": "discord",
@@ -510,7 +510,7 @@
     {
       "name": "approval_card_slack",
       "status": "BLOCKED",
-      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_base_and_new[approve-slack]",
+      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_effects_match_recording[approve-slack]",
       "golden_sha256": "dc3a5d514aafa6f1f7f82fbe49e2e7f1b88ac0afe7b01e6bf5b45c8702e0999d",
       "host_entry_point": "daimon.adapters.slack.tool_confirmation",
       "platform": "slack",
@@ -566,7 +566,7 @@
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver.py::test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack",
       "golden_sha256": "a9d108967f1120562faea0afbd457c235929cc29c8035cf5aa04fc5508613869",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -596,7 +596,7 @@
           "number": 1,
           "actor": "user",
           "text": "Say Starting slow task, then call nc_fixture.slow_task once and wait for it. Do not start another task.",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [
@@ -638,7 +638,7 @@
       "judge_task": {
         "id": "golden_cancel_mid_stream",
         "core": true,
-        "goal": "Cancel a genuinely active legacy stream, preserve partial content and wait for the provider stop acknowledgement.",
+        "goal": "Cancel a genuinely active stream, preserve partial content and wait for the provider stop acknowledgement.",
         "critical": [
           "tool_fidelity",
           "safety"
@@ -653,7 +653,7 @@
       "status": "BLOCKED",
       "source_node": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_reconnect_on_connection_drop",
       "golden_sha256": "1ad34bec71cabb4850d11f111e50f2a15fbf54c81c9cc71bbe8dbf51ada28e2c",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -667,7 +667,7 @@
           "number": 1,
           "actor": "user",
           "text": "hi",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [],
@@ -708,7 +708,7 @@
       "status": "BLOCKED",
       "source_node": "packages/core/tests/turn/test_driver_hooks.py::test_driver_calls_on_rate_limited_with_until_before_sleep",
       "golden_sha256": "4536db40786a434344d6da878db5d9ef3dd786daf2d4a1166b108c8a00a478af",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -722,7 +722,7 @@
           "number": 1,
           "actor": "user",
           "text": "hi",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [],
@@ -763,7 +763,7 @@
       "status": "BOUND",
       "source_node": "packages/core/tests/turn/test_driver.py::test_mcp_failure_then_reply_finalizes_as_success_carrying_the_failure",
       "golden_sha256": "4bfaabe9e37b66a733e8736c403866759b39becdbb9f8bea8501d8f5df851207",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -793,7 +793,7 @@
           "number": 1,
           "actor": "user",
           "text": "If the notion fixture is unavailable, say that it is unavailable and answer hello without using it.",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [],
@@ -842,7 +842,7 @@
       "status": "BOUND",
       "source_node": "tests/golden/test_boundary_scenarios.py::test_ceiling_after_http_setup_closes_stream",
       "golden_sha256": "32489761b89aa018f08bd314d3827fe4fba28a77a63bd03dc460e53e067ce948",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -872,7 +872,7 @@
           "number": 1,
           "actor": "user",
           "text": "Call nc_fixture.slow_task once and wait for it. Do not complete before the tool returns.",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [
@@ -928,7 +928,7 @@
       "status": "BLOCKED",
       "source_node": "packages/core/tests/turn/test_driver_replay_billing.py::test_replayed_call_is_debited_with_the_turns_attribution",
       "golden_sha256": "79ee861a7d68fb0247814d19ee27f531f8af2f60d7d58cabdfe53d3619f131a1",
-      "host_entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")",
+      "host_entry_point": "daimon.core.turn.driver.run_turn()",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -942,7 +942,7 @@
           "number": 1,
           "actor": "user",
           "text": "hi",
-          "entry_point": "daimon.core.turn.driver.run_turn(path=\"legacy\")"
+          "entry_point": "daimon.core.turn.driver.run_turn()"
         }
       ],
       "triggers": [],
@@ -1508,7 +1508,7 @@
       "max_model_turns": 0,
       "blocked": {
         "code": "HOST_ADMISSION_ONLY",
-        "reason": "No local credit: admission refuses before provider work. A refusal that never reaches Anthropic cannot count as a live legacy-provider turn.",
+        "reason": "No local credit: admission refuses before provider work. A refusal that never reaches Anthropic cannot count as a live provider turn.",
         "unblock": "Run and report the existing offline host admission test separately. Do not spend real money to exhaust balance/cap or label this LIVE."
       },
       "judge_task": {
@@ -1565,7 +1565,7 @@
       "max_model_turns": 0,
       "blocked": {
         "code": "HOST_ADMISSION_ONLY",
-        "reason": "Positive local credit but pre-seeded per-user cap breach: admission refuses before provider work (or follows current host queue policy). A refusal that never reaches Anthropic cannot count as a live legacy-provider turn.",
+        "reason": "Positive local credit but pre-seeded per-user cap breach: admission refuses before provider work (or follows current host queue policy). A refusal that never reaches Anthropic cannot count as a live provider turn.",
         "unblock": "Run and report the existing offline host admission test separately. Do not spend real money to exhaust balance/cap or label this LIVE."
       },
       "judge_task": {
@@ -1692,7 +1692,7 @@
       "status": "BOUND",
       "source_node": "packages/core/tests/test_workspace_transfer.py::test_transfer_rehosts_the_bundle_and_enqueues_its_deletion",
       "golden_sha256": "90b3a9e260efaf1b6f1af0834567d0907548968ca35348caaff8376239696a20",
-      "host_entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses legacy run_turn)",
+      "host_entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses run_turn)",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -1726,19 +1726,19 @@
           "number": 1,
           "actor": "user",
           "text": "Write /tmp/work/nc-marker.txt containing exactly NC-live-handoff followed by a newline. Compute its SHA256. Remember that our report topic is hierarchical model. Reply briefly.",
-          "entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses legacy run_turn)"
+          "entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses run_turn)"
         },
         {
           "number": 2,
           "actor": "host",
           "text": "Generate the production checkpoint message with build_checkpoint_prompt for this transfer_id; execute it on the old session through transfer_workspace.",
-          "entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses legacy run_turn)"
+          "entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses run_turn)"
         },
         {
           "number": 3,
           "actor": "user",
           "text": "Read the transferred nc-marker.txt, report its SHA256, and recall our report topic.",
-          "entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses legacy run_turn)"
+          "entry_point": "daimon.core.workspace_transfer.transfer_workspace (checkpoint uses run_turn)"
         }
       ],
       "triggers": [
@@ -2332,7 +2332,7 @@
       "status": "BOUND",
       "source_node": "packages/adapters/scheduler/tests/test_main.py::test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session",
       "golden_sha256": "413c6b3aaed4171bd6f2b0b0aeba5b1485825f19e11ef7a4a26224fb3920c31e",
-      "host_entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless legacy run_turn)",
+      "host_entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless run_turn)",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -2362,7 +2362,7 @@
           "number": 1,
           "actor": "host",
           "text": "trigger: reply with one brief scheduled-run confirmation.",
-          "entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless legacy run_turn)"
+          "entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless run_turn)"
         }
       ],
       "triggers": [],
@@ -2409,7 +2409,7 @@
       "judge_task": {
         "id": "golden_sealed_channel",
         "core": true,
-        "goal": "A real scheduled legacy turn preserves destination seal metadata.",
+        "goal": "A real scheduled turn preserves destination seal metadata.",
         "critical": [
           "safety"
         ],
@@ -2423,7 +2423,7 @@
       "status": "BOUND",
       "source_node": "packages/adapters/scheduler/tests/test_main.py::test_fire_runs_in_the_routine_channels_environment[channel]",
       "golden_sha256": "3a8ad6b56f43cca63d0c198814727ba75a67e6372b2528da80face673e678e42",
-      "host_entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless legacy run_turn)",
+      "host_entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless run_turn)",
       "platform": "headless",
       "coverage": "Real Anthropic MA execution; local host/platform fixtures. Assertions compare structural outcomes, not literal model prose or the scripted golden tape.",
       "setup": [
@@ -2453,7 +2453,7 @@
           "number": 1,
           "actor": "host",
           "text": "trigger: reply with one brief scheduled-run confirmation.",
-          "entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless legacy run_turn)"
+          "entry_point": "daimon.adapters.scheduler.main._build_fire -> fire (actual headless run_turn)"
         }
       ],
       "triggers": [],
@@ -2500,7 +2500,7 @@
       "judge_task": {
         "id": "golden_scheduler_run",
         "core": true,
-        "goal": "A real scheduled legacy turn resolves the configured channel environment over tenant/deployment defaults.",
+        "goal": "A real scheduled turn resolves the configured channel environment over tenant/deployment defaults.",
         "critical": [
           "safety"
         ],
@@ -2520,7 +2520,7 @@
       "setup": [
         {
           "resource": "adapter_fixture",
-          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the legacy turn driver."
+          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the turn driver."
         }
       ],
       "turns": [
@@ -2550,7 +2550,7 @@
       "max_model_turns": 0,
       "blocked": {
         "code": "NON_TURN_ENTRY_POINT",
-        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. Setting DAIMON_TURN__PATH=legacy cannot turn it into a legacy-turn golden.",
+        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. It cannot become a run_turn golden.",
         "unblock": "N9 may run a separately reported real-provider adapter/API probe with native budget admission; retain BLOCKED in this legacy-turn matrix until a distinct approved observation/consume-existing seam is defined. Do not send the same user message again via run_turn."
       },
       "judge_task": {
@@ -2577,7 +2577,7 @@
       "setup": [
         {
           "resource": "adapter_fixture",
-          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the legacy turn driver."
+          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the turn driver."
         }
       ],
       "turns": [
@@ -2607,7 +2607,7 @@
       "max_model_turns": 0,
       "blocked": {
         "code": "NON_TURN_ENTRY_POINT",
-        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. Setting DAIMON_TURN__PATH=legacy cannot turn it into a legacy-turn golden.",
+        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. It cannot become a run_turn golden.",
         "unblock": "N9 may run a separately reported real-provider adapter/API probe with native budget admission; retain BLOCKED in this legacy-turn matrix until a distinct approved observation/consume-existing seam is defined. Do not send the same user message again via run_turn."
       },
       "judge_task": {
@@ -2634,7 +2634,7 @@
       "setup": [
         {
           "resource": "adapter_fixture",
-          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the legacy turn driver."
+          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the turn driver."
         }
       ],
       "turns": [
@@ -2664,7 +2664,7 @@
       "max_model_turns": 0,
       "blocked": {
         "code": "NON_TURN_ENTRY_POINT",
-        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. Setting DAIMON_TURN__PATH=legacy cannot turn it into a legacy-turn golden.",
+        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. It cannot become a run_turn golden.",
         "unblock": "N9 may run a separately reported real-provider adapter/API probe with native budget admission; retain BLOCKED in this legacy-turn matrix until a distinct approved observation/consume-existing seam is defined. Do not send the same user message again via run_turn."
       },
       "judge_task": {
@@ -2691,7 +2691,7 @@
       "setup": [
         {
           "resource": "adapter_fixture",
-          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the legacy turn driver."
+          "instructions": "Use a probe-owned agent/environment/session and local authorized MCP/CLI runtime for a separately admitted adapter probe. Source invokes direct session read/send ports; it does not call the turn driver."
         }
       ],
       "turns": [
@@ -2721,7 +2721,7 @@
       "max_model_turns": 0,
       "blocked": {
         "code": "NON_TURN_ENTRY_POINT",
-        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. Setting DAIMON_TURN__PATH=legacy cannot turn it into a legacy-turn golden.",
+        "reason": "This exact source is a direct MCP session-send/interrupt or CLI read operation, bypassing run_turn. It cannot become a run_turn golden.",
         "unblock": "N9 may run a separately reported real-provider adapter/API probe with native budget admission; retain BLOCKED in this legacy-turn matrix until a distinct approved observation/consume-existing seam is defined. Do not send the same user message again via run_turn."
       },
       "judge_task": {

@@ -14,12 +14,6 @@ import pytest
 from daimon.adapters.mcp.auth.verifier import SCOPES_CLAIM, TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.middleware.mcp_identity import (
     IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
 )
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
 from daimon.core.authz import Subject
@@ -32,6 +26,8 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import production_identity_middleware
 
 PUBLIC_URL = "https://mcp.example.com/mcp"
 ENTRY_URL = "https://mcp.example.com/mcp/"  # an agent's entry: a trailing slash is the same server
@@ -88,16 +84,8 @@ class _World:
     ) -> FastMCP:
         mcp = FastMCP(name="test")
         mcp.add_middleware(
-            IdentityMiddleware(
-                subject_resolver=production_subject_resolver,
-                tenant_resolver=production_tenant_resolver,
-                role_resolver=production_role_resolver,
-                agent_id_resolver=production_agent_id_resolver,
-                is_admin_resolver=production_is_admin_resolver,
-                internal_resolver=production_internal_resolver,
-                sessionmaker=self.sessionmaker,
-                tool_safety=policy,
-                public_url=public_url,
+            production_identity_middleware(
+                self.sessionmaker, tool_safety=policy, public_url=public_url
             )
         )
         tags = {"agent-chat", scope_tag("tenant:read")}

@@ -21,7 +21,7 @@ from pathlib import PurePosixPath
 from typing import Literal, cast
 from urllib.parse import urlsplit
 
-from daimon.core.turn.outcomes import current_outcome
+from daimon.core.turn.outcomes import current_outcome, tool_server_names_shown
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, daimon_tool_input
 from mux.profiles import get_profile
 
@@ -182,11 +182,24 @@ def format_summary(
 
 
 def format_headline(
-    *, is_working: bool, elapsed_seconds: float | None, bold: Callable[[str], str]
+    *,
+    is_working: bool,
+    elapsed_seconds: float | None,
+    bold: Callable[[str], str],
+    waiting: bool = False,
+    timed: bool = False,
 ) -> str:
-    """One short working label; timing belongs in card details."""
-    del is_working, elapsed_seconds
-    return bold("Working on it…")
+    """One short working label; timing belongs in card details.
+
+    With ``timed`` (Discord's `card_timer`) the label says Working while a tool
+    runs, else Thinking, followed by the time so far.
+    """
+    if not timed:
+        return bold("Waiting for the AI service…" if waiting else "Working on it…")
+    word = "Waiting for the AI service" if waiting else "Working" if is_working else "Thinking"
+    if elapsed_seconds is None:
+        return bold(word)
+    return f"{bold(word)}{SUMMARY_GAP}{format_duration(elapsed_seconds)}"
 
 
 def format_draft(text: str) -> str:
@@ -257,7 +270,7 @@ def _tool_line(call: ToolUseBlock) -> str:
     else:
         icon, label = _humanize(call.name)
         label = _clip(label)
-        if call.mcp_server_name:
+        if call.mcp_server_name and tool_server_names_shown():
             label = f"{label} ({call.mcp_server_name})"
     if is_finished:
         icon = _FAILED_ICON if call.status == "failed" else _DONE_ICON
@@ -270,7 +283,8 @@ def tool_label(call: ToolUseBlock) -> tuple[str, str | None]:
     if narration is not None:
         label = narration.finished if call.status != "pending" else narration.running
         return label, _built_in_detail(call)
-    return _clip(_humanize(call.name)[1]), call.mcp_server_name
+    server = call.mcp_server_name if tool_server_names_shown() else None
+    return _clip(_humanize(call.name)[1]), server
 
 
 def _humanize(name: str) -> tuple[str, str]:

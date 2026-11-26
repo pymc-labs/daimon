@@ -1,10 +1,12 @@
 // Admin: people, invites, agent web access, audit log and workspace settings.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, AuditTarget, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
+import type { AdminPerson, AgentAccess, AgentMonitoring, AuditEntry, AuditKind, AuditTarget, DmExplain, DmGrant, DmGrantChange, DmPerson, DmRule, DmRuleAdd, DmRuleChange, DmSettings, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
 import { forbidden, notFound, paged, wait } from "./util"
 import { agent, AGENTS, DOMAIN, me, visitorFiles } from "./world"
 import { face } from "./face"
+import { monitoringOn } from "./features"
+import { conversationsOf, transcriptOf } from "./monitoring"
 
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString()
@@ -38,14 +40,39 @@ const invites: Invite[] = [
   { id: "inv_4", email: "dana.ko@tidewater.example", role: "visitor", agents: [agent("ag_pricing"), agent("ag_sales")], credit_usd: 5, allow_files: false, expires_at: inDays(-3), status: "expired", by: "Viktor Petrov" },
 ]
 
+// Direct messages: chat people and server roles by platform id, as the server stores them.
+const chatId = (n: number) => `11000000000000001${String(n).padStart(2, "0")}`
+const CHAT_PEOPLE: DmPerson[] = people.filter((p) => p.role !== "visitor").map((p, i) => ({ id: chatId(i), name: p.name }))
+const ROLES = [{ id: "1300000000000000201", name: "Staff" }, { id: "1300000000000000202", name: "MMM team" }, { id: "1300000000000000203", name: "Clients" }]
+const grant = (on: boolean, who: DmGrant["who"] = "members", users: DmPerson[] = [], groups: string[] = []): DmGrant => ({ on, who, users, groups })
+const DM: Record<string, DmGrant> = {
+  ag_default: grant(true),
+  ag_mmm: grant(true, "listed", [CHAT_PEOPLE[3]!, CHAT_PEOPLE[5]!], [ROLES[1]!.id]),
+  ag_pricing: grant(true, "excluded", [], [ROLES[2]!.id]),
+  ag_review: grant(false),
+  ag_sales: grant(true),
+}
+const dmSettings: DmSettings = {
+  platform: "discord",
+  default_agent: "Daimon",
+  agents: AGENTS.map((a) => ({ id: a.id, name: a.name })),
+  rules: [
+    { position: 0, subject: "group", subject_id: ROLES[2]!.id, name: null, agent: "Sales Desk", locked: true },
+    { position: 1, subject: "group", subject_id: ROLES[1]!.id, name: null, agent: "MMM Analyst", locked: false },
+    { position: 2, subject: "user", subject_id: CHAT_PEOPLE[1]!.id, name: CHAT_PEOPLE[1]!.name, agent: null, locked: false },
+  ],
+}
+const renumber = (rules: DmRule[]) => rules.forEach((r, i) => { r.position = i })
+const subjectText = (r: Pick<DmRule, "subject" | "subject_id">) => r.subject === "everyone" ? "Everyone" : r.subject === "group" ? `Group ${r.subject_id}` : "A person"
+
 const access: AgentAccess[] = [
-  ...AGENTS.map((a): AgentAccess => ({
+  ...AGENTS.map((a): AgentAccess => ({ dm: DM[a.id] ?? null,
     agent: a, web: a.id !== "ag_review", fixed_to: null, fixed_name: null,
     who: a.id === "ag_pricing" ? "groups" : a.id === "ag_sales" ? "groups" : "everyone",
     groups: a.id === "ag_pricing" ? ["Pricing", "CLV"] : a.id === "ag_sales" ? ["Sales", "Leadership"] : [],
   })),
   { agent: { id: "ag_northwind", name: "Northwind Support", avatar: face(39), model: "Opus 5.5", description: "Northwind customer support" },
-    web: false, who: "everyone", groups: [], fixed_to: "1100000000000000001", fixed_name: "northwind-support" },
+    web: false, who: "everyone", groups: [], fixed_to: "1100000000000000001", fixed_name: "northwind-support", dm: null },
 ]
 
 type Raw = Omit<AuditEntry, "target" | "actor_id"> & { target: string }
@@ -75,12 +102,16 @@ const audit: AuditEntry[] = ([
   { id: "a9", source: "web", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Web chat agent", detail: "Daimon" },
 ] satisfies Raw[]).map(entry)
 
+// Providers the deployment holds a key for: a workspace that never chose follows them.
+const KEYED = [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "OpenAI" }, { id: "gemini", label: "Google" }]
+const keyedIds = KEYED.map((p) => p.id)
+
 const settings: WorkspaceSettings = {
-  default_agent: "ag_daimon",
+  default_agent: "ag_default",
   access: { people: null, others: 0 },
   providers: {
-    offered: [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "OpenAI" }, { id: "gemini", label: "Google" }],
-    allowed: ["anthropic"],
+    offered: KEYED,
+    allowed: keyedIds,
     followed: true,
   },
 }
@@ -149,9 +180,14 @@ export const adminHandlers: HttpHandler[] = [
   http.patch("/api/admin/agent-access/:id", async ({ params, request }) => {
     const a = access.find((x) => x.agent.id === params.id)
     if (!a || a.fixed_to) return forbidden()
-    const b = (await request.json()) as Partial<AgentAccess>
+    const { dm, ...b } = (await request.json()) as Partial<Omit<AgentAccess, "dm">> & { dm?: DmGrantChange }
     if (b.web !== undefined && b.web !== a.web) log(b.web ? "Turned on web chat" : "Turned off web chat", a.agent.name)
     Object.assign(a, b)
+    if (dm && a.dm) {
+      const listed = dm.who !== "members"
+      a.dm = { ...a.dm, who: dm.who, users: listed ? dm.user_ids.map((id) => CHAT_PEOPLE.find((p) => p.id === id) ?? { id, name: null }) : [], groups: listed ? dm.group_ids : [] }
+      log("Changed DM access", a.agent.name, dm.who === "members" ? "Everyone" : `${dm.who === "listed" ? "Listed" : "Everyone except listed"}: ${a.dm.users.length} people, ${a.dm.groups.length} groups`)
+    }
     return HttpResponse.json(a)
   }),
   http.post("/api/admin/people/:id/link", async ({ params }) => {
@@ -181,7 +217,7 @@ export const adminHandlers: HttpHandler[] = [
     const raw: Feedback = {
       days,
       agents: [
-        { id: "ag_daimon", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
+        { id: "ag_default", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
         { id: "ag_mmm", name: "MMM Analyst", up: n(41), down: n(6), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(3) }, { code: "ignored_request", label: "Didn't do what I asked", count: n(2) }] },
         { id: "ag_review", name: "Code Reviewer", up: n(23), down: n(1), reasons: [{ code: "other", label: "Something else", count: n(1) }] },
         { id: null, name: "Unknown agent", up: n(2), down: 0, reasons: [] },
@@ -192,6 +228,79 @@ export const adminHandlers: HttpHandler[] = [
       agents: raw.agents.map((x) => ({ ...x, up: few(x.up!), down: few(x.down!), reasons: x.reasons.map((r) => ({ ...r, count: few(r.count!) })) })),
     }
     return me()?.capabilities.includes("audit.view") ? HttpResponse.json(body) : forbidden()
+  }),
+  http.get("/api/admin/dm", () => HttpResponse.json(dmSettings)),
+  http.patch("/api/admin/dm", async ({ request }) => {
+    const b = (await request.json()) as { default_agent: string | null }
+    dmSettings.default_agent = b.default_agent
+    log("Changed DM default agent", "Direct messages", b.default_agent ?? "None")
+    return HttpResponse.json(dmSettings)
+  }),
+  http.post("/api/admin/dm/rules", async ({ request }) => {
+    const b = (await request.json()) as DmRuleAdd
+    const name = b.subject === "user" ? CHAT_PEOPLE.find((p) => p.id === b.subject_id)?.name ?? null : null
+    dmSettings.rules.push({ ...b, position: dmSettings.rules.length, name })
+    log("Added DM rule", "Direct messages", `${subjectText(b)} to ${b.agent ?? "the default agent"}${b.locked ? ", locked" : ""}`)
+    return HttpResponse.json(dmSettings)
+  }),
+  http.patch("/api/admin/dm/rules/:position", async ({ params, request }) => {
+    const at = Number(params.position), r = dmSettings.rules[at]
+    if (!r) return notFound()
+    const b = (await request.json()) as DmRuleChange
+    if (b.agent !== undefined) r.agent = b.agent
+    if (b.locked !== undefined) r.locked = b.locked
+    if (b.to !== undefined) { dmSettings.rules.splice(at, 1); dmSettings.rules.splice(b.to, 0, r) }
+    renumber(dmSettings.rules)
+    log(b.to !== undefined ? "Moved DM rule" : "Changed DM rule", "Direct messages", subjectText(r))
+    return HttpResponse.json(dmSettings)
+  }),
+  http.delete("/api/admin/dm/rules/:position", ({ params }) => {
+    const [gone] = dmSettings.rules.splice(Number(params.position), 1)
+    if (!gone) return notFound()
+    renumber(dmSettings.rules)
+    log("Removed DM rule", "Direct messages", subjectText(gone))
+    return HttpResponse.json(dmSettings)
+  }),
+  http.get("/api/admin/dm/explain", ({ request }) => {
+    const user = new URL(request.url).searchParams.get("user")
+    const named = new Set([...dmSettings.rules.filter((r) => r.subject === "group").map((r) => r.subject_id!), ...Object.values(DM).flatMap((g) => g.groups)])
+    const groups = (user === CHAT_PEOPLE[3]!.id ? [ROLES[1]!.id] : []).filter((g) => named.has(g))
+    const allowed = Object.entries(DM).filter(([, g]) => g.on).map(([id]) => AGENTS.find((a) => a.id === id)!.name)
+    const rule = dmSettings.rules.findIndex((r) => r.subject === "everyone" || (r.subject === "user" ? r.subject_id === user : groups.includes(r.subject_id!)))
+    const r = dmSettings.rules[rule]
+    const agent = r?.agent ?? dmSettings.default_agent
+    const body: DmExplain = agent
+      ? { route: "start", agent, reason: r ? (r.locked ? "locked" : "rule") : "default", agents: [], allowed, rule: r ? rule : null, groups }
+      : { route: "choose", agent: null, reason: null, agents: allowed, allowed, rule: null, groups }
+    return HttpResponse.json(body)
+  }),
+  http.get("/api/admin/dm/people", ({ request }) => {
+    const q = (new URL(request.url).searchParams.get("q") ?? "").trim().toLowerCase()
+    return HttpResponse.json(q ? CHAT_PEOPLE.filter((p) => p.name!.toLowerCase().includes(q)).slice(0, 8) : [])
+  }),
+  http.get("/api/admin/platform-groups", () => HttpResponse.json({ platform: "discord", groups: ROLES, problem: null })),
+  http.get("/api/admin/monitoring/agents/:agent", ({ params }) => {
+    const a = AGENTS.find((x) => x.id === params.agent)
+    if (!a) return notFound()
+    const since = (on: boolean) => ({ on, since: on ? ago(24 * 9) : null })
+    return HttpResponse.json<AgentMonitoring>({
+      id: a.id, name: a.name, direct_messages: since(monitoringOn(a.id, "monitor_direct_messages")), coding_tools: since(monitoringOn(a.id, "monitor_mcp")),
+    })
+  }),
+  http.get("/api/admin/monitoring/agents/:agent/conversations", ({ params, request }) => {
+    const a = AGENTS.find((x) => x.id === params.agent)
+    if (!a) return notFound()
+    const { person, where, from, to } = Object.fromEntries(new URL(request.url).searchParams)
+    const day = (iso: string) => iso.slice(0, 10)
+    if (!from && !person && !where) log("Viewed monitored activity", a.name)
+    return paged(request, conversationsOf(a.id).filter((c) =>
+      (!person || c.person.id === person) && (!where || c.where === where) && (!from || day(c.last_at) >= from) && (!to || day(c.last_at) <= to)))
+  }),
+  http.get("/api/admin/monitoring/agents/:agent/conversations/:id", ({ params, request }) => {
+    const events = transcriptOf(String(params.agent), String(params.id))
+    if (!events) return notFound()
+    log("Opened monitored conversation", agent(String(params.agent)).name)
+    return paged(request, events)
   }),
   http.get("/api/admin/settings", () => HttpResponse.json(settings)),
   http.patch("/api/admin/settings", async ({ request }) => {
@@ -205,7 +314,7 @@ export const adminHandlers: HttpHandler[] = [
     }
     if (b.providers && settings.providers) {
       settings.providers.followed = b.providers === "default"
-      settings.providers.allowed = b.providers === "default" ? ["anthropic"] : b.providers
+      settings.providers.allowed = b.providers === "default" ? keyedIds : b.providers
       log("Changed setting", "Providers")
     }
     return HttpResponse.json(settings)

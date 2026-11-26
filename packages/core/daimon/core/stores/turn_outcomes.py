@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -15,7 +15,7 @@ from daimon.core.context_prompt import TurnContext
 if TYPE_CHECKING:
     from daimon.core.turn.termination import TerminationReason
 from pydantic import JsonValue
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, DateTime, and_, func, literal, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +49,8 @@ class OutcomeRecord:
     unpriced_calls: int | None = None
     billing_posture: str | None = None
     eval_key: dict[str, JsonValue] | None = None
+    is_dm: bool = False
+    alertable: bool | None = None
 
 
 async def record(session: AsyncSession, outcome: OutcomeRecord) -> None:
@@ -130,3 +132,103 @@ async def last_started_at(session: AsyncSession, tenant_id: UUID, agent_id: str)
             )
         )
     ).scalar_one()
+
+
+# A turn counts as an answer when `turn.finished` was logged for it (the alert denominator).
+# A row from before `alertable` was stored falls back to the old reading: not a command-line
+# run, and not a boundary's catch-all (reason unknown with no error class).
+def _counted() -> ColumnElement[bool]:
+    return or_(
+        TurnOutcome.alertable.is_(True),
+        and_(
+            TurnOutcome.alertable.is_(None),
+            TurnOutcome.platform != "cli",
+            not_(and_(TurnOutcome.reason == "unknown", TurnOutcome.error_class.is_(None))),
+        ),
+    )
+
+
+def _failed() -> ColumnElement[bool]:
+    from daimon.core.turn.termination import USER_VISIBLE_FAILURES
+
+    return TurnOutcome.reason.in_(sorted(r.value for r in USER_VISIBLE_FAILURES))
+
+
+@dataclass(frozen=True)
+class AnswerStats:
+    answers: int
+    failed: int
+    busy: int
+    recovered: int
+    p50_ms: float | None
+    p95_ms: float | None
+    cost_usd: Decimal
+    costed: int
+    """Completed answers the cost average is over: those with a known cost."""
+
+
+async def answer_stats(
+    session: AsyncSession, *, tenant_id: UUID, since: datetime, until: datetime
+) -> AnswerStats:
+    """Counted turns started in `[since, until)`: answers, failures, busy turn-aways,
+    retries that recovered, time percentiles and cost of the completed ones."""
+    completed = TurnOutcome.reason == "completed"
+    row = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(_failed()),
+                func.count().filter(
+                    TurnOutcome.reason.in_(("admission_concurrency_shed", "session_busy"))
+                ),
+                func.count().filter(TurnOutcome.recovered),
+                func.percentile_cont(0.5).within_group(TurnOutcome.duration_ms).filter(completed),
+                func.percentile_cont(0.95).within_group(TurnOutcome.duration_ms).filter(completed),
+                func.coalesce(func.sum(TurnOutcome.cost_usd).filter(completed), 0),
+                func.count().filter(and_(completed, TurnOutcome.cost_usd.is_not(None))),
+            ).where(
+                TurnOutcome.tenant_id == tenant_id,
+                TurnOutcome.started_at >= since,
+                TurnOutcome.started_at < until,
+                _counted(),
+            )
+        )
+    ).one()
+    return AnswerStats(
+        answers=int(row[0]),
+        failed=int(row[1]),
+        busy=int(row[2]),
+        recovered=int(row[3]),
+        p50_ms=None if row[4] is None else float(row[4]),
+        p95_ms=None if row[5] is None else float(row[5]),
+        cost_usd=Decimal(row[6]),
+        costed=int(row[7]),
+    )
+
+
+async def answer_series(
+    session: AsyncSession, *, tenant_id: UUID, now: datetime, span: timedelta, buckets: int
+) -> list[tuple[int, int]]:
+    """`(answers, failed)` per `span`, `buckets` of them oldest first, the last ending at `now`."""
+    age = func.greatest(
+        0,
+        func.floor(
+            func.extract("epoch", literal(now, DateTime(timezone=True)) - TurnOutcome.started_at)
+            / span.total_seconds()
+        ),
+    )
+    rows = await session.execute(
+        select(age.label("age"), func.count(), func.count().filter(_failed()))
+        .where(
+            TurnOutcome.tenant_id == tenant_id,
+            TurnOutcome.started_at >= now - span * buckets,
+            _counted(),
+        )
+        .group_by(age)
+    )
+    out = [(0, 0)] * buckets
+    for steps, answers, failed in rows:
+        position = buckets - 1 - int(steps)
+        if 0 <= position < buckets:
+            out[position] = (int(answers), int(failed))
+    return out

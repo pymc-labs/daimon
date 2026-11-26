@@ -18,8 +18,8 @@ from daimon.core.config import TurnSettings
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
-from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnQueue
+from daimon.testing.builders import admit_chat
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -38,7 +38,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from structlog.testing import capture_logs
 
-from .test_cold_direct_messages import interaction, message, selector
+from .test_cold_direct_messages import interaction, message, offered, selector
 
 
 class _Provider:
@@ -136,10 +136,14 @@ async def real_dm(db_engine, db_clean):
     provider = _Provider(agents, environments)
     fetch = AsyncMock(return_value=Membership(is_member=True, role_ids=("123",)))
     bot = MagicMock()
+    bot.working_mark = AsyncMock(return_value="👀")
+    bot.turn_model_marks = AsyncMock(return_value=())
     bot.draining = False
     bot.runtime.sessionmaker = factory
     bot.runtime.settings = SimpleNamespace(
+        discord=None,
         direct_message_policies={},
+        features={},
         ops=SimpleNamespace(alert_webhook_url=None),
         turn=TurnSettings(),
         table_rendering={},
@@ -147,7 +151,6 @@ async def real_dm(db_engine, db_clean):
     bot.runtime.turn_deps = replace(
         deps_for(provider.client, factory),
         membership_resolver=CachedMembershipResolver(fetch),
-        turn_path="legacy",
     )
     bot.get_guild.side_effect = lambda guild_id: SimpleNamespace(name=f"Server {guild_id}")
     bot.turn_queue = TurnQueue(
@@ -156,7 +159,7 @@ async def real_dm(db_engine, db_clean):
     cog = module.DirectMessageCog(bot)
     # Enable the second server only in tests that need a chooser.
     async with factory.begin() as session:
-        await set_dm_agent_name(session, tenant_id=tenants[1].id, agent_name=None)
+        await set_dm_enabled(session, tenant_id=tenants[1].id, enabled=False)
     harness = SimpleNamespace(
         cog=cog, provider=provider, factory=factory, tenants=tenants, fetch=fetch
     )
@@ -209,7 +212,7 @@ async def test_different_simultaneous_first_messages_each_answer_once_in_one_sco
     assert len(real_dm.provider.submissions) == 2
     prompts = model_prompts(real_dm.provider)
     assert sum(prompt.endswith("\n\nfirst message") for prompt in prompts) == 1
-    assert sum(prompt.endswith("\n\nsecond message") for prompt in prompts) == 1
+    assert sum(prompt.endswith("\nsecond message") for prompt in prompts) == 1
     assert len(set(real_dm.provider.streams)) == 1, "both turns use the one new private session"
     assert answers(first) == ["private answer"] and answers(second) == ["private answer"]
     assert [entry["text"] for entry in row.history if entry["role"] == "user"] == [
@@ -237,14 +240,15 @@ async def test_duplicate_gateway_delivery_submits_and_answers_once(real_dm):
 
 async def test_concurrent_selector_clicks_submit_original_once(real_dm):
     async with real_dm.factory.begin() as session:
-        await set_dm_agent_name(session, tenant_id=real_dm.tenants[1].id, agent_name="daimon")
+        await set_dm_enabled(session, tenant_id=real_dm.tenants[1].id, enabled=True)
     msg = message()
-    await real_dm.cog.on_message(msg)
+    task = await offered(real_dm.cog, msg)
     view = selector(msg)
     await asyncio.gather(
         view.choose(interaction(), str(real_dm.tenants[0].id)),
         view.choose(interaction(), str(real_dm.tenants[1].id)),
     )
+    await asyncio.wait_for(task, 10)
     row = await active(real_dm)
     assert len(real_dm.provider.submissions) == 1
     assert answers(msg) == ["private answer"]
@@ -290,7 +294,7 @@ async def test_active_route_unavailable_authority_is_silent_no_model_no_rediscov
     assert len(real_dm.provider.submissions) == 1
     # Another eligible tenant must never be discovered as a fallback.
     async with real_dm.factory.begin() as session:
-        await set_dm_agent_name(session, tenant_id=real_dm.tenants[1].id, agent_name="daimon")
+        await set_dm_enabled(session, tenant_id=real_dm.tenants[1].id, enabled=True)
         if unavailable == "policy_unreadable":
             await session.execute(
                 text(
@@ -317,15 +321,12 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
     from daimon.core.direct_messages import start_dm
     from daimon.core.handoff_context import TranscriptTurn
     from daimon.core.stores.domain import Role
-    from daimon.core.turn.admission import admit
 
     tenant = real_dm.tenants[0]
     deps = real_dm.cog.bot.runtime.turn_deps
-    admission = await admit(
+    admission = await admit_chat(
         deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        platform="discord",
+        tenant,
         external_user_id="999",
         channel_id="123",
         now=datetime.now(UTC),
@@ -333,7 +334,6 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
         verified_membership=True,
         is_dm=True,
         dm_source_channel_id="123",
-        requester_org=RequesterOrg.HOST,
     )
     await start_dm(
         deps,
@@ -367,3 +367,71 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
     assert all(
         session.archived_at is not None for session in real_dm.provider.state.sessions.values()
     )
+
+
+async def _known_conversation(real_dm, monkeypatch, seconds):
+    """A person with a conversation already open, and a debounce of `seconds`."""
+    await real_dm.cog.on_message(message(100))
+    assert len(real_dm.provider.submissions) == 1
+    monkeypatch.setattr(module, "debounce_seconds", AsyncMock(return_value=seconds))
+
+
+def _typed(text, message_id):
+    msg = message(message_id)
+    msg.content = text
+    return msg
+
+
+async def test_a_burst_waits_for_quiet_then_answers_once(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 0.4)
+    one, two, three = _typed("one", 201), _typed("two", 202), _typed("three", 203)
+    first = asyncio.create_task(real_dm.cog.on_message(one))
+    await asyncio.sleep(0.1)
+    await real_dm.cog.on_message(two)
+    await asyncio.sleep(0.05)
+    one.add_reaction.assert_awaited_once_with("👀")
+    two.add_reaction.assert_awaited_once_with("👀")
+    assert len(real_dm.provider.submissions) == 1, "no turn starts while the window is open"
+    await asyncio.sleep(0.2)
+    await real_dm.cog.on_message(three)
+    await first
+    prompts = model_prompts(real_dm.provider)
+    assert len(prompts) == 2, "three messages, one more turn"
+    assert prompts[-1].endswith("one\n\ntwo\n\nthree")
+    for msg in (one, two, three):
+        msg.remove_reaction.assert_awaited_with("👀", real_dm.cog.bot.user)
+    assert len(answers(one)) + len(answers(two)) + len(answers(three)) == 1, "one reply"
+    row = await active(real_dm)
+    assert {"201", "202", "203"} <= set(row.recent_message_ids)
+
+
+async def test_an_approval_reply_goes_straight_through(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 5.0)
+    started = asyncio.get_running_loop().time()
+    question, approval = _typed("check this", 301), _typed("yes", 302)
+    first = asyncio.create_task(real_dm.cog.on_message(question))
+    await asyncio.sleep(0.1)
+    await real_dm.cog.on_message(approval)
+    await first
+    assert asyncio.get_running_loop().time() - started < 4.0, "the window did not run its length"
+    prompts = model_prompts(real_dm.provider)
+    assert len(prompts) == 3, "the approval is its own turn"
+    assert prompts[1].endswith("check this") and prompts[2].endswith("yes")
+
+
+async def test_a_lone_approval_reply_is_never_held(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 5.0)
+    started = asyncio.get_running_loop().time()
+    approval = _typed("yes", 401)
+    await real_dm.cog.on_message(approval)
+    assert asyncio.get_running_loop().time() - started < 4.0
+    approval.add_reaction.assert_not_awaited()
+    assert model_prompts(real_dm.provider)[-1].endswith("yes")
+
+
+async def test_a_debounce_of_zero_answers_each_message_at_once(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 0)
+    msg = _typed("hello", 501)
+    await real_dm.cog.on_message(msg)
+    msg.add_reaction.assert_not_awaited()
+    assert len(real_dm.provider.submissions) == 2 and answers(msg) == ["private answer"]

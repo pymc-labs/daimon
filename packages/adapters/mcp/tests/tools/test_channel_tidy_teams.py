@@ -54,11 +54,13 @@ from daimon.core.stores.turn_card_intents import (
 )
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
@@ -129,9 +131,9 @@ class _World:
                 now=now,
                 chat_session_id="test-session",
             )
-        auth = AuthIdentity(
-            account_id=self.account_id,
-            tenant_id=self.tenant_id,
+        auth = auth_identity(
+            self.account_id,
+            self.tenant_id,
             role=Role.USER,
             platform="teams",
             external_id=_ENTRA,
@@ -159,11 +161,7 @@ async def _world(sessionmaker: async_sessionmaker[AsyncSession]) -> _World:
         account = await make_account(s, tenant=tenant)
     router = MARouter()
     agents: list[dict[str, Any]] = [
-        ma_agent(
-            id=agent_id,
-            name=agent_id,
-            metadata={"daimon_tenant": str(tenant.id), "daimon_name": agent_id},
-        ).model_dump(mode="json")
+        ma_agent_payload(id=agent_id, name=agent_id, tenant_id=tenant.id)
         for agent_id in (_AGENT, _OTHER_AGENT)
     ]
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response(agents))

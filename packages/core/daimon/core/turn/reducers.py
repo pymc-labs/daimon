@@ -108,6 +108,8 @@ def apply(
                 return dataclasses.replace(state, content=content)
         return state
     seen = state.seen_event_ids | {event.id}
+    if state.rate_limit_wait and event.type != "session.error":
+        state = dataclasses.replace(state, rate_limit_wait=False)
 
     match event.type:
         case "agent.message":
@@ -368,9 +370,15 @@ def _apply_session_error(
         # Kept aside, not dropped: should the stream end with no settled
         # copy and no output, the finalizer surfaces it rather than a blank.
         return dataclasses.replace(
-            state, retrying_error=_to_turn_error(sdk_error), seen_event_ids=seen
+            state,
+            retrying_error=_to_turn_error(sdk_error),
+            rate_limit_wait=sdk_error.type in _RATE_LIMIT_ERRORS,
+            seen_event_ids=seen,
         )
     return dataclasses.replace(state, error=_to_turn_error(sdk_error), seen_event_ids=seen)
+
+
+_RATE_LIMIT_ERRORS = frozenset({"model_rate_limited_error", "model_overloaded_error"})
 
 
 def _is_package_install_failure(sdk_error: SessionError) -> bool:

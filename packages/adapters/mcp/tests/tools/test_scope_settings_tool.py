@@ -127,7 +127,6 @@ BYPASSES: list[tuple[str, Any, tuple[str, Tier, str], dict[str, Any], str, bool]
     ("non_admin", lambda: make_auth(admin=False), ("approvals", "channel", "off"), {"admin": [MEMBER]}, "Only a server admin can change approvals", False),
     ("admin_lost_after_press", make_auth, ("approvals", "channel", "off"), {"admin": [ADMIN, MEMBER]}, "Only a server admin", True),
     ("daimon_admin_vs_approvals", _granted, ("approvals", "channel", "off"), {"admin": [MEMBER]}, "Only a server admin can change approvals", False),
-    ("approvals_at_agent", make_auth, ("approvals", "agent", "off"), {}, "can't be set for the agent", False),
     ("guardrail_by_agent_key", lambda: make_auth(agent_id=uuid.uuid4()), ("unattended_capabilities", "workspace", "off"), {}, "Nothing changed", False),
     ("guardrail_unattended", make_auth, ("require_routine_destination", "workspace", "on"), {"origin": SimpleNamespace(attended=False, platform="discord", parent_channel_id="C1", thread_id="T1")}, "Nothing changed", False),
     ("guardrail_no_card", make_auth, ("reach_budget", "channel", "on"), {"card": AsyncMock(side_effect=ToolError("Confirm this in chat. Nothing changed."))}, "Nothing changed", True),
@@ -163,12 +162,14 @@ async def test_allowed_changes_write_at_the_verified_origin(world: dict[str, Any
     assert footer.setting["value"] == "hidden", footer.setting
     agent = await _change(_as(world, make_auth()), "progress_plans", "agent", "on")
     assert agent.setting["source"] == "agent", "the agent is the origin's responder"
+    await _change(_as(world, make_auth()), "approvals", "agent", "off")
     await _change(_as(world, make_auth(admin=False)), "participation", "thread", "on")
     changes = await _changes(world)
     recorded = {(c.setting, c.surface, str(c.after)) for c in changes}
     thread = [c.after for c in changes if c.setting == "thread_participation"]
     assert thread == [{"thread": "T1", "mode": "on"}]
     assert ("approvals", "chat", "off") in recorded, "the origin's channel, not an argument"
+    assert any(s == "approvals" and "'value': 'off'" in a for s, _, a in recorded), "agent's own"
 
 
 async def test_a_guardrail_change_waits_for_the_card(world: dict[str, Any]) -> None:
@@ -197,7 +198,7 @@ async def test_get_settings_reads_the_origin_place_and_no_tool_names_a_place(
         "only unavailable features are hidden"
     )
     by_key = {s["key"]: [t["tier"] for t in s["tiers"]] for s in result.settings}
-    assert by_key["approvals"] == ["workspace", "channel", "thread"]
+    assert by_key["approvals"] == ["workspace", "agent", "channel", "thread"]
     assert by_key["progress_plans"] == ["deployment", "workspace", "agent", "channel", "thread"]
     world["origin"] = None
     with pytest.raises(ToolError):

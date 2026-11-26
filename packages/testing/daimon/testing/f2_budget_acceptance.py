@@ -19,7 +19,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import httpx
-from daimon.testing.a7_anthropic import source_pin
 from daimon.testing.anthropic_live import (
     HOST_CONFIG_SHA256,
     LEDGER_ID,
@@ -32,6 +31,7 @@ from daimon.testing.anthropic_live import (
     refuse_ambient,
     refuse_late_usage,
     run_live,
+    source_pin,
 )
 from daimon.testing.f2_native_bounds import (
     install_f2_bounds,

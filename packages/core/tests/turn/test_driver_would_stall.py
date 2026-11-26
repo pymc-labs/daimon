@@ -4,27 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import cast
 
 import pytest
 import structlog
-from anthropic import AsyncAnthropic
 from daimon.core.turn import driver
-from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import (
     BlockForever,
     DelayThenYield,
     FakeAnthropic,
-    RecordingLifecycle,
     YieldEvent,
     run_turn_on_leg,
 )
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle, make_tool_use
-
-_EXEMPT = BillingExempt(reason="cli-operator-run")
 
 
 @pytest.fixture(autouse=True)
@@ -43,16 +37,7 @@ async def _run_until_stopped(fake: FakeAnthropic, *, after_s: float) -> TurnStat
     stopper = asyncio.create_task(stop_later())
     try:
         async with asyncio.timeout(10):
-            return await run_turn_on_leg(
-                anthropic=cast(AsyncAnthropic, fake),
-                session_id="sess_1",
-                user_message="hi",
-                lifecycle=RecordingLifecycle(),
-                cancel=cancel,
-                render_interval_s=0.001,
-                interrupt_timeout_s=5.0,
-                billing=_EXEMPT,
-            )
+            return await run_turn_on_leg(fake, cancel=cancel, interrupt_timeout_s=5.0)
     finally:
         stopper.cancel()
 

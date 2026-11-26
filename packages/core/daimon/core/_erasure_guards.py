@@ -21,7 +21,8 @@ passes untouched, as does a NULL owner (a shared slot). The statements are plain
 the migration that installs them can carry its own copy; a test keeps the two equal.
 
 Not covered by a trigger: a write into a shared conversation, which names no account
-in its row.
+in its row. Migration 0142 installs `INSTALL`; 0217 adds `MONITORING_INSTALL`; 0224
+adds `OPS_EVENTS_INSTALL`.
 """
 
 from __future__ import annotations
@@ -77,6 +78,9 @@ FUNCTIONS: Final[tuple[str, ...]] = (
         "mux_account_erased(NEW.applied #>> '{observation,session,account_id}')",
     ),
 )
+_MONITORING_FUNCTION: Final = _trigger_function(
+    "mux_reject_erased_account", "mux_account_erased(NEW.account_id::text)"
+)
 
 #: table -> (trigger function, events). Slots, leases and release requests are owned by
 #: `account_id`; an operation also by its principal; a usage observation by the account on
@@ -87,7 +91,15 @@ GUARDED_TABLES: Final[dict[str, tuple[str, str]]] = {
     "thread_provider_release": ("mux_reject_erased_owner", "INSERT OR UPDATE"),
     "operation": ("mux_reject_erased_operation", "INSERT OR UPDATE"),
     "usage_observation": ("mux_reject_erased_usage", "INSERT"),
+    # A monitored question, answer or tool call names its person's account (a uuid).
+    "monitored_events": ("mux_reject_erased_account", "INSERT"),
+    # An ops event may name the person it reached; a queued write lands after the purge.
+    "ops_events": ("mux_reject_erased_account", "INSERT"),
 }
+_MUX_TABLES: Final = tuple(
+    table for table in GUARDED_TABLES if table not in ("monitored_events", "ops_events")
+)
+ALL_FUNCTIONS: Final[tuple[str, ...]] = (*FUNCTIONS, _MONITORING_FUNCTION)
 
 
 def trigger_name(table: str) -> str:
@@ -109,15 +121,26 @@ def drop_trigger(table: str) -> str:
 
 INSTALL: Final[tuple[str, ...]] = (
     *FUNCTIONS,
-    *(create_trigger(table) for table in GUARDED_TABLES),
+    *(create_trigger(table) for table in _MUX_TABLES),
 )
 """Everything that installs the guards, in dependency order."""
 
 REMOVE: Final[tuple[str, ...]] = (
-    *(drop_trigger(table) for table in GUARDED_TABLES),
+    *(drop_trigger(table) for table in _MUX_TABLES),
     "DROP FUNCTION IF EXISTS mux_reject_erased_usage()",
     "DROP FUNCTION IF EXISTS mux_reject_erased_operation()",
     "DROP FUNCTION IF EXISTS mux_reject_erased_owner()",
     "DROP FUNCTION IF EXISTS mux_principal_erased(text)",
     "DROP FUNCTION IF EXISTS mux_account_erased(text)",
 )
+
+MONITORING_INSTALL: Final[tuple[str, ...]] = (
+    _MONITORING_FUNCTION,
+    create_trigger("monitored_events"),
+)
+MONITORING_REMOVE: Final[tuple[str, ...]] = (
+    drop_trigger("monitored_events"),
+    "DROP FUNCTION IF EXISTS mux_reject_erased_account()",
+)
+OPS_EVENTS_INSTALL: Final[tuple[str, ...]] = (create_trigger("ops_events"),)
+OPS_EVENTS_REMOVE: Final[tuple[str, ...]] = (drop_trigger("ops_events"),)

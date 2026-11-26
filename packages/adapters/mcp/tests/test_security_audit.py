@@ -9,6 +9,8 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+from .harness import auth_identity
+
 
 async def seed_identity(sm, tenant, account):
     async with sm() as session, session.begin():
@@ -338,7 +340,6 @@ async def test_an_authorize_refusal_a_tool_raises_is_audited_with_its_reason(
     from unittest.mock import MagicMock
 
     from anthropic import AsyncAnthropic
-    from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.runtime import McpRuntime
     from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
     from daimon.core.access_policy import TenantAccessPolicy
@@ -359,7 +360,7 @@ async def test_an_authorize_refusal_a_tool_raises_is_audited_with_its_reason(
         settings=MagicMock(),
         deployment_default=DeploymentDefault(),
     )
-    auth = AuthIdentity(account_id=account, tenant_id=tenant, role=Role.USER, platform="discord")
+    auth = auth_identity(account, tenant, role=Role.USER, platform="discord")
 
     @server.tool
     async def post_here() -> str:

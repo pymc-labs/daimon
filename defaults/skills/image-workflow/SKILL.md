@@ -5,7 +5,7 @@ description: Generate or edit raster images through OpenAI and save the finished
 
 Use the dedicated `image-maker` agent. Obtain missing provider credentials with
 `request_agent_key`, exact `key=OPENAI_API_KEY` and the
-waiting task. Never accept pasted keys. They mount at `/mnt/session/uploads/.env`;
+waiting task. Never accept pasted keys. They mount in the agent's keys file (`scripts/workflow_io.py` finds it);
 every user of that agent can use them and spend the provider project's quota.
 Do not put shared keys on default Daimon. Prefer an operator-limited provider
 project/budget. No unattended routines are added by this skill.
@@ -26,8 +26,8 @@ local path. Download a user-provided attachment with existing authorized file
 access before invoking this script; it accepts no remote reference URLs. Reference
 files must be regular, non-hidden, non-symlink images under 10 MB and 25 megapixels.
 
-Output is validated and saved under `/mnt/session/outputs` with a unique filename,
-which attaches to the reply. Inspect the image using file-handling, report its
+Output is validated and saved in the outputs directory (`output_dir()` in
+`scripts/workflow_io.py`) with a unique filename, which attaches to the reply. Inspect the image using file-handling, report its
 filename and any limitations, and do not post it again through messaging tools.
 The script never overwrites existing outputs or accepts custom output paths.
 

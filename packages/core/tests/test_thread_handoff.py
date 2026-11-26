@@ -12,6 +12,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 import pytest_asyncio
@@ -28,7 +29,9 @@ from daimon.core.authz import (
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.native_admins import AdminCaller
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
+from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import TenantRow, ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import append_event, list_events
@@ -39,6 +42,7 @@ from daimon.core.thread_handoff import (
     RecordedSession,
     ThreadHandoffRefused,
     hand_over_thread,
+    switch_dm_groups,
     switch_thread_on_request,
 )
 from daimon.core.turn_hold import TurnHold
@@ -49,6 +53,11 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
+
+from .shared_fakes import until_lock_wait as _until_lock_wait
+
+_thread_session = partial(make_thread_session, platform="slack", thread_id="T1", channel_id="C1")
+
 
 _NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 _DEFAULT = DeploymentDefault(agent_name="daimon")
@@ -172,22 +181,6 @@ async def race_engine(db_engine: AsyncEngine, db_schema: str) -> AsyncIterator[A
 
 async def _pid(session: AsyncSession) -> int:
     return int((await session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
-
-
-async def _until_lock_wait(engine: AsyncEngine, pid: int) -> None:
-    async with engine.connect() as probe:
-        for _ in range(200):
-            waiting = (
-                await probe.execute(
-                    text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
-                    {"pid": pid},
-                )
-            ).scalar_one_or_none()
-            if waiting == "Lock":
-                return
-            await probe.rollback()
-            await asyncio.sleep(0.025)
-    raise AssertionError(f"backend {pid} never waited on a lock")
 
 
 _PIN_ELSEWHERE = TenantAccessPolicy(agent_channel_pins={"research-bot": ("C9",)})
@@ -793,9 +786,7 @@ async def test_an_owner_binding_is_marked_and_answers_only_its_owner(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.commit()
     async with db_session_factory.begin() as session:
         await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
@@ -833,9 +824,7 @@ async def test_a_thread_other_people_are_in_never_moves_to_a_private_copy(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     if spoke == "recent_turn":
         # Their turn has no session of its own yet (it is still starting).
         await create_origin(
@@ -856,14 +845,7 @@ async def test_a_thread_other_people_are_in_never_moves_to_a_private_copy(
             shared_channel=False,
         )
     else:
-        theirs = await make_thread_session(
-            db_session,
-            tenant=tenant,
-            account=other,
-            platform="slack",
-            thread_id="T1",
-            channel_id="C1",
-        )
+        theirs = await _thread_session(db_session, tenant=tenant, account=other)
         if spoke == "closed_session":
             await thread_sessions.mark_dead(db_session, id=theirs.id)
     await db_session.commit()
@@ -888,9 +870,7 @@ async def test_a_turn_long_past_with_no_session_never_blocks_the_owner(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await create_origin(
         db_session,
         tenant_id=tenant.id,
@@ -927,13 +907,9 @@ async def test_the_owners_own_sessions_and_turns_never_count_as_someone_else(
     await _owned_copy(db_session, tenant, member.id)
     # Only the owner has ever been here: an earlier session of theirs (closed), the
     # live one, and their own turn now.
-    closed = await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    closed = await _thread_session(db_session, tenant=tenant, account=member)
     await thread_sessions.mark_dead(db_session, id=closed.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await create_origin(
         db_session,
         tenant_id=tenant.id,
@@ -970,12 +946,8 @@ async def test_a_session_with_no_account_counts_as_someone_else(
     tenant = await _seed(db_session)
     member = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
-    legacy = await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
+    legacy = await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.execute(
         update(ThreadSession).where(ThreadSession.id == legacy.id).values(account_id=None)
     )
@@ -1029,9 +1001,7 @@ async def test_an_owner_thread_stops_routing_when_its_copy_changes_owner(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.commit()
     async with db_session_factory.begin() as session:
         await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
@@ -1063,9 +1033,7 @@ async def test_an_owner_thread_never_routes_a_caller_with_no_account(
     tenant = await _seed(db_session)
     member = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.commit()
     async with db_session_factory.begin() as session:
         await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
@@ -1074,3 +1042,135 @@ async def test_an_owner_thread_never_routes_a_caller_with_no_account(
         config = await resolve(session, context=anonymous, default=_DEFAULT)
     # Fail closed: the channel's own agent, never the private copy.
     assert config.responder_ma_agent_id != "agt_copy" and config.thread_binding_id is None
+
+
+async def _dm_switch(
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    *,
+    platform: str = "slack",
+    thread_id: str = "dm:abc",
+    dm_groups: frozenset[str] | None = None,
+) -> ThreadAgentBindingRow:
+    async with factory.begin() as session:
+        return await hand_over_thread(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id="D1",
+            thread_id=thread_id,
+            caller=_caller(account_id, admin=True),
+            destination=_RESEARCH,
+            current_responder_ma_agent_id="agt_daimon",
+            default=_DEFAULT,
+            now=_NOW,
+            dm_groups=dm_groups,
+        )
+
+
+async def _dm_seed(db_session: AsyncSession) -> tuple[TenantRow, uuid.UUID]:
+    tenant = await _seed(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await db_session.commit()
+    return tenant, account.id
+
+
+async def test_a_dm_switch_to_an_agent_that_admits_the_person_is_remembered(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Moving a private chat to an allowed agent binds it and saves the pick."""
+    tenant, account_id = await _dm_seed(db_session)
+    moved = await _dm_switch(db_session_factory, tenant.id, account_id)
+    assert moved.responder_ma_agent_id == "agt_research", "the DM scope is bound to the agent"
+    async with db_session_factory() as session:
+        saved = await dm_store.get_pick(session, tenant_id=tenant.id, account_id=account_id)
+    assert saved is not None and saved.agent_name == "research-bot", "the pick is saved"
+
+
+@pytest.mark.parametrize("kind", ["grant", "lock"])
+async def test_a_dm_switch_to_an_agent_that_does_not_admit_the_person_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], kind: str
+) -> None:
+    """A list that leaves the person out, or a lock on another agent, refuses the move."""
+    tenant, account_id = await _dm_seed(db_session)
+    async with db_session_factory.begin() as session:
+        if kind == "grant":
+            await dm_store.set_grant(
+                session, tenant_id=tenant.id, agent_name="research-bot", who="listed",
+                user_ids=["U9"], group_ids=[], set_by=None, now=_NOW,
+            )  # fmt: skip
+        else:
+            await dm_store.add_rule(
+                session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+                agent_name="daimon", locked=True, set_by=None, now=_NOW,
+            )  # fmt: skip
+    with pytest.raises(ThreadHandoffRefused) as refused:
+        await _dm_switch(db_session_factory, tenant.id, account_id)
+    assert refused.value.refusal.reason == "dm_not_allowed", "the move names no access"
+    async with db_session_factory() as session:
+        assert await dm_store.get_pick(session, tenant_id=tenant.id, account_id=account_id) is None
+
+
+@pytest.mark.parametrize(("platform", "thread_id"), [("slack", "dm:abc"), ("teams", "a:chat1")])
+async def test_a_dm_switch_reads_the_persons_groups_for_a_group_grant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+    thread_id: str,
+) -> None:
+    """A grant listing a group admits its members; unknown groups refuse. Teams 1:1 chats too."""
+    tenant, account_id = await _dm_seed(db_session)
+    async with db_session_factory.begin() as session:
+        await dm_store.set_grant(
+            session, tenant_id=tenant.id, agent_name="research-bot", who="listed",
+            user_ids=[], group_ids=["G1"], set_by=None, now=_NOW,
+        )  # fmt: skip
+        # A Teams 1:1 chat is still a place for the agent rules: the agent answers there.
+        await set_fields(
+            session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="D1"),
+            tenant_id=tenant.id, agent_name="research-bot",
+        )  # fmt: skip
+    asked: list[frozenset[str]] = []
+
+    async def lookup(user_id: str, wanted: frozenset[str]) -> frozenset[str]:
+        assert user_id == "U1"
+        asked.append(wanted)
+        return frozenset({"G1"})
+
+    groups = await switch_dm_groups(
+        db_session_factory, tenant_id=tenant.id, platform=platform,
+        thread_id=thread_id, user_id="U1", groups=lookup,
+    )  # fmt: skip
+    assert asked == [frozenset({"G1"})] and groups == frozenset({"G1"}), "the grant's groups"
+    with pytest.raises(ThreadHandoffRefused):
+        await _dm_switch(
+            db_session_factory, tenant.id, account_id, platform=platform, thread_id=thread_id
+        )
+    moved = await _dm_switch(
+        db_session_factory, tenant.id, account_id,
+        platform=platform, thread_id=thread_id, dm_groups=groups,
+    )  # fmt: skip
+    assert moved.responder_ma_agent_id == "agt_research", "a member of the group may switch"
+    async with db_session_factory() as session:
+        saved = await dm_store.get_pick(session, tenant_id=tenant.id, account_id=account_id)
+    assert saved is not None and saved.agent_name == "research-bot", "the pick is saved"
+
+
+async def test_switch_dm_groups_is_none_outside_a_dm_or_without_a_lookup(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def lookup(_user_id: str, _wanted: frozenset[str]) -> frozenset[str]:
+        raise AssertionError("never asked outside a DM")
+
+    tenant_id = uuid.uuid4()
+    for platform, thread_id, groups in (
+        ("slack", "1700.1", lookup),
+        ("teams", "19:abc@thread.tacv2", lookup),
+        ("slack", "dm:abc", None),
+    ):
+        assert await switch_dm_groups(
+            db_session_factory, tenant_id=tenant_id, platform=platform,
+            thread_id=thread_id, user_id="U1", groups=groups,
+        ) is None  # fmt: skip

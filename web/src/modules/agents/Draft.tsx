@@ -1,5 +1,5 @@
 import { ArrowRight, ChevronRight, Minus, Pencil, Plus, TriangleAlert } from "lucide-react"
-import { useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -7,8 +7,11 @@ import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { useApply, useDiscard } from "./api"
 import { Diff, EffectTag } from "./bits"
+import { PANEL_W } from "./Canvas"
 import { EFFECT } from "./lib"
+import { ModelPreviewPanel } from "./ModelPreviewPanel"
 import type { Agent, Change, Draft, Effect } from "./types"
+import { usePendingPreview } from "./usePendingPreview"
 
 const KIND = { add: Plus, remove: Minus, edit: Pencil }
 const ORDER: Effect[] = ["session", "threads", "live"]
@@ -18,7 +21,7 @@ function ChangeRow({ c, showEffect }: { c: Change; showEffect: boolean }) {
   const Icon = KIND[c.kind]
   return (
     <div>
-      <div className={cn("flex min-h-8 items-center gap-2 text-sm", c.text && "cursor-pointer")} onClick={() => c.text && setOpen(!open)}>
+      <div className="flex min-h-8 items-center gap-2 text-sm">
         <span className={cn("flex size-4 shrink-0 items-center justify-center rounded", c.kind === "add" ? "text-success" : c.kind === "remove" ? "text-destructive" : "text-muted-foreground")}>
           <Icon className="size-3.5" />
         </span>
@@ -30,7 +33,7 @@ function ChangeRow({ c, showEffect }: { c: Change; showEffect: boolean }) {
             {c.after && <span className="truncate text-foreground/80">{c.after}</span>}
           </span>
         )}
-        {c.text && <span className="flex items-center gap-0.5 text-xs text-link">Diff<ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} /></span>}
+        {c.text && <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="flex items-center gap-0.5 text-xs text-link">Diff<ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} /></button>}
         {showEffect && <EffectTag effect={c.effect} className="ml-auto" />}
       </div>
       {open && c.before != null && c.after != null && <Diff before={c.before} after={c.after} className="mt-1 mb-2 max-h-72 overflow-y-auto" />}
@@ -46,13 +49,25 @@ export function DraftBar({ agent, draft, shift }: { agent: Agent; draft: Draft; 
   const [review, setReview] = useState(false)
   const discard = useDiscard(agent.id)
   const n = draft.changes.length
+  // Centred beside the open inspector when it fits there, else over the whole canvas and above the inspector.
+  const bar = useRef<HTMLDivElement>(null)
+  const [room, setRoom] = useState(true)
+  useLayoutEffect(() => {
+    const el = bar.current, box = el?.offsetParent
+    if (!el || !box) return
+    const ro = new ResizeObserver(() => setRoom(box.clientWidth - PANEL_W >= el.offsetWidth + 32))
+    ro.observe(el); ro.observe(box)
+    return () => ro.disconnect()
+  }, [n > 0])  // eslint-disable-line react-hooks/exhaustive-deps
   if (!n) return null
+  const beside = shift && room
   const counts = ORDER.map((e) => [e, draft.changes.filter((c) => c.effect === e).length] as const).filter(([, k]) => k)
   return (
     <>
       <div
-        className="absolute bottom-4 z-10 flex h-11 -translate-x-1/2 items-center gap-3 rounded-xl border bg-popover pr-1.5 pl-4 shadow-[0_8px_28px_rgb(12_31_64/0.12)] transition-[left]"
-        style={{ left: shift ? "calc((100% - 440px) / 2)" : "50%" }}
+        ref={bar}
+        className={cn("absolute bottom-4 flex h-11 w-max -translate-x-1/2 items-center gap-3 rounded-xl border bg-popover pr-1.5 pl-4 shadow-[0_8px_28px_rgb(12_31_64/0.12)] transition-[left]", shift && !room ? "z-30" : "z-10")}
+        style={{ left: beside ? `calc((100% - ${PANEL_W}px) / 2)` : "50%" }}
       >
         <span className="size-1.5 rounded-full bg-link" />
         <span className="text-sm font-medium whitespace-nowrap tabular">{n} {n === 1 ? "change" : "changes"}</span>
@@ -70,6 +85,10 @@ export function DraftBar({ agent, draft, shift }: { agent: Agent; draft: Draft; 
 function Review({ open, onOpenChange, agent, draft }: { open: boolean; onOpenChange: (o: boolean) => void; agent: Agent; draft: Draft }) {
   const [note, setNote] = useState("")
   const apply = useApply(agent.id)
+  const pick = usePendingPreview(agent, draft.config.model)
+  const preview = pick.data
+  // A pick that is refused, still loading or failed to load cannot be applied.
+  const blocked = !!preview?.refusal || pick.isFetching || pick.isError
   const groups = ORDER.map((e) => ({ e, items: draft.changes.filter((c) => c.effect === e) })).filter((g) => g.items.length)
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -95,12 +114,13 @@ function Review({ open, onOpenChange, agent, draft }: { open: boolean; onOpenCha
               <ChangeList changes={g.items} showEffect={false} />
             </section>
           ))}
+          {preview && <ModelPreviewPanel preview={preview} className="m-5 mt-3" />}
         </div>
         <DialogFooter className="m-0 items-center px-5 py-3 sm:justify-between">
           <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note" className="h-8 sm:max-w-64" />
           <div className="flex gap-2">
             <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button disabled={apply.isPending || draft.stale} onClick={() => apply.mutate(note, { onSuccess: () => { setNote(""); onOpenChange(false) } })}>
+            <Button disabled={apply.isPending || draft.stale || blocked} onClick={() => apply.mutate({ note }, { onSuccess: () => { setNote(""); onOpenChange(false) } })}>
               Apply as v{agent.version + 1}
             </Button>
           </div>

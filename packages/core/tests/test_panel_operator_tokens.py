@@ -49,7 +49,13 @@ async def _mint(
 
 
 def test_the_panel_never_offers_the_deployment_scope() -> None:
-    assert PANEL_SCOPES == ("tenant:read", "channels:write", "agents:archive", "promo:redeem")
+    assert PANEL_SCOPES == (
+        "tenant:read",
+        "channels:write",
+        "agents:archive",
+        "promo:redeem",
+        "issues:read",
+    )
 
 
 async def test_mint_requires_recorded_platform_authority_and_refuses_promo_create(

@@ -190,12 +190,28 @@ async def test_headless_relay_credential_names_no_session(
     )
 
 
+async def test_refresh_keeps_a_routines_signed_owner(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    routine_id = uuid.uuid4()
+    binding = RelayBinding("Helper", routine_id=routine_id, owner="42")
+    vault, account_id, agent_id = await _relay_vault(db_session_factory, binding, RELAY)
+    assert _signed(vault.by_url(RELAY))[RELAY_CLAIM]["owner"] == "42"
+    await _refresh(
+        db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY, OTHER),
+        now=NOW + dt.timedelta(minutes=20),
+    )  # fmt: skip
+    for url in (RELAY, OTHER):
+        claim = _signed(vault.by_url(url))[RELAY_CLAIM]
+        assert (claim["routine"], claim["owner"]) == (str(routine_id), "42"), "kept on refresh"
+
+
 async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     key = uuid.uuid4()
     vault, account_id, agent_id = await _relay_vault(
-        db_session_factory, RelayBinding("Helper", key), RELAY
+        db_session_factory, RelayBinding("Helper", key, grant="grant-1"), RELAY
     )
     old = vault.by_url(RELAY)["auth"]["token"]
 
@@ -208,6 +224,7 @@ async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(
     assert renewed["auth"]["token"] != old, "a credential near expiry is re-minted"
     assert added["auth"]["token"] == renewed["auth"]["token"], "the new relay gets the same one"
     assert _signed(added)[RELAY_CLAIM]["session"] == str(key), "the binding survives a refresh"
+    assert _signed(added)[RELAY_CLAIM]["grant"] == "grant-1", "so does the execution grant"
 
 
 async def test_fresh_relay_vault_and_other_vaults_are_left_alone(
@@ -240,3 +257,48 @@ async def test_closing_a_session_archives_only_its_relay_vault() -> None:
     for vault in (relay, shared):
         await archive_relay_vaults(_client(vault), ["vlt_1"], scope=SCOPE)
     assert (relay.archived, shared.archived) == (True, False), "the shared vault stays"
+
+
+async def test_a_session_opened_before_agent_chat_bindings_gains_one_on_its_next_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    vault, account_id, agent_id = await _relay_vault(
+        db_session_factory, RelayBinding("Helper"), RELAY
+    )
+    writes = len(vault.writes)
+    await refresh_mounted_mcp_vaults(
+        _client(vault), vault_ids=["vlt_1"], account_id=account_id, agent_id=agent_id,
+        jwt_secret=SECRET, public_url=PUBLIC_URL, now=NOW, session_factory=db_session_factory,
+        scope=SCOPE, relay_urls=(RELAY,), agent_chat="sesn_old",
+    )  # fmt: skip
+    assert len(vault.writes) > writes, "a fresh credential is still re-minted to gain the binding"
+    assert _signed(vault.by_url(RELAY))[RELAY_CLAIM] == {
+        "agent_name": "Helper",
+        "agent_chat": "sesn_old",
+    }, "the relay can now read that session's driver"
+
+    await _refresh(
+        db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY,),
+        now=NOW + dt.timedelta(minutes=20),
+    )  # fmt: skip
+    assert _signed(vault.by_url(RELAY))[RELAY_CLAIM]["agent_chat"] == "sesn_old", (
+        "a later refresh that names no session keeps the binding"
+    )
+
+
+async def test_a_chat_session_or_routine_binding_never_gains_an_agent_chat(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    for binding in (
+        RelayBinding("Helper", uuid.uuid4(), grant="grant-1"),
+        RelayBinding("Helper", routine_id=uuid.uuid4(), owner="42"),
+    ):
+        vault, account_id, agent_id = await _relay_vault(db_session_factory, binding, RELAY)
+        before = _signed(vault.by_url(RELAY))[RELAY_CLAIM]
+        await refresh_mounted_mcp_vaults(
+            _client(vault), vault_ids=["vlt_1"], account_id=account_id, agent_id=agent_id,
+            jwt_secret=SECRET, public_url=PUBLIC_URL, now=NOW,
+            session_factory=db_session_factory, scope=SCOPE, relay_urls=(RELAY,),
+            agent_chat="sesn_x",
+        )  # fmt: skip
+        assert _signed(vault.by_url(RELAY))[RELAY_CLAIM] == before, "its binding is unchanged"

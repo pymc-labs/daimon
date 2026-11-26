@@ -73,7 +73,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserMessageEventParams,
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
-from daimon.core.config import load_turn_settings
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.context_provider import ContextHook, ContextInput
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S, SessionEvent, terminal_stop_reason
@@ -88,8 +88,7 @@ from daimon.core.turn.approvals import (
 from daimon.core.turn.ceiling import ceiling_error, current_turn_deadline, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
 from daimon.core.turn.io import (
-    LegacyTurnIO,
-    TrackedLegacyTurnIO,
+    MuxTurnIO,
     TurnConnectionLost,
     TurnIO,
     TurnStream,
@@ -98,6 +97,7 @@ from daimon.core.turn.io import (
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
 from daimon.core.turn.mutation_gate import (
     initial_send_check,
+    initial_send_prefix,
     unattended_execution,
     unattended_gate,
 )
@@ -125,11 +125,12 @@ from daimon.core.turn.termination import (
     termination_reason,
 )
 from daimon.core.usage_billing import ObservationBilled
+from daimon.core.usage_recording import web_search_call
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic import LegacyTurnTransport, single_attempt_mutation
+from mux.drivers.anthropic import single_attempt_mutation
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, RetryCallState, retry_if_exception_type
 
@@ -139,6 +140,23 @@ log = structlog.get_logger(__name__)
 # user's message is handed to the provider, so the caller knows whether a failed
 # turn ever sent it (and may put back what it would have carried).
 SEND_ATTEMPTED: ContextVar[list[bool] | None] = ContextVar("turn_send_attempted", default=None)
+
+
+@dataclasses.dataclass(frozen=True)
+class SendClaim:
+    """A framing the first send consumes, claimed once by whichever turn sends it first.
+
+    `take` returns False when another turn already claimed it; the send then goes
+    without it: its text drops `user_prefix` and its system blocks are left out.
+    """
+
+    take: Callable[[], Awaitable[bool]]
+    user_prefix: str
+
+
+# Set by the caller around a turn: awaited just before the user's message is handed
+# over, to settle what the send consumes. A failure here fails the turn unsent.
+SEND_CLAIM: ContextVar[SendClaim | None] = ContextVar("turn_send_claim", default=None)
 
 InterruptPhase = Literal[
     "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate"
@@ -197,6 +215,7 @@ async def _read_after_quiet[R](
                 raise TurnConnectionLost(f"{name} read kept failing") from error
             log.warning(
                 "turn.quiet_read_retry",
+                causes=backend_refusal_causes(error),
                 read=name,
                 session_id=session_id,
                 error_type=type(error).__name__,
@@ -608,6 +627,8 @@ async def _watch_silence(
 # clients retry reads eight times) could otherwise hold the turn until its
 # ceiling on a single question; a read that runs out is a transient failure.
 _STATUS_READ_TIMEOUT_S = 30.0
+DEFAULT_STREAM_READ_TIMEOUT_S = 120.0
+"""The stream read timeout of a backend that names none (Managed Agents)."""
 
 # A replay walks the session's whole log, so a long-lived thread can outgrow the
 # default budget. Inside a turn it may use what the ceiling leaves, less this
@@ -803,7 +824,7 @@ async def run_turn(
     cancel: asyncio.Event,
     render_interval_s: float = 0.05,
     interrupt_timeout_s: float = 120.0,
-    stream_read_timeout_s: float = 120.0,
+    stream_read_timeout_s: float | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
@@ -813,7 +834,6 @@ async def run_turn(
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
-    path: Literal["legacy", "mux"] | None = None,
     backend: ManagedAgents | None = None,
     scope: Scope | None = None,
     session_ref: ResourceRef | None = None,
@@ -823,8 +843,10 @@ async def run_turn(
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
-    `stream_read_timeout_s` (default 120.0) is the per-call read timeout
-    passed to `events.stream(...)`. A wire probe found the server sending
+    `stream_read_timeout_s` (default: the turn I/O's own `stream_read_timeout_s`,
+    else 120.0) is the per-call read timeout passed to `events.stream(...)`.
+    Gemini names its own: its streams stay silent while the model thinks.
+    For Managed Agents, a wire probe found the server sending
     `:keepalive` SSE comment frames every 30s on every connection from
     connect; those bytes reset httpx's read clock even though the SDK's SSE
     decoder drops comment lines before the driver ever sees them. 120s is
@@ -872,20 +894,28 @@ async def run_turn(
 
     Returns the final `TurnState`.
     """
-    selected_path = path if path is not None else load_turn_settings().path
-    persistence = current_persistence.get() if selected_path == "mux" else None
+    persistence = current_persistence.get()
     io = turn_io(
         anthropic,
         session_id,
-        path=selected_path,
         backend=backend,
         scope=scope,
         session_ref=session_ref,
-        read_timeout_s=stream_read_timeout_s,
+        read_timeout_s=(
+            stream_read_timeout_s
+            if stream_read_timeout_s is not None
+            else DEFAULT_STREAM_READ_TIMEOUT_S
+        ),
         profile=profile,
         backend_request=backend_request,
         persistence=persistence,
         provider_actions=provider_actions,
+    )
+    read_timeout_s: float = (
+        stream_read_timeout_s
+        if stream_read_timeout_s is not None
+        else cast("float | None", getattr(io, "stream_read_timeout_s", None))
+        or DEFAULT_STREAM_READ_TIMEOUT_S
     )
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
@@ -913,36 +943,52 @@ async def run_turn(
         context_prefix = context_input.response.turn_fragment
         if provider_system and not privileged:
             context_prefix = provider_system + "\n\n" + context_prefix
+        text = f"{context_prefix}\n\n{user_message}" if context_prefix else user_message
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
-            BetaManagedAgentsTextBlockParam(
-                type="text",
-                text=f"{context_prefix}\n\n{user_message}" if context_prefix else user_message,
-            ),
+            BetaManagedAgentsTextBlockParam(type="text", text=text),
         ]
         event: BetaManagedAgentsUserMessageEventParams = {
             "type": "user.message",
             "content": content,
         }
-        batch: list[BetaManagedAgentsEventParams] = [event]
-        combined_system = list(system_blocks)
-        if provider_system and privileged:
-            combined_system.append({"type": "text", "text": provider_system})
-        if combined_system:
-            # LAST, and immediately after the user.message: the live API
-            # rejects the whole request otherwise (at most one per request,
-            # must be final, must follow a user.message / tool result).
-            system_event: BetaManagedAgentsSystemMessageEventParams = {
-                "type": "system.message",
-                "content": combined_system,
-            }
-            batch.append(system_event)
+
+        def _batch(
+            framing: Sequence[BetaManagedAgentsSystemContentBlockParam],
+        ) -> list[BetaManagedAgentsEventParams]:
+            events: list[BetaManagedAgentsEventParams] = [event]
+            combined_system = list(framing)
+            if provider_system and privileged:
+                combined_system.append({"type": "text", "text": provider_system})
+            if combined_system:
+                # LAST, and immediately after the user.message: the live API
+                # rejects the whole request otherwise (at most one per request,
+                # must be final, must follow a user.message / tool result).
+                system_event: BetaManagedAgentsSystemMessageEventParams = {
+                    "type": "system.message",
+                    "content": combined_system,
+                }
+                events.append(system_event)
+            return events
+
+        batch = _batch(system_blocks)
         async with send_guard() if send_guard is not None else contextlib.nullcontext():
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
             if (gate := unattended_gate.get()) is not None:
                 await gate()
+            if (prefix_hook := initial_send_prefix.get()) is not None and (
+                prefix := await prefix_hook()
+            ):
+                # Confirmed calls run here: after the last checks, inside the lease.
+                text = f"{prefix}\n\n{text}"
+                content[-1] = BetaManagedAgentsTextBlockParam(type="text", text=text)
+            if (claim := SEND_CLAIM.get()) is not None and not await claim.take():
+                # Another turn sent the framing first.
+                text = text.replace(claim.user_prefix, "", 1)
+                content[-1] = BetaManagedAgentsTextBlockParam(type="text", text=text)
+                batch = _batch(())
             mark = SEND_ATTEMPTED.get()
             if mark is not None:
                 mark.append(True)  # from here the message may have been delivered
@@ -974,7 +1020,7 @@ async def run_turn(
             cancel=cancel,
             render_interval_s=render_interval_s,
             interrupt_timeout_s=interrupt_timeout_s,
-            stream_read_timeout_s=stream_read_timeout_s,
+            stream_read_timeout_s=read_timeout_s,
             now=now,
             entry="resume" if resume_existing else "run",
             billing=billing,
@@ -983,37 +1029,26 @@ async def run_turn(
         )
 
     async def _pump_unwedging() -> TurnState:
-        nonlocal io
         try:
             return await _new_pump()
         except _SessionAwaitingConfirmations as stuck:
             log.warning("turn.session_awaiting_confirmations", session_id=session_id)
-            if selected_path == "mux":
-                recovery_profile = profile or (
-                    backend_request.profile if backend_request is not None else None
-                )
-                if backend is not None or recovery_profile not in (
-                    None,
-                    "anthropic.managed_agents",
-                ):
-                    # No SDK authorization for an arbitrary injected backend.
-                    # Finalize the original refusal without opening more I/O.
-                    unwedge_failure[0] = stuck.__cause__
-                    return await _new_pump()
-                # Recovery needs the provider's filtered native idle history.
-                # Keep main's proof/retry semantics on the existing SDK client;
-                # the rejected batch was never accepted. Only this turn falls
-                # back, and the closed first stream cannot end the retry.
-                if persistence is not None:
-                    io = TrackedLegacyTurnIO(
-                        anthropic, session_id, scope=persistence.scope, persistence=persistence
-                    )
-                else:
-                    io = LegacyTurnIO(anthropic, session_id, scope=scope)
-                log.info("turn.confirmation_recovery_legacy", session_id=session_id)
-            settled = await _interrupt_and_settle(
-                anthropic, session_id=session_id, cancel=cancel, io=io, scope=scope
+            recovery_profile = profile or (
+                backend_request.profile if backend_request is not None else None
             )
+            if (
+                backend is not None
+                or recovery_profile not in (None, "anthropic.managed_agents")
+                or not isinstance(io, MuxTurnIO)
+            ):
+                # Recovery reads Anthropic's filtered idle history, which only
+                # the host's own Anthropic composition offers. Finalize the
+                # original refusal without opening more I/O.
+                unwedge_failure[0] = stuck.__cause__
+                return await _new_pump()
+            # The refused batch was never accepted, so the retried pump sends
+            # it again through the same codec and journal.
+            settled = await _interrupt_and_settle(io, session_id=session_id, cancel=cancel)
             if settled == "failed":
                 unwedge_failure[0] = stuck.__cause__
             # "cancelled" leaves `cancel` set: the retried pump ends as a Stop.
@@ -1036,6 +1071,7 @@ async def run_turn(
                     "turn.usage_reconciliation_failed",
                     session_id=session_id,
                     error_class=type(error).__name__,
+                    causes=backend_refusal_causes(error),
                 )
             raise
         final_cell = [final]
@@ -1055,7 +1091,6 @@ async def run_turn(
     pumped = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
 
     async def abandon_native() -> None:
-        # Looked up at failure time: recovery may have swapped `io`.
         hook = getattr(io, "abandon_native", None)
         if hook is not None:
             await hook()
@@ -1135,12 +1170,7 @@ class _SessionAwaitingConfirmations(Exception):
 
 
 async def _interrupt_and_settle(
-    anthropic: AsyncAnthropic,
-    *,
-    session_id: str,
-    cancel: asyncio.Event,
-    io: TurnIO | None = None,
-    scope: Scope | None = None,
+    io: MuxTurnIO, *, session_id: str, cancel: asyncio.Event
 ) -> Literal["idle", "cancelled", "failed"]:
     """Interrupt a session stuck on confirmations and wait until it is idle.
 
@@ -1156,17 +1186,13 @@ async def _interrupt_and_settle(
     waits on confirmations.
     """
 
-    recovery_io = io if io is not None else LegacyTurnIO(anthropic, session_id, scope=scope)
-
     async def _recover() -> bool:
-        await recovery_io.send([{"type": "user.interrupt"}])
+        await io.request_interrupt()
         while True:
-            status = await recovery_io.status()
+            status = await io.status()
             if status == "terminated":
                 return False
-            if status == "idle" and await _latest_idle_is_settled(
-                anthropic, session_id=session_id, scope=scope
-            ):
+            if status == "idle" and await io.latest_idle_is_settled():
                 return True
             await asyncio.sleep(0.5)
 
@@ -1189,23 +1215,18 @@ async def _interrupt_and_settle(
         log.warning("turn.session_unwedge_timeout", session_id=session_id)
         return "failed"
     if (error := recovery.exception()) is not None:
-        log.warning("turn.session_unwedge_failed", session_id=session_id, error=str(error))
+        log.warning(
+            "turn.session_unwedge_failed",
+            session_id=session_id,
+            error=str(error),
+            causes=backend_refusal_causes(error),
+        )
         return "failed"
     if not recovery.result():
         log.warning("turn.session_unwedge_failed", session_id=session_id, error="terminated")
         return "failed"
     log.info("turn.session_unwedged", session_id=session_id)
     return "idle"
-
-
-async def _latest_idle_is_settled(
-    anthropic: AsyncAnthropic, *, session_id: str, scope: Scope | None = None
-) -> bool:
-    """Whether the session's most recent idle exists and is not a `requires_action` pause.
-
-    No idle in the history is no evidence MA took the interrupt, so it does not count.
-    """
-    return await LegacyTurnTransport(anthropic, session_id, scope=scope).latest_idle_is_settled()
 
 
 async def _pump(
@@ -1601,14 +1622,16 @@ async def _pump(
             )
         except (_anthropic.APIError, ProviderError) as err:
             await _cancel_render()
+            wait = err.retry_after_s if isinstance(err, ProviderError) else None
             return await _finalize_upstream(
                 state_cell=state_cell,
                 lifecycle=lifecycle,
                 render_once=_render_once,
                 session_id=session_id,
                 err=err,
-                rate_limit_until=None,
-                retry_after_s=None,
+                # A native provider's 429 names its wait (`ProviderError.retry_after_s`).
+                rate_limit_until=now() + timedelta(seconds=wait) if wait is not None else None,
+                retry_after_s=wait,
                 renders_failed=renders_failed_cell[0],
             )
 
@@ -1797,7 +1820,7 @@ def _reasked_after_result(events: Sequence[object], pending_ids: set[str]) -> bo
 
 
 async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: set[str]) -> None:
-    """Meter one `span.model_request_end` through the turn's recorder, once.
+    """Meter one `span.model_request_end` or web search through the turn's recorder, once.
 
     `billed_event_ids` is per turn and shared across stream generations and
     replays, so a call is billed exactly once whether the driver first sees
@@ -1819,6 +1842,15 @@ async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: s
         billed_event_ids.add(key)
         return
     if not isinstance(event, BetaManagedAgentsSpanModelRequestEndEvent):
+        # Claude spans carry no search count, so each search bills by its tool events.
+        if (
+            isinstance(billing, Billed)
+            and (search := web_search_call(event, billed_event_ids)) is not None
+        ):
+            key = f"web_search:{search.id}"
+            if key not in billed_event_ids:
+                await billing.record(event=search)
+                billed_event_ids.add(key)
         return
     if isinstance(billing, ObservationBilled):
         raise ValueError("alternate-provider billing cannot consume a synthetic Anthropic meter")
@@ -2051,11 +2083,18 @@ async def _consume_with_reconnect(
                         "turn.idle_check_failed",
                         session_id=session_id,
                         error_type=type(error).__name__,
+                        causes=backend_refusal_causes(error),
                     )
                     continue
                 if silence is not None:
                     silence.status = status
                 if status in {"running", "rescheduling"}:
+                    # A provider whose stream omits what a status read stores
+                    # (Gemini: a running interaction's usage) replays it from
+                    # stored history into the same open stream.
+                    idle_running = getattr(io, "idle_running", None)
+                    if callable(idle_running):
+                        idle_running()
                     continue
                 log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
                 raise _EventlessCycle(reason="read_timeout")
@@ -2393,6 +2432,7 @@ async def _finalize_success_or_error(
             turn_error_kind=final_state.error.kind,
             error=final_state.error.message,
             renders_failed=renders_failed,
+            causes=backend_refusal_causes(final_state.error),
         )
         await lifecycle.on_terminal_failure(final_state, final_state.error)
     else:
@@ -2437,6 +2477,7 @@ async def _finalize_connection_lost(
         turn_error_kind="connection_lost",
         error=str(err),
         renders_failed=renders_failed,
+        causes=backend_refusal_causes(err),
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -2469,17 +2510,13 @@ async def _finalize_upstream(
         ),
     )
     await render_once(state_cell[0])
-    provider = err if isinstance(err, ProviderError) else None
     log.warning(
         "turn.failed",
         session_id=session_id,
         turn_error_kind="upstream",
         error=str(err),
         renders_failed=renders_failed,
-        # Redacted provider detail: which check or HTTP status ended the turn.
-        provider_category=provider.category if provider else None,
-        provider_native_code=provider.native_code if provider else None,
-        provider_http_status=provider.native_error_code if provider else None,
+        causes=backend_refusal_causes(err),
     )
     if rate_limit_until is not None:
         log.warning(
@@ -2517,6 +2554,7 @@ async def _finalize_interrupted(
         turn_error_kind="interrupted",
         error=turn_err.message,
         renders_failed=renders_failed,
+        causes=backend_refusal_causes(turn_err),
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -2538,8 +2576,8 @@ async def _handle_interrupt_in_consume(
     try:
         stop = await io.interrupt(timeout_s=interrupt_timeout_s)
     except TurnError as err:
-        # send_interrupt_and_wait raises TurnError(kind="interrupt_timeout")
-        # on its timeout; propagate through the on_terminal_failure path.
+        # The codec raises TurnError(kind="interrupt_timeout") on its timeout;
+        # propagate through the on_terminal_failure path.
         log.warning(
             "turn.interrupt.timeout",
             session_id=session_id,
@@ -2555,6 +2593,7 @@ async def _handle_interrupt_in_consume(
             turn_error_kind=err.kind,
             error=err.message,
             renders_failed=renders_failed,
+            causes=backend_refusal_causes(err),
         )
         await lifecycle.on_terminal_failure(state_cell[0], err)
         return state_cell[0]

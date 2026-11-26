@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_committing_engine as db_committing_engine
 from daimon.testing.db import db_committing_pool as db_committing_pool
@@ -18,6 +20,24 @@ from daimon.testing.db import db_session_factory as db_session_factory
 from daimon.testing.factories import make_tenant as make_tenant
 
 _xdist_enabled = False
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _end_audience_renewal() -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """A bot that got a ready or a resume renews room facts until its process ends. Tests
+    share one event loop, so end that loop with the test: it must not tick and log into a
+    later one."""
+    yield
+    loops = [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name() == "discord.audience_renewal" and not task.done()
+    ]
+    for task in loops:
+        task.cancel()
+    await asyncio.gather(*loops, return_exceptions=True)
+
+
 _xdist_worker = False
 
 
@@ -66,23 +86,3 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
         f"{report.longreprtext}\n",
         encoding="utf-8",
     )
-
-
-@pytest.fixture(autouse=True)
-def isolate_card_edits() -> Iterator[None]:
-    """Card edits finish in the background; one test's stalled edit must not
-    hold the next test's edit to a card with the same id."""
-    from daimon.core.posted_controls.lifecycle import cancel_pending_card_edits
-
-    yield
-    cancel_pending_card_edits()
-
-
-@pytest.fixture(autouse=True)
-def isolate_agent_faces() -> Iterator[None]:
-    """Creating an agent starts its face render in the background; one test's
-    render must not write into the next test's database or back-off state."""
-    from daimon.core.agent_identity import cancel_pending_agent_faces
-
-    yield
-    cancel_pending_agent_faces()

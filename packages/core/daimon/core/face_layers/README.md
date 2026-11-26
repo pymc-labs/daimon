@@ -44,19 +44,3 @@ Run the focused test after each edit:
 ```bash
 uv run pytest -n 2 packages/core/tests/test_agent_faces.py
 ```
-
-Render the pick sheet and the Slack thread preview from the shipped code:
-
-```bash
-uv run python scripts/render_agent_face_sheet.py
-uv run python scripts/render_agent_face_slack_mock.py
-uv run python scripts/render_agent_face_hat_sheet.py
-```
-
-The output files are `docs/assets/agent-faces-50.png`,
-`docs/assets/agent-face-slack-thread.png`, and
-`docs/assets/agent-face-hats.png`. The hat sheet shows 512 px and actual-size
-36 px square and rounded-square headers. The mock renders agents at 36 px and
-uses the classic generated face for the built-in app. Pass
-`--built-in-image PATH` to use a platform's current app picture, and
-`--output PATH` to write another copy.

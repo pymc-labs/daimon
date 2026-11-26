@@ -11,7 +11,7 @@ Pure builders / classification:
 handle_feedback_vote (real Postgres + transport-level FakeSlackWebClient):
   - 👍 records and acks ephemerally in the thread; no form;
   - every 👎 opens the form BEFORE any database work, repeats included;
-  - a repeat 👎 leaves one row (concurrent clicks: test_feedback_races.py);
+  - a repeat 👎 leaves one row;
   - a form Slack refused to open falls back to an ephemeral with a button;
   - a voter the tenant would not let start a turn there records nothing and
     sees why (the form is replaced);

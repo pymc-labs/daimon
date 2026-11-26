@@ -73,6 +73,7 @@ from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.monitoring import MCP_NOTICE, monitored_agents
 from daimon.core.native_admins import read_stored_admin
 from daimon.core.permissions import agent_permissions
 from daimon.core.scope import ScopeContext
@@ -103,17 +104,23 @@ class DaimonSummary(BaseModel):
     workspace: str
     role_summary: str
     skill_names: list[str]
+    # Set while the Daimon is monitored: tell the person before they ask anything.
+    monitoring: str | None = None
 
 
-def _summary(tenant: HubTenant, hub: HubIdentity, agent: BetaManagedAgentsAgent) -> DaimonSummary:
+def _summary(
+    tenant: HubTenant, hub: HubIdentity, agent: BetaManagedAgentsAgent, monitored: set[uuid.UUID]
+) -> DaimonSummary:
+    agent_id = derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id))
     return DaimonSummary(
-        id=str(derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id))),
+        id=str(agent_id),
         name=agent.name,
         platform=hub.platform,
         workspace_id=tenant.workspace_id,
         workspace=tenant.workspace_name,
         role_summary=(agent.system or "")[:200],
         skill_names=[sk.skill_id for sk in agent.skills],
+        monitoring=MCP_NOTICE.text if agent_id in monitored else None,
     )
 
 
@@ -184,6 +191,9 @@ def _hub_sees(
 ) -> bool:
     names = agent_pin_names(agent)
     permissions = agent_permissions(policy, names)
+    # a channel's own agent answers only in its home, so no hub lists it.
+    if permissions.home is not None:
+        return False
     if subject.is_admin:
         return True
     # A member's hub is outside every channel: only its effective workspace
@@ -194,7 +204,18 @@ def _hub_sees(
 async def _list_daimons_impl(runtime: McpRuntime, hub: HubIdentity) -> list[DaimonSummary]:
     out: list[DaimonSummary] = []
     for tenant, agents in await _agents_by_tenant(runtime, hub):
-        out.extend(_summary(tenant, hub, agent) for agent in agents)
+        async with runtime.session_factory() as session:
+            monitored = await monitored_agents(
+                session,
+                runtime.settings,
+                tenant_id=tenant.tenant_id,
+                agent_ids=[
+                    derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(a.id))
+                    for a in agents
+                ],
+                platform="mcp",
+            )
+        out.extend(_summary(tenant, hub, agent, monitored) for agent in agents)
     out.sort(key=lambda d: (d.workspace.lower(), d.name.lower()))
     return out
 
@@ -245,6 +266,8 @@ async def _auth_for(
         agent_id=derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id)),
         platform_user_id=hub.platform_user_id,
         is_admin=False,
+        # The hub token is the person's own platform login, verified at sign-in.
+        signed_in_person=True,
     )
 
 
@@ -341,7 +364,8 @@ def register_hub_tools(
 
         Call this first. ``id`` is what every other tool takes as ``daimon_id``;
         ``workspace`` tells you which workspace the Daimon lives in. Two Daimons may
-        share a ``name`` in different workspaces.
+        share a ``name`` in different workspaces. ``monitoring``, when set, is a notice
+        to show the person before they ask that Daimon anything.
         """
         return await _list_daimons_impl(runtime, await _hub_auth(ctx))
 
@@ -349,7 +373,10 @@ def register_hub_tools(
     async def describe_daimon(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str
     ) -> AgentDescription:
-        """Describe one Daimon: role, skills, repo, environment, platform and workspace."""
+        """Describe one Daimon: role, skills, repo, environment, platform and workspace.
+
+        ``monitoring``, when set, is a notice to show the person before they ask anything.
+        """
         tenant, _, auth = await _identity(runtime, ctx, daimon_id)
         base = await _describe_agent_impl(runtime, auth)
         return base.model_copy(update={"workspace": tenant.workspace_name})
@@ -390,7 +417,8 @@ def register_hub_tools(
     ) -> dict[str, str]:
         """Start a turn without waiting.
 
-        Returns ``{"handle": ...}`` for polling with ``get_session``.
+        Returns ``{"handle": ...}`` for polling with ``get_session``; show the person
+        ``monitoring`` when it is set.
         """
         auth, _, recheck = await _admitted(ctx, daimon_id, "start_turn")
         # A hub caller is a person, verified by their platform login.
@@ -459,9 +487,9 @@ def register_hub_tools(
         Other people's conversations with the same Daimon are not listed and
         their handles are not accepted; nor are conversations from a sealed
         channel, which can only be read from inside it. An admin also
-        sees everyone's channel conversations with this Daimon, sealed ones
-        included, and can read them with ``get_session``/``list_events``, but
-        for the channels they administer.
+        sees everyone's open channel conversations with this Daimon, and can
+        read them with ``get_session``/``list_events``. No one, admins
+        included, sees another person's conversation from a sealed channel.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):

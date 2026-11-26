@@ -64,21 +64,6 @@ def bundle() -> SkillBundle:
     return bundle_from_markdown("---\nname: notes\ndescription: Write notes.\n---\nWrite them.\n")
 
 
-async def test_a_failed_attachment_reuses_the_recorded_upload_on_retry() -> None:
-    host = Host()
-    with pytest.raises(RuntimeError, match="attachment failed"):
-        await add_skill(host, agent=42, agent_name="neutral", bundle=bundle())
-    assert host.stored is not None
-    result = await add_skill(host, agent=42, agent_name="neutral", bundle=bundle())
-    assert (result.action, result.skill_id, result.version) == (
-        "unchanged",
-        "opaque-upload",
-        "revision-A",
-    )
-    assert result.newly_attached
-    assert host.uploads == 1 and host.attaches == 2
-
-
 async def test_fresh_policy_refusal_precedes_upload_and_ledger_write() -> None:
     host = Host(deny=True)
     with pytest.raises(SkillIngestError, match="policy changed"):

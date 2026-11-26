@@ -33,7 +33,7 @@ from collections.abc import (
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from daimon.core._models import (
     AccountingBindingContext,
@@ -49,7 +49,7 @@ from daimon.core._models import (
     UsageEvent,
     UsageObservation,
 )
-from daimon.core.stores import agent_backends, mux_erasure, read_persisted_columns
+from daimon.core.stores import agent_backends, mux_erasure, read_persisted_columns, thread_models
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
@@ -139,12 +139,21 @@ def fixed_clock(now: datetime) -> Clock:
 
 
 def _agent_backend_reference(
-    channel: ChannelRef, origin: str, revision: AgentBackendRevision | None
+    channel: ChannelRef,
+    origin: str,
+    revision: AgentBackendRevision | None,
+    thread_id: str | None = None,
 ) -> list[JsonValue] | None:
+    """`[agent, local]` for an agent's revision; a conversation's model choice
+    (origin `thread`) adds its conversation and its revision's digest."""
     if revision is None:
         return None
-    if revision.tenant_id != _tenant(channel.tenant_id) or origin != "agent":
+    if revision.tenant_id != _tenant(channel.tenant_id) or origin not in ("agent", "thread"):
         raise ScopeViolation(channel.channel_id, "foreign agent backend association")
+    if (origin == "thread") != (thread_id is not None):
+        raise ScopeViolation(channel.channel_id, "thread backend association needs its thread")
+    if thread_id is not None:
+        return [str(revision.agent_id), revision.local, thread_id, revision.digest]
     return [str(revision.agent_id), revision.local]
 
 
@@ -154,6 +163,7 @@ async def put_config_revision(
     *,
     origin: str = "channel",
     agent_revision: AgentBackendRevision | None = None,
+    thread_id: str | None = None,
 ) -> ConfigRevision:
     channel = revision.channel
     key = {
@@ -162,7 +172,7 @@ async def put_config_revision(
         "channel_id": channel.channel_id,
         "local": revision.local,
     }
-    reference = _agent_backend_reference(channel, origin, agent_revision)
+    reference = _agent_backend_reference(channel, origin, agent_revision, thread_id)
     inserted = await session.scalar(
         insert(ChannelConfigRevision)
         .values(
@@ -755,7 +765,12 @@ async def projection(
 
 
 async def record_usage(
-    session: AsyncSession, binding_id: str, observation: ObservationContract
+    session: AsyncSession,
+    binding_id: str,
+    observation: ObservationContract,
+    *,
+    platform_user_id: str | None = None,
+    channel_id: str | None = None,
 ) -> OutboxRow | None:
     owner = await _session_owner(session, observation.session.id)
     if owner is None or owner[0] != binding_id:
@@ -790,6 +805,8 @@ async def record_usage(
             revision=applied.revision,
             tenant_id=tenant_id,
             applied=_json(applied),
+            provider=applied.observation.session.provider,
+            observed_at=applied.observation.observed_at,
         )
     )
     await session.execute(
@@ -800,9 +817,23 @@ async def record_usage(
             prior_applied_revision=row.prior_applied_revision,
             tenant_id=tenant_id,
             row=_json(row),
+            platform_user_id=platform_user_id,
+            channel_id=channel_id,
         )
     )
     return OutboxRow.model_validate(_json(row))
+
+
+async def get_newest_usage_revision(
+    session: AsyncSession, binding_id: str, observation_id: str
+) -> int | None:
+    """The newest revision recorded for an observation; None before any."""
+    return await session.scalar(
+        select(func.max(UsageObservation.revision)).where(
+            UsageObservation.binding_id == binding_id,
+            UsageObservation.observation_id == observation_id,
+        )
+    )
 
 
 async def pending_outbox(session: AsyncSession, *, limit: int = 100) -> list[OutboxRow]:
@@ -822,12 +853,13 @@ async def pending_outbox(session: AsyncSession, *, limit: int = 100) -> list[Out
 
 @dataclass(frozen=True)
 class PendingSettlement:
-    """An unapplied outbox row with what the host reads from its binding to settle it."""
+    """An outbox row with what the host reads from its binding to settle or re-read it."""
 
     row: OutboxRow
     tenant_id: uuid.UUID
     profile: str
     channel_id: str
+    platform_user_id: str | None
 
 
 async def pending_outbox_for_profiles(
@@ -843,9 +875,76 @@ async def pending_outbox_for_profiles(
     rebind to another profile, and a row of that other profile must not be read as
     this one. Keyed by (binding, observation, newest revision first), from just after
     `after`, so a caller can page past rows it could not settle. Each comes with its
-    tenant, the binding's current profile and its channel. A binding whose slot account
+    tenant, the binding's current profile, the budget channel and person recorded with
+    the row (the binding's channel and no person for a row recorded before they were
+    kept). A binding whose slot account
     erasure removed is read from its `AccountingBindingContext`, which records the same.
     """
+    return await _settlements(
+        session, profiles, AccountingOutbox.applied_at.is_(None), limit=limit, after=after
+    )
+
+
+async def not_final_outbox_for_profiles(
+    session: AsyncSession,
+    provider: str,
+    profiles: Collection[str],
+    *,
+    seen_since: datetime,
+    limit: int,
+    after: tuple[str, str, int] | None = None,
+) -> list[PendingSettlement]:
+    """Each `provider` observation's newest revision seen since `seen_since`, applied or
+    not, plus every pending one, unless its usage is final; read as
+    `pending_outbox_for_profiles` reads.
+
+    A billed fallback leaves no pending row, yet its turn's usage may still change. Rows
+    written before observations carried a provider (0216) are found as pending ones.
+    """
+    newer = aliased(AccountingOutbox)
+    superseded = (
+        select(newer.revision)
+        .where(
+            newer.binding_id == AccountingOutbox.binding_id,
+            newer.observation_id == AccountingOutbox.observation_id,
+            newer.revision > AccountingOutbox.revision,
+        )
+        .exists()
+    )
+    seen = tuple_(
+        AccountingOutbox.binding_id, AccountingOutbox.observation_id, AccountingOutbox.revision
+    ).in_(
+        select(
+            UsageObservation.binding_id, UsageObservation.observation_id, UsageObservation.revision
+        ).where(UsageObservation.provider == provider, UsageObservation.observed_at >= seen_since)
+    )
+    final = AccountingOutbox.row["observation"]["final"].astext
+    # Two index-driven reads, merged: one OR of them stops the planner starting from the
+    # observation index and scans the whole outbox instead.
+    found = {
+        (s.row.binding_id, s.row.observation_id, s.row.revision): s
+        for condition in (AccountingOutbox.applied_at.is_(None), seen)
+        for s in await _settlements(
+            session,
+            profiles,
+            condition,
+            ~superseded,
+            final.is_distinct_from("true"),
+            limit=limit,
+            after=after,
+        )
+    }
+    ordered = sorted(found.items(), key=lambda item: (*item[0][:2], -item[0][2]))
+    return [settlement for _, settlement in ordered[:limit]]
+
+
+async def _settlements(
+    session: AsyncSession,
+    profiles: Collection[str],
+    *where: ColumnElement[bool],
+    limit: int,
+    after: tuple[str, str, int] | None,
+) -> list[PendingSettlement]:
     generation = aliased(ProviderBinding)
     other = (
         select(generation.binding_id)
@@ -857,14 +956,24 @@ async def pending_outbox_for_profiles(
         .exists()
     )
     profile = func.coalesce(ProviderBinding.profile, AccountingBindingContext.profile)
-    channel_id = func.coalesce(ProviderBindingSlot.channel_id, AccountingBindingContext.channel_id)
+    channel_id = func.coalesce(
+        AccountingOutbox.channel_id,
+        ProviderBindingSlot.channel_id,
+        AccountingBindingContext.channel_id,
+    )
     live = and_(ProviderBindingSlot.binding_id.is_not(None), ~other)
     erased = and_(
         ProviderBindingSlot.binding_id.is_(None),
         AccountingBindingContext.profiles.contained_by(list(profiles)),
     )
     statement = (
-        select(AccountingOutbox.row, AccountingOutbox.tenant_id, profile, channel_id)
+        select(
+            AccountingOutbox.row,
+            AccountingOutbox.tenant_id,
+            profile,
+            channel_id,
+            AccountingOutbox.platform_user_id,
+        )
         .outerjoin(
             ProviderBindingSlot, ProviderBindingSlot.binding_id == AccountingOutbox.binding_id
         )
@@ -877,7 +986,7 @@ async def pending_outbox_for_profiles(
             AccountingBindingContext,
             AccountingBindingContext.binding_id == AccountingOutbox.binding_id,
         )
-        .where(AccountingOutbox.applied_at.is_(None), profile.is_not(None), or_(live, erased))
+        .where(*where, profile.is_not(None), or_(live, erased))
         .order_by(
             AccountingOutbox.binding_id,
             AccountingOutbox.observation_id,
@@ -905,9 +1014,20 @@ async def pending_outbox_for_profiles(
             tenant_id=tenant_id,
             profile=profile_name,
             channel_id=channel,
+            platform_user_id=person,
         )
-        for row, tenant_id, profile_name, channel in rows
+        for row, tenant_id, profile_name, channel, person in rows
     ]
+
+
+async def slot_of_binding(session: AsyncSession, binding_id: str) -> Slot | None:
+    """The slot a binding id lives in; None once account erasure removed it."""
+    generation = await session.scalar(
+        select(ProviderBindingSlot.generation).where(ProviderBindingSlot.binding_id == binding_id)
+    )
+    if generation is None:
+        return None
+    return binding_slot(await _binding(session, binding_id, generation))
 
 
 async def agent_of_usage_session(
@@ -973,6 +1093,23 @@ async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:
     if await session.scalar(select(AccountingOutbox.revision).where(*where)) is None:
         raise KeyError(f"no outbox row {row.key}")
     return False
+
+
+async def close_superseded_outbox(session: AsyncSession, row: OutboxRow) -> None:
+    """Mark the observation's unapplied revisions older than `row` applied, with no debit.
+
+    Only for a final exact settlement, where the newest settled revision carries the whole cost.
+    """
+    await session.execute(
+        update(AccountingOutbox)
+        .where(
+            AccountingOutbox.binding_id == row.binding_id,
+            AccountingOutbox.observation_id == row.observation_id,
+            AccountingOutbox.revision < row.revision,
+            AccountingOutbox.applied_at.is_(None),
+        )
+        .values(applied_at=func.now())
+    )
 
 
 # Legacy thread_sessions links
@@ -1184,8 +1321,9 @@ async def effective_revision(
     origin: str,
     *,
     agent_revision: AgentBackendRevision | None = None,
+    thread_id: str | None = None,
 ) -> ConfigRevision | None:
-    reference = _agent_backend_reference(channel, origin, agent_revision)
+    reference = _agent_backend_reference(channel, origin, agent_revision, thread_id)
     body = await session.scalar(
         select(ChannelConfigRevision.revision)
         .where(
@@ -1210,31 +1348,107 @@ async def config_origin(session: AsyncSession, channel: ChannelRef, local: int) 
     )
 
 
+async def config_agent_id(
+    session: AsyncSession, channel: ChannelRef, local: int
+) -> uuid.UUID | None:
+    """The agent an `agent` or `thread` revision was made for, else None."""
+    raw = await session.scalar(
+        select(ChannelConfigRevision.agent_backend_ref).where(
+            *_channel_where(channel),
+            ChannelConfigRevision.local == local,
+            ChannelConfigRevision.origin.in_(("agent", "thread")),
+        )
+    )
+    if not isinstance(raw, list) or not raw:
+        return None
+    try:
+        return uuid.UUID(str(cast(list[JsonValue], raw)[0]))
+    except ValueError:
+        return None
+
+
+async def config_thread_pin(
+    session: AsyncSession, channel: ChannelRef, local: int
+) -> tuple[str, str] | None:
+    """The conversation and revision digest a `thread` revision was made with, else None."""
+    raw = await session.scalar(
+        select(ChannelConfigRevision.agent_backend_ref).where(
+            *_channel_where(channel),
+            ChannelConfigRevision.local == local,
+            ChannelConfigRevision.origin == "thread",
+        )
+    )
+    if not isinstance(raw, list) or len(cast(list[JsonValue], raw)) != 4:
+        return None
+    thread_id, digest = cast(list[JsonValue], raw)[2:]
+    return (thread_id, digest) if isinstance(thread_id, str) and isinstance(digest, str) else None
+
+
 async def get_config_agent_revision(
     session: AsyncSession, revision: ConfigRevision, *, agent_id: uuid.UUID
 ) -> AgentBackendRevision | None:
-    """Recover only the immutable consent association retained with this effective revision."""
+    """Recover the agent backend revision retained with this effective revision.
+
+    A conversation's model choice (origin `thread`) recovers that conversation's
+    revision, only while it is still the one the revision was made with."""
     statement = select(ChannelConfigRevision.agent_backend_ref).where(
         *_channel_where(revision.channel),
         ChannelConfigRevision.local == revision.local,
-        ChannelConfigRevision.origin == "agent",
+        ChannelConfigRevision.origin.in_(("agent", "thread")),
     )
     raw = (await read_persisted_columns(session, statement)).scalar_one_or_none()
     if raw is None:
         return None
+    thread: tuple[str, str] | None = None
     try:
-        identity, local = TypeAdapter(
-            tuple[uuid.UUID, Annotated[int, Field(gt=0, strict=True)]]
-        ).validate_python(raw)
+        if isinstance(raw, list) and len(cast(list[JsonValue], raw)) == 4:
+            identity, local, *pinned = TypeAdapter(
+                tuple[uuid.UUID, Annotated[int, Field(gt=0, strict=True)], str, str]
+            ).validate_python(raw)
+            thread = (pinned[0], pinned[1])
+        else:
+            identity, local = TypeAdapter(
+                tuple[uuid.UUID, Annotated[int, Field(gt=0, strict=True)]]
+            ).validate_python(raw)
     except ValueError:
         raise ScopeViolation(
             revision.channel.channel_id, "invalid agent backend association"
         ) from None
     if identity != agent_id:
         raise ScopeViolation(revision.channel.channel_id, "foreign agent backend association")
+    if thread is not None:
+        consent = await thread_models.get_thread_consent(
+            session,
+            tenant_id=_tenant(revision.channel.tenant_id),
+            platform=revision.channel.platform,
+            thread_id=thread[0],
+            agent_id=identity,
+        )
+        if consent is None or consent.digest != thread[1]:
+            raise ScopeViolation(revision.channel.channel_id, "missing original backend revision")
+        return consent
     retained = await agent_backends.current(
         session, _tenant(revision.channel.tenant_id), identity, local=local, persisted=True
     )
-    if retained is None or retained.drop_consent is None:
-        raise ScopeViolation(revision.channel.channel_id, "missing original backend consent")
+    if retained is None:
+        raise ScopeViolation(revision.channel.channel_id, "missing original backend revision")
     return retained
+
+
+async def put_agent_config_revision(
+    session: AsyncSession, revision: ConfigRevision, *, retained: AgentBackendRevision | None
+) -> ConfigRevision:
+    """Re-put an agent's revision under the association admission stored it with.
+
+    Admission reports a conversation's model choice (stored as `thread`) as the
+    agent's own, so its thread comes from the row: re-put as `agent`, it conflicts.
+    `retained` is `get_config_agent_revision`'s; None for a record born on its provider.
+    """
+    pin = await config_thread_pin(session, revision.channel, revision.local)
+    return await put_config_revision(
+        session,
+        revision,
+        origin="agent" if pin is None else "thread",
+        agent_revision=retained,
+        thread_id=None if pin is None else pin[0],
+    )

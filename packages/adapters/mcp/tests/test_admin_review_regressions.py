@@ -18,15 +18,6 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_LABEL_CLAIM,
     DaimonJWTVerifier,
 )
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import _require_platform_admin
@@ -71,6 +62,8 @@ from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import auth_identity, production_identity_middleware
 
 SECRET = b"chat-integration-secret-at-least-32-bytes"
 
@@ -130,18 +123,7 @@ async def test_real_chat_mint_verifier_middleware_preserves_config_but_refuses_h
     )
     settings = MagicMock(discord=DiscordSettings(bot_token=SecretStr("test")))
     mcp = FastMCP(name="real-chat", auth=verifier)
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
-            settings=settings,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(db_session_factory, settings=settings))
     observed: list[AuthIdentity] = []
 
     @mcp.tool
@@ -259,9 +241,9 @@ async def test_panel_role_delegate_never_acquires_hub_sealed_transcript_exceptio
         session_factory=db_session_factory,
         membership_resolver=DiscordRestMembershipResolver("test"),
     )
-    auth = AuthIdentity(
-        account_id=principal.account_id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        principal.account_id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id=principal.external_id,
@@ -345,17 +327,7 @@ async def test_malformed_execution_binding_never_becomes_a_personal_credential(
     malformed = jwt.encode(claims, SECRET, algorithm="HS256")
     verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=db_session_factory)
     mcp = FastMCP(name="malformed-user-execution", auth=verifier)
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(db_session_factory))
     invoked = False
 
     @mcp.tool
@@ -410,18 +382,7 @@ async def test_only_personal_cli_tokens_can_exercise_human_authority(
     settings = MagicMock(discord=DiscordSettings(bot_token=SecretStr("test")))
     runtime = SimpleNamespace(session_factory=db_session_factory, settings=settings)
     mcp = FastMCP(name="personal-only", auth=verifier)
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
-            settings=settings,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(db_session_factory, settings=settings))
 
     @mcp.tool
     async def probe_personal(ctx: Context) -> bool:
@@ -445,13 +406,7 @@ async def test_only_personal_cli_tokens_can_exercise_human_authority(
 def test_legacy_or_billing_panel_identity_is_never_a_personal_credential() -> None:
     from dataclasses import replace
 
-    base = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    base = auth_identity(uuid.uuid4(), uuid.uuid4(), is_admin=False, token_kind="cli")
     assert base.is_personal_user
     for denied in (replace(base, token_kind=None), replace(base, token_label="billing-panel")):
         assert not denied.is_personal_user
@@ -497,15 +452,12 @@ async def test_panel_operator_mint_refuses_user_snapshot_then_verifies_after_adm
 def test_held_and_foreign_callers_never_inherit_admin_or_human_authority(foreign):
     from daimon.core.turn_hold import TurnHold
 
-    auth = AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        role=Role.ADMIN,
+    auth = auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         platform="discord",
         platform_user_id="user",
         token_kind="cli",
-        is_admin=True,
-        is_platform_admin=True,
         foreign_home_id="elsewhere" if foreign else None,
         hold=None if foreign else TurnHold("discord", "channel", False),
     )
@@ -537,14 +489,8 @@ async def _platform_admin_app(
         auth=DaimonJWTVerifier(secret=SECRET, sessionmaker=db_session_factory),
     )
     mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
+        production_identity_middleware(
+            db_session_factory,
             settings=MagicMock(discord=DiscordSettings(bot_token=SecretStr("test"))),
             authority_cache=cache,
         )

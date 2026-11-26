@@ -22,6 +22,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
+    place_thread_id,
 )
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
@@ -93,7 +94,9 @@ async def load_skill_owners(
         return NO_SKILL_OWNERS
     async with runtime.session_factory() as session:
         rows = await list_user_skills_for_tenant(session, tenant_id=tenant_id)
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=tenant_id, records=runtime.session_factory
+    )
     names = {name for agent in agents for name in agent_pin_names(agent.name, agent.metadata)}
     return SkillOwners(
         {row.anthropic_id: row.agent_name for row in rows if row.anthropic_id},
@@ -205,7 +208,10 @@ async def _load_view(
             async with runtime.session_factory() as session:
                 agents = await list_live_agent_facts(session, tenant_id=auth.tenant_id)
         else:
-            agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+            agents = await list_agents_by_tenant(
+                runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+            )
+    location_thread_id = place_thread_id(location_thread_id)
     if auth.agent_id is not None:
         location_channel_id = None
         location_thread_id = None

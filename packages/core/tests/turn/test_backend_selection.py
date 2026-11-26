@@ -13,6 +13,7 @@ import pytest
 from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Subject
+from daimon.core.channel_backend import AgentSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
 from daimon.core.stores import mux_state
@@ -74,6 +75,13 @@ def preference_for(host):
     )
     actor = channel_backend.BackendActor(TENANT, ACCOUNT, Subject(is_admin=True))
     return service, agent, actor
+
+
+def unrunnable(monkeypatch, provider):
+    """`provider` can't run here, so a switch to it is refused rather than applied."""
+    runnable = channel_backend.RUNNABLE_PROFILES
+    left = frozenset(p for p in runnable if not p.startswith(f"{provider}."))
+    monkeypatch.setattr(channel_backend, "RUNNABLE_PROFILES", left)
 
 
 @pytest.fixture(params=["memory", "postgres"])
@@ -377,7 +385,7 @@ async def test_removed_provider_allowlist_refuses_an_existing_native_binding(sel
 
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 async def test_agent_preference_and_revert_select_new_threads_without_channel_override(
-    selector_host,
+    selector_host, monkeypatch
 ):
     host = selector_host
     original = await host.prepare("thread")
@@ -388,6 +396,7 @@ async def test_agent_preference_and_revert_select_new_threads_without_channel_ov
         )
     service, agent, actor = preference_for(host)
     changed = await service.set_backend(agent, "openai", 0, actor)
+    unrunnable(monkeypatch, "openai")
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await host.admit("new-thread")
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
@@ -539,11 +548,12 @@ async def test_a_same_named_resource_cannot_impersonate_the_source_of_a_preferen
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 @pytest.mark.parametrize("target", ["openai", "gemini"])
 async def test_private_dm_does_not_silently_ignore_an_explicit_native_agent_preference(
-    selector_host, target
+    selector_host, target, monkeypatch
 ):
     host = selector_host
     service, agent, actor = preference_for(host)
     await service.set_backend(agent, target, 0, actor)
+    unrunnable(monkeypatch, target)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await host.admit("dm-thread", is_dm=True)
     async with host.sessions() as db:
@@ -632,22 +642,19 @@ async def test_foreign_binding_is_refused_before_retained_config_or_provider_io(
     assert (len(host.wire.requests), len(host.calls)) == before
 
 
-@pytest.mark.parametrize("path,enabled", [("legacy", True), ("legacy", False), ("mux", False)])
-async def test_legacy_or_unconfigured_admission_does_not_read_native_bindings(
-    selector_host, monkeypatch, path, enabled
-):
+async def test_unconfigured_admission_does_not_read_native_bindings(selector_host, monkeypatch):
     host = selector_host
-    latest = await host.change()
+    await host.change()
 
     async def forbidden(*args):
-        raise AssertionError("legacy/unconfigured admission read a native binding")
+        raise AssertionError("unconfigured admission read a native binding")
 
     monkeypatch.setattr(host.store, "get_binding", forbidden)
     monkeypatch.setattr(channel_backend, "load_backend_agent", forbidden)
     monkeypatch.setattr(channel_backend, "current_agent_backend", forbidden)
     monkeypatch.setattr(channel_backend, "resolve_turn_backend", forbidden)
     current = await admit_impl(
-        replace(host.deps, turn_path=path, channel_backends=enabled),
+        replace(host.deps, channel_backends=False),
         origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
@@ -657,7 +664,7 @@ async def test_legacy_or_unconfigured_admission_does_not_read_native_bindings(
         thread_id="thread",
         now=datetime.now(UTC),
     )
-    assert current.backend_revision == (latest if enabled else None)
+    assert current.backend_revision is None
     assert host.created == []
 
 
@@ -706,11 +713,12 @@ async def test_another_caller_never_selects_the_private_native_binding(selector_
 
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 async def test_channel_clear_inherits_the_actual_agent_identity_and_keeps_old_channel_pin(
-    selector_host,
+    selector_host, monkeypatch
 ):
     host = selector_host
     service, agent, actor = preference_for(host)
     await service.set_backend(agent, "openai", 0, actor)
+    unrunnable(monkeypatch, "openai")
     explicit = await host.change(BackendConfig())
     original = await host.prepare("thread")
     async with host.sessions.begin() as db:
@@ -753,6 +761,7 @@ async def test_agent_selection_projects_the_already_authorized_source_without_an
         return resolved
 
     monkeypatch.setattr(channel_backend, "load_backend_agent", capture)
+    unrunnable(monkeypatch, "openai")
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await host.admit("new-thread")
     assert projections == [agent.agent_id]
@@ -793,11 +802,12 @@ async def test_concrete_handoff_source_uses_its_identity_despite_a_historical_di
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 @pytest.mark.parametrize("target", ["openai", "gemini"])
 async def test_refused_agent_selection_leaves_no_revision_for_a_rollback_reader(
-    selector_host, target
+    selector_host, target, monkeypatch
 ):
     host = selector_host
     service, agent, actor = preference_for(host)
     await service.set_backend(agent, target, 0, actor)
+    unrunnable(monkeypatch, target)
     async with host.sessions() as db:
         before = await mux_state.latest_config_revision_and_sharing(db, REVISION.channel)
         next_local = await mux_state.next_config_local(db, REVISION.channel)
@@ -991,14 +1001,12 @@ async def test_button_resend_uses_normal_provider_retention_and_confirmed_releas
         host.sessions, enabled=True, capture_source=capture
     )
     actor = channel_backend.BackendActor(TENANT, ACCOUNT, Subject(is_admin=True))
-    quote = await service.preview(target, "openai")
+    await service.preview(target, "openai")
     await service.set_backend(
         target,
         "openai",
         0,
         actor,
-        accepted_drops=quote.declared_drops,
-        expected_preview_digest=quote.digest,
     )
     if slot_state == "released":
         async with host.sessions.begin() as db:
@@ -1044,3 +1052,165 @@ async def test_button_resend_uses_normal_provider_retention_and_confirmed_releas
         assert after.native_refs["session"] != before.native_refs["session"]
     async with host.sessions() as db:
         assert await pending_releases(db, tenant_id=TENANT) == []
+
+
+async def _hand_thread_to_other_agent(host):
+    """Hand "thread" to a second responder; returns its agent."""
+    from daimon.core.stores.thread_agent_bindings import create_binding
+    from daimon.testing.ma_models import ma_agent
+
+    other = ma_agent(id="ag_other_responder", name="other-responder", tenant_id=TENANT)
+    host.handover_agents[other.id] = other
+    async with host.sessions.begin() as db:
+        await create_binding(
+            db,
+            tenant_id=TENANT,
+            platform="slack",
+            parent_channel_id="channel",
+            thread_id="thread",
+            responder_ma_agent_id=other.id,
+            responder_name=other.name,
+            kind="handoff",
+        )
+    return other
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_held_revision_runs_only_for_the_agent_it_was_made_for(selector_host):
+    """Handed to another agent, a thread selects afresh: one agent's switch stays its own."""
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, "anthropic", 0, actor)
+    first = await host.prepare("thread")
+    held = first.admission.backend_revision
+    assert held is not None and first.admission.backend_revision_origin == "agent", held
+    other = await _hand_thread_to_other_agent(host)
+    handed = await host.admit("thread")
+    assert handed.agent.id == other.id, "the thread answers as the new agent"
+    assert handed.backend_revision is None, "the first agent's switch does not carry over"
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_routing_passes_over_a_revision_kept_for_another_agent_as_admission_does(
+    selector_host,
+):
+    """A routine of another agent posting into a thread is routed where it is admitted."""
+    if isinstance(selector_host.store, MemoryStateStore):
+        pytest.skip("routing reads the bindings Postgres holds")
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, "openai", 0, actor)
+    first = await host.prepare("thread")
+    assert first.session_ref is not None and first.session_ref.provider == "openai", first
+
+    async def routed(agent_id: uuid.UUID) -> str:
+        async with host.sessions() as db:
+            return await channel_backend.effective_thread_backend(
+                db,
+                tenant_id=TENANT,
+                platform="slack",
+                channel_id="channel",
+                thread_id="thread",
+                caller_id="caller",
+                agent_id=agent_id,
+            )
+
+    assert await routed(agent.agent_id) == "openai", "the agent's own thread keeps OpenAI"
+    other = await _hand_thread_to_other_agent(host)
+    handed = await host.admit("thread")
+    assert handed.backend_revision is None, "admission selects afresh for the other agent"
+    other_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=other.id)
+    assert await routed(other_id) == "anthropic", "routing agrees: not the first agent's OpenAI"
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_shared_thread_handed_to_another_agent_leaves_the_first_agents_revision(
+    selector_host,
+):
+    """A shared slot keeps the first agent's revision; the next agent must not inherit or trip on it."""
+    if isinstance(selector_host.store, MemoryStateStore):
+        pytest.skip("shared bindings are written to Postgres only")
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(
+        agent, "anthropic", 0, actor, settings=AgentSettings(thread_mode="shared")
+    )
+    first = await host.prepare("thread")
+    held = first.admission.backend_revision
+    assert held is not None and first.admission.shared_owner is not None, "first turn is shared"
+    shared_slot = Slot(thread=host.slot.thread)
+    before = await host.store.get_binding(shared_slot)
+    assert before is not None and before.config_revision == held.local, "slot binds A's revision"
+    other = await _hand_thread_to_other_agent(host)
+    handed = await host.prepare("thread")
+    assert handed.admission.agent.id == other.id, "the thread answers as the new agent"
+    assert handed.admission.backend_revision is None, "A's revision does not carry over to B"
+    assert handed.admission.shared_owner is None, "B runs per caller, not on A's shared slot"
+    after = await host.store.get_binding(shared_slot)
+    assert after == before, "A's shared binding is left as it was"
+    again = await host.prepare("thread")
+    assert again.admission.agent.id == other.id and again.session_ref == handed.session_ref, (
+        "B's next turn keeps its own session instead of selecting afresh each time"
+    )
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_shared_thread_handed_to_an_agent_with_its_own_switch_runs_that_switch(
+    selector_host,
+):
+    """B's own provider switch applies after A's shared one, and keeps applying."""
+    if isinstance(selector_host.store, MemoryStateStore):
+        pytest.skip("shared bindings are written to Postgres only")
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(
+        agent, "anthropic", 0, actor, settings=AgentSettings(thread_mode="shared")
+    )
+    await host.prepare("thread")
+    other = await _hand_thread_to_other_agent(host)
+    other_agent = channel_backend.BackendAgent(
+        tenant_id=TENANT,
+        agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=other.id),
+        name=other.name,
+        configuration_digest="actual-offline-other",
+        model="claude-sonnet-4-6",
+    )
+    await service.set_backend(other_agent, "anthropic", 0, actor)
+    first = await host.prepare("thread")
+    second = await host.prepare("thread")
+    for turn in (first, second):
+        revision = turn.admission.backend_revision
+        assert revision is not None, "B runs a revision"
+        async with host.sessions() as db:
+            made_for = await mux_state.config_agent_id(db, revision.channel, revision.local)
+        assert made_for == other_agent.agent_id, "B runs its own switched revision"
+        assert turn.admission.backend_revision_origin == "agent", turn.admission
+        assert turn.admission.shared_owner is None, "B is not pinned to A's shared slot"
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+@pytest.mark.parametrize(
+    ("capability", "support"), [("steer", "unsupported"), ("session_resources", "native")]
+)
+async def test_a_switched_agent_stays_on_its_provider_when_the_provider_gains_or_loses_capabilities(
+    selector_host, monkeypatch, capability, support
+):
+    """No consent holds the switch to the capabilities of the day it was made: it applies as is."""
+    from mux.profiles import PROFILES
+
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, "openai", 0, actor)
+    profile = PROFILES[PROFILE]
+    assert profile.support_for(capability) != support, "the capability changes"
+    monkeypatch.setitem(
+        PROFILES,
+        PROFILE,
+        profile.model_copy(update={"support": {**profile.support, capability: support}}),
+    )
+    admitted = await host.admit("new-thread")
+    revision = admitted.backend_revision
+    assert revision is not None, "the turn runs on the switched provider, not Anthropic"
+    assert (revision.backend, revision.profile) == ("openai", PROFILE), revision
+    assert admitted.backend_revision_origin == "agent", admitted.backend_revision_origin
+    assert admitted.backend_footer_profile == PROFILE, admitted.backend_footer_profile

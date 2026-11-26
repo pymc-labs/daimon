@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from functools import partial
 
 from daimon.core.stores import web_identities as identities
 from daimon.core.stores import web_people as people
@@ -11,6 +12,8 @@ from daimon.testing.factories import make_account, make_tenant, make_web_person
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _ISSUER = "https://id.example.com"
+
+_link_identity = partial(identities.link_identity, provider="oidc", issuer=_ISSUER)
 
 
 async def test_upsert_member_keeps_the_first_id_and_refreshes_the_name(
@@ -78,12 +81,10 @@ async def test_delete_for_account_removes_identities_and_leaves_other_accounts(
     gone = await make_web_person(db_session, tenant=tenant)
     kept = await make_web_person(db_session, tenant=tenant)
     for person, subject in ((gone, "a"), (kept, "b")):
-        await identities.link_identity(
+        await _link_identity(
             db_session,
             tenant_id=tenant.id,
             person_id=person.id,
-            provider="oidc",
-            issuer=_ISSUER,
             subject=subject,
             label="x",
             groups=["g"],
@@ -111,22 +112,18 @@ async def test_find_identity_returns_every_workspace_the_login_reaches(
     first = await make_web_person(db_session)
     second = await make_web_person(db_session)
     for person in (first, second):
-        await identities.link_identity(
+        await _link_identity(
             db_session,
             tenant_id=person.tenant_id,
             person_id=person.id,
-            provider="oidc",
-            issuer=_ISSUER,
             subject="same-login",
             label="Example",
             groups=[],
         )
-    await identities.link_identity(
+    await _link_identity(
         db_session,
         tenant_id=first.tenant_id,
         person_id=first.id,
-        provider="oidc",
-        issuer=_ISSUER,
         subject="same-login",
         label="Renamed",
         groups=["staff"],
@@ -177,12 +174,10 @@ async def test_people_in_a_group_are_counted_once_across_sign_ins(
         (ann, "a2", ["staff", "ops"]),
         (bob, "b1", ["ops"]),
     ):
-        await identities.link_identity(
+        await _link_identity(
             db_session,
             tenant_id=tenant.id,
             person_id=person.id,
-            provider="oidc",
-            issuer=_ISSUER,
             subject=subject,
             label=subject,
             groups=groups,
@@ -206,12 +201,10 @@ async def test_every_group_is_listed_with_its_head_count(db_session: AsyncSessio
         (ann, "a2", ["staff", "ops"]),
         (bob, "b1", ["ops"]),
     ):
-        await identities.link_identity(
+        await _link_identity(
             db_session,
             tenant_id=tenant.id,
             person_id=person.id,
-            provider="oidc",
-            issuer=_ISSUER,
             subject=subject,
             label=subject,
             groups=groups,
@@ -247,12 +240,10 @@ async def test_group_head_counts_leave_out_visitors(db_session: AsyncSession) ->
     vic = await make_web_person(db_session, tenant=tenant, email="v@example.com")
     await people.update_person(db_session, person_id=vic.id, kind="visitor")
     for person, subject in ((ann, "a1"), (vic, "v1")):
-        await identities.link_identity(
+        await _link_identity(
             db_session,
             tenant_id=tenant.id,
             person_id=person.id,
-            provider="oidc",
-            issuer=_ISSUER,
             subject=subject,
             label=subject,
             groups=["staff"],

@@ -107,14 +107,6 @@ journal lease, and an adapter that omits unverified cost. An accounting posture
 does not enable a profile. Aggregates require disjoint transitive coverage,
 including absent descendants; their coverage sets remain fixed across revisions.
 
-The host's offline `daimon.core.usage_delegation` API accounts complete,
-explicitly attributed OpenAI root/child turn inventories atomically. It retains
-native child IDs/meters, refuses reassignment or omitted known work, and charges
-measured shared infrastructure once. Unverified membership/disjointness, models,
-prices or measurements cannot establish actual spend. A native collector must
-prove the scope before delegation is enabled; this API does not register a
-profile or lift the delegation-disabled host restriction.
-
 The host's `daimon.core.selfhosted_usage` consumes selfhosted incremental
 model-request observations through the transactional usage outbox and credit
 ledger. Before model I/O, runtime admission must persist the deployment,
@@ -176,9 +168,7 @@ callback, settlement and normalized export. See `docs/conformance/README.md`.
 
 `AnthropicManagedAgents` registers an `AnthropicEvents` port over the
 host's existing SDK client; an explicitly injected Events implementation still
-wins. The host bridge is experimental and requires `DAIMON_TURN__PATH=mux`;
-unset or empty selects the unchanged `legacy` path. No database writes or
-client retry settings are added by the bridge.
+wins. No database writes or client retry settings are added by the bridge.
 Sessions lifecycle remains a separately injected port.
 
 The Events port checks host resource authorization before sending, listing,
@@ -253,6 +243,8 @@ Gemini skills are host-stored, immutable bundle versions; text deploys as inline
 Existing pins do not follow later publications. Uploaded artifact bytes remain
 in the injected host storage; UTF-8 uploads can seed inline workspace files.
 Workspace artifact discovery uses the documented Files API workspace tar snapshot.
+Discovery leaves out what the session's request mounted: skill files and
+repository directories always, inline files while their bytes are unchanged.
 Downloads verify the discovered content digest; unavailable or changed files
 produce typed errors. Unsafe, oversized or malformed archives are refused without
 extracting files to disk. Native vaults and workspace-file deletion are unsupported.
@@ -373,18 +365,6 @@ session JSON after scope, reference and tenant-tag checks. It preserves partial
 SDK responses and nullable location metadata without constructing a binding;
 generic session records retain their validation. Turn seal stamping uses this
 read and the existing metadata-only update port, with no extra provider request.
-Prepared legacy replay and interruption pass the caller's admitted scope to the
-private transport while preserving SDK traffic and recovery behavior.
-
-The Anthropic legacy turn transport bounds idempotent reads (status, replay and
-idle history) to 60 seconds including retries and pagination; a replay may be
-given a longer budget by its caller. Its read client
-uses a 30-second request timeout and at most two retries. Turn mutations (input,
-confirmations, interrupt and archive) retain the original client timeout and
-always disable automatic SDK retries, including attended turns. An unknown
-liveness probe keeps the turn held and probes again until a definitive result,
-cancellation or the overall turn ceiling. Live streams retain their separate
-read timeout.
 
 The Anthropic environment driver exposes a scoped create-and-discard edge for legacy environment forks that ignored the SDK reply. It validates the request configuration and tenant authorization without decoding unused response fields; generic Environment records retain their existing validation.
 
@@ -505,8 +485,8 @@ checks have separate regression proofs; they do not promote a partial scenario
 to a matrix pass. This report is partial evidence, not an all-pass certificate.
 
 Host profile dispatch is in `daimon.core.mux_backend` and `daimon.core.turn`.
-Provider codecs register `register_turn_preparation`, `register_turn_backend`
-and `register_turn_codec`. Preparation returns a real authorized native session;
+Each provider module exports one `HostedBackend` (preparation, backend
+factory, codec, runtime), listed in `daimon.core.turn.runtimes`. Preparation returns a real authorized native session;
 factories preserve its identity and codecs own provider stream ordering,
 replay/cancel truth and compatibility display records. Transport and durable
 journal/usage dependencies are injected in `TurnRuntime`; mux still imports no
@@ -610,7 +590,7 @@ lazily after interaction acceptance, preserves provider root identities across
 replay/cancel and emits cumulative interaction usage through the neutral host
 recorder. The host configures `gemini-3.8-flash` as primary; only create HTTP503
 permits the reviewed Flash fallback chain. A channel revision may instead pin
-`gemini-4-argon`, which is a single attempt with no fallback. Preparation rejects missing stores,
+an opt-in model (`gemini-4-argon`, `gemini-4-carbon`, `gemini-4-hydrogen` or `gemini-4-neon`), which is a single attempt with no fallback. Preparation rejects missing stores,
 foreign bindings, seals and unsupported deployment policies before dispatch.
 Unsupported runtime/model/policy selections return the host's typed
 `backend_unsupported` refusal. Native journal source identities are scoped to
@@ -779,8 +759,8 @@ C06/C07 cancellation and usage oracles through actual SDK request/response bytes
 It retains C08/C09 refusals, declares other component envelopes PENDING and leaves
 the standard offline matrix unchanged. No live settlement or host factory is
 installed. See [SDK conformance component](docs/drivers/gemini/CONFORMANCE-SDK.md).
-The host can register a deployment constructor through
-`daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
+The host's deployment constructor is the `runtime` of the profile's
+`HostedBackend` in `daimon.core.turn.runtimes`. The factory
 receives `ProviderPreparationRequest` only when the selected provider preparer
 looks up its runtime for an explicit admitted channel revision. It must return
 the provider's public runtime with authorized native resources and durable state;
@@ -800,8 +780,11 @@ file digest manifest. Persisted receipts mount immutable directories at the
 original skill paths, including binary fonts/images, and retain old version
 pins after publication. The host owns authorized GCS publication/access and
 retention; no publisher or credentials are selected implicitly. Without that
-adapter, binary/oversize bundles refuse `skill_bundle_gcs_deployment`; normal
-text bundles retain inline mounts. See
+adapter or a `skill_files` reader, binary/oversize bundles refuse
+`skill_bundle_gcs_deployment`; normal text bundles retain inline mounts. With
+`skill_files`, bundles up to 28 MiB upload into an environment created before
+the first interaction; failed uploads are left out and named in
+`Session.native["skills_left_out"]`. See
 [the capability notes](docs/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
 offline evidence. A scripted publisher does not certify a live full default.
 
@@ -849,7 +832,7 @@ absent, preserving existing consumer bytes. Authored native replay proves
 host behavior only; it does not certify model behavior or remote execution.
 
 I3 native bindings are exercised by
-`packages/mux/tests/drivers/gemini/test_i3_native_replay.py`. Anthropic and
+`packages/core/tests/mux_native/test_i3_native_replay.py`. Anthropic and
 OpenAI consume unchanged recorded fixture bytes; Gemini consumes an owned
 explicit `code_execution` tape. All three run the real host turn and Discord
 serializer. OpenAI's empty HTTP 202 receipt is retained unchanged and joined
@@ -927,11 +910,6 @@ the tenant/account scope authorized by the mapping lookup. Its native snapshot
 keeps the SDK's partial metadata and exception behavior without projecting a
 generic session binding. The host still commits the stamp before preparation
 locks the mapping and leaves unreadable stamps for the next bind to retry.
-Gemini native credential offers have a separate, default-off operator adapter
-and MCP registration edge. They verify the authorized resource scope, durable
-caller/binding/catalog identity and native target readback before posting shared
-cards. Production native origin/registry wiring and timed expiry remain pending;
-see `docs/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
 
 ### Tool-only post history checks
 
@@ -945,7 +923,7 @@ absent, preserving existing consumer bytes. Authored native replay proves
 host behavior only; it does not certify model behavior or remote execution.
 
 I3 native bindings are exercised by
-`packages/mux/tests/drivers/gemini/test_i3_native_replay.py`. Anthropic and
+`packages/core/tests/mux_native/test_i3_native_replay.py`. Anthropic and
 OpenAI consume unchanged recorded fixture bytes; Gemini consumes an owned
 explicit `code_execution` tape. All three run the real host turn and Discord
 serializer. OpenAI's empty HTTP 202 receipt is retained unchanged and joined

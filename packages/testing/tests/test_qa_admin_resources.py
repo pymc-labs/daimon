@@ -658,7 +658,7 @@ async def test_anthropic_resource_callback_preserves_direct_product_request_byte
         platform="discord",
         channel_id=CHANNEL,
         readers="own",
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         default=binding.default,
         actor_account_id=uuid.UUID(binding.scope.account_id),
         copy=True,
@@ -676,7 +676,7 @@ async def test_anthropic_resource_callback_preserves_direct_product_request_byte
         platform="discord",
         channel_id=CHANNEL,
         readers="any",
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         default=binding.default,
     )
     start = len(case.trace.requests)

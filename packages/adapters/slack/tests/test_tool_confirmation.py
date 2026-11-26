@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -29,8 +30,16 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
-from daimon.testing.adapters.slack.notices import shown_text
+from daimon.testing.slack_notices import shown_text
 from slack_sdk.web.async_client import AsyncWebClient
+
+_tool_rule_card_reference = partial(
+    ToolRuleCardReference,
+    agent_id="ma-1",
+    agent_name="Helper",
+    tool_key="linear/create_issue",
+    server_url="https://example.test/mcp",
+)
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -152,14 +161,7 @@ async def test_always_click_checks_admin_then_claims_and_saves(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="C1",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4(), channel_id="C1"),
         }
     )
     subject = AsyncMock(return_value=Subject(is_admin=True, platform_user_id="U2"))
@@ -195,14 +197,7 @@ async def test_always_click_refuses_nonadmins_without_settling(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="C1",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4(), channel_id="C1"),
         }
     )
     cards._controls.cards[token] = confirmation_module._PostedCard(
@@ -242,13 +237,7 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     posted = confirmation_module._PostedCard(
@@ -288,13 +277,7 @@ async def test_always_role_check_loses_to_deny_and_saves_nothing(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     started = asyncio.Event()
@@ -337,13 +320,7 @@ async def test_stale_always_click_approves_once_and_notifies_clicker(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     cards._controls.cards[token] = confirmation_module._PostedCard(
@@ -721,7 +698,7 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     client = _client()
     client.users_info = AsyncMock(
         return_value={
@@ -748,7 +725,7 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     )
     kwargs = factory.call_args.kwargs
     assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
-    check = kwargs["current_admin"]
+    check = kwargs["current_platform_admin"]
     assert await check("U1") is True
     client.users_info.return_value = {
         "ok": True,
@@ -774,7 +751,7 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model provider unchanged",
+            "denied_action": "Model unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -787,19 +764,27 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
     assert any(losses in text for text in texts) == (state in {"pending", "approved"})
 
 
+def test_an_admin_card_without_details_posts_no_empty_section():
+    """Slack refuses a section with empty text, so an admin card with no details has none."""
+    from daimon.adapters.slack.tool_confirmation import _attachment
+    from daimon.core.posted_controls.confirmation import build_confirmation_card
+
+    prompt = _prompt().model_copy(
+        update={"admin": True, "consequence": "Stops working: memory", "detail_lines": ()}
+    )
+    card = build_confirmation_card(prompt, state="pending", token="abcdefgh")
+    blocks = _attachment(card, prompt)[0]["blocks"]
+    texts = [block["text"]["text"] for block in blocks if block["type"] == "section"]
+    assert all(texts), f"every section has text: {texts}"
+
+
 async def test_blocked_always_save_does_not_block_retirement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     cards = SlackConfirmationCards()
@@ -840,13 +825,7 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     cards = SlackConfirmationCards()
@@ -920,7 +899,7 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
 
@@ -965,3 +944,53 @@ async def test_a_card_still_open_posts_one_reminder_in_its_thread(monkeypatch) -
             ),
         }
     ], "the mention stays in text so it notifies; the words ride a neutral card"
+
+
+@pytest.mark.parametrize(("where", "inside"), [("C_SEAL", True), ("D1", False)])
+async def test_always_click_carries_the_clicks_own_channel_as_its_origin(
+    monkeypatch: pytest.MonkeyPatch, where: str, inside: bool
+) -> None:
+    """A sealed channel's agent takes the rule from a click inside it, not from a DM."""
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize
+
+    cards = SlackConfirmationCards()
+    token, _future = cards._controls.pending.open()
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    cards._controls.cards[token] = confirmation_module._PostedCard(
+        prompt,
+        _client(),
+        "C_SEAL",
+        "1700.1",
+        "1699.9",
+        rule_factory=MagicMock(),
+        rule_subject=AsyncMock(return_value=Subject(is_admin=True, platform_user_id="U2")),
+    )
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    click = _click(f"dcf:{token}:always", "U2") | {"channel": {"id": where}}
+    await cards.handle_click(click)
+    subject = save.call_args.kwargs["subject"]
+    sealed = TenantAccessPolicy(
+        channel_rules={"C_SEAL": ChannelRule(readers="own", writers="own")},
+        agent_rules={"Helper": AgentRule(runs_in=("C_SEAL",))},
+    )
+    decision = authorize(
+        sealed,
+        subject=subject,
+        action=Action.SET_AGENT_TOOL_RULE,
+        agent=AgentRef.of("Helper"),
+        place=Place(),
+    )
+    assert bool(decision) is inside, decision.reason

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sys
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
+import pytest_asyncio
 import structlog
 
 if TYPE_CHECKING:
@@ -73,6 +74,29 @@ def restoring_structlog_config() -> Iterator[None]:
 def _restore_structlog_config() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
     with restoring_structlog_config():
         yield
+
+
+@pytest.fixture(autouse=True)
+def _cancel_background_work() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Card edits and agent face renders finish in the background; one test's stalled
+    edit or render must not hold the next test's card, database or back-off state."""
+    yield
+    faces = sys.modules.get("daimon.core.agent_identity")
+    if faces is not None:
+        faces.cancel_pending_agent_faces()
+    cards = sys.modules.get("daimon.core.posted_controls.lifecycle")
+    if cards is not None:
+        cards.cancel_pending_card_edits()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _drain_ops_events() -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Write a test's coalesced ops events in its own teardown: on the shared loop a pending
+    write would otherwise log in, or merge with, a later test."""
+    yield
+    ops_events = sys.modules.get("daimon.core.ops_events")
+    if ops_events is not None:
+        await ops_events.drain_ops_events()
 
 
 @pytest.fixture

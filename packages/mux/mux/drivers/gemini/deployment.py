@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import posixpath
 import re
+import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, cast
 from urllib.parse import urlsplit
@@ -15,7 +18,10 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import JsonValue
 
+from mux.contracts.completions import CompletionEffort, CompletionResult, Completions
+from mux.contracts.ids import Scope
 from mux.drivers import isolated_ssl_context
+from mux.drivers.clients import LoopClients, key_digest
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.mcp_auth import RedactedCredential
 from mux.drivers.gemini.transport import MountEchoBook, Object, SDKTransport, Transport
@@ -78,12 +84,136 @@ class _OwnedStream(AsyncIterator[Object]):
             await self._close()
 
 
+def _sdk_client(
+    api_key: str,
+    synchronous: httpx.Client,
+    asynchronous: httpx.AsyncClient,
+    context: ssl.SSLContext,
+) -> genai.Client:
+    """The SDK client over two HTTP clients the caller owns, with every retry off."""
+    from google import genai
+    from google.genai.types import HttpOptions, HttpRetryOptions
+
+    client = genai.Client(
+        api_key=api_key,
+        enterprise=False,
+        vertexai=False,
+        credentials=None,
+        project=None,
+        location=None,
+        debug_config=genai.client.DebugConfig(
+            client_mode=None, replays_directory=None, replay_id=None
+        ),
+        http_options=HttpOptions(
+            base_url="https://generativelanguage.googleapis.com",
+            api_version="v1beta",
+            httpx_client=synchronous,
+            httpx_async_client=asynchronous,
+            client_args={"trust_env": False, "verify": context, "proxy": None},
+            async_client_args={
+                "trust_env": False,
+                "verify": context,
+                "ssl": context,
+                "proxy": None,
+            },
+            headers={"x-goog-api-key": api_key},
+            retry_options=HttpRetryOptions(attempts=1),
+        ),
+    )
+    # The interactions SDK counts retries rather than attempts.
+    # Pin the owned clients before exposing any request boundary.
+    client._nextgen_client.max_retries = 0  # pyright: ignore[reportPrivateUsage]
+    client.aio._nextgen_client.max_retries = 0  # pyright: ignore[reportPrivateUsage]
+    return client
+
+
+@asynccontextmanager
+async def _owned_client(api_key: str) -> AsyncIterator[genai.Client]:
+    """A client for one call or stream: built, and closed with both HTTP clients, here."""
+    _require_clean_environment()
+    # Validate request policy before constructor imports or TLS/HTTP allocation.
+    context = isolated_ssl_context()
+    with httpx.Client(trust_env=False, timeout=60, verify=context, proxy=None) as synchronous:
+        async with httpx.AsyncClient(
+            trust_env=False, timeout=60, verify=context, proxy=None
+        ) as asynchronous:
+            client = _sdk_client(api_key, synchronous, asynchronous, context)
+            try:
+                yield client
+            finally:
+                try:
+                    await client.aio.aclose()
+                finally:
+                    client.close()
+
+
+@dataclass(frozen=True)
+class _SharedClient:
+    client: genai.Client
+    synchronous: httpx.Client
+    asynchronous: httpx.AsyncClient
+
+
+def _shared_client(api_key: str) -> _SharedClient:
+    context = isolated_ssl_context()
+    synchronous = httpx.Client(trust_env=False, timeout=60, verify=context, proxy=None)
+    asynchronous = httpx.AsyncClient(trust_env=False, timeout=60, verify=context, proxy=None)
+    try:
+        return _SharedClient(
+            _sdk_client(api_key, synchronous, asynchronous, context), synchronous, asynchronous
+        )
+    except BaseException:
+        # Nothing was sent: the async client holds no connection to close.
+        synchronous.close()
+        raise
+
+
+async def _close_shared(shared: _SharedClient) -> None:
+    try:
+        await shared.client.aio.aclose()
+    finally:
+        try:
+            shared.client.close()
+        finally:
+            try:
+                await shared.asynchronous.aclose()
+            finally:
+                shared.synchronous.close()
+
+
+class GeminiClients:
+    """The process's Gemini SDK clients: one per key per event loop.
+
+    Calls and streams borrow a client and never close it; `aclose` does, at shutdown.
+    """
+
+    def __init__(self) -> None:
+        self._clients = LoopClients[_SharedClient](_close_shared)
+
+    def get(self, api_key: str) -> genai.Client:
+        # The ambient-environment refusal stays per call, not per client.
+        _require_clean_environment()
+        return self._clients.get(
+            (key_digest(api_key),), functools.partial(_shared_client, api_key)
+        ).client
+
+    async def aclose(self) -> None:
+        await self._clients.aclose()
+
+
 class _ConfiguredTransport:
-    def __init__(self, api_key: str, *, protect_storage_credentials: bool = False) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        protect_storage_credentials: bool = False,
+        clients: GeminiClients | None = None,
+    ) -> None:
         self._api_key = api_key
+        self._clients = clients
         self._protect_storage_credentials = protect_storage_credentials
         self._storage_tokens: set[RedactedCredential] = set()
-        # Interaction id -> digests of mount headers sent (never the token).
+        # Interaction id -> digests of mount and MCP headers sent (never the token).
         self._mount_echoes = MountEchoBook()
         # Shared like the storage tokens: each call gets a fresh SDKTransport, and
         # every later read must scrub a credential an earlier create dispatched.
@@ -106,53 +236,11 @@ class _ConfiguredTransport:
 
     @asynccontextmanager
     async def _client(self) -> AsyncIterator[genai.Client]:
-        _require_clean_environment()
-        # Validate request policy before constructor imports or TLS/HTTP allocation.
-        from google import genai
-        from google.genai.types import HttpOptions, HttpRetryOptions
-
-        context = isolated_ssl_context()
-        with httpx.Client(trust_env=False, timeout=60, verify=context, proxy=None) as synchronous:
-            async with httpx.AsyncClient(
-                trust_env=False, timeout=60, verify=context, proxy=None
-            ) as asynchronous:
-                client = genai.Client(
-                    api_key=self._api_key,
-                    enterprise=False,
-                    vertexai=False,
-                    credentials=None,
-                    project=None,
-                    location=None,
-                    debug_config=genai.client.DebugConfig(
-                        client_mode=None, replays_directory=None, replay_id=None
-                    ),
-                    http_options=HttpOptions(
-                        base_url="https://generativelanguage.googleapis.com",
-                        api_version="v1beta",
-                        httpx_client=synchronous,
-                        httpx_async_client=asynchronous,
-                        client_args={"trust_env": False, "verify": context, "proxy": None},
-                        async_client_args={
-                            "trust_env": False,
-                            "verify": context,
-                            "ssl": context,
-                            "proxy": None,
-                        },
-                        headers={"x-goog-api-key": self._api_key},
-                        retry_options=HttpRetryOptions(attempts=1),
-                    ),
-                )
-                try:
-                    # The interactions SDK counts retries rather than attempts.
-                    # Pin the owned clients before exposing any request boundary.
-                    client._nextgen_client.max_retries = 0  # pyright: ignore[reportPrivateUsage]
-                    client.aio._nextgen_client.max_retries = 0  # pyright: ignore[reportPrivateUsage]
-                    yield client
-                finally:
-                    try:
-                        await client.aio.aclose()
-                    finally:
-                        client.close()
+        if self._clients is not None:
+            yield self._clients.get(self._api_key)
+            return
+        async with _owned_client(self._api_key) as client:
+            yield client
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         async with self._client() as client:
@@ -169,6 +257,26 @@ class _ConfiguredTransport:
     async def download_snapshot(self, environment_id: str) -> bytes:
         async with self._client() as client:
             return await self._sdk(client).download_snapshot(environment_id)
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        async with self._client() as client:
+            return await self._sdk(client).create_environment(config)
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        async with self._client() as client:
+            await self._sdk(client).upload_archive(
+                environment_id, path, archive, overwrite=overwrite
+            )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        async with self._client() as client:
+            return await self._sdk(client).list_files(environment_id, path)
+
+    async def delete_environment(self, environment_id: str) -> None:
+        async with self._client() as client:
+            await self._sdk(client).delete_environment(environment_id)
 
     async def open_stream(
         self,
@@ -190,10 +298,18 @@ class _ConfiguredTransport:
         return _OwnedStream(source, close)
 
 
-def configured_transport(*, api_key: str, protect_storage_credentials: bool = False) -> Transport:
+def configured_transport(
+    *,
+    api_key: str,
+    protect_storage_credentials: bool = False,
+    clients: GeminiClients | None = None,
+) -> Transport:
+    """Each call owns its SDK client, unless the process's `clients` hold one calls share."""
     if not api_key.strip():
         raise ValueError("explicit Gemini credential is required")
-    return _ConfiguredTransport(api_key, protect_storage_credentials=protect_storage_credentials)
+    return _ConfiguredTransport(
+        api_key, protect_storage_credentials=protect_storage_credentials, clients=clients
+    )
 
 
 class _ConfiguredCatalogTransport(_ConfiguredTransport):
@@ -206,10 +322,36 @@ class _ConfiguredCatalogTransport(_ConfiguredTransport):
             return await SDKAgentCatalogTransport(client).get_agent(id_)
 
 
-def configured_catalog_transport(*, api_key: str) -> AgentCatalogTransport:
+class _ConfiguredCompletions(_ConfiguredTransport):
+    async def complete(
+        self,
+        scope: Scope,
+        model: str,
+        system: str,
+        prompt: str,
+        max_tokens: int,
+        effort: CompletionEffort | None = None,
+    ) -> CompletionResult:
+        from mux.drivers.gemini.completions import GeminiCompletions
+
+        async with self._client() as client:
+            completions = GeminiCompletions(client)
+            return await completions.complete(scope, model, system, prompt, max_tokens, effort)
+
+
+def configured_completions(*, api_key: str) -> Completions:
+    """Side-call completions on a deployment key; each call owns its client."""
     if not api_key.strip():
         raise ValueError("explicit Gemini credential is required")
-    return _ConfiguredCatalogTransport(api_key)
+    return _ConfiguredCompletions(api_key)
+
+
+def configured_catalog_transport(
+    *, api_key: str, clients: GeminiClients | None = None
+) -> AgentCatalogTransport:
+    if not api_key.strip():
+        raise ValueError("explicit Gemini credential is required")
+    return _ConfiguredCatalogTransport(api_key, clients=clients)
 
 
 def downscoped_storage_token(

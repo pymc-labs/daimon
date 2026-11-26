@@ -16,7 +16,7 @@ from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.runtime_defaults import (
     DEFAULT_PROJECT,
-    OPENAI_SPEND_LIMIT_CENTS,
+    SPEND_LIMIT_CENTS,
     default_rows,
 )
 from daimon.core.turn.runtime_manifest import select_runtime_manifest
@@ -81,6 +81,7 @@ def test_a_gemini_agent_turn_runs_from_the_code_template(
     assert plan.tenant_id == str(TENANT) and plan.channel_id == "never-set-up"
     assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools"
     assert (plan.hold_usd, plan.cap_usd) == (Decimal("0.25"), Decimal("1.75"))
+    assert plan.spend_limit_usd_cents == SPEND_LIMIT_CENTS
 
 
 def test_an_openai_agent_turn_waits_for_its_tenants_environment(
@@ -99,7 +100,7 @@ def test_an_openai_agent_turn_waits_for_its_tenants_environment(
     )
 
     assert plan.root_materialization and plan.environment_id == "envtmpl_1"
-    assert plan.spend_limit_usd_cents == OPENAI_SPEND_LIMIT_CENTS
+    assert plan.spend_limit_usd_cents == SPEND_LIMIT_CENTS
     assert plan.project_header is False
     assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools (J6)"
 
@@ -157,6 +158,37 @@ def test_a_channel_pinned_to_gemini_runs_from_the_code_default(
 
     assert not plan.root_materialization
     assert plan.tools == () and plan.template_capabilities is None
+
+
+def test_a_channel_pinned_to_openai_names_the_missing_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DEFAULT_KEY_ENV["openai"], "set")
+
+    with pytest.raises(AdmissionDenied) as denied:
+        select_runtime_manifest(
+            request("openai.persistent_workspace", "gpt-6-luna", origin="channel"),
+            OpenAIDeployment,
+        )
+
+    assert denied.value.cause == "channel_row_missing", (
+        "a keyed OpenAI install has no code row for a channel pin: the card says so"
+    )
+    assert denied.value.provider == "openai"
+
+
+def test_the_channel_row_refusal_copy_names_the_pin_and_both_fixes() -> None:
+    from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
+
+    text = admission_refusal_text(
+        "backend_unsupported",
+        RefusalNouns(scope="server", admin="a server admin", billing="`/billing`"),
+        cause="channel_row_missing",
+        provider="openai",
+        agent_name="Daimon",
+    )
+    assert "pinned to OpenAI" in text and "whoever runs Daimon" in text
+    assert "clear this channel's pin" in text and "DAIMON_" not in text
 
 
 def test_a_pro_model_is_never_in_a_default_grant(monkeypatch: pytest.MonkeyPatch) -> None:

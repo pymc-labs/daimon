@@ -199,7 +199,7 @@ function ModelNode() {
       <div className="space-y-1 p-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{modelLabel(config.model.id, c?.label)}{config.model.speed === "fast" && " Fast"}</span>
-          {config.model.backend === "anthropic" && <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>}
+          {config.model.backend === "anthropic" && config.model.effort && <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>}
         </div>
         <div className="text-xs text-muted-foreground">
           {PROVIDER[config.model.backend]}{c && <span className="text-faint">, ${c.in_usd} in / ${c.out_usd} out per million</span>}

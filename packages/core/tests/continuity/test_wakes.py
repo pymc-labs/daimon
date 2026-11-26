@@ -7,10 +7,12 @@ lease that expires after it started is settled, never re-run.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from daimon.core.continuity.continuation import (
@@ -29,6 +31,7 @@ from daimon.core.continuity.wakes import (
     cancel_wake,
     claim_wake,
     enqueue_wake,
+    keep_wake,
     list_due_wake_threads,
     poll_wakes_once,
     release_wake,
@@ -38,9 +41,11 @@ from daimon.core.continuity.wakes import (
 )
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from ..shared_fakes import wake_origin
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 
@@ -150,6 +155,129 @@ async def test_an_expired_unstarted_claim_is_retried_and_a_started_one_is_not(
     assert [row.idempotency_key for row in abandoned] == [started.idempotency_key]
     row = await _read(db_session_factory, started.idempotency_key)
     assert row.status == "skipped" and row.skip_reason == "interrupted"
+
+
+async def test_a_running_turn_renews_its_lease_and_a_dead_one_settles_within_it(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A turn may run its whole time limit; a process that stops renewing loses the row."""
+    from daimon.core.continuity import wakes
+
+    monkeypatch.setattr(wakes, "WAKE_RENEW_INTERVAL", timedelta(milliseconds=20))
+    tenant_id = await _tenant(db_session_factory)
+    request = _request(tenant_id)
+    await enqueue_wake(db_session_factory, request, available_at=_NOW)
+    claim = await claim_wake(db_session_factory, idempotency_key=request.idempotency_key, now=_NOW)
+    assert claim is not None, "the due wake is claimed"
+    assert await start_wake(db_session_factory, claim, now=_NOW), "the fence commits"
+    clock = [_NOW]
+    async with keep_wake(db_session_factory, claim, now=lambda: clock[0]):
+        # Three hours into the turn, well past one lease.
+        clock[0] = _NOW + timedelta(hours=3)
+        await asyncio.sleep(0.2)
+        assert not await abandon_interrupted_wakes(
+            db_session_factory, platform="discord", now=clock[0] + WAKE_RUN_LEASE / 2
+        ), "a renewed lease keeps a long turn's row"
+    # The renewals stop, as when the process dies mid-turn.
+    late = clock[0] + WAKE_RUN_LEASE + timedelta(seconds=1)
+    abandoned = await abandon_interrupted_wakes(db_session_factory, platform="discord", now=late)
+    assert [row.idempotency_key for row in abandoned] == [request.idempotency_key], (
+        "an unrenewed row settles within one lease"
+    )
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert (row.status, row.skip_reason) == ("skipped", "interrupted"), "never run again"
+
+
+async def test_a_lost_row_stops_the_renewals(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Once the row is settled elsewhere, the running turn renews nothing."""
+    from daimon.core.continuity import wakes
+
+    monkeypatch.setattr(wakes, "WAKE_RENEW_INTERVAL", timedelta(milliseconds=20))
+    tenant_id = await _tenant(db_session_factory)
+    request = _request(tenant_id)
+    await enqueue_wake(db_session_factory, request, available_at=_NOW)
+    claim = await claim_wake(db_session_factory, idempotency_key=request.idempotency_key, now=_NOW)
+    assert claim is not None, "the due wake is claimed"
+    assert await start_wake(db_session_factory, claim, now=_NOW), "the fence commits"
+    async with keep_wake(db_session_factory, claim, now=lambda: _NOW + timedelta(hours=1)):
+        await abandon_interrupted_wakes(
+            db_session_factory, platform="discord", now=_NOW + WAKE_RUN_LEASE * 2
+        )
+        await asyncio.sleep(0.1)
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert (row.status, row.lease_expires_at) == ("skipped", None), "the settled row stays settled"
+
+
+async def test_a_kept_wake_names_the_one_turn_it_starts(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The first origin opened while a wake is kept takes the claim's owner as its id.
+
+    The row keeps that owner as `lease_owner`, so a tool can tell the wake's own
+    turn from any other (`stores.compute_tasks.wake_turn_of`).
+    """
+    async with db_session_factory.begin() as session:
+        account = await make_account(session)
+    request = _request(account.tenant_id)
+    await enqueue_wake(db_session_factory, request, available_at=_NOW)
+    claim = await claim_wake(db_session_factory, idempotency_key=request.idempotency_key, now=_NOW)
+    assert claim is not None and await start_wake(db_session_factory, claim, now=_NOW)
+    row = await _read(db_session_factory, request.idempotency_key)
+
+    def origin(**fields: object):
+        return wake_origin(db_session_factory, row, account.id, **fields)
+
+    async with origin() as before:
+        pass
+    async with (
+        keep_wake(db_session_factory, claim, now=lambda: _NOW),
+        origin() as turn,
+        origin(helper_of=turn.id) as helper,
+        origin() as second,
+    ):
+        pass
+    async with origin() as after:
+        pass
+    assert turn.id.hex == claim.owner == row.lease_owner
+    others = {before.id, helper.id, second.id, after.id}
+    assert len(others) == 4 and turn.id not in others
+
+
+#: Callers of `start_wake` that start no turn, with the reason.
+_STARTS_NO_TURN = {
+    "testing/daimon/testing/turn_conformance.py": "drives the lease ladder itself; runs no turn",
+}
+
+
+def test_every_wake_dispatch_site_binds_the_turn_it_starts() -> None:
+    """Found by AST: a function that fences a wake (`start_wake`) runs its turn inside
+    `keep_wake` or `wake_turn`, which bind the turn's origin to the claim. A dispatcher
+    that skips this starts a turn no wake-only read recognises."""
+    packages = Path(__file__).resolve().parents[3]
+    sites: dict[str, bool] = {}
+    for path in [*packages.glob("*/daimon/**/*.py"), *packages.glob("adapters/*/daimon/**/*.py")]:
+        where = path.relative_to(packages).as_posix()
+        source = path.read_text()
+        if where in _STARTS_NO_TURN or "start_wake(" not in source:
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            called = {
+                getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            }
+            if "start_wake" in called:
+                sites[f"{where}:{node.name}"] = bool(called & {"keep_wake", "wake_turn"})
+    assert {
+        "core/daimon/core/continuity/dispatch.py:dispatch_pending_continuations",
+        "core/daimon/core/continuity/scope_timers.py:dispatch_scope_timer",
+        "core/daimon/core/continuity/watch_reports.py:dispatch_watch_report",
+    } <= set(sites), "the scan finds the dispatchers"
+    assert [site for site, bound in sites.items() if not bound] == []
 
 
 async def test_a_release_refunds_its_claim_so_waiting_never_exhausts_the_row(
@@ -502,3 +630,23 @@ async def test_enqueued_wake_commits_once_with_its_callers_transaction(
         assert await get_tenant(session, tenant.id) is not None
         committed = await get_continuation(session, idempotency_key=request.idempotency_key)
         assert committed == queued, "the committed wake retains its single durable identity"
+
+
+def test_every_skip_settle_names_its_row_so_a_failed_skip_is_reported() -> None:
+    """Found by AST: each `settle_wake` (and the dispatcher's `_settle`) that can skip passes
+    `row`; one that only ever delivers needs none."""
+    packages = Path(__file__).resolve().parents[3]
+    missing: list[str] = []
+    for path in [*packages.glob("*/daimon/**/*.py"), *packages.glob("adapters/*/daimon/**/*.py")]:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name != "settle_wake" and not (name == "_settle" and path.name == "dispatch.py"):
+                continue
+            keywords = {k.arg: k.value for k in node.keywords}
+            status = keywords.get("status")
+            delivers = isinstance(status, ast.Constant) and status.value == "delivered"
+            if not delivers and "row" not in keywords:
+                missing.append(f"{path.name}:{node.lineno}")
+    assert missing == [], "a skip settled without its row is never reported as wake.failed"

@@ -99,7 +99,9 @@ daimon tenants access-policy get discord GUILD_ID --json
 
 `--invoker-role` replaces the role list. The server's own id (`@everyone`) is
 refused, and Slack and Teams refuse any role list. With the bypass off, admins
-on every platform must match the lists like anyone else.
+on every platform must match the lists like anyone else. In the web chat, a
+role list and its bypass apply to the person's linked Discord account, checked
+live before each step.
 
 ## Limit an agent to roles
 
@@ -120,17 +122,40 @@ drops it.
 Membership is checked live when the agent is chosen, on queued sends and
 before each model call and approval card. A revoked role refuses the next
 step, not one already running. A handoff checks the person asking against the
-agent it moves to.
+agent it moves to. In the web chat, the person's linked Discord account must hold
+the roles; with no linked account they can't run the agent there.
 
-Only a person can use a role-gated agent. Routines, watches, timers, long jobs
-and other unattended turns cannot, and saving a routine for one is refused. A
-handoff from an unattended turn cannot switch to one. Handing a thread away
-from a role-gated agent carries the transcript but skips the workspace
-checkpoint.
+A person who holds the agent's roles can run it unattended. A routine for a
+role-gated agent runs as its owner, and each run (and each message it sends)
+reads the owner's membership live: it needs a current member who holds every
+role the agent requires. An admin without the role does not qualify. Saving
+or editing such a routine needs the same, checked live for the person saving.
+Other follow-up turns that run for a person (such as a watch report) are
+checked the same way before each send. Long jobs and handoffs from an
+unattended turn stay refused.
+
+If the owner loses a role, the next run is skipped and the routine is paused
+with the error `owner_lacks_agent_role`. The owner gets one Discord direct
+message naming the routine, when routine DMs to them are allowed; a message
+Discord refuses is logged. It stays paused until someone resumes it from the
+`/routines` panel; if the role is still missing it pauses again at its next run.
+
+An owner who left the server is refused at each run, not paused. One whose
+membership cannot be read is not told; the run is retried at the next fire.
+Changing a routine's owner (an edit by another admin) moves who must hold the
+roles. Handing a thread away from a role-gated agent carries the transcript but
+skips the workspace checkpoint.
+
+To list the enabled routines whose owner would be paused or refused, without
+changing anything, run:
+
+```bash
+daimon routines check-roles --tenant TENANT_UUID
+```
 
 ## How membership is checked
 
-Discord checks use `DAIMON_DISCORD__BOT_TOKEN`, so set it on the scheduler and
-MCP processes as well as the Discord service. Ordinary checks cache a positive
-answer for 30 seconds and a negative one for five. Private delivery always
-looks up live. A failed lookup never grants access.
+Discord checks use `DAIMON_DISCORD__BOT_TOKEN`, so set it on the scheduler,
+MCP and web processes as well as the Discord service. Ordinary checks cache a
+positive answer for 30 seconds and a negative one for five. Private delivery
+and the web chat always look up live. A failed lookup never grants access.

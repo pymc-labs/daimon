@@ -24,6 +24,7 @@ members = [
     "daimon-adapter-slack",
     "daimon-adapter-teams",
     "daimon-adapter-web",
+    "daimon-compute-session",
     "daimon-core",
     "daimon-harness",
     "daimon-mux",
@@ -859,6 +860,9 @@ dependencies = [
 billing = [
     { name = "daimon-adapter-mcp", extra = ["billing"] },
 ]
+gemini = [
+    { name = "daimon-mux", extra = ["gemini"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -898,9 +902,10 @@ requires-dist = [
     { name = "daimon-adapter-teams", editable = "packages/adapters/teams" },
     { name = "daimon-adapter-web", editable = "packages/adapters/web" },
     { name = "daimon-core", editable = "packages/core" },
+    { name = "daimon-mux", extras = ["gemini"], marker = "extra == 'gemini'", editable = "packages/mux" },
     { name = "daimon-mux", extras = ["openai"], editable = "packages/mux" },
 ]
-provides-extras = ["billing"]
+provides-extras = ["billing", "gemini"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1206,6 +1211,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "daimon-compute-session"
+version = "0.2.0"
+source = { editable = "apps/compute-session" }
+dependencies = [
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "starlette", specifier = ">=0.40" },
+    { name = "uvicorn", specifier = ">=0.34" },
+]
+
+[[package]]
 name = "daimon-core"
 version = "0.2.0"
 source = { editable = "packages/core" }
@@ -1264,7 +1284,7 @@ requires-dist = [
 
 [[package]]
 name = "daimon-harness"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/harness" }
 dependencies = [
     { name = "aiohttp" },
@@ -1310,7 +1330,7 @@ provides-extras = ["data"]
 
 [[package]]
 name = "daimon-mux"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/mux" }
 dependencies = [
     { name = "httpx" },
@@ -1327,6 +1347,7 @@ gemini = [
 ]
 openai = [
     { name = "openai" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -1337,6 +1358,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.54.0,<3" },
     { name = "pydantic", specifier = ">=2.8" },
+    { name = "pyyaml", marker = "extra == 'openai'", specifier = ">=6.0" },
 ]
 provides-extras = ["anthropic", "openai", "gemini"]
 

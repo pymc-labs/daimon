@@ -9,9 +9,8 @@ carries no Discord SDK type, so each side owns a thin, from-scratch
 translation of the platform-neutral `Screen` into its own component tree.
 A change to component order, style mapping, or spacing in one renderer
 without the matching change in the other would silently desync what a user
-sees after a tap from what they saw on the original post -- a later test
-(`test_wizard_render.py`) asserts the two renderers agree component-for-
-component on the same `Screen`, so any change here must be mirrored there.
+sees after a tap from what they saw on the original post, so any change
+here must be mirrored there.
 
 The one deliberate divergence: this process cannot attach files -- there is
 no local `discord.File` handle to re-upload on a re-render, since the bot

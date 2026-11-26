@@ -10,25 +10,25 @@ inline what each file needs).
 
 from __future__ import annotations
 
-import types
 import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
-from anthropic import AsyncAnthropic
+import pytest
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.errors import TurnError
-from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
+from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.message_feedback import THUMBS_DOWN, THUMBS_UP
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.support_escalation import ESCALATE
-from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.state import TextBlock, TurnState
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import resolved_agent_env_router
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
@@ -36,6 +36,8 @@ from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+from .shared_fakes import make_channel_message as _make_channel_message
+from .shared_fakes import make_turn_deps as _make_turn_deps
 
 # --- unit tests: the helper alone -------------------------------------------
 
@@ -113,24 +115,6 @@ async def test_seed_is_a_no_op_for_a_channel_type_without_get_partial_message() 
 # --- integration: wired into _orchestrate's terminal-success branch --------
 
 
-def _make_turn_deps(
-    settings: MagicMock,
-    anthropic: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    resolver_cache: ResolverCache,
-    deployment_default: DeploymentDefault,
-) -> TurnDeps:
-    return build_turn_deps(
-        settings,
-        anthropic,
-        sessionmaker,
-        deployment_default=deployment_default,
-        resolver_cache=resolver_cache,
-        billing_config=None,
-    )
-
-
 def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
     settings = MagicMock()
     settings.mcp = McpSettings()
@@ -144,12 +128,10 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
     anthropic = build_stub_anthropic(resolved_agent_env_router().dispatch)
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=_make_turn_deps(
@@ -160,46 +142,6 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
             deployment_default=deployment_default,
         ),
     )
-
-
-class _AsyncIter:
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
-
-
-def _make_channel_message(
-    *,
-    content: str = "<@999> hello",
-    guild_id: int = 123456,
-    channel_id: int = 789,
-    author_id: int = 111,
-) -> discord.Message:
-    message = MagicMock(spec=discord.Message)
-    message.content = content
-    message.author = MagicMock()
-    message.author.bot = False
-    message.author.id = author_id
-    message.guild = MagicMock(spec=discord.Guild)
-    message.guild.id = guild_id
-    message.channel = MagicMock()
-    message.channel.__class__ = discord.TextChannel
-    message.channel.id = channel_id
-    message.channel.send = AsyncMock()
-    message.channel.history = MagicMock(return_value=_AsyncIter([]))
-    message.create_thread = AsyncMock()
-    message.add_reaction = AsyncMock()
-    message.attachments = []
-    message.mentions = [types.SimpleNamespace(id=999)]
-    return message
 
 
 def _stub_resolved_config() -> ResolvedConfig:
@@ -289,6 +231,57 @@ async def test_a_real_text_answer_seeds_all_three_emoji_on_the_final_message(
     assert mock_thread.get_partial_message.return_value.add_reaction.await_count == 3, (
         "an answered turn must seed both vote emoji on its final message"
     )
+
+
+@pytest.mark.parametrize(
+    ("off_agent", "seeded"),
+    [("ag_test", [THUMBS_UP, THUMBS_DOWN]), ("ag_other", [THUMBS_UP, THUMBS_DOWN, ESCALATE])],
+    ids=["the answering agent is off", "another agent is off"],
+)
+@patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+@patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+@patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+async def test_the_answering_agents_own_value_decides_the_escalate_emoji(
+    mock_resolve: AsyncMock,
+    mock_create_session: AsyncMock,
+    mock_run_turn: AsyncMock,
+    mock_find_env: AsyncMock,
+    mock_find_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    off_agent: str,
+    seeded: list[str],
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+    await _seed_balance(db_session, tenant.id)
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget(tier="agent", agent_id=off_agent),
+        key="support_escalation",
+        value="off",
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    mock_resolve.return_value = _stub_resolved_config()
+    mock_create_session.return_value = ma_session(id="sess-seed-agent")
+    mock_run_turn.side_effect = _fake_run_turn(
+        TurnState(content=[TextBlock(kind="text", text="the answer")])
+    )
+    mock_find_agent.return_value = "ag_test"
+    mock_find_env.return_value = "env_test"
+    bot = make_bot(_make_runtime(db_session_factory))
+    message = _make_channel_message()
+    mock_thread = _make_seeding_thread()
+    message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+
+    await bot.on_message(message)
+
+    reactions = mock_thread.get_partial_message.return_value.add_reaction.await_args_list
+    assert [call.args[0] for call in reactions] == seeded, "only the answering agent's value counts"
 
 
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)

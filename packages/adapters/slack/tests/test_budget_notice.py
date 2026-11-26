@@ -7,16 +7,27 @@ from dataclasses import MISSING, fields
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from daimon.adapters.slack import budget_notice
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.turn.deps import TurnDeps
+from daimon.testing.factories import budget_alert
 from slack_sdk.errors import SlackApiError
 
 from .conftest import shown_text
 
 _TENANT = uuid.uuid4()
+
+
+@pytest.fixture(autouse=True)
+def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The default agent's grant admits everyone unless a test says otherwise."""
+    admits = AsyncMock(return_value=True)
+    monkeypatch.setattr(budget_notice, "sender_admits", admits)
+    return admits
 
 
 def _required(cls: Any, **given: object) -> dict[str, object]:
@@ -68,8 +79,45 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     )
 
 
+async def test_a_recipient_the_default_agent_does_not_admit_gets_no_dm(
+    default_agent_grant: AsyncMock,
+) -> None:
+    settings = MagicMock()
+    settings.direct_message_policies = {}
+    runtime = SlackRuntime(**_required(SlackRuntime, settings=settings))
+    default_agent_grant.side_effect = lambda *_a, user_id, **_k: user_id == "U2"
+    client = MagicMock()
+    client.conversations_open = AsyncMock(return_value={"channel": {"id": "D-U2"}})
+    client.chat_postMessage = AsyncMock()
+    with patch.object(budget_notice, "resolve_web_client", AsyncMock(return_value=client)):
+        delivered = await budget_notice.slack_budget_notifier(runtime)(_notice())
+
+    assert delivered == 1, "only the admitted recipient is messaged"
+    opened = [c.kwargs["users"] for c in client.conversations_open.await_args_list]
+    assert opened == ["U2"], "the grant check runs before any DM opens"
+    asked = {c.kwargs["agent_name"] for c in default_agent_grant.await_args_list}
+    assert asked == {None}, "a budget notice is held to the workspace default agent"
+
+
 def test_a_real_runtime_gets_the_notifier() -> None:
     runtime = SlackRuntime(**_required(SlackRuntime, turn_deps=TurnDeps(**_required(TurnDeps))))
     assert budget_notice.with_budget_notifier(runtime).turn_deps.budget_notifier is not None
     stand_in = MagicMock()
     assert budget_notice.with_budget_notifier(stand_in) is stand_in
+
+
+async def test_an_alert_posts_a_neutral_card_and_a_channel_daimon_left_is_refused() -> None:
+    runtime = SlackRuntime(**_required(SlackRuntime, settings=MagicMock()))
+    client = MagicMock()
+    client.chat_postMessage = AsyncMock()
+    alerter = budget_notice.slack_budget_alerter(runtime)
+    with patch.object(budget_notice, "resolve_web_client", AsyncMock(return_value=client)):
+        assert await alerter(budget_alert()) == "sent"
+        kwargs = client.chat_postMessage.await_args.kwargs
+        assert kwargs == {"channel": "C9", **notice_fields(shown_text(kwargs), neutral=True)}
+        client.chat_postMessage.side_effect = SlackApiError("no", {"error": "not_in_channel"})
+        assert await alerter(budget_alert()) == "refused", "the next post would be refused too"
+        client.chat_postMessage.side_effect = SlackApiError("no", {"error": "token_revoked"})
+        assert await alerter(budget_alert()) == "refused", "a dead token never recovers on a retry"
+        client.chat_postMessage.side_effect = SlackApiError("no", {"error": "ratelimited"})
+        assert await alerter(budget_alert()) == "failed", "a rate limit passes on a later poll"

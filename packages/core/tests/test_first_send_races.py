@@ -1,13 +1,10 @@
 """Regression: an ordinary first send and a checkpoint send decide again right before they post."""
 
-import asyncio
-
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
-from daimon.core.turn.run import run_prepared_turn
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import run_prepared
 
 from .test_action_time_races import setup
 from .test_session_preparation import _agent, _register
@@ -60,19 +57,14 @@ async def test_normal_turn_policy_change_during_stream_open(db_session, db_commi
         pytest.fail("this is a live normal session, so recovery must not run")
 
     async def run():
-        return await run_prepared_turn(
+        return await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
-            external_user_id="user-1",
             user_message="member request",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
             reseed_user_message=reseed,
             recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
         )
 
     if error is None:

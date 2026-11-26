@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,16 +19,17 @@ import pytest_asyncio
 from daimon.adapters.discord.bot import (  # pyright: ignore[reportPrivateUsage]
     GLOBAL_CAP_NOTICE,
     DaimonBot,
-    _compose_queued_content,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.discord.context import compose_queued_content
+from daimon.adapters.discord.reactions import QUEUED
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.slots import wait_for_slot
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -56,9 +56,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(
-            deps_for(), turn_path=None
-        ),  # _handle_mention/_orchestrate stubbed per-test
+        turn_deps=deps_for(),  # _handle_mention/_orchestrate stubbed per-test
     )
 
 
@@ -121,7 +119,7 @@ def _make_thread_message(
 
 
 # ---------------------------------------------------------------------------
-# _compose_queued_content pure unit tests
+# compose_queued_content pure unit tests
 # ---------------------------------------------------------------------------
 
 
@@ -129,17 +127,17 @@ def test_compose_single_author_joins_contents_with_blank_lines() -> None:
     m1 = _make_channel_message(content="hello", author_id=42, display_name="Alice")
     m2 = _make_channel_message(content="anyone there?", author_id=42, display_name="Alice")
     m3 = _make_channel_message(content="please respond", author_id=42, display_name="Alice")
-    assert _compose_queued_content([m1, m2, m3]) == "hello\n\nanyone there?\n\nplease respond"
+    assert compose_queued_content([m1, m2, m3]) == "hello\n\nanyone there?\n\nplease respond"
 
 
 def test_compose_multi_author_prefixes_display_name() -> None:
     m1 = _make_channel_message(content="foo", author_id=1, display_name="Alice")
     m2 = _make_channel_message(content="bar", author_id=2, display_name="Bob")
-    assert _compose_queued_content([m1, m2]) == "[Alice]: foo\n\n[Bob]: bar"
+    assert compose_queued_content([m1, m2]) == "[Alice]: foo\n\n[Bob]: bar"
 
 
 def test_compose_empty_list_returns_empty_string() -> None:
-    assert _compose_queued_content([]) == ""
+    assert compose_queued_content([]) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +160,7 @@ async def queued_bot(
     # the next test share one xdist worker schema.
     db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Funded: a turn that queued re-checks the balance once it holds a slot.
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="123456", signup_credit=Decimal("10")
-    )
+    result = await provision_workspace(db_session_factory, "123456", signup_credit=Decimal("10"))
 
     runtime = _make_runtime(result.tenant_id, db_session_factory)
     bot = make_bot(runtime)
@@ -1396,14 +1392,16 @@ async def test_a_backend_refusal_is_logged_as_one_not_as_over_cap(queued_bot):
     from structlog.testing import capture_logs
 
     message = _make_thread_message()
-    refused = AdmissionDenied(reason="backend_unsupported", cause="re_confirm", provider="gemini")
+    refused = AdmissionDenied(
+        reason="backend_unsupported", cause="provider_not_configured", provider="gemini"
+    )
     with capture_logs() as logs, patch("daimon.adapters.discord.bot.admit", side_effect=refused):
         await queued_bot._handle_mention(message, "123456", uuid.uuid4())
     events = [row for row in logs if row["event"].startswith("turn.skipped.")]
     assert [row["event"] for row in events] == ["turn.skipped.backend_unsupported"], (
         "one event that names the refusal"
     )
-    assert (events[0]["cause"], events[0]["provider"]) == ("re_confirm", "gemini"), (
+    assert (events[0]["cause"], events[0]["provider"]) == ("provider_not_configured", "gemini"), (
         "the cause says what to fix"
     )
 
@@ -1492,3 +1490,21 @@ async def test_queue_notice_delayed_by_reaction_is_fenced_to_held_turn(
     await queued_bot._queue_behind_inflight_turn(789, message)
     message.channel.send.assert_not_awaited()
     message.add_reaction.assert_awaited_once_with("⌛")
+
+
+async def test_every_message_of_a_group_and_a_dropped_one_lose_their_mail_mark(queued_bot):
+    queued_bot._message_feature_on = AsyncMock(return_value=True)
+    grouped = [_make_thread_message(), _make_thread_message()]
+    for message in grouped:
+        await queued_bot._queue_behind_inflight_turn(789, message)
+        message.add_reaction.assert_awaited_with(QUEUED)
+    queued_bot._handle_mention = AsyncMock()
+    await queued_bot._drain_pending_mentions(789, "123456", uuid.uuid4())
+    assert queued_bot._handle_mention.await_count == 1, "one turn answers the group"
+    dropped = _make_thread_message(thread_id=790)
+    await queued_bot._queue_behind_inflight_turn(790, dropped)
+    queued_bot._finish_admitted_messages = AsyncMock()
+    await queued_bot._drop_queued([dropped], uuid.uuid4())
+    for message in [*grouped, dropped]:
+        message.remove_reaction.assert_awaited_with(QUEUED, queued_bot.user)
+    assert not queued_bot._queued_reactions

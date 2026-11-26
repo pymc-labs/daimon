@@ -35,6 +35,7 @@ from daimon.adapters.mcp.tools.github_connect import (
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
+    require_unsealed_agent,
     resolve_setup_agent,
 )
 from daimon.core.admin_actions import DelegatedAction
@@ -190,6 +191,7 @@ async def _attach_synced_skills(
             version=fresh.version,
             payload={"skills": merged},
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
 
     try:
@@ -198,6 +200,7 @@ async def _attach_synced_skills(
             agent.id,
             _apply,
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
     except (ToolError, DaimonError, anthropic.APIStatusError) as exc:
         return f"Uploaded to the registry, but attaching to '{agent_name}' failed: {exc}"
@@ -223,6 +226,7 @@ async def _sync_impl(
         # Refused before the import rather than at attach time, so a seeded
         # target leaves nothing half-done behind.
         _reject_system_agent(agent)
+        await require_unsealed_agent(runtime, auth, agent)
         expected_ma_agent_id = agent.id
         agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory() as session:
@@ -308,7 +312,9 @@ async def _sync_impl(
     # agent" -- so it can be non-zero on an import that attached nothing. The
     # summary has to say which of the two it is, or the caller reads a re-import
     # of already-attached skills as an attach it just performed.
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     attached_ids = {skill.skill_id for agent in agents for skill in agent.skills}
     attached = registry_ids & attached_ids
 

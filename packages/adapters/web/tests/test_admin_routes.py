@@ -72,17 +72,34 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("PATCH", f"/api/admin/agent-access/{AGENT_ID}", {"web": False}),
     ("GET", "/api/admin/audit", None),
     ("GET", "/api/admin/feedback", None),
+    ("GET", f"/api/admin/monitoring/agents/{AGENT_ID}", None),
+    ("GET", f"/api/admin/monitoring/agents/{AGENT_ID}/conversations", None),
+    ("GET", f"/api/admin/monitoring/agents/{AGENT_ID}/conversations/abc", None),
+    ("GET", "/api/admin/overview", None),
+    ("GET", "/api/admin/issues", None),
+    ("GET", f"/api/admin/issues/{uuid.uuid4().hex}", None),
+    ("GET", f"/api/admin/issues/{uuid.uuid4().hex}/events", None),
+    ("POST", f"/api/admin/issues/{uuid.uuid4().hex}/state", {"action": "mute"}),
     ("GET", "/api/admin/settings", None),
     ("PATCH", "/api/admin/settings", {"default_agent": AGENT_ID}),
     ("PATCH", "/api/admin/settings", {"invokers": {"everyone": True}}),
     ("PATCH", "/api/admin/settings", {"providers": "default"}),
+    ("PATCH", f"/api/admin/agent-access/{AGENT_ID}", {"dm": {"who": "members"}}),
+    ("GET", "/api/admin/dm", None),
+    ("PATCH", "/api/admin/dm", {"default_agent": None}),
+    ("POST", "/api/admin/dm/rules", {"subject": "everyone"}),
+    ("PATCH", "/api/admin/dm/rules/0", {"locked": False}),
+    ("DELETE", "/api/admin/dm/rules/0", None),
+    ("GET", "/api/admin/dm/explain?user=u-1", None),
+    ("GET", "/api/admin/dm/people?q=a", None),
+    ("GET", "/api/admin/platform-groups", None),
 ]
 
 
 _SETTINGS = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
 )
 
 
@@ -434,6 +451,7 @@ async def test_turning_web_chat_off_hides_the_agent_from_members(
         "groups": [],
         "fixed_to": None,
         "fixed_name": None,
+        "dm": {"on": False, "who": "members", "users": [], "groups": []},
     }, "an agent nobody configured is on for everyone"
     assert changed.json()["web"] is False, changed.text
     assert agents == [], "a member no longer sees it"

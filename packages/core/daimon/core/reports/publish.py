@@ -196,7 +196,7 @@ async def publish_report(
     # an admin) before any variant, token or host record exists.
     if authorize_source is not None:
         source_ma = await find_agent_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=resolved_agent
+            anthropic, tenant_id=tenant_id, name=resolved_agent, records=session_factory
         )
         if source_ma is None:
             raise DaimonError(f"agent '{resolved_agent}' not found")

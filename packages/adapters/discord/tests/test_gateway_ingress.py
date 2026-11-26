@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any, Never
 from unittest.mock import AsyncMock
@@ -26,12 +27,10 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
-    Settings,
     ThreadNamingSettings,
     TurnSettings,
 )
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import scoped_config_write, tenant_ledger
 from daimon.core.stores.access_policy import (
@@ -44,6 +43,7 @@ from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.discord_ingress import ConcurrentCheckpoint, DiscordIngress, IngressHTTP
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -52,22 +52,12 @@ from mux.contracts.ids import Provider, Scope
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import PostgresDsn, SecretStr
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from .shared_fakes import InitOnlySettings
 
-class InitOnlySettings(Settings):
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings,)
+_scope = partial(Scope, principal_id="qa-operator:100", authorization_id="qa-offline:100")
 
 
 @dataclasses.dataclass
@@ -156,7 +146,7 @@ async def owned(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         discord=DiscordSettings(bot_token=SecretStr("offline"), thread_open_notice_after_s=0),
         thread_naming=ThreadNamingSettings(),
-        turn=TurnSettings(path="mux", channel_backends=True),
+        turn=TurnSettings(channel_backends=True),
     )
     cache = new_resolver_cache()
     default = DeploymentDefault()
@@ -170,12 +160,10 @@ async def owned(
     )
 
     deps = dataclasses.replace(deps, turn_runtime_factory=None, turn_runtimes={})
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=client,
         sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=default,
         resolver_cache=cache,
         turn_deps=deps,
@@ -265,12 +253,7 @@ async def start(
         )
     harness = DiscordIngress(
         runtime=owned.runtime,
-        scope=Scope(
-            tenant_id=str(owned.tenant_id),
-            account_id=str(owned.account_id),
-            principal_id="qa-operator:100",
-            authorization_id="qa-offline:100",
-        ),
+        scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
         http=IngressHTTP(evidence_id="c7-owned", parent_channel_id=101, hold_first_post=True),
         native=owned.native,
         utc_clock=utc_clock,
@@ -314,13 +297,11 @@ async def start(
     return harness
 
 
-@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
 @pytest.mark.parametrize(
     "scenario", ["QA-I6-BARE-MENTION-THREAD-TITLE", "QA-NEW9-NO-INTERNAL-PLUMBING"]
 )
-async def test_source_ingress_and_title(
-    owned: OwnedIngress, backend: Provider, scenario: str
-) -> None:
+async def test_source_ingress_and_title(owned: OwnedIngress, scenario: str) -> None:
+    backend: Provider = "anthropic"  # other backends' turns: tests/simulated
     harness = await start(owned, backend)
     context: dict[str, Any] | None = None
     try:
@@ -590,12 +571,7 @@ async def test_all_database_binds_are_checked_before_gateway_allocation(
         with pytest.raises(ValueError, match="owned"):
             DiscordIngress(
                 runtime=dataclasses.replace(owned.runtime, sessionmaker=factory),
-                scope=Scope(
-                    tenant_id=str(owned.tenant_id),
-                    account_id=str(owned.account_id),
-                    principal_id="qa-operator:100",
-                    authorization_id="qa-offline:100",
-                ),
+                scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                 http=IngressHTTP(evidence_id="bad-bind", parent_channel_id=101),
                 native=owned.native,
             )
@@ -612,11 +588,9 @@ async def test_foreign_owned_fixture_binding_is_refused(owned: OwnedIngress, for
     await first.close()
     harness = DiscordIngress(
         runtime=owned.runtime,
-        scope=Scope(
+        scope=_scope(
             tenant_id=str(uuid.uuid4()) if foreign == "tenant" else str(owned.tenant_id),
             account_id=str(uuid.uuid4()) if foreign == "account" else str(owned.account_id),
-            principal_id="qa-operator:100",
-            authorization_id="qa-offline:100",
         ),
         http=IngressHTTP(evidence_id="bad-scope", parent_channel_id=101),
         native=owned.native,
@@ -665,24 +639,14 @@ async def test_reachable_nested_dependencies_refuse_before_admission(
             with pytest.raises(ValueError):
                 DiscordIngress(
                     runtime=bad,
-                    scope=Scope(
-                        tenant_id=str(owned.tenant_id),
-                        account_id=str(owned.account_id),
-                        principal_id="qa-operator:100",
-                        authorization_id="qa-offline:100",
-                    ),
+                    scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                     http=IngressHTTP(evidence_id="nested", parent_channel_id=101),
                     native=owned.native,
                 )
         elif boundary == "open":
             harness = DiscordIngress(
                 runtime=owned.runtime,
-                scope=Scope(
-                    tenant_id=str(owned.tenant_id),
-                    account_id=str(owned.account_id),
-                    principal_id="qa-operator:100",
-                    authorization_id="qa-offline:100",
-                ),
+                scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                 http=IngressHTTP(evidence_id="nested", parent_channel_id=101),
                 native=owned.native,
             )
@@ -744,12 +708,7 @@ async def test_nested_routed_bind_refused_before_bot_allocation(
                     owned.runtime,
                     turn_deps=dataclasses.replace(owned.runtime.turn_deps, sessionmaker=nested),
                 ),
-                scope=Scope(
-                    tenant_id=str(owned.tenant_id),
-                    account_id=str(owned.account_id),
-                    principal_id="qa-operator:100",
-                    authorization_id="qa-offline:100",
-                ),
+                scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                 http=IngressHTTP(evidence_id="nested-routed", parent_channel_id=101),
                 native=owned.native,
             )
@@ -798,9 +757,9 @@ async def test_opaque_runtime_dependencies_refuse_before_real_event(
     # The genuine default resolver is safe even under a broken guard: its
     # registered composition is trapped before deployment/credential discovery.
     monkeypatch.setitem(
-        runtime_module._RUNTIME_FACTORIES,  # pyright: ignore[reportPrivateUsage]
+        runtime_module._BACKENDS,  # pyright: ignore[reportPrivateUsage]
         "openai.persistent_workspace",
-        trap_runtime,
+        runtime_module.HostedBackend(runtime=trap_runtime),
     )
     replacements: dict[str, object] = {
         "turn_runtime_factory": trap_runtime,
@@ -824,11 +783,8 @@ async def test_opaque_runtime_dependencies_refuse_before_real_event(
                 with pytest.raises(ValueError, match="absent injected"):
                     DiscordIngress(
                         runtime=bad,
-                        scope=Scope(
-                            tenant_id=str(owned.tenant_id),
-                            account_id=str(owned.account_id),
-                            principal_id="qa-operator:100",
-                            authorization_id="qa-offline:100",
+                        scope=_scope(
+                            tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)
                         ),
                         # Unheld is deliberate: pause configuration cannot authorize a runtime.
                         http=IngressHTTP(evidence_id="opaque", parent_channel_id=101),
@@ -837,12 +793,7 @@ async def test_opaque_runtime_dependencies_refuse_before_real_event(
             else:
                 harness = DiscordIngress(
                     runtime=owned.runtime,
-                    scope=Scope(
-                        tenant_id=str(owned.tenant_id),
-                        account_id=str(owned.account_id),
-                        principal_id="qa-operator:100",
-                        authorization_id="qa-offline:100",
-                    ),
+                    scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                     http=IngressHTTP(evidence_id="opaque", parent_channel_id=101),
                     native=owned.native,
                 )
@@ -1058,14 +1009,12 @@ def post_text(checkpoint: ConcurrentCheckpoint, thread_id: str) -> str:
     )
 
 
-@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
 async def test_busy_native_root_queues_then_continues_same_actual_session(
-    owned: OwnedIngress, backend: Provider
+    owned: OwnedIngress,
 ) -> None:
     from daimon.testing.discord_ingress import DiscordConcurrentDriver
 
-    if backend != "anthropic":
-        pytest.skip("PENDING: explicit owned alternate-provider native capture binding")
+    backend: Provider = "anthropic"
     clock = InterleavingClock()
     harness = await start(owned, backend, utc_clock=clock.utc)
     wire = BusyWire(owned, ["FIRST-DONE", "SECOND-DONE"])
@@ -1169,15 +1118,11 @@ async def test_busy_native_root_queues_then_continues_same_actual_session(
         await harness.close()
 
 
-@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
-async def test_real_cap_admin_three_admissions_wait_then_release(
-    owned: OwnedIngress, backend: Provider
-) -> None:
+async def test_real_cap_admin_three_admissions_wait_then_release(owned: OwnedIngress) -> None:
     from daimon.testing.admin_bindings import AdminBindings
     from daimon.testing.discord_ingress import DiscordConcurrentDriver
 
-    if backend != "anthropic":
-        pytest.skip("PENDING: explicit owned alternate-provider native capture binding")
+    backend: Provider = "anthropic"
     discord_settings = owned.runtime.settings.discord
     assert discord_settings is not None
     clock = InterleavingClock()

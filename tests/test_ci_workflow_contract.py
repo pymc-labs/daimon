@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import subprocess
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +84,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     deploy = jobs["deploy-gcp"]
     legs = _legs(jobs["pytest-db"])
     discord_legs = _legs(jobs["pytest-discord"])
-    for suite, count in (("core", 6), ("mcp", 2), ("discord", 2)):
+    for suite, count in (("core", 4), ("mcp", 2), ("discord", 2)):
         suite_legs = [leg for leg in legs + discord_legs if leg["suite"] == suite]
         shards = [leg["shard"] for leg in suite_legs]
         assert shards == list(range(count)), f"{suite} must run every shard exactly once"
@@ -93,7 +92,9 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     # The sharded legs of one suite select the same paths, or a shard would skip tests.
     for suite in {leg["suite"] for leg in legs + discord_legs}:
         assert len({leg["paths"] for leg in legs + discord_legs if leg["suite"] == suite}) == 1
-    assert {leg["suite"] for leg in legs} == {"core", "mcp", "slack", "teams", "web", "parity"}
+    assert {leg["suite"] for leg in legs} == {
+        "core", "mcp", "slack", "teams", "web", "parity", "simulated",
+    }  # fmt: skip
     assert {leg["suite"] for leg in discord_legs} == {"discord"}
     for name in ("pytest-db", "pytest-discord"):
         shard_options = [
@@ -110,8 +111,6 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     assert set(deploy["needs"]) == {
         "lint",
         "shard-check",
-        # The production default path (mux) gates the deploy.
-        "pytest-mux-leg",
         "pytest-db",
         "pytest-discord",
         "pytest-light",
@@ -127,6 +126,9 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "mux",
         "harness",
         "harness-conformance",
+        # Core's compute caller and task scripts against the session server. The image
+        # build itself is a docker-build step, which a deploy does not wait for.
+        "compute-session",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))
@@ -142,7 +144,6 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
     assert set(pytest_jobs) == {
         "pytest-db",
         "pytest-discord",
-        "pytest-mux-leg",
         "pytest-staging-config",
         "pytest-light",
         "pytest-notebook-host",
@@ -175,7 +176,7 @@ def test_core_legs_check_out_full_history() -> None:
     assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
     legs = _legs(job)
     core = [leg for leg in legs if leg["suite"] == "core"]
-    assert len(core) == 6
+    assert len(core) == 4
     assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
     assert all(isinstance(leg["fetch-depth"], int) for leg in legs)
 
@@ -208,7 +209,6 @@ def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
         == {
             "pytest-db",
             "pytest-discord",
-            "pytest-mux-leg",
         }
     )
 
@@ -693,97 +693,9 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
         assert len((tmp_path / "updates").read_text().splitlines()) == 1
 
 
-@pytest.mark.parametrize("environment", ["production", "staging"])
-def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
-    tmp_path: Path, environment: str
-) -> None:
-    """Prod keeps today's stops until a promote is approved; staging runs code defaults."""
-    import json
-
-    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
-    step = next(step for step in steps if step.get("id") == "mcp_minters")
-    assert step["env"]["DEPLOY_ENVIRONMENT"] == "${{ inputs.environment }}"
-    receipt = {"spec": {"template": {"spec": {"timeoutSeconds": 300, "containers": [{}]}}}}
-    (tmp_path / "service.json").write_text(json.dumps(receipt))
-    gcloud = tmp_path / "gcloud"
-    gcloud.write_text(
-        '#!/bin/sh\nif [ "$3" = describe ]; then cat "$RUNNER_TEMP/service.json"; '
-        'else echo "$*" >> "$RUNNER_TEMP/updates"; fi\n'
-    )
-    gcloud.chmod(0o700)
-    script = (
-        step["run"]
-        .replace("${{ vars.GCP_AR_REPO }}", "offline")
-        .replace("${{ steps.images.outputs.daimon }}", "offline/image")
-    )
-    result = subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", script],
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}:{os.environ['PATH']}",
-            "RUNNER_TEMP": str(tmp_path),
-            "GITHUB_OUTPUT": str(tmp_path / "outputs"),
-            "REGION": "offline",
-            "DEPLOY_ENVIRONMENT": environment,
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    updates = (tmp_path / "updates").read_text()
-    pins = (
-        "DAIMON_TURN__PATH=mux",
-        "DAIMON_TURN__CHANNEL_BACKENDS=false",
-        "DAIMON_TURN__AGENT_BACKENDS=false",
-    )
-    if environment == "production":
-        assert all(pin in updates for pin in pins), updates
-    else:
-        assert "TURN__" not in updates and "FLEET__" not in updates, updates
-
-
-def test_production_worker_refresh_pins_mux_with_backends_off() -> None:
-    """The prod worker env gets mux with both backend switches off after every refresh."""
-    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
-    script = next(
-        step["run"]
-        for step in steps
-        if step.get("name") == "Refresh worker VM containers (recreate in place)"
-    )
-    refresh = script.index("sudo /usr/local/bin/daimon-refresh-env")
-    pin = script.index('if [ "${{ inputs.environment }}" = production ]; then', refresh)
-    assert pin < script.index("docker compose -f compose.worker.yml pull"), "before recreate"
-    block = script[pin : script.index("fi", pin)]
-    for line in (
-        "DAIMON_TURN__PATH=mux",
-        "DAIMON_TURN__CHANNEL_BACKENDS=false",
-        "DAIMON_TURN__AGENT_BACKENDS=false",
-    ):
-        assert line in block
-    assert "tee -a /etc/daimon/daimon.env" in block
-
-
-def test_mux_leg_is_a_blocking_ratchet_inside_the_deploy_gate() -> None:
-    """The mux leg selects mux through the environment and ratchets its known failures."""
-    jobs = _workflow("ci.yml")["jobs"]
-    job = jobs["pytest-mux-leg"]
-    assert not job.get("continue-on-error")
-    assert job["env"]["DAIMON_TURN__PATH"] == "mux"
-    assert job["env"]["DAIMON_TURN__CHANNEL_BACKENDS"] == "true"
-    assert all("-p daimon.testing.mux_leg_known" in c for c in _pytest_commands(job))
-    # Production defaults to mux, so a mux failure holds back the staging deploy.
-    assert "pytest-mux-leg" in jobs["deploy-gcp"]["needs"]
-    assert (_ROOT / "tests" / "mux_leg_known_failures.txt").is_file()
-    # The other legs never load the ratchet or select a path: the root addopts run
-    # them on the emergency-stop leg (daimon.testing.stop_leg_default).
-    addopts = tomllib.loads((_ROOT / "pyproject.toml").read_text())["tool"]["pytest"][
-        "ini_options"
-    ]["addopts"]
-    assert "-p daimon.testing.stop_leg_default" in addopts
-    for name in ("pytest-db", "pytest-discord"):
-        assert "mux_leg_known" not in " ".join(_pytest_commands(jobs[name]))
-        assert "DAIMON_TURN__PATH" not in jobs[name]["env"]
+def test_deploys_leave_turn_switches_to_the_environment_config() -> None:
+    """Deploys never pin turn switches; each environment's own config sets them."""
+    assert "DAIMON_TURN__" not in (_WORKFLOWS / "deploy.yml").read_text()
 
 
 def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> None:
@@ -795,36 +707,40 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
     assert legs == [
         {
             "configuration": "enabled",
-            "path": "mux",
             "channel_backends": "true",
             "agent_backends": "true",
         },
         {
             "configuration": "mux-only",
-            "path": "mux",
-            "channel_backends": "false",
-            "agent_backends": "false",
-        },
-        {
-            "configuration": "legacy-off",
-            "path": "legacy",
             "channel_backends": "false",
             "agent_backends": "false",
         },
     ]
     for flag, matrix_key in (
-        ("DAIMON_TURN__PATH", "path"),
         ("DAIMON_TURN__CHANNEL_BACKENDS", "channel_backends"),
         ("DAIMON_TURN__AGENT_BACKENDS", "agent_backends"),
         ("DAIMON_CI_CONFIGURATION", "configuration"),
     ):
         assert job["env"][flag] == f"${{{{ matrix.{matrix_key} }}}}"
     command = " ".join(_pytest_commands(job))
-    for selected in (
-        "test_turn_runs_on_the_selected_leg",
-        "packages/core/tests/turn/test_staging_configuration_paths.py",
-    ):
-        assert selected in command
+    assert "packages/core/tests/turn/test_staging_configuration_paths.py" in command
+    for path in command.split():
+        if path.endswith(".py") or ".py::" in path:
+            assert (_WORKFLOWS.parents[1] / path.split("::")[0]).is_file(), f"{path} must exist"
+
+
+def test_journeys_run_with_backends_on_and_off() -> None:
+    """mux runs the code defaults (backends on); stop pins both off, the emergency stop."""
+    job = _workflow("ci.yml")["jobs"]["journeys-offline"]
+    assert job["strategy"]["matrix"]["include"] == [
+        {"leg": "mux", "backends": "true"},
+        {"leg": "stop", "backends": "false"},
+    ]
+    step = next(step for step in job["steps"] if "journey" in step.get("name", ""))
+    assert step["env"] == {
+        "DAIMON_TURN__CHANNEL_BACKENDS": "${{ matrix.backends }}",
+        "DAIMON_TURN__AGENT_BACKENDS": "${{ matrix.backends }}",
+    }
 
 
 _CLEAR_STEP = "Forget the deployed commit until this deploy passes"
@@ -901,3 +817,55 @@ def test_a_config_change_recreates_and_checks_every_worker() -> None:
     for step in (settle, steps["Verify deployed installs match shipped defaults"]):
         assert without_freshness(step["if"]) == f"({reconcile}) != ''"
     assert "steps.refresh.outputs.smoke == 'true'" in steps["Post-deploy smoke turn"]["if"]
+
+
+def test_guard_jobs_run_the_checks_in_parallel_and_stay_out_of_the_deploy_gate() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    runs = lambda job: " ".join(s.get("run", "") for s in jobs[job]["steps"])  # noqa: E731
+    assert "scripts/ci/image_tls_check.py" in runs("image-smoke")
+    assert "daimon:smoke" in runs("image-smoke")
+    assert "tests/simulated" in runs("image-smoke")
+    # The tooling added to the image is what the lock pins.
+    lock = (_ROOT / "uv.lock").read_text()
+    for pin in re.findall(r"\b(pytest[\w-]*)==([\d.]+)", runs("image-smoke")):
+        assert f'name = "{pin[0]}"\nversion = "{pin[1]}"' in lock, pin
+    assert any(s.get("with", {}).get("load") for s in jobs["image-smoke"]["steps"])
+    assert "scripts/ci/migration_upgrade.py" in runs("migration-upgrade")
+    # The release tag and the parent commit come from history.
+    assert jobs["migration-upgrade"]["steps"][0]["with"]["fetch-depth"] == 0
+    for name in ("image-smoke", "migration-upgrade"):
+        assert jobs[name]["needs"] == "changes"
+        assert jobs[name]["timeout-minutes"] <= 15
+        assert name not in jobs["deploy-gcp"]["needs"]
+
+
+def test_the_tls_check_retries_a_blip_and_fails_a_stale_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import runpy
+    import time
+
+    import httpx
+
+    def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(time, "sleep", no_sleep)
+    answers = {"calls": 0, "blips": 1}
+
+    def get(_client: httpx.Client, url: str) -> httpx.Response:
+        answers["calls"] += 1
+        if answers["blips"] > 0 and answers["calls"] == 1 or answers["blips"] < 0:
+            raise httpx.ConnectError("handshake")
+        return httpx.Response(401, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    script = str(_ROOT / "scripts/ci/image_tls_check.py")
+
+    with pytest.raises(SystemExit) as one_blip:
+        runpy.run_path(script, run_name="__main__")
+    assert one_blip.value.code == 0, "one blip at one provider must not fail the run"
+    answers.update(calls=0, blips=-1)
+    with pytest.raises(SystemExit) as stale:
+        runpy.run_path(script, run_name="__main__")
+    assert stale.value.code == 1, "a store that never handshakes still fails"

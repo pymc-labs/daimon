@@ -14,7 +14,6 @@ Covers:
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
@@ -31,8 +30,8 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.routines import list_routines_for_tenant
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
+from daimon.testing.slack_notices import shown_text
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
@@ -218,7 +217,7 @@ def _build_runtime(handler: Any, db_session_factory: Any) -> SlackRuntime:
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
 

@@ -5,18 +5,21 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from unittest.mock import MagicMock
 
 import anthropic
 import httpx
 import pytest
 from daimon.core import routine_delivery as routine_delivery_module
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.config import Settings, WebSettings
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
+    DirectPost,
+    RunText,
     agent_posted_to,
     clear_creator,
     delivery_refusal,
@@ -28,24 +31,29 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     render_routine_controls,
     resolve_routine_identity,
+    split_run_text,
     teams_thread_id,
 )
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     claim_routine_deliveries,
-    create_routine,
     get_routine,
     record_result,
     settle_routine_delivery,
     update_routine,
 )
 from daimon.core.turn.state import ToolUseBlock, TurnState
-from daimon.core.web_links import WebLinks
+from daimon.core.web_links import panel_links
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+
+_claim_routine_deliveries = partial(
+    claim_routine_deliveries, platform="discord", now=_NOW, lease=timedelta(minutes=2)
+)
 
 
 def _row(**overrides: object) -> RoutineRow:
@@ -103,7 +111,7 @@ def test_a_teams_thread_destination_is_its_channel_and_root() -> None:
 
 def test_routine_controls_link_only_its_own_workspace_and_only_with_a_web_app() -> None:
     row = _row()
-    web = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
+    web = panel_links(WebSettings(public_url="https://app.example.com"), row.tenant_id, admin=False)  # type: ignore[call-arg]
     assert render_routine_controls(row, platform="discord", web=None) == render_routine_controls(
         row, platform="discord"
     ), "no web app, the same controls as before"
@@ -118,8 +126,9 @@ def test_routine_controls_link_only_its_own_workspace_and_only_with_a_web_app() 
 
 
 def test_routine_controls_omit_web_links_when_the_channel_is_held() -> None:
-    web = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
-    text = render_routine_controls(_row(), platform="discord", web=web, held=True)
+    row = _row()
+    web = panel_links(WebSettings(public_url="https://app.example.com"), row.tenant_id, admin=False)  # type: ignore[call-arg]
+    text = render_routine_controls(row, platform="discord", web=web, held=True)
     assert "app.example.com" not in text, "a shared channel's readers get no web links"
     assert '"web"' not in text, "and no web control at all"
 
@@ -149,7 +158,6 @@ def test_routine_controls_carry_the_destination_platforms_words(
     assert controls["words"]["setup"] == setup
     assert admin in controls["words"]["admin"]
     assert "use `words` from these controls" in text
-    assert "Never name or hint at another chat app" in text
     assert "only place" not in text
 
 
@@ -206,6 +214,51 @@ def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:
     )
 
 
+@pytest.mark.parametrize("direct_post", ["allowed", "protected", "unverified"])
+@pytest.mark.parametrize(
+    ("platform", "kind", "destination_id"),
+    [
+        ("discord", "channel", "1"),
+        ("discord", "thread", "1"),
+        ("discord", "dm", "1"),
+        ("slack", "channel", "C1"),
+        ("teams", "channel", "19:abc@thread.tacv2"),
+    ],
+)
+def test_every_destination_says_how_a_quiet_run_ends(
+    platform: str, kind: str, destination_id: str, direct_post: DirectPost
+) -> None:
+    """`test_split_run_text` proves the marker, `test_an_empty_tail_is_not_posted` no text."""
+    text = render_routine_controls(
+        _row(destination_kind=kind, destination_id=destination_id),
+        platform=platform,
+        direct_post=direct_post,
+    )
+    assert "must be one line: NO_POST: and a short reason" in text
+    assert "Whatever your instructions ask you to report" in text, "a report is never dropped"
+    assert "say what stopped you" in text, "a failed check is never silent"
+
+
+@pytest.mark.parametrize(
+    ("text", "post", "record"),
+    [
+        ("Report.\nAll green.", "Report.\nAll green.", "Report.\nAll green."),
+        ("NO_POST: no new leads", "", "no new leads"),
+        ("  **NO_POST:** no new leads", "", "no new leads"),
+        ("`NO_POST: no new leads`", "", "no new leads"),
+        ("NO_POST", "", "Nothing to post."),
+        ("I read the inbox.\n\nNO_POST: no new leads\n", "", "no new leads"),
+        ("NO_POST: no new leads\nI checked twice.", "", "no new leads"),
+        ("", "", ""),
+        ("The NO_POST: rule changed.", *("The NO_POST: rule changed.",) * 2),
+        ("NO_POST handling changed.", *("NO_POST handling changed.",) * 2),
+        ("NO_POSTERS: none", *("NO_POSTERS: none",) * 2),
+    ],
+)
+def test_split_run_text(text: str, post: str, record: str) -> None:
+    assert split_run_text(text) == RunText(post=post, record=record)
+
+
 def test_protected_controls_do_not_invite_a_post() -> None:
     text = render_routine_controls(_row(), platform="discord", direct_post="protected")
     assert "do not post there" in text
@@ -250,6 +303,26 @@ def test_the_fallback_post_names_the_agent_unless_the_post_carries_its_identity(
     assert render_fallback_post(row, as_agent=True) == (
         "Result from the Friday routine at 17:00 Europe/London:\n\nAll green."
     ), "the agent's own header says who it is from; the schedule stays"
+
+
+def test_a_fallback_post_without_the_header_is_the_result_alone() -> None:
+    """Off drops the "Result from" line only: the requester line stays, a failure notice is unchanged."""
+    row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
+    assert render_fallback_post(row, header=False) == "All green."
+    assert render_fallback_post(row, header=False, as_agent=True) == "All green."
+    assert render_fallback_post(row, header=False, platform="discord").endswith(
+        "All green.\n-# requested by <@U1>"
+    ), "the attribution line is not the header"
+    failed = _row(delivery_note="failure_notice")
+    assert render_fallback_post(failed, header=False) == render_fallback_post(failed)
+
+
+def test_the_fallback_texts_name_the_agent_by_its_display_name() -> None:
+    row = _row(agent_name="research", cron_expr="0 17 * * 5", timezone="Europe/London")
+    assert render_fallback_post(row, agent_name="Ada").startswith(
+        "Result from Ada's Friday routine"
+    )
+    assert render_fallback_dm(row, "destination_unavailable", "Ada").startswith("Ada, ")
 
 
 def test_the_fallback_post_keeps_a_schedule_it_cannot_say_exactly_as_cron() -> None:
@@ -456,14 +529,11 @@ async def _routine(
     session: AsyncSession, *, platform: str = "discord", destination: bool = True
 ) -> RoutineRow:
     tenant = await make_tenant(session, platform=platform)  # type: ignore[arg-type]
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="U1",
         agent_id="ag",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
         trigger_message="go",
         destination_kind="channel" if destination else None,
         destination_id="123" if destination else None,
@@ -485,12 +555,8 @@ async def test_a_pending_post_is_claimed_once_and_settled_by_its_owner(
     row = await _routine(db_session)
     await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
 
-    first = await claim_routine_deliveries(
-        db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-    )
-    second = await claim_routine_deliveries(
-        db_session, platform="discord", owner="b", now=_NOW, lease=timedelta(minutes=2)
-    )
+    first = await _claim_routine_deliveries(db_session, owner="a")
+    second = await _claim_routine_deliveries(db_session, owner="b")
     assert [r.id for r in first] == [row.id]
     assert second == [], "a claimed post is not handed out twice"
     assert not await settle_routine_delivery(
@@ -507,14 +573,10 @@ async def test_a_pending_post_is_claimed_once_and_settled_by_its_owner(
 async def test_an_expired_claim_is_never_reposted(db_session: AsyncSession) -> None:
     row = await _routine(db_session)
     await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
-    await claim_routine_deliveries(
-        db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-    )
+    await _claim_routine_deliveries(db_session, owner="a")
 
     later = _NOW + timedelta(minutes=5)
-    again = await claim_routine_deliveries(
-        db_session, platform="discord", owner="b", now=later, lease=timedelta(minutes=2)
-    )
+    again = await _claim_routine_deliveries(db_session, owner="b", now=later)
 
     assert again == []
     after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
@@ -525,12 +587,7 @@ async def test_an_expired_claim_is_never_reposted(db_session: AsyncSession) -> N
 async def test_claims_are_per_platform(db_session: AsyncSession) -> None:
     row = await _routine(db_session, platform="slack")
     await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
-    assert (
-        await claim_routine_deliveries(
-            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-        )
-        == []
-    )
+    assert await _claim_routine_deliveries(db_session, owner="a") == []
 
 
 @pytest.mark.parametrize("claimed", [False, True])
@@ -560,9 +617,7 @@ async def test_clearing_the_destination_drops_a_pending_post(
         delivery_payload=payload,
     )
     if claimed:
-        claims = await claim_routine_deliveries(
-            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-        )
+        claims = await _claim_routine_deliveries(db_session, owner="a")
         assert len(claims) == 1 and claims[0].delivery_status == "claimed"
     await update_routine(
         db_session,
@@ -688,6 +743,57 @@ async def test_clear_creator_returns_the_policy_or_why_not(
 
 
 @pytest.mark.parametrize(
+    ("member", "roles", "admin", "expected"),
+    [
+        (True, ("123",), False, "cleared"),
+        (True, ("999",), True, "agent_not_allowed"),
+        (True, (), False, "agent_not_allowed"),
+        (False, (), False, "invoker_not_allowed"),
+    ],
+)
+async def test_a_dm_for_a_role_gated_agent_is_sent_only_for_an_owner_holding_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    member: bool,
+    roles: tuple[str, ...],
+    admin: bool,
+    expected: str,
+) -> None:
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord")
+    row = await new_routine(
+        db_session,
+        tenant,
+        created_by_user_id="1234",
+        agent_id="ag",
+        trigger_message="go",
+        destination_kind="dm",
+        destination_id="1234",
+        source_provenance_known=True,
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=member, role_ids=roles, is_admin=admin)
+
+    result = await clear_creator(
+        db_session_factory,
+        row,
+        platform="discord",
+        membership_resolver=CachedMembershipResolver(fetch),  # type: ignore[arg-type]
+    )
+    assert ("cleared" if isinstance(result, TenantAccessPolicy) else result) == expected
+
+
+@pytest.mark.parametrize(
     ("policy", "platform", "kind", "unsafe"),
     [
         (TenantAccessPolicy(), "discord", "thread", False),
@@ -809,21 +915,126 @@ async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_sess
 
 
 @pytest.mark.parametrize(
-    ("platform", "payload", "scrubbed"),
+    ("note", "event"),
     [
-        ("discord", "Sent to Discord, Slack and Teams.", "Sent to Discord, other apps."),
-        ("slack", "Sent to Discord or Microsoft Teams.", "Sent to another app."),
-        ("teams", "Sent to Discord and Slack.", "Sent to other apps."),
+        ("tenant_archived", "routine.delivery_skipped"),
+        ("post_failed", "routine.delivery_failed"),
+        ("access_policy_unreadable", "routine.delivery_failed"),
     ],
 )
-def test_a_routine_result_never_names_another_chat_app(
-    platform: str, payload: str, scrubbed: str
-) -> None:
-    row = _row(delivery_payload=payload)
-    assert render_fallback_post(row, platform=platform).count(f"\n\n{scrubbed}\n") == 1
-    assert (
-        render_fallback_post(row, as_agent=True, platform=platform).count(f"\n\n{scrubbed}\n") == 1
+async def test_deliberate_skip_is_not_a_delivery_failure(
+    db_session, db_session_factory, note, event
+):
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="Report", error=None, delivery="pending")
+    await db_session.commit()
+
+    async def post(claimed):
+        return DeliveryOutcome(status="skipped", note=note)
+
+    with capture_logs() as logs:
+        await poll_deliveries_once(db_session_factory, platform="discord", post=post, now=_NOW)
+    seen = {
+        e["event"]
+        for e in logs
+        if e["event"] in {"routine.delivery_failed", "routine.delivery_skipped"}
+    }
+    assert seen == {event}
+
+
+def test_lapsed_role_card_names_the_routine_and_how_to_resume() -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.routine_delivery import lapsed_role_card
+
+    row = SimpleNamespace(
+        name="Weekly digest", agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC"
     )
-    dm = render_fallback_dm(row, "destination_unavailable", platform=platform)
-    assert dm.endswith(f"\n\n{scrubbed}")
-    assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"
+    title, todo = lapsed_role_card(row)  # type: ignore[arg-type]
+    assert "Weekly digest" in title and "paused" in title
+    assert "admin" in todo and "/routines" in todo
+    unnamed = SimpleNamespace(name=None, agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC")
+    assert "Monday routine at 09:00 UTC" in lapsed_role_card(unnamed)[0]  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("roles", "fresh", "gated", "lapsed"),
+    [
+        ((), True, True, True),
+        (("999",), True, True, True),
+        (("123",), True, True, False),
+        ((), False, True, False),
+        ((), True, False, False),
+    ],
+)
+def test_lapsed_role_is_a_fresh_member_missing_a_gated_agents_role(
+    roles: tuple[str, ...], fresh: bool, gated: bool, lapsed: bool
+) -> None:
+    """Admins get no bypass; a stale or missing membership is retried, not paused."""
+    from daimon.core.authz import build_subject
+    from daimon.core.routine_delivery import lapsed_role
+
+    rules = {"helper": AgentRule(invoker_role_ids=("123",))} if gated else {}
+    owner = build_subject(
+        is_admin=roles == ("999",),
+        platform_user_id="U1",
+        role_ids=roles,
+        verified_membership=fresh or None,
+        membership_fresh=fresh,
+    )
+    assert lapsed_role(TenantAccessPolicy(agent_rules=rules), ("helper",), owner) is lapsed
+
+
+@pytest.mark.parametrize(
+    ("mode", "roles", "expected"),
+    [
+        ("on", ("4001",), "cleared"),
+        ("on", ("4002",), "owner_outside_team"),
+        ("shadow", ("4002",), "cleared"),
+        ("off", ("4002",), "cleared"),
+    ],
+)
+async def test_a_dm_result_rechecks_the_owners_standing_in_mode_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    roles: tuple[str, ...],
+    expected: str,
+) -> None:
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    async def read(*_args: object, **_kwargs: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", read)
+    tenant = await make_tenant(db_session, platform="discord")
+    row = await new_routine(
+        db_session,
+        tenant,
+        created_by_user_id="1234",
+        agent_id="ag",
+        trigger_message="go",
+        destination_kind="dm",
+        destination_id="1234",
+        source_provenance_known=True,
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await set_access_policy(
+        db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(internal_role_ids=("4001",))
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=True, role_ids=roles)
+
+    result = await clear_creator(
+        db_session_factory,
+        row,
+        platform="discord",
+        membership_resolver=CachedMembershipResolver(fetch),  # type: ignore[arg-type]
+    )
+    assert ("cleared" if isinstance(result, TenantAccessPolicy) else result) == expected

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from daimon.adapters.discord import routine_delivery as poster_mod
+from daimon.adapters.discord.output_delivery import DEFAULT_MAX_BYTES_PER_FILE
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
@@ -18,9 +19,11 @@ from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import list_posts_in
-from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.routines import create_routine, record_result
+from daimon.core.stores.domain import FeatureTarget, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.stores.routines import record_result
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,7 +47,10 @@ def _guild(*, guild_id: int = _GUILD, member: object | None = _MEMBER) -> object
         raise discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Member")
 
     return SimpleNamespace(
-        id=guild_id, get_member=lambda user_id: member, fetch_member=fetch_member
+        id=guild_id,
+        get_member=lambda user_id: member,
+        fetch_member=fetch_member,
+        filesize_limit=DEFAULT_MAX_BYTES_PER_FILE,
     )
 
 
@@ -74,14 +80,12 @@ async def _routine(
     from daimon.core.stores.direct_messages import set_dm_enabled
 
     await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="1",
         agent_id="ag",
-        agent_name="daimon",
         cron_expr="0 9 * * 1",
-        timezone_="UTC",
         trigger_message="go",
         destination_kind=destination_kind,
         destination_id=destination_id,
@@ -102,11 +106,13 @@ async def _routine(
 class _Dms:
     """Records DMs opened for the creator; `fail` makes opening raise."""
 
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool | Exception = False) -> None:
         self.sent: list[tuple[int, int, str]] = []
         self.fail = fail
 
     async def open(self, guild_id: int, user_id: int) -> Any:
+        if isinstance(self.fail, Exception):
+            raise self.fail
         if self.fail:
             raise LookupError("not a member")
         dms = self
@@ -207,6 +213,55 @@ async def test_posts_the_tail_with_mentions_disabled(
     assert not mentions.everyone and not mentions.users and not mentions.roles
 
 
+async def _header_off(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:
+    async with sm.begin() as session:
+        await set_feature_value(
+            session, tenant_id=row.tenant_id, target=FeatureTarget("workspace"),
+            key="routine_result_header", value="off", set_by=None, surface="cli",
+        )  # fmt: skip
+
+
+async def test_with_the_header_off_the_result_posts_without_it_on_every_path(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bot's channel post, the agent-identity post and the owner's DM all drop the line."""
+    monkeypatch.setattr(poster_mod, "DiscordPostTransport", _Transport)
+    _Transport.made, _Transport.sent = [], []
+    row = await _routine(db_session)
+    await _header_off(db_session_factory, row)
+    channel = _text_channel()
+    await _poster(db_session_factory, channel)(row)
+    assert channel.send.await_args.kwargs["content"] == (
+        "All green @\u200beveryone.\n-# requested by <@1>"
+    )
+    identity = AgentIdentity(name="research", avatar_url="https://app/a.png", builtin=False)
+    await _poster(db_session_factory, _text_channel(), identity=identity)(row)
+    assert _Transport.sent[-1]["content"] == "All green @\u200beveryone.\n-# requested by <@1>"
+
+
+async def test_with_the_header_off_a_dm_routine_posts_the_result_alone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.routines import update_routine
+
+    row = await _routine(db_session)
+    await _header_off(db_session_factory, row)
+    async with db_session_factory.begin() as session:
+        updated = await update_routine(
+            session, row.id, edited_by="1", tenant_id=row.tenant_id, destination_kind="dm"
+        )
+        await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=True)
+    assert updated is not None
+    row = updated.model_copy(update={"delivery_payload": "A private notification."})
+    dms = _Dms()
+    assert (await _poster(db_session_factory, {}, dms=dms)(row)).status == "delivered"
+    [(_, _, text)] = dms.sent
+    assert "Result from" not in text and text.endswith("A private notification."), text
+
+
 async def test_with_identity_the_result_posts_as_the_agent_without_from_wording(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -300,6 +355,36 @@ async def test_a_channel_in_a_protected_category_falls_back_to_a_dm(
     (guild_id, user_id, content) = dms.sent[0]
     assert (guild_id, user_id) == (_GUILD, 1)
     assert "posting is blocked there" in content and content.endswith("All green @everyone.")
+
+
+@pytest.mark.parametrize(
+    ("error", "failed"),
+    [
+        (discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "closed"), None),
+        (discord.HTTPException(MagicMock(status=500, reason="failed"), "down"), "HTTPException"),
+    ],
+    ids=["dms_closed", "server_error"],
+)
+async def test_a_fallback_dm_to_closed_dms_is_skipped_without_counting_a_failure(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    error: Exception,
+    failed: str | None,
+) -> None:
+    """Closed DMs repeat on every run, so they must not page; a server error still counts."""
+    row = await _routine(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=row.tenant_id,
+        policy=TenantAccessPolicy(protected_category_ids=("77",)),
+    )
+    await db_session.commit()
+
+    outcome = await _poster(
+        db_session_factory, _text_channel(category_id=77), dms=_Dms(fail=error)
+    )(row)
+
+    assert (outcome.status, outcome.failed) == ("skipped", failed)
 
 
 async def test_an_uncached_thread_parent_is_resolved_before_category_protection(
@@ -748,13 +833,26 @@ async def test_routine_dm_does_not_replace_an_active_private_conversation(
 
 
 @pytest.mark.parametrize(
-    "mode", ["members", "disabled", "tenant_disabled", "blocked", "sealed", "revoked"]
+    "mode",
+    [
+        "members",
+        "disabled",
+        "tenant_disabled",
+        "blocked",
+        "sealed",
+        "revoked",
+        "unlisted",
+        "role_listed",
+        "role_missing",
+    ],
 )
 async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     mode: str,
 ) -> None:
+    from datetime import UTC, datetime
+
     from daimon.core.config import DirectMessagePolicy
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.stores.routines import update_routine
@@ -769,6 +867,15 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
             destination_kind="dm",
         )
         await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=mode != "tenant_disabled")
+        if mode in ("unlisted", "role_listed", "role_missing"):
+            from daimon.core.stores.dm_access import set_grant
+
+            # The routine's agent lists someone else, or a role: only its holders get the DM.
+            await set_grant(
+                session, tenant_id=row.tenant_id, agent_name=row.agent_name, who="listed",
+                user_ids=["424242"], group_ids=[] if mode == "unlisted" else ["R1"],
+                set_by=None, now=datetime.now(UTC),
+            )  # fmt: skip
     assert updated is not None
     if mode == "sealed":
         from daimon.core.access_policy import ChannelRule
@@ -792,7 +899,8 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     dms = _Dms(fail=mode == "blocked")
 
     async def membership(tenant_id, guild_id, user_id):
-        return Membership(is_member=mode != "revoked")
+        roles = ("R1",) if mode == "role_listed" else ()
+        return Membership(is_member=mode != "revoked", role_ids=roles)
 
     poster = make_discord_routine_poster(
         db_session_factory,
@@ -805,8 +913,9 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     )
     outcome = await poster(updated.model_copy(update={"delivery_payload": "private @everyone"}))
     fetch.assert_not_awaited()
-    assert outcome.status == ("delivered" if mode == "members" else "skipped")
-    assert bool(dms.sent) == (mode == "members")
+    delivered = mode in ("members", "role_listed")
+    assert outcome.status == ("delivered" if delivered else "skipped")
+    assert bool(dms.sent) == delivered
     if dms.sent:
         assert dms.sent[0][:2] == (_GUILD, 1)
         assert "private @everyone" in dms.sent[0][2]
@@ -955,6 +1064,54 @@ async def test_dm_delivery_rechecks_all_live_agent_names(db_session_factory, age
     result = await poster(row.model_copy(update={"delivery_payload": "private"}))
     assert result.status == ("delivered" if agent_state == "unrelated_rule" else "skipped")
     assert bool(dms.sent) == (agent_state == "unrelated_rule")
+
+
+@pytest.mark.parametrize(("roles", "delivered"), [(("123",), True), ((), False)])
+async def test_dm_delivery_of_a_role_gated_alias_needs_the_owner_to_hold_its_roles(
+    db_session_factory, roles, delivered
+):
+    """The live names are checked against the owner's fresh roles, not an empty subject."""
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.stores.routines import update_routine
+
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        row = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
+        assert row is not None
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(
+                agent_rules={"pinned name": AgentRule(invoker_role_ids=("123",))}
+            ),
+        )
+    dms = _Dms()
+
+    async def member(*args):
+        return Membership(is_member=True, role_ids=roles)
+
+    async def names(_):
+        return ("daimon", "pinned name")
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=AssertionError("not a channel")),
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),
+        resolve_agent_names=names,
+    )
+    result = await poster(row.model_copy(update={"delivery_payload": "private"}))
+    assert result.status == ("delivered" if delivered else "skipped"), result.note
+    assert bool(dms.sent) == delivered, "only a role holder gets the private delivery"
 
 
 @pytest.mark.parametrize("destination", ["channel", "dm"])
@@ -1253,3 +1410,298 @@ async def test_a_shared_channels_routine_never_leaves_it_by_dm(
 
     assert (outcome.status, outcome.note) == ("skipped", expected)
     assert dms.sent == [], "the result never goes by DM"
+
+
+# ── audience_hold: the stored hold of a fire, and the room's current audience ──
+
+
+class _Audience:
+    """The patched `audience_hold` mode and room facts the routine gate reads."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daimon.core import audience_gate, routine_hold
+        from daimon.core.channel_audience import ChannelAudience
+
+        self.mode: Any = "on"
+        self.contained: set[str] = set()
+
+        async def mode(session: object, place: object) -> str:
+            if isinstance(self.mode, Exception):
+                raise self.mode
+            return self.mode
+
+        async def fact(
+            session: object, *, tenant_id: object, platform: str, channel_id: str
+        ) -> ChannelAudience:
+            return ChannelAudience(
+                contained=channel_id in self.contained,
+                known=True,
+                narrow=False,
+                source="live",
+            )
+
+        monkeypatch.setattr(audience_gate, "audience_mode", mode)
+        monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+        monkeypatch.setattr(routine_hold, "channel_has_outsiders", fact)
+
+
+@pytest.fixture
+def audience(monkeypatch: pytest.MonkeyPatch) -> _Audience:
+    return _Audience(monkeypatch)
+
+
+_HELD_555 = {"held": True, "channel_id": "555", "client": False, "relay": False}
+
+
+async def _stored(
+    db_session: AsyncSession, hold: dict[str, Any] | None, **kwargs: Any
+) -> RoutineRow:
+    row = await _routine(db_session, **kwargs)
+    await record_result(
+        db_session,
+        row.id,
+        tail="All green @everyone.",
+        error=None,
+        delivery="pending",
+        delivery_hold=hold,
+    )
+    await db_session.commit()
+    return row.model_copy(update={"delivery_hold": hold})
+
+
+async def test_a_held_fire_never_falls_back_to_a_dm_after_the_outsider_leaves(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The fire ran held to room 555. The room is open again and the post fails."""
+    row = await _stored(db_session, _HELD_555)
+    gone = discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
+
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, gone, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
+    assert dms.sent == []
+
+    # With the feature off the result takes today's path: the registry says nothing, so it DMs.
+    audience.mode = "off"
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, gone, dms=dms)(row)
+    assert outcome.status == "delivered" and len(dms.sent) == 1
+
+
+async def test_a_held_fire_posts_in_its_contained_room(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, _HELD_555)
+    channel = _text_channel()
+    outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered"
+    channel.send.assert_awaited_once()
+
+
+async def test_a_held_fire_posts_in_a_thread_under_its_contained_room(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"444"}
+    row = await _stored(
+        db_session,
+        {"held": True, "channel_id": "444", "client": False, "relay": False},
+        destination_kind="thread",
+        channel_id="444",
+    )
+    thread = _uncached_thread(parent_id=444, creator_in_thread=True)
+    outcome = await _poster(db_session_factory, {555: thread, 444: _text_channel()})(row)
+    assert outcome.status == "delivered"
+    thread.send.assert_awaited_once()
+
+
+async def test_an_unheld_result_is_not_posted_in_a_room_outsiders_can_now_read(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, {"held": False})
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []
+
+
+async def test_a_legacy_result_keeps_todays_logic(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.mode = "off"  # `on` counts a legacy result as unheld
+    audience.contained = {"555"}
+    row = await _stored(db_session, None)
+    channel = _text_channel()
+    outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered"
+    channel.send.assert_awaited_once()
+
+
+async def test_a_legacy_result_counts_as_unheld_in_mode_on(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, None)
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []
+
+
+async def test_shadow_delivers_and_logs_the_refusal(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from structlog.testing import capture_logs
+
+    audience.mode = "shadow"
+    audience.contained = {"555"}
+    row = await _stored(db_session, {"held": False})
+    channel = _text_channel()
+    with capture_logs() as logs:
+        outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered"
+    records = [log for log in logs if log["event"] == "audience.shadow"]
+    assert [(r["kind"], r["channel_id"], r["reason"]) for r in records] == [
+        ("post_refused", "555", "audience_contained")
+    ]
+    assert "green" not in str(records)
+
+
+async def test_a_failed_mode_read_refuses_the_delivery(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.mode = RuntimeError("database down")
+    row = await _stored(db_session, {"held": False})
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_unreadable")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []
+
+
+async def test_an_audience_change_between_chunks_stops_the_rest_of_the_result(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every chunk asks the audience again: an outsider who joins after the first chunk
+    gets no later one, and nothing falls back to a direct message."""
+    row = await _stored(db_session, {"held": False})
+    row = row.model_copy(update={"delivery_payload": "x" * 2500})
+    channel = _text_channel()
+
+    async def send(*args: object, **kwargs: object) -> MagicMock:
+        audience.contained = {"555"}  # the room becomes one that outsiders can read
+        return SimpleNamespace(id=1)
+
+    channel.send = AsyncMock(side_effect=send)
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    assert channel.send.await_count == 1, "the second chunk was never sent"
+    assert dms.sent == []
+
+
+async def test_every_chunk_is_sent_while_the_audience_stays_the_same(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _stored(db_session, {"held": False})
+    row = row.model_copy(update={"delivery_payload": "x" * 2500})
+    channel = _text_channel()
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=1))
+    outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered" and channel.send.await_count >= 2
+
+
+@pytest.mark.parametrize(
+    ("mode", "roles", "delivered"),
+    [
+        ("on", ("4001",), True),
+        ("on", ("4002",), False),
+        ("on", None, False),
+        ("shadow", ("4002",), True),
+        ("off", ("4002",), True),
+    ],
+)
+async def test_a_channel_routines_dm_fallback_rechecks_the_owners_standing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    roles: tuple[str, ...] | None,
+    delivered: bool,
+) -> None:
+    """The fallback DM (and its files) goes only to an owner who still holds an internal
+    role in `on`; a failed lookup is an unknown standing, which `on` refuses."""
+    from daimon.core.config import DirectMessagePolicy
+
+    async def read(*_args: object, **_kwargs: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", read)
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(internal_role_ids=("4001",)),
+        )
+        # An open room: a room with no fact is narrow in `on`, and a narrow room keeps its
+        # results inside (no DM fallback).
+        from datetime import UTC, datetime, timedelta
+
+        from daimon.core.audience_facts import RoomFacts
+        from daimon.core.stores.audience_facts import StoredRoom, publish_facts
+
+        now = datetime.now(UTC)
+        await publish_facts(
+            session,
+            tenant_id=row.tenant_id,
+            rooms={"555": StoredRoom(RoomFacts(contained=False, narrow=False))},
+            now=now,
+            fresh_until=now + timedelta(minutes=10),
+        )
+
+    calls = 0
+
+    async def member(*_args: object) -> Membership:
+        nonlocal calls
+        calls += 1
+        if roles is None and calls > 1:
+            raise RuntimeError("lookup failed")
+        return Membership(is_member=True, role_ids=roles or ("4001",))
+
+    dms = _Dms()
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone")),
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),  # type: ignore[arg-type]
+    )
+    result = await poster(row)
+    assert bool(dms.sent) is delivered, result

@@ -28,7 +28,10 @@ from daimon.core._models import (
     PrincipalLink,
     PrivacySessionDelete,
     Routine,
+    Tenant,
     TenantConfig,
+    ThreadModelConsent,
+    ThreadModelSetting,
     UserConfig,
 )
 from daimon.core.credential_requests import mint_request_token
@@ -41,6 +44,7 @@ from daimon.core.purge import (
     sweep_privacy_session_deletes,
 )
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
@@ -284,6 +288,49 @@ async def test_purge_account_respects_fk_order(
     assert (
         await db_session.execute(select(UserConfig).where(UserConfig.account_id == account.id))
     ).scalar_one_or_none() is None, "user_config gone"
+
+
+async def test_purge_account_keeps_a_conversations_model_choice_and_consent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Thread model rows are tenant configuration: no person to erase, gone with the tenant."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    db_session.add_all(
+        [
+            ThreadModelSetting(
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="t1",
+                model="gpt-5",
+                provider="openai",
+            ),
+            ThreadModelConsent(
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="t1",
+                agent_id=uuid.uuid4(),
+                revision={},
+                digest="0" * 64,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=account.id)
+
+    for table in (ThreadModelSetting, ThreadModelConsent):
+        kept = await db_session.scalar(
+            select(func.count()).select_from(table).where(table.tenant_id == tenant.id)
+        )
+        assert kept == 1, f"{table.__tablename__} is tenant configuration and survives an erasure"
+
+    await db_session.execute(Tenant.__table__.delete().where(Tenant.id == tenant.id))
+    await db_session.commit()
+    for table in (ThreadModelSetting, ThreadModelConsent):
+        left = await db_session.scalar(select(func.count()).select_from(table))
+        assert left == 0, f"{table.__tablename__} goes with its tenant"
 
 
 async def test_purge_account_with_linked_principals(
@@ -1034,6 +1081,35 @@ async def test_purge_principal_cli_skips_slack_user_tokens(
     assert report.db.slack_user_tokens == 0, "CLI principals must not touch slack_user_tokens"
 
 
+async def test_purge_principal_erases_the_sandbox_setter(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A principal purge alone erases the person from the old sandbox opt-in columns."""
+    calls: list[dict[str, Any]] = []
+
+    async def record(_session: AsyncSession, **kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(routines_store, "erase_sandbox_setter", record)
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    pp = await make_platform_principal(
+        db_session, platform="discord", external_id="u-setter", tenant=tenant, account=account
+    )
+    cli = await make_cli_principal(db_session, os_user="cli-setter", tenant=tenant, account=account)
+    await db_session.commit()
+
+    await purge_principal(sm=db_session_factory, principal_id=pp.id, kind="platform")
+    await purge_principal(sm=db_session_factory, principal_id=cli.id, kind="cli")
+
+    assert calls == [
+        {"ids": [], "platform_users": [(tenant.id, "u-setter")]},
+        {"ids": [str(cli.id)], "platform_users": []},
+    ], "a platform user only within their tenant; a CLI principal by id"
+
+
 async def test_purge_principal_discord_skips_slack_user_tokens(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1290,6 +1366,51 @@ async def test_purge_principal_platform_deletes_credential_request_and_reports_c
     report = await purge_principal(sm=db_session_factory, principal_id=pp.id, kind="platform")
 
     assert report.db.credential_requests == 1, "must delete the platform principal's request row"
+
+
+async def test_purge_principal_deletes_their_host_call_cards_in_that_tenant_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A principal purge deletes the cards they asked for, not another tenant's or person's."""
+    tenant = await make_tenant(db_session)
+    other_tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    pp = await make_platform_principal(
+        db_session, platform="discord", external_id="card-user", tenant=tenant, account=account
+    )
+    for tenant_id, user in (
+        (tenant.id, "card-user"),
+        (other_tenant.id, "card-user"),
+        (tenant.id, "x"),
+    ):
+        await host_call_cards_store.create_card(
+            db_session,
+            tenant_id=tenant_id,
+            origin_id=uuid.uuid4(),
+            requester_account_id=account.id,
+            requester_platform_user_id=user,
+            platform="discord",
+            channel_id="c1",
+            thread_id="t1",
+            executing_agent_id=uuid.uuid4(),
+            executing_ma_agent_id="agent_x",
+            agent_name="Researcher",
+            tool_name="send_message",
+            args_digest="d1",
+            reference={"args": {"text": "private"}, "admin": False},
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+    await db_session.commit()
+
+    report = await purge_principal(sm=db_session_factory, principal_id=pp.id, kind="platform")
+
+    assert report.db.host_call_cards == 1, f"only the person's own card goes: {report.db}"
+    db_session.expire_all()
+    left = await host_call_cards_store.list_cards(db_session, tenant_id=tenant.id)
+    assert [c.requester_platform_user_id for c in left] == ["x"], "another person's card stays"
+    kept = await host_call_cards_store.list_cards(db_session, tenant_id=other_tenant.id)
+    assert len(kept) == 1, "the same user id in another tenant keeps its card"
 
 
 async def test_purge_principal_cli_credential_requests_reports_zero_when_none_exist(
@@ -1721,3 +1842,57 @@ async def test_personal_memory_erasure_survives_agent_archive_and_missing_princi
     await sweep_privacy_session_deletes(client, db_session_factory)
 
     assert store_id not in state.stores, "the personal store and its memories are deleted"
+
+
+async def test_purge_clears_where_the_accounts_agent_chat_sessions_came_from(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The account's id leaves each agent-chat session record, with the session's grant and
+    channel, so the session is no longer found. Its driver record names no one and stays;
+    another account's session is untouched."""
+    from daimon.core.agent_chat_requester import UNREAD, record_driver
+    from daimon.core.privacy import collect_purge_preview
+    from daimon.core.stores import session_settle_state as settle
+    from sqlalchemy import text
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    for session_id, owner in (("sesn-mine", account.id), ("sesn-other", other.id)):
+        await record_driver(
+            db_session_factory,
+            managed_session_id=session_id,
+            signed_in_person=False,
+            session_status="idle",
+            earlier=UNREAD,
+            provenance=settle.SessionProvenance(
+                grant=f"grant-{session_id}", channel_id="chan-k", account_id=owner
+            ),
+        )
+    async with db_session_factory() as db:
+        sends = await settle.count_agent_chat_sends(db, managed_session_id="sesn-mine")
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.agent_chat_session_links.count == 1
+
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+
+    assert report.db.agent_chat_session_links == 1
+    async with db_session_factory() as db:
+        kept = (
+            await db.execute(
+                text(
+                    "SELECT agent_chat_grant, agent_chat_channel, agent_chat_account_id "
+                    "FROM usage_reconcile_progress WHERE managed_session_id = 'sesn-mine'"
+                )
+            )
+        ).one()
+        assert tuple(kept) == (None, None, None), "the grant, channel and account are cleared"
+        assert (
+            await settle.find_agent_chat_session(db, grant="grant-sesn-mine", account_id=account.id)
+            is None
+        )
+        assert await settle.count_agent_chat_sends(db, managed_session_id="sesn-mine") == sends
+        assert await settle.find_agent_chat_session(
+            db, grant="grant-sesn-other", account_id=other.id
+        ) == settle.AgentChatSession(managed_session_id="sesn-other", channel_id="chan-k")

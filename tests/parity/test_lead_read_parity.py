@@ -244,6 +244,7 @@ class World:
     records: dict[str, uuid.UUID]
     tokens: dict[str, str]
     app: ASGIApp
+    accounts: dict[str, uuid.UUID]
 
     async def mcp(self, member: str, tool: str, **arguments: object) -> tuple[bool, str]:
         """(refused, text) for one MCP call as `member`."""
@@ -313,7 +314,10 @@ class World:
 
             channel.send = send
             hook = discord_confirmation_hook(
-                channel, runtime=self.runtime(), tenant_id=self.tenant_id
+                channel,
+                runtime=self.runtime(),
+                tenant_id=self.tenant_id,
+                account_id=self.accounts[A_ONLY],
             )
             waiting = asyncio.create_task(hook(prompt))
             while not posted:
@@ -356,6 +360,7 @@ async def _world(
 ) -> World:
     now = dt.datetime.now(dt.UTC)
     tokens: dict[str, str] = {}
+    accounts: dict[str, uuid.UUID] = {}
     async with sessions() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id=GUILD)  # pyright: ignore[reportArgumentType]
         await set_access_policy(
@@ -367,6 +372,7 @@ async def _world(
             principal = await make_platform_principal(
                 session, platform="discord", external_id=member, tenant=tenant
             )
+            accounts[member] = principal.account_id
             await create_origin(
                 session,
                 tenant_id=tenant.id,
@@ -451,7 +457,7 @@ async def _world(
         ),
         sessionmaker=sessions,
     )
-    return World(sessions, tenant.id, store, records, tokens, app)
+    return World(sessions, tenant.id, store, records, tokens, app, accounts)
 
 
 async def test_mcp_get_leads_and_card_details_agree_for_every_member_and_record(

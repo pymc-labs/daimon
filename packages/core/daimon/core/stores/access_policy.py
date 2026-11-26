@@ -9,21 +9,39 @@ A missing row is the open default. A row that no longer validates raises
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any, cast
 
+import structlog
 from daimon.core._models import Tenant, TenantAccessPolicyRecord
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.access_policy import (
+    OPEN_ACCESS_POLICY,
+    OPEN_RULE,
+    ChannelRule,
+    TenantAccessPolicy,
+    attach_automatic_rules,
+)
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
+from daimon.core.stores.audience_facts import (
+    StoredChannelFact,
+    list_channel_facts,
+    read_status,
+    retire_facts,
+)
 from mux.profiles import MANAGED_AGENTS
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger(__name__)
 
 
 class AccessPolicyUnreadable(UserFacingError):
@@ -39,6 +57,46 @@ class AccessPolicyUnreadable(UserFacingError):
             )
         )
         self.tenant_id = tenant_id
+
+
+class AudienceHoldNeedsInternalRoles(UserFacingError):
+    """The change would leave `audience_hold` on with no internal roles to tell people apart."""
+
+    reason = "audience_hold_needs_internal_roles"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The audience hold is on, so the server needs its internal roles. "
+            "Switch the audience hold off first, or keep at least one internal role."
+        )
+
+
+async def _role_lists_changed(
+    session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
+) -> None:
+    """Make the server's room facts unknown when a role list that built them changes.
+
+    The facts say which rooms outsiders can read, from `internal_role_ids` and
+    `team_role_ids`. After a change they are no longer true, so they stop being trusted in
+    this transaction; the next reconcile computes them again. Clearing `internal_role_ids`
+    while `audience_hold` is `on` is refused: nobody could be told apart.
+    """
+    try:
+        before = await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable:
+        before = None
+    if before is not None and (
+        before.internal_role_ids == policy.internal_role_ids
+        and before.team_role_ids == policy.team_role_ids
+    ):
+        return
+    if (
+        not policy.internal_role_ids
+        and (before is None or before.internal_role_ids)
+        and await audience_mode(session, tenant_id) == "on"
+    ):
+        raise AudienceHoldNeedsInternalRoles
+    await retire_facts(session, tenant_id=tenant_id, now=datetime.now(UTC))
 
 
 def _policy_write_key(tenant_id: uuid.UUID) -> str:
@@ -86,6 +144,36 @@ async def lock_policy_writes_exclusive(session: AsyncSession, *, tenant_id: uuid
         )
     except FenceUnavailable:
         raise PolicyBusyError() from None
+
+
+#: An admin save that meets a short holder (a fact publish) tries again this often, this long.
+#: A caller-owned transaction must not wait longer in the pool: a long holder still gets 409.
+POLICY_LOCK_ATTEMPTS = 6
+POLICY_LOCK_RETRY_S = 0.1
+
+
+async def lock_policy_writes_exclusive_retrying(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    attempts: int | None = None,
+    delay_s: float | None = None,
+) -> None:
+    """Take the exclusive policy fence, trying again a few times when a short holder has it.
+
+    A failed try takes no lock and leaves the transaction intact, so trying again is safe
+    when nothing else ran first. Gives up with `PolicyBusyError` after the last try.
+    """
+    tries = POLICY_LOCK_ATTEMPTS if attempts is None else attempts
+    wait = POLICY_LOCK_RETRY_S if delay_s is None else delay_s
+    for attempt in range(1, tries + 1):
+        try:
+            await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+            return
+        except PolicyBusyError:
+            if attempt == tries:
+                raise
+            await asyncio.sleep(wait)
 
 
 @asynccontextmanager
@@ -146,6 +234,7 @@ async def _roles_supported(
     role_ids = (
         *policy.invoker_role_ids,
         *policy.internal_role_ids,
+        *policy.team_role_ids,
         *(role for rule in policy.agent_rules.values() for role in rule.invoker_role_ids),
     )
     if not role_ids:
@@ -164,6 +253,113 @@ def _with_default_backends(policy: TenantAccessPolicy) -> TenantAccessPolicy:
 
 
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
+    """The tenant's stored policy, with the computed narrow-room rules when the server's
+    audience mode is `on`. Writers save without them: they are never dumped.
+    """
+    return await _with_automatic_rules(
+        session, tenant_id, await _load_stored_policy(session, tenant_id=tenant_id)
+    )
+
+
+_INSIDE_RULE = ChannelRule(readers="inside")
+_SHADOW_LOGGED: dict[uuid.UUID, float] = {}
+_SHADOW_EVERY = 60.0
+
+
+async def audience_mode(session: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """The server's `audience_hold` mode (`daimon.core.channel_audience`). Imported here, not
+    at the top: the feature and config modules import this store."""
+    from daimon.core.channel_audience import audience_mode as read_mode
+    from daimon.core.features.snapshot import FeaturePlace
+
+    return await read_mode(session, FeaturePlace(tenant_id, "discord"))
+
+
+_Automatic = tuple[dict[str, ChannelRule], bool, bool]
+"""The rules, whether a room with no fact is narrow, and whether the facts are missing."""
+_CACHE_KEY = "audience_automatic_rules"
+_Held = tuple[object, dict[uuid.UUID, _Automatic | None]]
+"""A transaction and what was read inside it."""
+
+
+async def _with_automatic_rules(
+    session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
+) -> TenantAccessPolicy:
+    """Attach the computed rules, if the mode is `on`. Off costs one mode read, and a
+    transaction reads each server once: a later load in it reuses the answer."""
+    # Valid for one transaction only: a commit or rollback starts a new one, and facts
+    # can expire or turn narrow between them.
+    transaction = session.get_transaction()
+    held = cast(
+        "tuple[object, dict[uuid.UUID, _Automatic | None]] | None", session.info.get(_CACHE_KEY)
+    )
+    if held is None or held[0] is not transaction:
+        held = (transaction, dict[uuid.UUID, _Automatic | None]())
+        session.info[_CACHE_KEY] = held
+    cache = held[1]
+    if tenant_id not in cache:
+        cache[tenant_id] = await _automatic_rules(session, tenant_id)
+    automatic = cache[tenant_id]
+    if automatic is None:
+        return policy
+    rules, unknown_narrow, facts_missing = automatic
+    return attach_automatic_rules(
+        policy, rules, unknown_narrow=unknown_narrow, facts_missing=facts_missing
+    )
+
+
+async def _automatic_rules(session: AsyncSession, tenant_id: uuid.UUID) -> _Automatic | None:
+    # The mode first: it is the only read a server with the hold off pays for.
+    mode = await audience_mode(session, tenant_id)
+    if mode == "off":
+        return None
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None or tenant.platform != "discord":
+        return None
+    if mode == "shadow":
+        # Compute and log, at most once a minute for each server; enforce nothing.
+        if _shadow_due(tenant_id):
+            # Shadow enforces nothing: a failed facts read is logged, never a refusal.
+            try:
+                async with session.begin_nested():
+                    rooms, usable = await _stored_rooms(session, tenant_id)
+            except Exception:
+                log.warning("audience.shadow_facts_failed", tenant_id=str(tenant_id), exc_info=True)
+            else:
+                _log_shadow(tenant_id, narrow=sum(room.narrow for room in rooms), usable=usable)
+        return None
+    rooms, usable = await _stored_rooms(session, tenant_id)
+    rules = {room.channel_id: _INSIDE_RULE if room.narrow else OPEN_RULE for room in rooms}
+    return rules, True, not usable  # a room with no fact is narrow
+
+
+async def _stored_rooms(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[list[StoredChannelFact], bool]:
+    status = await read_status(session, tenant_id=tenant_id, now=datetime.now(UTC))
+    usable = status is not None and status.usable
+    return (await list_channel_facts(session, tenant_id=tenant_id) if usable else []), usable
+
+
+def _shadow_due(tenant_id: uuid.UUID) -> bool:
+    last = _SHADOW_LOGGED.get(tenant_id)
+    return last is None or time.monotonic() - last >= _SHADOW_EVERY
+
+
+def _log_shadow(tenant_id: uuid.UUID, *, narrow: int, usable: bool) -> None:
+    """One `audience.shadow` line a minute for each server: what the automatic rule would seal."""
+    _SHADOW_LOGGED[tenant_id] = time.monotonic()
+    log.info(
+        "audience.shadow",
+        kind="narrow_rule",
+        tenant_id=str(tenant_id),
+        channel_id=None,
+        agent=None,
+        reason=f"narrow_rooms={narrow} facts_usable={usable}",
+    )
+
+
+async def _load_stored_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
     # Select the row, not just its payload: a JSON `null` payload would
     # otherwise read as "no row" and fall open.
     record = (
@@ -209,6 +405,7 @@ async def set_access_policy(
         raise ValueError(
             "Discord roles require a Discord tenant and cannot include @everyone (guild id)"
         )
+    await _role_lists_changed(session, tenant_id, policy)
     payload = policy.model_dump(mode="json")
     # A list that differs from the deployment default is a choice even when the
     # caller rebuilt the policy from a defaulted one (a model_dump round trip).
@@ -228,8 +425,10 @@ async def set_access_policy(
         "channel_rules",
         "category_rules",
         "agent_rules",
+        "agent_approvals",
         "invoker_role_ids",
         "internal_role_ids",
+        "team_role_ids",
     ):
         if not payload.get(key):
             payload.pop(key, None)
@@ -258,6 +457,7 @@ async def clear_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) ->
     """Delete the tenant's row, putting it back on the open default. True if one existed."""
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
+    await _role_lists_changed(session, tenant_id, TenantAccessPolicy())
     result = await session.execute(
         delete(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
     )

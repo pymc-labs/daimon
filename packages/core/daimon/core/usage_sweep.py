@@ -1,11 +1,12 @@
 """Settle a Managed Agents session's usage: debit every model call it has no ledger row for.
 
-A turn's live recorder only meters the `span.model_request_end` events its own
-stream delivers. Calls made while no stream was attached (a worker that died
-mid-turn, a ceiling, an interrupt) and every call of a headless agent-chat
-turn (MCP `start_turn`/`continue_turn`/`ask`, which never drive a stream)
-reach no recorder. `settle_session` is the one path that bills them: it lists
-the session's model calls newest first, skips those already in `usage_events`
+A turn's live recorder only meters the `span.model_request_end` events and web
+searches its own stream delivers. Calls made while no stream was attached (a
+worker that died mid-turn, a ceiling, an interrupt) and every call of a
+headless agent-chat turn (MCP `start_turn`/`continue_turn`/`ask`, which never
+drive a stream) reach no recorder. `settle_session` is the one path that bills
+them: it lists the session's model calls (and, where no stream drove the
+session, its searches) newest first, skips those already in `usage_events`
 (written in the same transaction as the ledger debit, so "has a usage row"
 means "has a debit"), and replays the rest through `record_turn_usage`. That
 recorder is idempotent on the `turn:<session>:<event>` key, so a call recorded
@@ -27,7 +28,8 @@ There is no stored scan progress. A settle reads the session's calls (within
 a page bound) and debits those without a usage row; one cut short simply
 leaves the next settle to read again. No automatic settle reads a call made
 before the backlog cutoff, the time this path was deployed; the operator's
-backlog settle reads only those.
+backlog settle reads only those. No settle bills a web search made before
+search billing was deployed (the web search cutoff); the backlog has none.
 
 Attribution comes off the metadata `create_session` stamps on every session:
 `daimon_tenant` is the billed tenant, `daimon_account` resolves to the owning
@@ -59,9 +61,13 @@ from anthropic import AsyncAnthropic
 from anthropic._models import construct_type
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentToolResultEvent,
+    BetaManagedAgentsAgentToolUseEvent,
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from daimon.core import monitoring
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -71,13 +77,13 @@ from daimon.core.defaults.metadata import (
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call
-from daimon.core.pricing import MODEL_PRICING, ModelRates, cost_of
+from daimon.core.pricing import AGENT_WEB_SEARCH_USD, MODEL_PRICING, ModelRates, cost_of
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores import session_settle_state, turn_outcomes, usage_events
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.usage_recording import record_turn_usage
+from daimon.core.usage_recording import WebSearchCall, record_turn_usage
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import EventPage, EventQuery, SessionTools
 from pydantic import BaseModel
@@ -93,7 +99,11 @@ log = structlog.get_logger(__name__)
 # Bounds for a settle on a caller's path (a chat turn's end, an MCP read).
 SETTLE_MAX_PAGES = 10
 SETTLE_BUDGET_S = 5.0
+KEEP_REPLIES_BUDGET_S = 3.0  # monitored replies, kept after the settle
 _PAGE_SIZE = 100
+_CALLS = "span.model_request_end"
+# A Claude search is a `web_search` use and its result; neither span counts it.
+_SEARCHES = ("agent.tool_use", "agent.tool_result")
 # The drain settles a whole session: a larger bound than a caller's path.
 DRAIN_MAX_PAGES = 100
 # An unnamed request this young may belong to a send still in flight.
@@ -168,14 +178,16 @@ async def _list_events(
 class SettleResult:
     """What one settle read and wrote.
 
-    `unbilled` are the calls with no usage row when their page was read (all
-    of them reported, none written, for a read-only settle). `debited` and
-    `debit_usd` count only the ledger rows this settle inserted. `complete`
+    `unbilled` are the calls and `unbilled_searches` the web searches with no
+    usage row when their page was read (all of them reported, none written,
+    for a read-only settle). `debited` and `debit_usd` count only the ledger
+    rows this settle inserted. `complete`
     means the listing was read to its end within the page and time bounds.
     """
 
     scanned: int
     unbilled: tuple[BetaManagedAgentsSpanModelRequestEndEvent, ...]
+    unbilled_searches: tuple[WebSearchCall, ...]
     debited: int
     debit_usd: Decimal
     complete: bool
@@ -191,8 +203,9 @@ async def settle_session(
     max_pages: int | None = SETTLE_MAX_PAGES,
     deadline: float | None = None,
     backlog: bool = False,
+    streamed: bool = False,
 ) -> SettleResult:
-    """Debit the session's model calls that have no ledger row yet, newest first.
+    """Debit the session's model calls and web searches with no ledger row yet, newest first.
 
     `record` must be the recorder bound to this session (`turn.prepare.
     bind_recorder` or `SessionBilling.recorder`), so the calls are priced at
@@ -200,13 +213,19 @@ async def settle_session(
     stream would have. `record=None` reads only: it reports the unbilled calls
     and writes nothing.
 
-    Reads the calls made at or after the backlog cutoff, or with `backlog`
-    only those before it (the operator's backlog settle), at most `max_pages`
+    Reads the calls made at or after the backlog cutoff and the searches made
+    at or after the web search cutoff, or with `backlog` only the calls before
+    the backlog cutoff (the operator's backlog settle), at most `max_pages`
     pages of 100 (None: no bound) and no later than `deadline` (a
     `time.monotonic()` reading, covering the database work too). There is no
     stored progress: a settle cut short keeps every debit it wrote and reports
     itself incomplete, and the next settle reads the listing again, which is
     safe because a call with a usage row is never recorded twice.
+
+    `streamed`: a live stream drove the session and billed every search it or
+    its replays saw, so only calls are listed. Listing every tool result of a
+    long chat session at each turn end costs far more than the rare search a
+    cut stream misses.
 
     `scope` authorizes the read: the turn's admitted session scope, or the
     tenant of a validated session stamp. None reads under the platform scope
@@ -215,6 +234,9 @@ async def settle_session(
     scope = scope if scope is not None else _platform_settle_scope()
     scanned = 0
     unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = []
+    unbilled_searches: list[WebSearchCall] = []
+    # Newest first, a search's result is listed before its use.
+    results: dict[str, datetime] = {}
     debited = 0
     debit_usd = Decimal(0)
     complete = False
@@ -223,7 +245,9 @@ async def settle_session(
         async with asyncio.timeout(timeout):
             async with sessionmaker() as s:
                 cutoff = await session_settle_state.backlog_cutoff(s)
-            query = EventQuery(order="desc", limit=_PAGE_SIZE, types=["span.model_request_end"])
+                search_floor = await session_settle_state.web_search_cutoff(s)
+            types = [_CALLS] if backlog or streamed else [_CALLS, *_SEARCHES]
+            query = EventQuery(order="desc", limit=_PAGE_SIZE, types=types)
             # Unset fields mean SDK omit; never turn them into explicit nulls.
             if cutoff is not None and not backlog:
                 query = query.model_copy(update={"created_at_gte": cutoff})
@@ -235,15 +259,21 @@ async def settle_session(
                 calls = [
                     e for e in page.data if isinstance(e, BetaManagedAgentsSpanModelRequestEndEvent)
                 ]
-                scanned += len(calls)
+                searches = _searches(page.data, results, floor=search_floor)
+                scanned += len(calls) + len(searches)
                 async with sessionmaker() as s:
                     recorded = await usage_events.recorded_among(
-                        s, managed_session_id=session_id, event_ids=[e.id for e in calls]
+                        s,
+                        managed_session_id=session_id,
+                        event_ids=[e.id for e in (*calls, *searches)],
                     )
-                for event in calls:
+                for event in (*calls, *searches):
                     if event.id in recorded:
                         continue
-                    unbilled.append(event)
+                    if isinstance(event, WebSearchCall):
+                        unbilled_searches.append(event)
+                    else:
+                        unbilled.append(event)
                     if record is not None and (debit := await record(event=event)) is not None:
                         debited += 1
                         debit_usd += debit
@@ -256,12 +286,13 @@ async def settle_session(
                 pages += 1
     except TimeoutError:
         complete = False  # every debit written so far stands
-    if unbilled or not complete:
+    if unbilled or unbilled_searches or not complete:
         log.info(
             "billing.settled",
             managed_session_id=session_id,
             scanned=scanned,
             unbilled=len(unbilled),
+            unbilled_searches=len(unbilled_searches),
             debited=debited,
             debit_usd=str(debit_usd),
             complete=complete,
@@ -270,25 +301,48 @@ async def settle_session(
     return SettleResult(
         scanned=scanned,
         unbilled=tuple(unbilled),
+        unbilled_searches=tuple(unbilled_searches),
         debited=debited,
         debit_usd=debit_usd,
         complete=complete,
     )
 
 
+def _searches(
+    events: Sequence[BetaManagedAgentsSessionEvent],
+    results: dict[str, datetime],
+    *,
+    floor: datetime | None,
+) -> list[WebSearchCall]:
+    """The searches whose use `events` lists, given the results listed so far.
+
+    A search counts once its result arrived without an error, as the provider
+    bills no failed search; `results` carries results to the page with their use.
+    """
+    searches: list[WebSearchCall] = []
+    for event in events:
+        if isinstance(event, BetaManagedAgentsAgentToolResultEvent):
+            if not event.is_error and (floor is None or event.processed_at >= floor):
+                results[event.tool_use_id] = event.processed_at
+        elif isinstance(event, BetaManagedAgentsAgentToolUseEvent):
+            at = results.pop(event.id, None)
+            if at is not None and event.name == "web_search":
+                searches.append(WebSearchCall(id=event.id, processed_at=at))
+    return searches
+
+
 def price(
     calls: Sequence[BetaManagedAgentsSpanModelRequestEndEvent],
     *,
+    searches: int = 0,
     pricing: ModelRates | None,
     markup: Decimal,
 ) -> tuple[Decimal, Decimal]:
-    """(provider cost, ledger debit) of `calls`, priced as `record_turn_usage` would."""
-    cost = Decimal(0)
-    debit = Decimal(0)
-    for event in calls:
-        event_cost = cost_of(event.model_usage, pricing)
-        cost += debit_amount(event_cost, markup=Decimal(1))
-        debit += debit_amount(event_cost, markup=markup)
+    """(provider cost, ledger debit) of `calls` and `searches`, priced as recording would."""
+    costs = [cost_of(event.model_usage, pricing) for event in calls]
+    costs += [float(AGENT_WEB_SEARCH_USD)] * searches
+    cost = sum((debit_amount(c, markup=Decimal(1)) for c in costs), Decimal(0))
+    debit = sum((debit_amount(c, markup=markup) for c in costs), Decimal(0))
     return cost, debit
 
 
@@ -447,7 +501,12 @@ async def settle_stamped_session(
         max_pages=max_pages,
         deadline=deadline,
     )
-    cost, debit = price(result.unbilled, pricing=billing.pricing, markup=markup)
+    cost, debit = price(
+        result.unbilled,
+        searches=len(result.unbilled_searches),
+        pricing=billing.pricing,
+        markup=markup,
+    )
     log.info(
         "usage_sweep.exempt_skipped",
         tenant_id=str(billing.tenant_id),
@@ -456,6 +515,7 @@ async def settle_stamped_session(
         model_id=billing.model_id,
         priced=billing.pricing is not None,
         model_calls=len(result.unbilled),
+        web_searches=len(result.unbilled_searches),
         cost_usd=str(cost),
         would_be_debit_usd=str(debit),
     )
@@ -509,6 +569,98 @@ async def turn_ended(
     return bool(unnamed_turn)
 
 
+async def _keep_monitored_replies(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+) -> bool:
+    """Keep the replies to this agent chat session's kept questions whose turns ended
+    (`daimon.core.monitoring`): each turn's newest `agent.message` text. A turn paused on
+    a confirmation has not ended; it is kept by a later settle. Bounded by
+    `KEEP_REPLIES_BUDGET_S`. False when the read failed or ran out of time, so a reply may
+    be unkept: the caller leaves its settle request, and the next sweep retries."""
+    try:
+        tenant_id = uuid.UUID(session.metadata.get(MA_METADATA_KEY_TENANT) or "")
+    except ValueError:
+        return True
+    try:
+        async with asyncio.timeout(KEEP_REPLIES_BUDGET_S):
+            await _keep_replies(anthropic, sessionmaker, session, tenant_id)
+    except _anthropic.RateLimitError:
+        raise
+    # Billing goes on without the kept reply: the question stays open for a later settle.
+    except (TimeoutError, _anthropic.APIError, SQLAlchemyError) as error:
+        log.warning(
+            "monitoring.capture_failed",
+            kind="answer",
+            causes=backend_refusal_causes(error),
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+async def _keep_replies(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    # Imported here: `daimon.core.turn` imports this module.
+    from daimon.core.turn.termination import TerminationReason
+
+    waiting = set(
+        await monitoring.open_questions(sessionmaker, tenant_id=tenant_id, conversation=session.id)
+    )
+    if not waiting:
+        return
+    page = await _list_events(
+        anthropic,
+        session.id,
+        scope=_stamped_scope(session),
+        query=EventQuery(
+            order="desc",
+            limit=_PAGE_SIZE,
+            types=[
+                "user.message",
+                "agent.message",
+                "session.status_idle",
+                "session.status_terminated",
+            ],
+        ),
+    )
+    # Newest first: the end and the reply seen since the previous `user.message`.
+    ended: TerminationReason | Literal["paused"] | None = None
+    reply: str | None = None
+    for _ in range(SETTLE_MAX_PAGES):
+        for event in page.data:
+            if event.type == "session.status_terminated":
+                ended = ended or TerminationReason.SESSION_TERMINATED
+            elif event.type == "session.status_idle":
+                paused = event.stop_reason.type == "requires_action"
+                ended = ended or ("paused" if paused else TerminationReason.COMPLETED)
+            elif event.type == "agent.message":
+                text = "\n".join(block.text for block in event.content if block.text)
+                reply = reply or text or None
+            elif event.type == "user.message":
+                if event.id in waiting and ended not in (None, "paused"):
+                    waiting.discard(event.id)
+                    await monitoring.capture_answer(
+                        sessionmaker,
+                        tenant_id=tenant_id,
+                        conversation=session.id,
+                        turn_ref=event.id,
+                        content=reply,
+                        outcome=str(ended),
+                    )
+                if not waiting:
+                    return
+                ended, reply = None, None
+        if not page.has_next_page():
+            return
+        page = await page.get_next_page()
+
+
 async def settle_finished_turn(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -527,8 +679,10 @@ async def settle_finished_turn(
     only when the settle read to the end, and only if it is still the very
     request this call verified (a newer send replaces it), so a settle cut
     short, or one racing a send, leaves it for the next read or the drain.
-    `budget_s` bounds the whole call, database work included; on expiry the
-    request stays.
+    `budget_s` bounds the settle, database work included; on expiry the
+    request stays. A turn that ended then keeps its monitored replies, within
+    `budget_s` and a budget of their own; the request is cleared only once they
+    were read too, so a reply that could not be read is retried by the next sweep.
 
     Named boundary: an upstream or database error is logged and the request
     kept, except a rate limit, which propagates so the drain stops its pass
@@ -537,6 +691,7 @@ async def settle_finished_turn(
     if session.status not in ("idle", "terminated"):
         return None
     deadline = None if budget_s is None else time.monotonic() + budget_s
+    result: SettleResult | None = None
     try:
         async with asyncio.timeout(budget_s):
             async with sessionmaker() as s:
@@ -562,19 +717,26 @@ async def settle_finished_turn(
                 max_pages=max_pages,
                 deadline=deadline,
             )
-            if result is None or result.complete:
+            # Before the request is cleared: the open questions are the retry list, and
+            # nothing else would revisit a reply that could not be read.
+            replies_kept = await _keep_monitored_replies(anthropic, sessionmaker, session)
+            if (result is None or result.complete) and replies_kept:
                 async with sessionmaker() as s, s.begin():
                     await session_settle_state.clear_settle_request(
                         s, managed_session_id=session.id, request=request
                     )
-            return result
     except TimeoutError:
-        return None  # out of budget; the request stays for the next read or the drain
+        result = None  # out of budget; the request stays for the next read or the drain
     except _anthropic.RateLimitError:
         raise
-    except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.settle_failed", managed_session_id=session.id)
-        return None
+    except (_anthropic.APIError, SQLAlchemyError) as error:
+        log.exception(
+            "billing.settle_failed",
+            managed_session_id=session.id,
+            causes=backend_refusal_causes(error),
+        )
+        result = None
+    return result
 
 
 async def sweep_headless_usage(
@@ -614,8 +776,12 @@ async def sweep_headless_usage(
             continue
         except _anthropic.RateLimitError:
             raise
-        except _anthropic.APIError:
-            log.exception("usage_sweep.session_failed", managed_session_id=session_id)
+        except _anthropic.APIError as error:
+            log.exception(
+                "usage_sweep.session_failed",
+                managed_session_id=session_id,
+                causes=backend_refusal_causes(error),
+            )
         else:
             result = await settle_finished_turn(
                 client,

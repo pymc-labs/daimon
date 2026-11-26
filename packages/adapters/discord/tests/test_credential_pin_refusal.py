@@ -63,7 +63,9 @@ async def test_a_pinned_target_is_refused_before_the_form_is_consumed(
         expires_at=now + timedelta(minutes=30),
         used_at=None,
     )
-    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=0), followup=SimpleNamespace(send=AsyncMock())
+    )
 
     target = await resolve_credential_target(
         interaction,  # type: ignore[arg-type]
@@ -134,10 +136,12 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://daimon.example.com", jwt_secret="s")
         ),
-        turn_deps=replace(deps_for(None, None), fernet=object(), turn_path=None),
+        turn_deps=replace(deps_for(None, None), fernet=object()),
     )
     interaction = SimpleNamespace(
-        response=SimpleNamespace(defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock())
+        user=SimpleNamespace(id=0),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
     )
 
     await start_mcp_oauth_from_click(
@@ -152,3 +156,87 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
     async with db_session_factory() as session:
         live = await peek_credential_request(session, token="tok-late-pin")
     assert live is not None and live.used_at is None, "the refused form was not spent"
+
+
+@pytest.mark.parametrize(("channel", "inside"), [(222, True), (333, False)])
+async def test_an_admin_form_for_a_private_channels_agent_works_only_from_inside_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    channel: int,
+    inside: bool,
+) -> None:
+    """The click's own channel must be the form's channel; then the submitter is inside it."""
+    from daimon.core.access_policy import AgentRule, ChannelRule
+    from daimon.core.permissions import SEALED_REFUSAL
+    from daimon.core.stores.accounts import set_role
+    from daimon.core.stores.domain import Role
+    from daimon.testing.factories import make_account, make_platform_principal
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="guild-seal-form")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, tenant=tenant, account=account, platform="discord", external_id="42"
+    )
+    await set_role(db_session, account.id, Role.ADMIN)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            channel_rules={"222": ChannelRule(readers="own", writers="own")},
+            agent_rules={"acme-config": AgentRule(runs_in=("222",))},
+        ),
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add_agent_list(
+        ma_agent(
+            id="ag_acme", name="Acme", tenant_id=tenant.id, metadata={"daimon_name": "acme-config"}
+        )
+    )
+    runtime = SimpleNamespace(
+        anthropic=build_fake_anthropic(router.dispatch), sessionmaker=db_session_factory
+    )
+    now = datetime.now(UTC)
+    row = CredentialRequestRow(
+        token="tok",
+        kind="env",
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_acme"),
+        account_id=account.id,
+        target="NOTES_TOKEN",
+        mcp_server_url=None,
+        requester_platform_user_id="42",
+        channel_id="222",
+        platform="discord",
+        parent_channel_id="222",
+        origin_thread_id=None,
+        idempotency_key=uuid.uuid4(),
+        target_name="acme-config",
+        created_at=now,
+        expires_at=now + timedelta(minutes=30),
+        used_at=None,
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        guild_id="guild-seal-form",
+        channel_id=channel,
+        channel=SimpleNamespace(),
+        message=None,
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    from daimon.adapters.discord.credential_origin import refuse_if_pinned_elsewhere
+
+    agent = ma_agent(
+        id="ag_acme", name="Acme", tenant_id=tenant.id, metadata={"daimon_name": "acme-config"}
+    )
+    refused = await refuse_if_pinned_elsewhere(
+        interaction,  # type: ignore[arg-type]
+        runtime=runtime,  # type: ignore[arg-type]
+        row=row,
+        agent=agent,
+    )
+    assert refused is not inside
+    if not inside:
+        interaction.followup.send.assert_awaited_once_with(
+            embed=build_notice_embed(SEALED_REFUSAL), ephemeral=True
+        )

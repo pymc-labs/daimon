@@ -54,6 +54,8 @@ from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _AGENT = "ag_acme"
 _SEALED = "chan-acme"
 _OPEN = "chan-b"
@@ -131,9 +133,9 @@ class _World:
     def agent_key_auth(self, bound_channel_id: str | None = None) -> AuthIdentity:
         """An agent-chat key (headless: plugin, another program), maybe minted in a channel."""
         agent_uuid = derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=_AGENT)
-        return AuthIdentity(
-            account_id=self.account_id,
-            tenant_id=self.tenant_id,
+        return auth_identity(
+            self.account_id,
+            self.tenant_id,
             role=Role.USER,
             platform=self.platform,
             agent_id=agent_uuid,
@@ -143,11 +145,7 @@ class _World:
 
     def runtime(self) -> McpRuntime:
         router = MARouter()
-        agent = ma_agent(
-            id=_AGENT,
-            name="acme-project",
-            metadata={"daimon_tenant": str(self.tenant_id), "daimon_name": "acme-project"},
-        )
+        agent = ma_agent(id=_AGENT, name="acme-project", tenant_id=self.tenant_id)
         router.add_agent(agent)
         router.add_agent_list(agent)
         router.add(
@@ -248,6 +246,22 @@ async def test_sealed_transcript_is_readable_from_inside_its_channel(world: _Wor
     )
 
     assert _SEALED_TOPIC in _events_text(page)
+
+
+async def test_a_sealed_provider_turn_reads_inside_its_signed_seals_only(world: _World) -> None:
+    """A provider turn names no origin: its credential's seals are its inside."""
+    await world.seal(_SEALED, "chan-other")
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    world.add_session("ses_other", daimon_channel="chan-other", daimon_thread="thr-o")
+    sealed = world.auth(seal_ids=frozenset({_SEALED}))
+
+    page = await _list_session_events_impl(world.runtime(), sealed, "ses_acme", None, None, None)
+    assert _SEALED_TOPIC in _events_text(page), "its own seal's conversation is readable"
+    with pytest.raises(ToolError, match="read only from inside"):
+        await _list_session_events_impl(world.runtime(), sealed, "ses_other", None, None, None)
+    with pytest.raises(ToolError, match="read only from inside"):
+        # Without signed seals or an origin (MA's path) nothing sealed is read.
+        await _list_session_events_impl(world.runtime(), world.auth(), "ses_acme", None, None, None)
 
 
 async def test_list_sessions_hides_sealed_conversations_outside_their_channel(
@@ -1196,5 +1210,83 @@ async def test_long_job_cancel_survives_unavailable_source_proof(world, monkeypa
             assert json.loads(result.content[0].text)["source"] == "source restricted"
             result = await client.call_tool("cancel_long_job", {"job_id": str(job.id)})
             assert set(json.loads(result.content[0].text)) == {"id", "state", "owner_account_id"}
+    finally:
+        await runtime.client.close()
+
+
+@pytest.mark.parametrize(
+    "hold_kind,readable",
+    [("none", True), ("plain", True), ("relay", False)],
+)
+async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
+    world: _World, monkeypatch, hold_kind, readable
+):
+    """`compute_task_result` and `get_long_job` read a stored row through the source check.
+
+    A relay hold reads none, though the row ran in its own channel; a plain hold
+    and an unheld turn read exactly what they did before.
+    """
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools import _long_job_access as access_tools
+    from daimon.adapters.mcp.tools._long_job_access import LongJobCaller, long_job_access
+    from daimon.adapters.mcp.tools.compute import _readable  # pyright: ignore[reportPrivateUsage]
+    from daimon.core.turn_hold import TurnHold
+
+    stamps = dict(daimon_channel=_SEALED, daimon_thread="thread")
+    hold = {
+        "none": None,
+        "plain": TurnHold(world.platform, _SEALED, client=False),
+        "relay": TurnHold(world.platform, _SEALED, client=False, relay=True),
+    }[hold_kind]
+    auth = replace(world.auth(), hold=hold)
+    runtime = world.runtime()
+    monkeypatch.setattr(access_tools, "fresh_admin", AsyncMock(return_value=False))
+    try:
+        # The stored compute row behind compute_task_result, status and the rest.
+        session = SimpleNamespace(source_metadata=stamps)
+        if readable:
+            await _readable(runtime, auth, "", session)  # pyright: ignore[reportArgumentType]
+        else:
+            with pytest.raises(ToolError):
+                await _readable(runtime, auth, "", session)  # pyright: ignore[reportArgumentType]
+        # The stored job summary behind get_long_job.
+        job = await _register_long_job(world, **stamps)
+        caller = await LongJobCaller.load(runtime, auth, None)
+        access = await long_job_access(caller, job)
+        assert access.act
+        assert access.read is readable
+    finally:
+        await runtime.client.close()
+
+
+async def test_an_agent_chat_machines_source_reads_as_its_own_session_does(world: _World) -> None:
+    """What a launch from agent chat records (`compute._agent_chat_source`) reads for its own
+    session's credential, which names no origin. A session in a sealed channel stamps that
+    channel and seal, so only a credential inside the seal reads it."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools.compute import (  # pyright: ignore[reportPrivateUsage]
+        _agent_chat_source,
+        _readable,
+    )
+    from daimon.core.compute_sessions import ComputePlace
+
+    await world.seal(_SEALED)
+    auth = world.auth(is_chat_execution=True)
+    place = ComputePlace(world.platform, "agentchat:test-session", _AGENT, "acme-project", None)
+    in_seal = replace(auth, seal_ids=frozenset({_SEALED}))
+    sealed = replace(place, feature_channel_id=_SEALED)
+    runtime = world.runtime()
+    try:
+        own = SimpleNamespace(source_metadata=_agent_chat_source(auth, place))
+        await _readable(runtime, auth, None, own)  # pyright: ignore[reportArgumentType]
+        kept = SimpleNamespace(source_metadata=_agent_chat_source(in_seal, sealed))
+        await _readable(runtime, in_seal, None, kept)  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ToolError, match="can no longer read the source conversation"):
+            await _readable(runtime, auth, None, kept)  # pyright: ignore[reportArgumentType]
     finally:
         await runtime.client.close()

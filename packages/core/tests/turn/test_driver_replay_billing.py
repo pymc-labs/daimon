@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
@@ -26,7 +27,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.turn.posture import Billed
-from daimon.core.usage_recording import record_turn_usage
+from daimon.core.usage_recording import WebSearchCall, record_turn_usage, web_search_call
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import (
     FakeAnthropic,
@@ -39,7 +40,7 @@ from daimon.testing.turn_fakes import (
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conftest import make_end_turn, make_status_idle
+from .conftest import make_end_turn, make_status_idle, make_tool_result, make_tool_use
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
 _MODEL = "claude-opus-4-7"
@@ -68,7 +69,9 @@ class _Recorder:
     def __init__(self) -> None:
         self.ids: list[str] = []
 
-    async def __call__(self, *, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
+    async def __call__(
+        self, *, event: BetaManagedAgentsSpanModelRequestEndEvent | WebSearchCall
+    ) -> None:
         self.ids.append(event.id)
 
 
@@ -190,3 +193,61 @@ async def test_replayed_call_is_debited_with_the_turns_attribution(
     assert {e.reason for e in debits} == {"checkpoint_debit"}, (
         "the replay-only call must keep the turn's ledger reason"
     )
+
+
+def test_a_search_completes_on_its_successful_result_only() -> None:
+    seen: set[str] = set()
+    assert web_search_call(make_tool_use(event_id="tu_1", name="web_search"), seen) is None
+    assert web_search_call(make_tool_use(event_id="tu_2", name="bash"), seen) is None
+    assert web_search_call(make_tool_use(event_id="tu_3", name="web_search"), seen) is None
+    done = web_search_call(make_tool_result(event_id="tr_1", tool_use_id="tu_1"), seen)
+    assert done == WebSearchCall(id="tu_1", processed_at=_T)
+    assert web_search_call(make_tool_result(event_id="tr_2", tool_use_id="tu_2"), seen) is None
+    failed = make_tool_result(event_id="tr_3", tool_use_id="tu_3", is_error=True)
+    assert web_search_call(failed, seen) is None, "a failed search is not billed"
+
+
+async def test_search_is_billed_once_across_a_reconnect_replay() -> None:
+    use = make_tool_use(event_id="tu_1", name="web_search")
+    result = make_tool_result(event_id="tr_1", tool_use_id="tu_1")
+    done = make_status_idle(event_id="sevt_idle", stop_reason=make_end_turn())
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(use), YieldEvent(result), RaiseConnection()],
+        [YieldEvent(use), YieldEvent(result), YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [use, result]
+    recorder = _Recorder()
+
+    await _drive(fa, recorder)
+
+    assert recorder.ids == ["tu_1"], "each search is billed once across replay and stream"
+
+
+async def test_search_debits_its_list_price_once(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    record = functools.partial(
+        record_turn_usage,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="U_AUTHOR",
+        managed_session_id="sess_1",
+        model_id=_MODEL,
+        markup=Decimal("1.5"),
+        event=WebSearchCall(id="tu_1", processed_at=_T),
+    )
+
+    assert await record() == Decimal("0.015")
+    assert await record() is None, "a replayed search is not debited again"
+
+    entries = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
+    assert [(e.idempotency_key, e.delta_usd) for e in entries if e.delta_usd < 0] == [
+        ("turn:sess_1:tu_1", Decimal("-0.015"))
+    ]
+    spend = await usage_events.cost_for_tenant_since(
+        db_session, tenant_id=tenant.id, since=_T - timedelta(days=1)
+    )
+    assert spend == pytest.approx(0.01), "spend reads price the search before markup"

@@ -31,11 +31,11 @@ from daimon.adapters.teams import app, card, lifecycle
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core import output_delivery
 from daimon.core.config import SupportSettings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router, turn_events
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -80,11 +80,8 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
 @pytest.fixture
 async def funded_tenant(db_session_factory: async_sessionmaker[AsyncSession]) -> None:
     """Provisioned with credit, so the balance gate admits the turn."""
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
+    await provision_workspace(
+        db_session_factory, ENTRA_TENANT_ID, platform="teams", signup_credit=Decimal("100")
     )
 
 
@@ -100,7 +97,8 @@ async def _service(
     """The started service over `router`; drained on exit, then every activity is checked.
 
     `one_session` hands every turn `SESSION_ID`; without it `router` creates sessions.
-    `support` turns human support on, posting to a Teams channel."""
+    `support` turns human support on, posting to a Teams channel; without it no
+    workspace may pick its own, so no channel could take a request."""
     runtime = build_teams_runtime(
         db_factory,
         anthropic=build_fake_anthropic(router.dispatch),
@@ -110,6 +108,8 @@ async def _service(
         runtime.settings.support = SupportSettings(
             teams_escalation_channel_id="19:ops@thread.tacv2"
         )
+    else:
+        runtime.settings.features = {**runtime.settings.features, "support_own_channel": "off"}
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
     create = patch("daimon.core.turn.prepare.create_session", return_value=session)
     with create if one_session else nullcontext():

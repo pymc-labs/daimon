@@ -8,14 +8,19 @@ settle floor produces.
 
 from __future__ import annotations
 
+import ast
 import re
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
+from daimon.core import output_delivery
+from daimon.core.ops_events import OpsEvent
 from daimon.core.output_delivery import (
     DeliverableFile,
     NoticedFiles,
@@ -24,9 +29,12 @@ from daimon.core.output_delivery import (
     SkippedFile,
     download_output_file,
     render_oversize_notice,
-    sweep_session_outputs,
+    sweep_outputs,
 )
+from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.testing.builders import file_meta
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
@@ -34,8 +42,14 @@ from mux.testing.drivers.anthropic.ma import (
     combine_handlers,
     list_response,
 )
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
+
+
+async def _sweep(client: AsyncAnthropic, *, session_id: str, **kwargs: Any) -> int:
+    scope = Scope.legacy_host_authorized(call_site="test_output_delivery")
+    return await sweep_outputs(AnthropicOutputRuntime(client, session_id, scope=scope), **kwargs)
 
 
 async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
@@ -55,14 +69,8 @@ async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
             return list_response([])
         return list_response(
             [
-                FileMetadata(
-                    id="file_late",
-                    created_at=NOW,
-                    filename="report.csv",
-                    mime_type="text/plain",
-                    size_bytes=4,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_late", created_at=NOW, filename="report.csv", size_bytes=4
                 ).model_dump(mode="json")
             ]
         )
@@ -88,7 +96,7 @@ async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "the late-indexed file should be posted"
     assert [f.file_id for f in posted] == ["file_late"], "posted file must be the listed one"
@@ -113,15 +121,9 @@ async def test_quiet_time_counts_toward_the_settle_floor(
     async def sleep(delay: float) -> None:
         delays.append(delay)
 
-    row = FileMetadata(
-        id="file_a",
-        created_at=NOW,
-        filename="a.txt",
-        mime_type="text/plain",
-        size_bytes=1,
-        type="file",
-        downloadable=True,
-    ).model_dump(mode="json")
+    row = file_meta(id="file_a", created_at=NOW, filename="a.txt", size_bytes=1).model_dump(
+        mode="json"
+    )
     router = MARouter()
     router.add("GET", r"/v1/files", lambda request, match: list_response([row] * files))
     router.add("GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"a"))
@@ -135,9 +137,7 @@ async def test_quiet_time_counts_toward_the_settle_floor(
         pass
 
     client = build_fake_anthropic(router.dispatch)
-    count = await sweep_session_outputs(
-        client, session_id="sesn_1", post=post, sleep=sleep, quiet_s=quiet_s
-    )
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep, quiet_s=quiet_s)
 
     assert count == files and delays == expected
 
@@ -156,26 +156,14 @@ async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -
         nonlocal polls
         polls += 1
         rows = [
-            FileMetadata(
-                id="file_a",
-                created_at=NOW,
-                filename="early.txt",
-                mime_type="text/plain",
-                size_bytes=5,
-                type="file",
-                downloadable=True,
-            ).model_dump(mode="json")
+            file_meta(id="file_a", created_at=NOW, filename="early.txt", size_bytes=5).model_dump(
+                mode="json"
+            )
         ]
         if polls >= 3:
             rows.append(
-                FileMetadata(
-                    id="file_b",
-                    created_at=NOW,
-                    filename="late.txt",
-                    mime_type="text/plain",
-                    size_bytes=5,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_b", created_at=NOW, filename="late.txt", size_bytes=5
                 ).model_dump(mode="json")
             )
         return list_response(rows)
@@ -201,7 +189,7 @@ async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 2, "both the early file and the t=6 straggler should be posted"
     assert sorted(posted) == ["file_a", "file_b"], "both listed files must be posted"
@@ -224,7 +212,7 @@ async def test_sweep_returns_zero_when_every_poll_is_empty() -> None:
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("nothing should be posted from an empty listing")
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 0, "an all-empty run posts nothing"
     assert delays == [2.0, 4.0], "empty sweep must give up at the t=6 poll, never reach t=14"
@@ -242,23 +230,19 @@ async def test_sweep_never_downloads_entry_when_downloadable_is_not_true() -> No
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_env",
                     created_at=NOW,
                     filename=".env",
-                    mime_type="text/plain",
                     size_bytes=128,
-                    type="file",
                     downloadable=False,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                file_meta(
                     id="file_chart",
                     created_at=NOW,
                     filename="chart.png",
                     mime_type="image/png",
                     size_bytes=64,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json"),
             ]
         )
@@ -284,7 +268,7 @@ async def test_sweep_never_downloads_entry_when_downloadable_is_not_true() -> No
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "only the downloadable entry should be posted"
     assert posted == ["file_chart"], "the non-downloadable .env entry must never be posted"
@@ -305,24 +289,8 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         rows = [
-            FileMetadata(
-                id="file_a",
-                created_at=NOW,
-                filename="a.txt",
-                mime_type="text/plain",
-                size_bytes=3,
-                type="file",
-                downloadable=True,
-            ),
-            FileMetadata(
-                id="file_b",
-                created_at=NOW,
-                filename="b.txt",
-                mime_type="text/plain",
-                size_bytes=3,
-                type="file",
-                downloadable=True,
-            ),
+            file_meta(id="file_a", created_at=NOW, filename="a.txt", size_bytes=3),
+            file_meta(id="file_b", created_at=NOW, filename="b.txt", size_bytes=3),
         ]
         return list_response([row.model_dump(mode="json") for row in rows if row.id not in deleted])
 
@@ -345,7 +313,7 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
     async def post(file: DeliverableFile) -> None:
         events.append(f"post:{file.file_id}")
 
-    first = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    first = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert first == 2, "both files should be posted on the first sweep"
     for file_id in ("file_a", "file_b"):
@@ -353,7 +321,7 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
             f"{file_id} must be posted before its listing entry is deleted"
         )
 
-    second = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    second = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert second == 0, "a deleted entry must not appear in the next sweep's listing"
 
@@ -368,24 +336,12 @@ async def test_sweep_counts_post_when_delete_fails_afterwards() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_a",
-                    created_at=NOW,
-                    filename="a.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_b",
-                    created_at=NOW,
-                    filename="b.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
+                file_meta(id="file_a", created_at=NOW, filename="a.txt", size_bytes=3).model_dump(
+                    mode="json"
+                ),
+                file_meta(id="file_b", created_at=NOW, filename="b.txt", size_bytes=3).model_dump(
+                    mode="json"
+                ),
             ]
         )
 
@@ -413,7 +369,7 @@ async def test_sweep_counts_post_when_delete_fails_afterwards() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 2, "a delete failure after a successful post must still count the post"
     assert posted == ["file_a", "file_b"], "the sweep must continue past the failed delete"
@@ -432,14 +388,12 @@ async def test_sweep_skips_oversize_file_with_notice_and_keeps_entry() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="huge.parquet",
                     mime_type="application/octet-stream",
                     size_bytes=11,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         )
@@ -466,7 +420,7 @@ async def test_sweep_skips_oversize_file_with_notice_and_keeps_entry() -> None:
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("an oversize file must never be posted")
 
-    count = await sweep_session_outputs(
+    count = await _sweep(
         client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep, max_bytes=10
     )
 
@@ -485,24 +439,16 @@ def _oversize_then_normal_client(
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="render.mp4",
                     mime_type="video/mp4",
                     size_bytes=11,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_ok",
-                    created_at=NOW,
-                    filename="ok.txt",
-                    mime_type="text/plain",
-                    size_bytes=2,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
+                file_meta(id="file_ok", created_at=NOW, filename="ok.txt", size_bytes=2).model_dump(
+                    mode="json"
+                ),
             ]
         )
 
@@ -541,7 +487,7 @@ async def test_a_kept_oversize_file_is_announced_once_across_sweeps() -> None:
 
     noticed = NoticedFiles()
     for _ in range(2):
-        await sweep_session_outputs(
+        await _sweep(
             client,
             session_id="sesn_1",
             post=post,
@@ -572,7 +518,7 @@ async def test_without_a_ledger_every_sweep_repeats_the_notice() -> None:
         pass
 
     for _ in range(2):
-        await sweep_session_outputs(
+        await _sweep(
             client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep, max_bytes=10
         )
 
@@ -597,7 +543,7 @@ async def test_a_failed_notice_is_not_recorded_and_retries() -> None:
 
     noticed = NoticedFiles()
     for _ in range(3):
-        await sweep_session_outputs(
+        await _sweep(
             client,
             session_id="sesn_1",
             post=post,
@@ -623,7 +569,7 @@ async def test_discard_skipped_up_to_deletes_only_files_that_fit() -> None:
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("nothing is posted when max_bytes is 0")
 
-    await sweep_session_outputs(
+    await _sweep(
         client, session_id="sesn_1", post=post, sleep=sleep, max_bytes=0, discard_skipped_up_to=10
     )
 
@@ -645,7 +591,7 @@ async def test_a_skipped_file_carries_its_mime_type() -> None:
     async def on_skip(file: SkippedFile) -> None:
         skipped.append(file)
 
-    await sweep_session_outputs(
+    await _sweep(
         _oversize_then_normal_client(deletes),
         session_id="sesn_1",
         post=post,
@@ -686,7 +632,7 @@ async def test_a_kept_original_stays_downloadable_byte_for_byte() -> None:
         posts.append(file.file_id)
 
     for _ in range(3):
-        await sweep_session_outputs(
+        await _sweep(
             client,
             session_id="sesn_k",
             post=post,
@@ -721,7 +667,7 @@ async def test_kept_files_filling_the_first_page_do_not_hide_a_later_file() -> N
     async def post(file: DeliverableFile) -> None:
         posts.append(file.file_id)
 
-    await sweep_session_outputs(
+    await _sweep(
         client,
         session_id="sesn_p",
         post=post,
@@ -759,24 +705,16 @@ async def test_sweep_keeps_oversize_entry_when_skip_notice_fails() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="huge.bin",
                     mime_type="application/octet-stream",
                     size_bytes=11,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_ok",
-                    created_at=NOW,
-                    filename="ok.txt",
-                    mime_type="text/plain",
-                    size_bytes=2,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
+                file_meta(id="file_ok", created_at=NOW, filename="ok.txt", size_bytes=2).model_dump(
+                    mode="json"
+                ),
             ]
         )
 
@@ -802,7 +740,7 @@ async def test_sweep_keeps_oversize_entry_when_skip_notice_fails() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(
+    count = await _sweep(
         client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep, max_bytes=10
     )
 
@@ -825,14 +763,8 @@ async def test_sweep_deletes_zero_byte_entry_without_download_or_notice() -> Non
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_empty",
-                    created_at=NOW,
-                    filename="empty.txt",
-                    mime_type="text/plain",
-                    size_bytes=0,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_empty", created_at=NOW, filename="empty.txt", size_bytes=0
                 ).model_dump(mode="json")
             ]
         )
@@ -859,9 +791,7 @@ async def test_sweep_deletes_zero_byte_entry_without_download_or_notice() -> Non
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("a 0-byte file must never be posted")
 
-    count = await sweep_session_outputs(
-        client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep
-    )
+    count = await _sweep(client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep)
 
     assert count == 0, "a 0-byte entry does not count as posted"
     assert downloads == [], "a 0-byte entry must never be downloaded"
@@ -869,9 +799,16 @@ async def test_sweep_deletes_zero_byte_entry_without_download_or_notice() -> Non
     assert deletes == ["file_empty"], "the 0-byte entry must be deleted"
 
 
-async def test_sweep_continues_when_post_fails_for_one_file() -> None:
+async def test_sweep_continues_when_post_fails_for_one_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A post failure isolates to that file: it stays listed, the next file is
-    posted and deleted, and the return value counts only the success."""
+    posted and deleted, the return value counts only the success, and the
+    failed file is an ops issue."""
+    reported: list[OpsEvent] = []
+    monkeypatch.setattr(
+        output_delivery, "report_ops_event", lambda sm, event, *, logged: reported.append(event)
+    )
 
     async def sleep(delay: float) -> None:
         pass
@@ -881,23 +818,11 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_bad",
-                    created_at=NOW,
-                    filename="bad.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_bad", created_at=NOW, filename="bad.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_good",
-                    created_at=NOW,
-                    filename="good.txt",
-                    mime_type="text/plain",
-                    size_bytes=4,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_good", created_at=NOW, filename="good.txt", size_bytes=4
                 ).model_dump(mode="json"),
             ]
         )
@@ -920,12 +845,24 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
         if file.file_id == "file_bad":
             raise RuntimeError("upload exploded")
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    tenant_id = uuid.uuid4()
+    count = await _sweep(
+        client,
+        session_id="sesn_1",
+        post=post,
+        sleep=sleep,
+        tenant_id=tenant_id,
+        platform="slack",
+        sessions=cast("async_sessionmaker[AsyncSession]", object()),
+    )
 
     assert count == 1, "only the successfully posted file counts"
     assert deletes == ["file_good"], (
         "the failed file must stay listed; only the posted file is deleted"
     )
+    assert [(e.code, e.tenant_id, e.reason, e.platform) for e in reported] == [
+        ("delivery.output_failed", tenant_id, "file_failed", "slack")
+    ]
 
 
 async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
@@ -940,23 +877,11 @@ async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_offered",
-                    created_at=NOW,
-                    filename="offered.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_offered", created_at=NOW, filename="offered.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_posted",
-                    created_at=NOW,
-                    filename="posted.txt",
-                    mime_type="text/plain",
-                    size_bytes=4,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_posted", created_at=NOW, filename="posted.txt", size_bytes=4
                 ).model_dump(mode="json"),
             ]
         )
@@ -979,7 +904,7 @@ async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
         if file.file_id == "file_offered":
             raise OutputDeliveryDeferred(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "a deferred file is not counted as posted"
     assert deletes == ["file_posted"], "the deferred file must stay listed"
@@ -1039,23 +964,11 @@ async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> No
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_first",
-                    created_at=NOW,
-                    filename="first.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_first", created_at=NOW, filename="first.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_second",
-                    created_at=NOW,
-                    filename="second.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_second", created_at=NOW, filename="second.txt", size_bytes=3
                 ).model_dump(mode="json"),
             ]
         )
@@ -1078,7 +991,7 @@ async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> No
         raise OutputPostingUnavailable("missing_scope")
 
     with pytest.raises(OutputPostingUnavailable):
-        await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+        await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert deletes == [], "an aborted sweep must delete nothing"
     assert downloads == ["file_first"], "the second file must never be downloaded after the abort"
@@ -1098,23 +1011,19 @@ async def test_sweep_skips_handoff_bundles_and_leaves_them_listed() -> None:
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         rows = [
-            FileMetadata(
+            file_meta(
                 id="file_bundle",
                 created_at=NOW,
                 filename="daimon-handoff-0f9d1c4e.tar.gz",
                 mime_type="application/gzip",
                 size_bytes=2048,
-                type="file",
-                downloadable=True,
             ),
-            FileMetadata(
+            file_meta(
                 id="file_report",
                 created_at=NOW,
                 filename="report.csv",
                 mime_type="text/csv",
                 size_bytes=3,
-                type="file",
-                downloadable=True,
             ),
         ]
         return list_response([row.model_dump(mode="json") for row in rows if row.id not in deleted])
@@ -1140,7 +1049,7 @@ async def test_sweep_skips_handoff_bundles_and_leaves_them_listed() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.filename)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "only the real output counts as posted"
     assert posted == ["report.csv"], "the handoff bundle must never be posted"
@@ -1163,14 +1072,12 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     deleted: set[str] = set()
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
-        row = FileMetadata(
+        row = file_meta(
             id="file_bundle",
             created_at=NOW,
             filename="daimon-handoff-0f9d1c4e.tar.gz",
             mime_type="application/gzip",
             size_bytes=4,
-            type="file",
-            downloadable=True,
         )
         return list_response([] if row.id in deleted else [row.model_dump(mode="json")])
 
@@ -1193,7 +1100,7 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.filename)
 
-    count = await sweep_session_outputs(
+    count = await _sweep(
         client,
         session_id="sesn_1",
         post=post,
@@ -1214,14 +1121,12 @@ async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
 
     names = ["first.pdf", "second.png"]
     listing = [
-        FileMetadata(
+        file_meta(
             id=f"file_{index}",
             created_at=NOW,
             filename=name,
             mime_type="application/octet-stream",
             size_bytes=3,
-            type="file",
-            downloadable=True,
         ).model_dump(mode="json")
         for index, name in enumerate(names)
     ]
@@ -1250,7 +1155,24 @@ async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
         posted.append(file.filename)
 
     client = build_fake_anthropic(router.dispatch)
-    await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep, order=reverse)
+    await _sweep(client, session_id="sesn_1", post=post, sleep=sleep, order=reverse)
 
     assert seen == [names], "order sees the listed names"
     assert posted == ["second.png", "first.pdf"], "posted in the order given"
+
+
+def test_every_adapter_sweep_passes_sessions_so_a_failed_file_is_an_ops_issue() -> None:
+    """Every chat and web path records its failed files; found by AST over the adapters."""
+    adapters = Path(__file__).resolve().parents[2] / "adapters"
+    calls: dict[str, bool] = {}
+    for path in adapters.glob("*/daimon/**/*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "sweep_outputs"
+            ):
+                where = f"{path.relative_to(adapters)}:{node.lineno}"
+                calls[where] = any(k.arg == "sessions" for k in node.keywords)
+    assert len(calls) >= 6, calls
+    assert [where for where, ok in calls.items() if not ok] == []

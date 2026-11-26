@@ -57,6 +57,7 @@ _SCOPE_LABELS: dict[str, str] = {
     "channels:write": "Change channel settings",
     "agents:archive": "Archive channel copies",
     "promo:redeem": "Redeem promo codes",
+    "issues:read": "Read failures and warnings",
 }
 _ERROR_WORDS = 80
 

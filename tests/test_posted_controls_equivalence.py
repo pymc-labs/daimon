@@ -1,4 +1,4 @@
-"""Run real base handlers and refactored callers against the same effects."""
+"""Pin the effects of posted confirmation cards and routine panel actions on each platform."""
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ from uuid import UUID
 
 import discord
 import pytest
-from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt, PendingConfirmations
+from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt
 from daimon.core.posted_controls import lifecycle
-from daimon.core.posted_controls.confirmation import NO_LONGER_PENDING_MESSAGE, NOT_YOURS_MESSAGE
+from daimon.testing.recorded_effects import Recording
 from slack_sdk.errors import SlackApiError
 
-BASE = Path(__file__).with_name("posted_controls_base")
 AT = datetime(2026, 10, 3, tzinfo=UTC)
+_RECORDING = Recording(Path(__file__).with_name("posted_controls_effects.json"), epoch=AT)
 TOKEN = "tok_abcdefgh"
 TENANT = UUID(int=1)
 ROUTINE = UUID(int=2)
@@ -31,26 +31,6 @@ class Clock(datetime):
     @classmethod
     def now(cls, tz=None):
         return AT
-
-
-def _base(module, name):
-    scope = dict(
-        vars(module),
-        datetime=Clock,
-        UTC=UTC,
-        PendingConfirmations=PendingConfirmations,
-        NOT_YOURS_MESSAGE=NOT_YOURS_MESSAGE,
-        NO_LONGER_PENDING_MESSAGE=NO_LONGER_PENDING_MESSAGE,
-    )
-    if name == "slack_confirm":
-        posted_card = scope["_PostedCard"]
-
-        def legacy_posted_card(prompt, client, channel, ts):
-            return posted_card(prompt, client, channel, ts, thread_ts=None)
-
-        scope["_PostedCard"] = legacy_posted_card
-    exec("from __future__ import annotations\n" + (BASE / f"{name}.txt").read_text(), scope)
-    return SimpleNamespace(**scope)
 
 
 def _json(value):
@@ -102,13 +82,12 @@ def _refusal(*args, **kwargs):
         "timer_after_click",
     ],
 )
-async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
+async def test_confirmation_effects_match_recording(platform, scenario, monkeypatch):
     module = importlib.import_module(f"daimon.adapters.{platform}.tool_confirmation")
     monkeypatch.setattr(lifecycle, "datetime", Clock)
     monkeypatch.setattr("secrets.token_urlsafe", lambda n: TOKEN)
-    old = _base(module, f"{platform}_confirm")
 
-    async def run(implementation):
+    async def run():
         trace, posted = [], []
         prompt = ConfirmationPrompt(
             title="Approve a write?",
@@ -131,9 +110,9 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             trace.append(_refusal(**kwargs))
 
         if platform == "discord":
-            hook = implementation.discord_confirmation_hook(SimpleNamespace(send=send))
+            hook = module.discord_confirmation_hook(SimpleNamespace(send=send))
         elif platform == "slack":
-            cards = implementation.SlackConfirmationCards()
+            cards = module.SlackConfirmationCards()
             client = SimpleNamespace(
                 chat_postMessage=send, chat_update=edit, chat_postEphemeral=ephemeral
             )
@@ -143,8 +122,6 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
                 trace.append(("missing", user, text))
 
             monkeypatch.setattr(module, "_ephemeral_from_payload", missing)
-            if implementation is old:
-                cards.handle_click.__func__.__globals__["_ephemeral_from_payload"] = missing
         else:
 
             async def teams_send(conversation_id, activity, *, service_url):
@@ -154,7 +131,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
                 posted.append(activity)
                 return SimpleNamespace(id="m-1")
 
-            cards = implementation.TeamsConfirmationCards(SimpleNamespace(send=teams_send))
+            cards = module.TeamsConfirmationCards(SimpleNamespace(send=teams_send))
             hook = cards.hook(conversation_id="conversation", service_url="https://service.invalid")
         gate = asyncio.Event()
         original_wait = asyncio.wait_for
@@ -263,8 +240,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             trace.append(("registries", sorted(pending._pending), sorted(registry)))
         return trace
 
-    expected = await run(old)
-    actual = await run(module)
+    actual = await run()
     if platform == "slack" and scenario != "post_error":
         # Main #807 current-outcome assertions complement the full trace check below.
         trace = actual
@@ -288,14 +264,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             refusals = [item[2] for item in trace if item[0] == "refusal"]
             assert len(refusals) == 1 and refusals[0]["thread_ts"] == "1699.9"
 
-    if platform == "slack" and scenario in ("stranger", "lost"):
-        # Main 8e4280f0518c3f669a715dab20951a24eaaac43c threads refusal replies.
-        # Update only that cited field in the two pre-main expected rows.
-        assert expected[1][0] == actual[1][0] == "refusal"
-        assert "thread_ts" not in expected[1][2]
-        assert actual[1][2]["thread_ts"] == "1699.9"
-        expected[1][2]["thread_ts"] = "1699.9"
-    assert expected == actual
+    _RECORDING.check(f"confirm-{platform}-{scenario}", actual)
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
@@ -304,17 +273,16 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
     "scenario",
     ["creator", "admin", "stranger", "gone", "wrong_tenant", "write_error", "stale", "ownerless"],
 )
-async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
+async def test_routine_effects_match_recording(platform, op, scenario, monkeypatch):
     suffix = (
         "routines_panel"
         if platform == "teams"
         else "routines_panel." + ("panel" if platform == "discord" else "actions")
     )
     module = importlib.import_module(f"daimon.adapters.{platform}.{suffix}")
-    old = _base(module, f"{platform}_routine")
     monkeypatch.setattr(module, "datetime", Clock)
 
-    async def run(implementation):
+    async def run():
         trace = []
         row = SimpleNamespace(
             id=ROUTINE,
@@ -345,7 +313,11 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
         factory = MagicMock(side_effect=transaction)
         factory.begin = transaction
         runtime = SimpleNamespace(
-            sessionmaker=factory, anthropic=None, settings=SimpleNamespace(web=None)
+            sessionmaker=factory,
+            anthropic=None,
+            settings=SimpleNamespace(web=None),
+            deployment_default=None,
+            resolver_cache=None,
         )
 
         async def load(session, routine_id, *, tenant_id):
@@ -388,7 +360,8 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                 user=member,
                 guild_id="1",
                 guild=SimpleNamespace(owner_id=None),
-                response=SimpleNamespace(send_message=client.chat_postEphemeral),
+                response=SimpleNamespace(send_message=client.chat_postEphemeral, defer=AsyncMock()),
+                followup=SimpleNamespace(send=client.chat_postEphemeral),
             )
             view = SimpleNamespace(
                 state=SimpleNamespace(selected=SimpleNamespace(routine=row)), runtime=runtime
@@ -399,14 +372,14 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
 
             scope.update(
                 checks=SimpleNamespace(is_guild_admin=discord_admin),
+                # The chat permission check is stubbed: this test covers the transition.
+                _chat_refusal=AsyncMock(return_value=None),
                 pause_routine_via_panel=scope["pause_routine"],
                 resume_routine_via_panel=scope["resume_routine"],
                 _rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),
                 _send_callback_error=AsyncMock(side_effect=lambda *a: trace.append("error")),
             )
-            function = (
-                implementation.callback if implementation is old else module._PauseButton.callback
-            )
+            function = module._PauseButton.callback
             args = (SimpleNamespace(view=view), interaction)
         elif platform == "slack":
             scope.update(
@@ -416,7 +389,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                 build_content_view=lambda *a, **kw: {"view": "routines"},
                 surface_command_error=AsyncMock(side_effect=lambda **kw: trace.append("error")),
             )
-            function = implementation.handle_routine_action
+            function = module.handle_routine_action
             args = (
                 runtime,
                 {
@@ -437,6 +410,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                         is_admin=scenario == "admin",
                         admin_for=lambda _action: scenario == "admin",
                         foreign=False,
+                        channel_thread=("C1", None),
                     )
                 ),
                 store=SimpleNamespace(
@@ -448,7 +422,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             panel = SimpleNamespace(_runtime=runtime, _panel=AsyncMock(return_value=MagicMock()))
             scope["replace_card"] = lambda card: "render"
             scope["toast"] = lambda text: text
-            function = implementation._act if implementation is old else module.RoutinesPanel._act
+            function = module.RoutinesPanel._act
             args = (
                 panel,
                 SimpleNamespace(
@@ -465,33 +439,4 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             trace.append("error")
         return trace
 
-    expected, actual = await run(old), await run(module)
-    # Routine transitions now pass the revision checked by the permission
-    # callback. The archived handlers predate that CAS argument; every other
-    # effect (including errors, rollback and rendering) remains equivalent.
-    for item in expected:
-        if isinstance(item, tuple) and item[0] == "write":
-            assert "expected_updated_at" not in item[2]
-            item[2]["expected_updated_at"] = AT
-    if scenario == "stale" and op == "resume" and platform in ("slack", "teams"):
-        # Slot-safe cutover refuses a repeated resume instead of replacing the
-        # seeded next slot. The archived handlers wrote and rendered again.
-        assert not any(isinstance(item, tuple) and item[0] == "write" for item in actual)
-        if platform == "slack":
-            refusal = ("refusal", "This routine is already on.", {"channel": "C1", "user": USER})
-            assert refusal in actual
-            assert expected[4][0] == "write"
-            expected = expected[:4] + [refusal] + expected[5:7] + [("response", None)]
-        else:
-            assert ("response", "This routine is already on.") in actual
-            expected = [
-                item for item in expected if not (isinstance(item, tuple) and item[0] == "write")
-            ]
-            expected[-1] = ("response", "This routine is already on.")
-    if platform == "discord":
-        # Main e7a70df78 reworded these refusals; compare where and how they go.
-        expected, actual = (
-            [("refusal", "", i[2]) if isinstance(i, tuple) and i[0] == "refusal" else i for i in t]
-            for t in (expected, actual)
-        )
-    assert expected == actual
+    _RECORDING.check(f"routine-{platform}-{op}-{scenario}", await run())

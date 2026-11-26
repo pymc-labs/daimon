@@ -52,6 +52,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_file_resource import (
 from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
     BetaManagedAgentsGitHubRepositoryResource,
 )
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_CHAT_SESSION
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_server_url import (
     GITHUB_COPILOT_MCP_URL,
@@ -67,6 +68,7 @@ from daimon.core.tool_safety import (
     heal_reserved_server,
     session_tools_for_policy,
     trusted_servers_for,
+    with_current_tool_names,
 )
 from pydantic import (
     BaseModel,
@@ -149,6 +151,7 @@ class SessionSnapshot(BaseModel):
             "github_repo_script_resource_id",
             "mcp_hold",
             "memory_scope",
+            "model_effort",
             "identity_features",
         ):
             if not data.get(name):
@@ -165,6 +168,9 @@ class SessionSnapshot(BaseModel):
     ma_agent_id: str
     model_id: str
     model_speed: Literal["standard", "fast"] = "standard"
+    # The effort a conversation chose for the session (`daimon.core.thread_models`);
+    # None when the agent's own runs, and for every session from before it existed.
+    model_effort: str | None = None
 
     @property
     def pricing_id(self) -> str:
@@ -329,6 +335,8 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
         fields = (*fields, "mcp_hold")
     if snapshot.memory_scope is not None:
         fields = (*fields, "memory_scope")
+    if snapshot.model_effort is not None:
+        fields = (*fields, "model_effort")
     return _fingerprint(snapshot, fields)
 
 
@@ -378,8 +386,11 @@ def snapshot_from_created_session(
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
     identity_features: tuple[tuple[str, str], ...] = (),
+    model_effort: str | None = None,
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
+
+    `model_effort` is the effort the conversation's choice sent, if any.
 
     `memory_scope` is the isolation scope the creator built the session for,
     whether or not a store mounted.
@@ -418,6 +429,7 @@ def snapshot_from_created_session(
             "mcp_hold": mcp_hold,
             "memory_scope": memory_scope,
             "identity_features": identity_features,
+            "model_effort": model_effort,
         }
     )
     if sent_system is None:
@@ -533,7 +545,7 @@ def _snapshot_from_session(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
-        chat_session_id=session.metadata.get("daimon_chat_session_id"),
+        chat_session_id=session.metadata.get(MA_METADATA_KEY_CHAT_SESSION),
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
         env_sha256=env_sha256,
@@ -637,9 +649,11 @@ def session_tools(
     agent, hidden_mcp_server_names = _with_toolset(agent, hidden_mcp_server_names, toolset)
     visible = visible_tools(agent, hidden_mcp_server_names)
     dumped = _dumped(visible)
+    # An agent written before a daimon tool was renamed still names the old one.
+    named = with_current_tool_names(dumped) or dumped
     gated = session_tools_for_policy(
         tool_safety,
-        dumped,
+        named,
         trusted_servers=trusted_servers_for(
             public_url, {s.name: s.url for s in visible_mcp_servers(agent, hidden_mcp_server_names)}
         ),
@@ -647,10 +661,10 @@ def session_tools(
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
     )
-    payload = gated if gated is not None else dumped
+    payload = gated if gated is not None else named
     hidden_tools = frozenset[str]() if toolset is None else toolset.hidden_daimon_tools
     if not legacy_memory_servers and not hidden_tools:
-        return visible if gated is None else _retyped(visible, dumped, gated)
+        return visible if payload is dumped else _retyped(visible, dumped, payload)
     if legacy_memory_servers:
         payload = suppress_legacy_readers(payload, legacy_memory_servers)
     if hidden_tools:
@@ -731,6 +745,7 @@ def desired_snapshot(
     legacy_memory_servers: tuple[str, ...] = (),
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
+    model_effort: str | None = None,
     github_transport: GithubTransport = "direct",
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
@@ -789,6 +804,7 @@ def desired_snapshot(
         chat_session_id=chat_session_id,
         mcp_hold=mcp_hold,
         memory_scope=memory_scope,
+        model_effort=model_effort,
         identity_features=identity_features,
         github_transport=github_transport,
         tools_sha256=hash_tools(

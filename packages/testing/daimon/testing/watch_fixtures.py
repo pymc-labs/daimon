@@ -180,11 +180,27 @@ async def install_poll_ports(session: AsyncSession) -> None:
             text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar")
         )
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
+    # 0211 adds the token-link callback port, installed and owned like the page port.
+    callback = runpy.run_path(
+        str(
+            Path(__file__).resolve().parents[3]
+            / "core/alembic/versions/0211_callback_watch_imports.py"
+        )
+    )
+    signature = cast(str, callback["SIGNATURE"])
+    await session.execute(text(cast(str, callback["CALLBACK_SQL"]).format(schema=quoted)))
+    await session.execute(text(f"GRANT CREATE ON SCHEMA {quoted} TO daimon_watch_ingress_owner"))
+    await session.execute(text(f"REVOKE ALL ON FUNCTION {quoted}.{signature} FROM PUBLIC"))
+    await session.execute(
+        text(f"ALTER FUNCTION {quoted}.{signature} OWNER TO daimon_watch_ingress_owner")
+    )
+    await session.execute(text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar"))
+    await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
     await install_firing_trigger(session)
 
 
 async def install_firing_trigger(session: AsyncSession) -> None:
-    """Install 0196's trigger that stamps a watch with its latest firing time.
+    """Install 0236's trigger that stamps a watch with its latest firing time.
 
     ``install_poll_ports`` calls it, so every watch test keeps ``last_fired_at`` current.
     """
@@ -193,7 +209,7 @@ async def install_firing_trigger(session: AsyncSession) -> None:
         raise ValueError("Watch fixtures require an owned test schema")
     quoted = '"' + schema + '"'
     migration = runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0196_audit_clocks.py")
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0236_audit_clocks.py")
     )
     await session.execute(text(cast(str, migration["FUNCTION"]).format(schema=quoted)))
     await session.execute(

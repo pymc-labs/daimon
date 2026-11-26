@@ -17,9 +17,9 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionStatusIdleEvent,
 )
 from daimon.adapters.teams import card
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
@@ -74,11 +74,8 @@ async def test_cancel_requester_persona_matrix(
     db_session_factory: async_sessionmaker[AsyncSession], requester: Persona
 ) -> None:
     """Mocked permission tests: another non-admin cannot interrupt the active turn."""
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
+    await provision_workspace(
+        db_session_factory, ENTRA_TENANT_ID, platform="teams", signup_credit=Decimal("100")
     )
     held = asyncio.Event()
     release = asyncio.Event()

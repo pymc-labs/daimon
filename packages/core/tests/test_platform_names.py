@@ -7,6 +7,8 @@ import importlib.util
 import uuid
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -28,6 +30,7 @@ from daimon.core.platform_names import (
 )
 from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account, purge_principal
+from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.platform_names import (
     ChannelSighting,
@@ -37,6 +40,7 @@ from daimon.core.stores.platform_names import (
     get_user_names,
     list_channel_names,
     mark_channel_status,
+    search_user_names,
     upsert_channel_names,
     upsert_user_names,
 )
@@ -45,6 +49,10 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_lookup_channel_names = partial(
+    platform_names.lookup_channel_names, platform="discord", external_id="g1"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -120,6 +128,80 @@ async def test_no_name_is_stored_for_someone_without_a_principal(db_session: Asy
     assert known == {"1": KnownName("Ann")}, (
         "no principal here (none at all, or only in another tenant): nothing stored"
     )
+
+
+async def test_search_finds_a_name_or_handle_by_substring_in_this_tenant_only(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    other = await make_tenant(db_session, platform="discord")
+    for t in (tenant, other):
+        await _people(db_session, t.id, "discord", "1", "2", "3")
+    await upsert_user_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        names={
+            "1": KnownName("Maya Chen", "mc"),
+            "2": KnownName(None, "MAYA_k"),
+            "3": KnownName("Bo 100%"),
+        },
+    )
+    await upsert_user_names(
+        db_session, tenant_id=other.id, platform="discord", names={"1": KnownName("Maya Other")}
+    )
+
+    async def find(query: str, limit: int = 8) -> dict[str, KnownName]:
+        return await search_user_names(
+            db_session, tenant_id=tenant.id, platform="discord", query=query, limit=limit
+        )
+
+    assert set(await find("maya")) == {"1", "2"}, (
+        "display name or handle, any case; not other tenants"
+    )
+    assert (await find("aya c")).keys() == {"1"}, "a substring of the display name"
+    assert (await find("100%")).keys() == {"3"}, "a literal percent, not a wildcard"
+    assert await find("%") == {"3": KnownName("Bo 100%")}, "wildcards match only themselves"
+    assert len(await find("a", limit=1)) == 1, "capped at the limit"
+    assert (
+        await search_user_names(
+            db_session, tenant_id=tenant.id, platform="slack", query="maya", limit=8
+        )
+        == {}
+    ), "another platform's people are not found"
+
+
+async def test_search_keeps_only_listed_members_when_asked(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session, platform="discord")
+    await _people(db_session, tenant.id, "discord", "1", "2")
+    await upsert_user_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        names={"1": KnownName("Maya In"), "2": KnownName("Maya Gone")},
+    )
+    await members_store.replace_members(
+        db_session,
+        tenant_id=tenant.id,
+        members={"1": False},
+        workspace_name="Guild",
+        now=datetime.now(UTC),
+    )
+
+    both = await search_user_names(
+        db_session, tenant_id=tenant.id, platform="discord", query="maya", limit=8
+    )
+    members = await search_user_names(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        query="maya",
+        members_only=True,
+        limit=8,
+    )
+
+    assert list(both) == ["2", "1"], "unfiltered: everyone named, by name"
+    assert set(members) == {"1"}, "members_only drops the person the list does not have"
 
 
 async def test_a_name_is_kept_per_tenant_and_platform(db_session: AsyncSession) -> None:
@@ -750,21 +832,11 @@ async def test_a_channel_name_is_asked_for_once_and_remembered(
         asked.append(channel_id)
         return {"c1": " general "}.get(channel_id)
 
-    first = await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=tenant,
-        platform="discord",
-        external_id="g1",
-        channel_ids=["c1", "c2"],
-        lookup=lookup,
+    first = await _lookup_channel_names(
+        MagicMock(), tenant_id=tenant, channel_ids=["c1", "c2"], lookup=lookup
     )
-    again = await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=tenant,
-        platform="discord",
-        external_id="g1",
-        channel_ids=["c2"],
-        lookup=lookup,
+    again = await _lookup_channel_names(
+        MagicMock(), tenant_id=tenant, channel_ids=["c2"], lookup=lookup
     )
 
     assert first.names == {"c1": "general"} and remembered == [{"c1": "general"}]
@@ -793,13 +865,8 @@ async def test_a_deleted_channel_is_answered_from_memory_and_never_stored(
         }.get(channel_id)
 
     async def ask() -> platform_names.LookedUpChannels:
-        return await platform_names.lookup_channel_names(
-            MagicMock(),
-            tenant_id=tenant,
-            platform="discord",
-            external_id="g1",
-            channel_ids=["gone", "dm"],
-            lookup=lookup,
+        return await _lookup_channel_names(
+            MagicMock(), tenant_id=tenant, channel_ids=["gone", "dm"], lookup=lookup
         )
 
     first, again = await ask(), await ask()
@@ -828,13 +895,8 @@ async def test_a_channel_not_answered_in_time_is_asked_again_a_minute_later(
         return platform_names.ChannelStatus.GONE
 
     async def ask() -> platform_names.LookedUpChannels:
-        return await platform_names.lookup_channel_names(
-            MagicMock(),
-            tenant_id=tenant,
-            platform="discord",
-            external_id="g1",
-            channel_ids=["c1"],
-            lookup=lookup,
+        return await _lookup_channel_names(
+            MagicMock(), tenant_id=tenant, channel_ids=["c1"], lookup=lookup
         )
 
     tenant = uuid.uuid4()
@@ -856,13 +918,8 @@ async def test_a_channel_lookup_that_raises_names_nothing() -> None:
     async def broken(_guild: str, _channel_id: str) -> str | None:
         raise RuntimeError("boom")
 
-    found = await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=uuid.uuid4(),
-        platform="discord",
-        external_id="g1",
-        channel_ids=["c1"],
-        lookup=broken,
+    found = await _lookup_channel_names(
+        MagicMock(), tenant_id=uuid.uuid4(), channel_ids=["c1"], lookup=broken
     )
     assert found.labels() == {}, "a failed lookup names nothing"
 
@@ -929,13 +986,8 @@ async def test_a_channel_lookup_asks_for_a_capped_number_at_a_bounded_pace() -> 
         running -= 1
         return None
 
-    await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=uuid.uuid4(),
-        platform="discord",
-        external_id="g1",
-        channel_ids=[f"c{n}" for n in range(50)],
-        lookup=lookup,
+    await _lookup_channel_names(
+        MagicMock(), tenant_id=uuid.uuid4(), channel_ids=[f"c{n}" for n in range(50)], lookup=lookup
     )
 
     assert len(asked) == 20, "no more than 20 channels are asked about per call"

@@ -50,9 +50,10 @@ from daimon.core.session_update_ops import (
 )
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
@@ -230,14 +231,7 @@ async def test_env_replacement_deletes_the_old_resource_before_adding_the_new_on
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="TOGGL_TOKEN",
-        content="tok",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="TOGGL_TOKEN", content="tok")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -299,14 +293,7 @@ async def test_env_replacement_enqueues_the_new_file_for_ttl_deletion(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -339,14 +326,7 @@ async def test_env_replacement_finds_the_mounted_env_when_no_resource_id_was_rec
     """A backfilled snapshot may not name the resource; the session does."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -382,14 +362,7 @@ async def test_env_replacement_that_keeps_nothing_only_removes_the_mount(
     """`agent_env_file` Off: the saved keys stay, the session's `.env` goes."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -425,14 +398,7 @@ async def test_env_replacement_clears_the_recorded_env_when_the_add_fails_after_
     mounting the secrets the caller saved."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -505,14 +471,7 @@ async def test_update_defers_as_session_busy_when_ma_refuses_a_running_session(
     it must still be reported, or the caller would redo it."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -815,3 +774,72 @@ async def test_a_routed_session_keeps_the_router_and_renews_its_record(
         renewed = await github_router_sessions.get(session, router_session_id=record.id)
     assert renewed is not None
     assert renewed.expires_at == _NOW + GITHUB_ROUTER_SESSION_TTL
+
+
+@pytest.mark.parametrize(
+    ("vault_id", "server_url", "synced"),
+    [
+        (None, "https://notion.example/mcp", False),
+        ("vlt_mine", "https://daimon.example/mcp", False),
+        ("vlt_mine", "https://daimon.example/mcp-identity/crm", False),
+        ("vlt_mine", "https://notion.example/mcp", True),
+    ],
+    ids=["no-vault", "own-mcp-only", "relay-only", "external-connector"],
+)
+async def test_the_vault_mirror_runs_only_for_a_vault_and_an_external_connector(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    vault_id: str | None,
+    server_url: str,
+    synced: bool,
+) -> None:
+    """A reused session with nothing external to mirror makes no Anthropic vault calls."""
+    from cryptography.fernet import Fernet, MultiFernet
+    from daimon.core import session_update_ops
+    from pydantic import HttpUrl, SecretStr
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    state = FakeSessionsState(ma=FakeMAState())
+    _register_agent(state.ma)
+    client = _build_client(state)
+    session_id, recorded = await _session_with_env(client, content=b"A=1\n")
+    calls: list[str] = []
+
+    async def sync(*_args: object, **_kwargs: object) -> None:
+        calls.append("sync")
+
+    async def refresh(*_args: object, **_kwargs: object) -> None:
+        calls.append("refresh")
+
+    monkeypatch.setattr(session_update_ops, "sync_agent_mcp_credentials", sync)
+    monkeypatch.setattr(session_update_ops, "refresh_mounted_mcp_vaults", refresh)
+    agent = _agent(
+        mcp_servers=[
+            BetaManagedAgentsMCPServerURLDefinition(name="srv", type="url", url=server_url)
+        ]
+    )
+
+    await apply_update_ops(
+        client,
+        db_session_factory,
+        ops=(RemirrorVaultCredentials(),),
+        session_id=session_id,
+        recorded=recorded.model_copy(update={"vault_id": vault_id}),
+        agent=agent,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        mcp=McpSettings(
+            public_url=HttpUrl("https://daimon.example/mcp"), jwt_secret=SecretStr("s" * 32)
+        ),
+        tool_safety=OPEN_TOOL_SAFETY,
+        fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+        github_fallback_pat=None,
+        github_app_id=None,
+        github_app_private_key=None,
+        now=_NOW,
+    )
+
+    assert ("sync" in calls) is synced

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator, Collection, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Collection, Mapping, MutableMapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -44,6 +44,7 @@ import anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_attach import McpServerReplaceRefusedError
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
@@ -66,7 +67,10 @@ from daimon.core.mux_compat import (
     update_credential,
 )
 from daimon.core.stores import agent_mcp_credentials as cred_store
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
+from daimon.core.stores.domain import ConnectorTokenRow
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -402,6 +406,8 @@ async def sync_agent_mcp_credentials(
     now: dt.datetime,
     exclude_github_copilot: bool = False,
     vault_ids: McpVaultIds | None = None,
+    hold: TurnHold | None = None,
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> None:
     """Ensure this caller's vault holds the agent's external MCP credentials.
 
@@ -415,12 +421,15 @@ async def sync_agent_mcp_credentials(
     *contents* are read at each turn's MCP init — so writing into the vault the
     session already mounts does reach it on the next turn.
 
-    Cheap for the common case: the DB read gates every MA call, so an agent with
-    no external MCP servers pays one indexed query and nothing else.
+    Runs even when the agent holds nothing, so a copy whose grant or token was
+    removed is deleted under the vault lock rather than kept until it expires.
 
     ``vault_ids`` remembers the vault ``ensure_agent_mcp_vault`` returned, so
     later turns skip its walk over every vault in the workspace. A cached
     vault that has since been deleted or archived is resolved again.
+
+    A held or private Slack session mounts its own vault (`ensure_agent_mcp_vault`):
+    ``hold`` and ``slack_turn_context_id`` select it, as at create, and skip the cache.
     """
     credentials = await resolve_agent_mcp_credentials(
         sessionmaker=sessionmaker,
@@ -434,8 +443,6 @@ async def sync_agent_mcp_credentials(
             for credential in credentials
             if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
         )
-    if not credentials:
-        return
     scope = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
 
     async def ensure() -> str:
@@ -447,6 +454,8 @@ async def sync_agent_mcp_credentials(
             public_url=public_url,
             now=now,
             session_factory=sessionmaker,
+            slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
             scope=scope,
         )
 
@@ -463,7 +472,7 @@ async def sync_agent_mcp_credentials(
             exclude_github_copilot=exclude_github_copilot,
         )
 
-    if vault_ids is None:
+    if vault_ids is None or hold is not None or slack_turn_context_id is not None:
         await mirror(await ensure())
         return
     key = (account_id, agent_id, public_url)
@@ -603,10 +612,30 @@ async def mirror_stored_credentials(
     thread's synthetic owner. ``prune`` is for a shared thread's vault, which
     nobody else writes: anything that is not a stored token is deleted first,
     so a removed token stops authenticating on the thread's next turn.
+
+    A caller's vault (no ``prune``) also gets the caller's own OAuth grants
+    Daimon holds (`mirror_grants_into_vault`), refreshed first when near expiry.
     """
+    from daimon.core.mcp_oauth.connector_tokens import refresh_due_grants  # import cycle
+
+    if not prune:
+        await refresh_due_grants(
+            sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=lock_account_id,
+            fernet=fernet,
+        )
     async with hold_agent_vault_lock(
         sessionmaker, account_id=lock_account_id, agent_id=agent_id
     ) as locked:
+        if not prune:
+            grants = await connector_tokens_store.list_connector_tokens(
+                locked, tenant_id=tenant_id, agent_id=agent_id, account_id=lock_account_id
+            )
+            await mirror_grants_into_vault(
+                client, vault_id=vault_id, grants=grants, fernet=fernet, scope=scope
+            )
         credentials = await _read_agent_mcp_credentials(
             locked, fernet=fernet, tenant_id=tenant_id, agent_id=agent_id
         )
@@ -633,6 +662,95 @@ async def mirror_stored_credentials(
                 )
         await mirror_credentials_into_vault(
             client, vault_id=vault_id, credentials=credentials, scope=scope
+        )
+
+
+async def mirror_grants_into_vault(
+    client: AsyncAnthropic,
+    *,
+    vault_id: str,
+    grants: Sequence[ConnectorTokenRow],
+    fernet: MultiFernet,
+    scope: Scope,
+) -> None:
+    """Put each of the caller's Daimon-held OAuth grants into their vault, access token only.
+
+    Daimon refreshes the grant, so the copy carries no refresh token for
+    Anthropic to spend. Per URL, by the copy's `METADATA_VERSION_KEY` stamp:
+    a copy of this grant's version is current; an older stamped copy is
+    updated in place, never deleted, so a turn in another thread keeps a
+    credential; an unstamped grant (Anthropic-refreshed, signed in before
+    Daimon held grants) or the agent's stamped shared token is replaced, since
+    a sign-in outranks both; an unstamped static token is the person's own
+    pasted one and stays. Callers hold the vault lock (`mirror_stored_credentials`).
+
+    A stamped copy whose grant is gone (a refused refresh, an erasure, a deleted
+    agent) is deleted, so it never outlives the grant it copied.
+    """
+    from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse  # import cycle
+    from daimon.core.mcp_oauth.vault import build_mcp_oauth_auth, put_mcp_oauth_credential
+
+    granted = {_url_key(grant.server_url) for grant in grants}
+    slots: dict[str, tuple[str, str, str | None]] = {}
+    async for existing in list_credentials(client, vault_id, scope=scope):
+        if existing.auth.type != "mcp_oauth" and existing.auth.type != "static_bearer":
+            continue
+        stamp = (existing.metadata or {}).get(METADATA_VERSION_KEY)
+        url = _url_key(existing.auth.mcp_server_url)
+        if existing.auth.type == "mcp_oauth" and stamp is not None and url not in granted:
+            await delete_credential(client, vault_id, existing.id, scope=scope)
+            continue
+        slots[url] = (existing.id, existing.auth.type, stamp)
+    now = dt.datetime.now(dt.UTC)
+    for grant in grants:
+        version = grant.updated_at.isoformat()
+        left = None if grant.expires_at is None else grant.expires_at - now
+        tokens = TokenResponse(
+            access_token=decrypt_token(fernet, grant.access_token_encrypted),
+            expires_in=None if left is None else max(0, int(left.total_seconds())),
+        )
+        client_registration = ClientRegistration(client_id=grant.client_id)
+        found = slots.get(_url_key(grant.server_url))
+        if found is not None:
+            credential_id, kind, stamp = found
+            if stamp == version or (kind == "static_bearer" and stamp is None):
+                continue
+            if kind == "mcp_oauth" and stamp is not None:
+                auth = build_mcp_oauth_auth(
+                    mcp_server_url=grant.server_url,
+                    tokens=tokens,
+                    client=client_registration,
+                    token_endpoint=grant.token_endpoint,
+                    resource=None,
+                    now=now,
+                )
+                # The URL is immutable: an update naming it is a 400.
+                await update_credential(
+                    client,
+                    vault_id,
+                    credential_id,
+                    {
+                        "auth": {
+                            "type": "mcp_oauth",
+                            "access_token": tokens.access_token,
+                            "expires_at": auth.get("expires_at"),
+                        },
+                        "metadata": {METADATA_VERSION_KEY: version},
+                    },
+                    scope=scope,
+                )
+                continue
+        await put_mcp_oauth_credential(
+            client,
+            vault_id=vault_id,
+            mcp_server_url=grant.server_url,
+            tokens=tokens,
+            client=client_registration,
+            token_endpoint=grant.token_endpoint,
+            resource=None,
+            now=now,
+            scope=scope,
+            metadata={METADATA_VERSION_KEY: version},
         )
 
 
@@ -699,6 +817,7 @@ async def forget_mirrored_mcp_token(
                 "mcp_credentials.copy_delete_failed",
                 vault_id=vault_id,
                 error=type(err).__name__,
+                causes=backend_refusal_causes(err),
             )
             failed.append(vault_id)
     log.info(
@@ -749,8 +868,12 @@ async def resolve_hidden_mcp_server_names(
     agent_id: uuid.UUID,
     account_id: uuid.UUID,
     server_urls: Mapping[str, str],
+    daimon_refreshes: bool = False,
 ) -> frozenset[str]:
     """The servers to leave off this caller's session, read from the DB.
+
+    `daimon_refreshes` (a non-MA backend) also reads the caller's connector
+    tokens, so a grant without one reads as not signed in.
 
     The OAuth twin of `mirror_credentials_into_vault`: a token stored HERE
     reaches every caller, so the server stays; a grant somebody drove through
@@ -772,10 +895,18 @@ async def resolve_hidden_mcp_server_names(
         credentials = await cred_store.list_credential_revisions(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
+        token_urls = (
+            await connector_tokens_store.list_connector_token_urls(
+                session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+            )
+            if daimon_refreshes
+            else None
+        )
     return hidden_mcp_server_names(
         grants,
         agent_id=agent_id,
         account_id=account_id,
         shared_server_urls=[url for _, url, _ in credentials],
         server_urls=server_urls,
+        connector_token_urls=token_urls,
     )

@@ -66,8 +66,8 @@ fenced; neither is an account id that is not a UUID (synthetic and operator iden
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Iterable
-from dataclasses import dataclass, fields
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from typing import Any, cast
 
@@ -141,7 +141,10 @@ TABLE_DISPOSITIONS: dict[str, str] = {
         "counted); synthetic billing operations are not matched"
     ),
     "usage_observation": "retained financial evidence, detached from the slot",
-    "accounting_outbox": "retained financial evidence, detached from the slot",
+    "accounting_outbox": (
+        "retained financial evidence, detached from the slot; its platform user id is "
+        "billing attribution, retained like usage_events"
+    ),
     "accounting_binding_context": "the profile and channel settlement reads; no personal data",
     "erased_account": "the fence; a bare account id",
     "erased_principal": "the fence for operations keyed by principal; bare ids",
@@ -174,10 +177,17 @@ class MuxRetained:
     shared_conversations: int = 0
     shared_operations: int = 0
     accounting_records: int = 0
+    # Provider state a shared conversation owns (Gemini rows keyed by the thread).
+    shared_provider_records: int = 0
 
     @property
     def total(self) -> int:
-        return self.shared_conversations + self.shared_operations + self.accounting_records
+        return (
+            self.shared_conversations
+            + self.shared_operations
+            + self.accounting_records
+            + self.shared_provider_records
+        )
 
 
 @dataclass(frozen=True)
@@ -282,7 +292,17 @@ async def inventory(
             select(func.count()).select_from(MuxOperation).where(owned, not_(_on_shared_slot())),
         ),
     )
+    # Imported here: the Gemini store reaches `channel_backend` through `shared_threads`.
+    from daimon.core.stores.gemini_runtime_state import count_shared_records
+
+    threads = [
+        (tenant, platform, channel, thread)
+        for tenant, platform, channel, thread in (
+            await session.execute(select(shared_conversations))
+        ).tuples()
+    ]
     retained = MuxRetained(
+        shared_provider_records=await count_shared_records(session, threads=threads),
         shared_conversations=await _count(
             session, select(func.count()).select_from(shared_conversations)
         ),
@@ -297,6 +317,45 @@ async def inventory(
         ),
     )
     return MuxInventory(erased=erased, retained=retained)
+
+
+@dataclass(frozen=True)
+class ProviderSession:
+    """A provider-side session a private slot's generation named, read before `erase`."""
+
+    tenant_id: uuid.UUID
+    provider: str
+    session_id: str
+    account_scope_id: str | None
+    profile: str
+    # The binding's refs, which name the session's keys file (`replace_binding.ENV_FILE_REF`).
+    native_refs: Mapping[str, str] = field(default_factory=dict[str, str], compare=False)
+
+
+async def provider_sessions(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> tuple[ProviderSession, ...]:
+    """The provider sessions behind the account's private slots, for upstream deletion.
+
+    Read before `erase` removes the bindings that name them. Shared slots are not listed.
+    """
+    rows = await session.execute(
+        select(
+            ProviderBinding.tenant_id,
+            ProviderBinding.provider,
+            ProviderBinding.binding,
+            ProviderBinding.profile,
+        ).where(ProviderBinding.binding_id.in_(_private_slot_ids(_account_key(account_id))))
+    )
+    found: dict[tuple[uuid.UUID, str, str], ProviderSession] = {}
+    for tenant_id, provider, binding, profile in rows.tuples():
+        refs = cast("dict[str, str]", binding.get("native_refs") or {})
+        session_id = refs.get("session")
+        if session_id:
+            found[tenant_id, provider, session_id] = ProviderSession(
+                tenant_id, provider, session_id, refs.get("account_scope"), profile, refs
+            )
+    return tuple(found.values())
 
 
 async def _detach_accounting(session: AsyncSession, slots: ColumnElement[bool]) -> None:

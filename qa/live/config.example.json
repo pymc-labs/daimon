@@ -1,5 +1,5 @@
 {
-  "driver_path": "/home/clsandoval/.config/daimon-qa/qa.py",
+  "driver_path": "/home/qa/.config/daimon-qa/qa.py",
   "models": {
     "backends": {
       "anthropic": {
@@ -76,9 +76,9 @@
     "backend": "anthropic"
   },
   "alerts": {
-    "inbox": "/home/clsandoval/cs/root-opus-handoff-20260923/inbox",
+    "inbox": "/home/qa/.local/state/daimon-qa/alerts",
     "command": [
-      "/home/clsandoval/cs/root-opus-handoff-20260923/tsend.sh",
+      "/home/qa/.local/bin/qa-alert.sh",
       "%618"
     ],
     "cooldown_s": 21600,

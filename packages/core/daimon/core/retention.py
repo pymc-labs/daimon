@@ -6,8 +6,9 @@ shorten. Every delete runs in short batches, each its own transaction, so a
 sweep is safe to stop and run again.
 
 Each rule is claimed in the database (`retention_runs`) and runs on its own: it is
-due once a day whichever process asks, a restart does not rerun it, and a rule that
-fails is logged and retried later while the others go on.
+due once a day (monitored events, ops events and idle Gemini conversations hourly, as
+their sweeps cap each run) whichever process asks, a restart does not rerun it, and a
+rule that fails is logged and retried later while the others go on.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from daimon.core import tenant_retirement
 from daimon.core.config import Settings
 from daimon.core.features.registry import FEATURES, limit_int
 from daimon.core.features.snapshot import FeaturePlace, feature_in, resolve_one
+from daimon.core.monitoring_sweep import sweep_monitored_events
+from daimon.core.ops_events_sweep import sweep_ops_events
 from daimon.core.stores import (
     agent_posts,
     file_uploads,
@@ -38,6 +41,8 @@ BATCH = 500
 # A rule is due once a day, and tried again after a failure or an interrupted run.
 RERUN_EVERY = timedelta(hours=24)
 RETRY_AFTER = timedelta(minutes=30)
+# Sweeps that cap the rows of one run, so a backlog spreads over hours, not days.
+HOURLY = timedelta(hours=1)
 # Files an MCP client or tool uploads are fetched within the hour; a day is ample.
 UNOWNED_UPLOAD_LIFETIME = timedelta(hours=24)
 # A sign-in record gets a day to be used before an unused one may go.
@@ -230,6 +235,17 @@ async def _logins(sm: async_sessionmaker[AsyncSession], now: datetime) -> None:
         log.info("web_logins.deleted", count=removed)
 
 
+async def _gemini_records(sm: async_sessionmaker[AsyncSession], days: int, now: datetime) -> None:
+    # Lazy: the sweep pulls the Gemini SDK, which an Anthropic-only install lacks.
+    try:
+        from daimon.core.turn.gemini_retention import prune_idle_records
+    except ImportError:
+        return
+    counts = await prune_idle_records(sm, now=now, window=timedelta(days=days))
+    if counts:
+        log.info("gemini_records.pruned", **counts)
+
+
 def _aged_rule(event: str, days: int, step: Batch) -> Run:
     async def run(sm: async_sessionmaker[AsyncSession], _: Settings, now: datetime) -> None:
         verb = "cleared" if step.__name__.startswith("clear_") else "deleted"
@@ -238,8 +254,8 @@ def _aged_rule(event: str, days: int, step: Batch) -> Run:
     return run
 
 
-def rules(settings: Settings) -> list[tuple[str, int, Run]]:
-    """Every rule as (name, days, run); `days` 0 means the operator keeps that record."""
+def rules(settings: Settings) -> list[tuple[str, int, Run, timedelta]]:
+    """Every rule as (name, days, run, how often); `days` 0 means the operator keeps it."""
     keep = settings.retention
     aged: list[tuple[str, int, Batch]] = [
         ("web_audit", keep.admin_history_days, retention.delete_web_audit),
@@ -277,22 +293,39 @@ def rules(settings: Settings) -> list[tuple[str, int, Run]]:
     async def logins(sm: async_sessionmaker[AsyncSession], _: Settings, now: datetime) -> None:
         await _logins(sm, now)
 
+    async def monitored(sm: async_sessionmaker[AsyncSession], _: Settings, now: datetime) -> None:
+        await sweep_monitored_events(sm, now=now, retention_days=settings.monitoring.retention_days)
+
+    async def ops(sm: async_sessionmaker[AsyncSession], _: Settings, now: datetime) -> None:
+        await sweep_ops_events(sm, now=now, retention_days=settings.ops_events.retention_days)
+
+    async def gemini(sm: async_sessionmaker[AsyncSession], _: Settings, now: datetime) -> None:
+        await _gemini_records(sm, settings.gemini.records_retention_days, now)
+
     return [
-        ("security_audit", keep.security_audit_days, security),
-        *((name, days, _aged_rule(name, days, step)) for name, days, step in aged),
-        ("conversations", 1, _conversations),
-        ("file_uploads", 1, uploads),
-        ("web_logins", 1, logins),
-        ("archived_tenants", keep.archived_tenants_days, archived),
+        ("security_audit", keep.security_audit_days, security, RERUN_EVERY),
+        *((name, days, _aged_rule(name, days, step), RERUN_EVERY) for name, days, step in aged),
+        ("conversations", 1, _conversations, RERUN_EVERY),
+        ("file_uploads", 1, uploads, RERUN_EVERY),
+        ("web_logins", 1, logins, RERUN_EVERY),
+        ("archived_tenants", keep.archived_tenants_days, archived, RERUN_EVERY),
+        ("monitored_events", settings.monitoring.retention_days, monitored, HOURLY),
+        ("ops_events", settings.ops_events.retention_days, ops, HOURLY),
+        ("gemini_records", settings.gemini.records_retention_days, gemini, HOURLY),
     ]
 
 
 async def _run_rule(
-    sm: async_sessionmaker[AsyncSession], settings: Settings, name: str, run: Run, now: datetime
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    name: str,
+    run: Run,
+    now: datetime,
+    every: timedelta,
 ) -> None:
     async with sm() as session, session.begin():
         claimed = await retention.claim_rule(
-            session, rule=name, now=now, every=RERUN_EVERY, retry=RETRY_AFTER
+            session, rule=name, now=now, every=every, retry=min(RETRY_AFTER, every)
         )
     if not claimed:
         return
@@ -311,9 +344,9 @@ async def _run_rule(
 async def sweep(sm: async_sessionmaker[AsyncSession], settings: Settings, *, now: datetime) -> None:
     """Run each retention rule that is due, one at a time.
 
-    A rule is due once a day (`retention_runs`). One that fails is logged and tried
-    again after `RETRY_AFTER`; the rest run either way.
+    A rule is due once a day, or hourly (`retention_runs`). One that fails is logged and
+    tried again after `RETRY_AFTER`; the rest run either way.
     """
-    for name, days, run in rules(settings):
+    for name, days, run, every in rules(settings):
         if days > 0:
-            await _run_rule(sm, settings, name, run, now)
+            await _run_rule(sm, settings, name, run, now, every)

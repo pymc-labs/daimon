@@ -9,7 +9,10 @@ from typing import IO, Self, cast
 import httpx
 from openai import DEFAULT_CONNECTION_LIMITS, DEFAULT_TIMEOUT, AsyncOpenAI
 
+from mux.contracts.completions import CompletionEffort, CompletionResult, Completions
+from mux.contracts.ids import Scope
 from mux.drivers import isolated_ssl_context
+from mux.drivers.clients import LoopClients, key_digest
 from mux.drivers.openai.transport import Method, Object, SDKTransport, Transport
 
 _TLS_PROXY_ENV = frozenset(
@@ -68,8 +71,8 @@ def _http_transport() -> httpx.AsyncBaseTransport:
 
 
 class _OwnedStream[T](AsyncIterator[T]):
-    def __init__(self, source: AsyncIterator[T], client: AsyncOpenAI) -> None:
-        self._source, self._client = source, client
+    def __init__(self, source: AsyncIterator[T], close: Callable[[], Awaitable[None]]) -> None:
+        self._source, self._close = source, close
         self._closed = False
 
     def __aiter__(self) -> _OwnedStream[T]:
@@ -93,12 +96,38 @@ class _OwnedStream[T](AsyncIterator[T]):
             if callable(close):
                 await cast(Callable[[], Awaitable[None]], close)()
         finally:
-            await self._client.close()
+            await self._close()
+
+
+class OpenAIClients:
+    """The process's OpenAI SDK clients: one per (key, project) per event loop.
+
+    Requests and streams borrow a client and never close it; `aclose` does, at shutdown.
+    """
+
+    def __init__(self) -> None:
+        self._clients = LoopClients[AsyncOpenAI](lambda client: client.close())
+
+    def get(
+        self, api_key: str, project: str | None, build: Callable[[], AsyncOpenAI]
+    ) -> AsyncOpenAI:
+        # The ambient-environment refusal stays per call, not per client.
+        _check_environment()
+        return self._clients.get((key_digest(api_key), project or ""), build)
+
+    async def aclose(self) -> None:
+        await self._clients.aclose()
+
+
+async def _keep() -> None:
+    """The close of a client someone else owns."""
 
 
 class _ConfiguredTransport:
-    def __init__(self, api_key: str, project: str | None) -> None:
-        self._api_key, self._project = api_key, project
+    def __init__(
+        self, api_key: str, project: str | None, clients: OpenAIClients | None = None
+    ) -> None:
+        self._api_key, self._project, self._clients = api_key, project, clients
 
     def _client(self) -> AsyncOpenAI:
         # Explicit origin/project/key override SDK environment discovery. The
@@ -127,6 +156,17 @@ class _ConfiguredTransport:
             ),
         )
 
+    def _borrow(self) -> tuple[AsyncOpenAI, Callable[[], Awaitable[None]]]:
+        """The client for one call, with how to end the call's use of it.
+
+        With a process's `OpenAIClients` the client is shared and stays open;
+        without, each call owns a client and closes it.
+        """
+        if self._clients is None:
+            client = self._client()
+            return client, client.close
+        return self._clients.get(self._api_key, self._project, self._client), _keep
+
     async def request(
         self,
         method: Method,
@@ -136,17 +176,20 @@ class _ConfiguredTransport:
         query: Mapping[str, str | int] | None = None,
         key: str | None = None,
     ) -> Object:
-        async with self._client() as client:
+        client, close = self._borrow()
+        try:
             return await SDKTransport(client).request(method, path, body=body, query=query, key=key)
+        finally:
+            await close()
 
     async def open_stream(self, path: str) -> AsyncIterator[Object]:
-        client = self._client()
+        client, close = self._borrow()
         try:
             source = await SDKTransport(client).open_stream(path)
         except BaseException:
-            await client.close()
+            await close()
             raise
-        return _OwnedStream(source, client)
+        return _OwnedStream(source, close)
 
     async def multipart(
         self,
@@ -156,21 +199,55 @@ class _ConfiguredTransport:
         fields: Mapping[str, str],
         key: str,
     ) -> Object:
-        async with self._client() as client:
+        client, close = self._borrow()
+        try:
             return await SDKTransport(client).multipart(path, files=files, fields=fields, key=key)
+        finally:
+            await close()
 
     async def download(self, path: str) -> AsyncIterator[bytes]:
-        client = self._client()
+        client, close = self._borrow()
         try:
             source = await SDKTransport(client).download(path)
         except BaseException:
-            await client.close()
+            await close()
             raise
-        return _OwnedStream(source, client)
+        return _OwnedStream(source, close)
 
 
-def configured_transport(*, api_key: str, project: str | None) -> Transport:
-    """No I/O at construction; each request/stream owns its SDK client lifetime.
+class _ConfiguredCompletions(_ConfiguredTransport):
+    async def complete(
+        self,
+        scope: Scope,
+        model: str,
+        system: str,
+        prompt: str,
+        max_tokens: int,
+        effort: CompletionEffort | None = None,
+    ) -> CompletionResult:
+        from mux.drivers.openai.completions import OpenAICompletions
+
+        client = self._client()
+        try:
+            completions = OpenAICompletions(client)
+            return await completions.complete(scope, model, system, prompt, max_tokens, effort)
+        finally:
+            await client.close()
+
+
+def configured_completions(*, api_key: str) -> Completions:
+    """Side-call completions on a deployment key; each call owns its client."""
+    _check_environment()
+    if not api_key.strip():
+        raise ValueError("explicit OpenAI credential is required")
+    return _ConfiguredCompletions(api_key, None)
+
+
+def configured_transport(
+    *, api_key: str, project: str | None, clients: OpenAIClients | None = None
+) -> Transport:
+    """No I/O at construction. Each request/stream owns its SDK client lifetime, unless
+    the process's `clients` hold one that calls share (streams then close only their response).
 
     `project=None` sends no OpenAI-Project header, so the key's own default project
     applies; ambient `OPENAI_*` settings are refused either way. A blank project is
@@ -179,4 +256,4 @@ def configured_transport(*, api_key: str, project: str | None) -> Transport:
     _check_environment()
     if not api_key.strip() or (project is not None and not project.strip()):
         raise ValueError("explicit OpenAI credential and project are required")
-    return _ConfiguredTransport(api_key, project)
+    return _ConfiguredTransport(api_key, project, clients)

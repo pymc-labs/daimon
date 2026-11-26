@@ -15,7 +15,7 @@ import structlog
 from daimon.adapters.discord import checks, layout
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
-from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton
+from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton, saver_subject
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState, state_label
 from daimon.adapters.discord.routines_panel.write import (
@@ -24,12 +24,13 @@ from daimon.adapters.discord.routines_panel.write import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules
-from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.posted_controls.routines import RoutineAction, apply_routine_action
+from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
 from daimon.core.routines import can_read_routine_output
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -116,6 +117,42 @@ class _RoutinePicker(discord.ui.Select["RoutinesPanelView"]):
             await _send_callback_error(interaction, exc)
 
 
+async def _chat_refusal(
+    runtime: DiscordRuntime, row: RoutineRow, *, user_id: str, denied: str
+) -> str | None:
+    """Why the person may not use the routine's agent, or None when they may.
+
+    Roles are read live, and only for an agent limited to roles. That can call
+    Discord, so answer the interaction first and call this outside a transaction.
+    """
+    async with runtime.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=row.tenant_id)
+    agent_ref = AgentRef.of(row.agent_name)
+    if any_agent_rules(policy):
+        agent = await find_agent_by_daimon_tag(
+            runtime.anthropic,
+            tenant_id=row.tenant_id,
+            name=row.agent_name,
+            records=runtime.sessionmaker,
+        )
+        if agent is None:
+            return "The routine agent is unavailable."
+        agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
+    decision = authorize(
+        policy,
+        subject=await saver_subject(
+            runtime, policy, agent_ref, tenant_id=row.tenant_id, user_id=user_id
+        ),
+        action=Action.SAVE_ROUTINE,
+        surface=Surface.ROUTINE,
+        agent=agent_ref,
+        place=Place(),
+    )
+    if decision:
+        return None
+    return ROLES_REQUIRED_REFUSAL if decision.reason == "invoker_not_allowed" else denied
+
+
 class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
     def __init__(self, state: RoutinesPanelState) -> None:
         super().__init__(
@@ -131,38 +168,28 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
         if self.view is None or self.view.state.selected is None:
             return
         selected = self.view.state.selected.routine
+        runtime = self.view.runtime
         try:
-            async with self.view.runtime.sessionmaker.begin() as session:
+            # Reading roles may call Discord, so answer first and keep it out of the transaction.
+            await interaction.response.defer()
+            async with runtime.sessionmaker() as session:
                 row = await get_routine(session, selected.id, tenant_id=selected.tenant_id)
                 if row is None or row.created_by_user_id != str(interaction.user.id):
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "Only the routine owner can change private delivery.", ephemeral=True
                     )
                     return
-                policy = await load_access_policy(session, tenant_id=row.tenant_id)
-                agent_ref = AgentRef.of(row.agent_name)
-                if self.values[0] == "dm" and any_agent_rules(policy):
-                    agent = await find_agent_by_daimon_tag(
-                        self.view.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
-                    )
-                    if agent is None:
-                        await interaction.response.send_message(
-                            "The routine agent is unavailable.", ephemeral=True
-                        )
-                        return
-                    agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
-                if self.values[0] == "dm" and not authorize(
-                    policy,
-                    subject=Subject(),
-                    action=Action.SAVE_ROUTINE,
-                    surface=Surface.ROUTINE,
-                    agent=agent_ref,
-                    place=Place(),
-                ):
-                    await interaction.response.send_message(
-                        "This agent cannot run a private routine.", ephemeral=True
-                    )
+            if self.values[0] == "dm":
+                refusal = await _chat_refusal(
+                    runtime,
+                    row,
+                    user_id=str(interaction.user.id),
+                    denied="This agent cannot run a private routine.",
+                )
+                if refusal is not None:
+                    await interaction.followup.send(refusal, ephemeral=True)
                     return
+            async with runtime.sessionmaker.begin() as session:
                 await update_routine(
                     session,
                     row.id,
@@ -174,7 +201,10 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                 )
             await _rerender(interaction, self.view)
         except DaimonError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(str(exc), ephemeral=True)
+            else:
+                await interaction.response.send_message(str(exc), ephemeral=True)
         except Exception as exc:  # routines-panel callback boundary
             await _send_callback_error(interaction, exc)
 
@@ -203,24 +233,43 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
         runtime = self.view.runtime
 
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+        deferred = False
         try:
+            is_admin = await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES)
+            user_id = str(interaction.user.id)
+            op: RoutineAction = "toggle"
+            if not is_admin:
+                async with runtime.sessionmaker() as session:
+                    current = await get_routine(session, routine_id, tenant_id=tenant_id)
+                if current is not None:
+                    # The checked direction is the one applied, even if it changes meanwhile.
+                    op = "pause" if current.enabled else "resume"
+                if op == "resume" and current is not None and current.created_by_user_id == user_id:
+                    # Only Resume checks chat permission, never a creator's Pause. Roles
+                    # come from Discord: answer first, read outside the transaction.
+                    await interaction.response.defer()
+                    deferred = True
+                    refusal = await _chat_refusal(
+                        runtime,
+                        current,
+                        user_id=user_id,
+                        denied="This agent cannot run this routine for you.",
+                    )
+                    if refusal is not None:
+                        await interaction.followup.send(refusal, ephemeral=True)
+                        return
             async with runtime.sessionmaker() as session, session.begin():
 
                 async def allowed(row: RoutineRow) -> bool:
-                    is_admin = await checks.is_guild_admin(
-                        interaction, action=DelegatedAction.ROUTINES
+                    return is_admin or (
+                        row.created_by_user_id is not None and row.created_by_user_id == user_id
                     )
-                    is_creator = (
-                        row.created_by_user_id is not None
-                        and row.created_by_user_id == str(interaction.user.id)
-                    )
-                    return is_admin or is_creator
 
                 result = await apply_routine_action(
                     session,
                     routine_id,
                     tenant_id=tenant_id,
-                    op="toggle",
+                    op=op,
                     allowed=allowed,
                     load=get_routine,
                     pause=pause_routine_via_panel,
@@ -235,9 +284,11 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     "not_owner": ("Only its creator or a server admin can pause it."),
                 }
                 if result != "changed":
-                    await interaction.response.send_message(
-                        embed=build_notice_embed(refusals[result]), ephemeral=True
-                    )
+                    notice = build_notice_embed(refusals[result])
+                    if deferred:
+                        await interaction.followup.send(embed=notice, ephemeral=True)
+                    else:
+                        await interaction.response.send_message(embed=notice, ephemeral=True)
                     return
 
             await _rerender(interaction, self.view)
@@ -391,6 +442,7 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
             runtime.anthropic,
             tenant_id=tenant_id,
             viewer_user_id=str(view.allowed_user_id),
+            only_own=not await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES),
         )
     new_state = RoutinesPanelState.initial(
         rows=entries,

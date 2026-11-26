@@ -35,18 +35,26 @@ from daimon.adapters.slack.modal_limits import (
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.setup_conversations import setup_button
 from daimon.adapters.slack.web_button import open_in_web_button
-from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
+from daimon.core.backend_refusals import RefusalAction
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     EnvironmentPicker,
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
+from daimon.core.channel_skills import remove_label
 from daimon.core.github_connect_cards import repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
+from daimon.core.model_switch import (
+    BACK_LABEL,
+    CANCEL_LABEL,
+    SWITCH_BACK_LABEL,
+    TRY_AGAIN_LABEL,
+    ModelPicker,
+)
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.platform_words import words_for
@@ -61,12 +69,9 @@ from daimon.core.setup_conversations import (
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import (
     ChannelSkillRow,
-    CompatibilityPreview,
     McpTokenRow,
 )
 from daimon.core.text_layout import fit_lines
-from daimon.core.turn.notices import conversations_follow_line
-from mux.contracts.ids import Provider
 
 __all__ = [
     "ACTION_CHANNEL_SKILLS",
@@ -218,9 +223,18 @@ ACTION_REVOKE_CODING_KEY: Final = "agent_setup__revoke_coding_key"
 
 ACTION_ADD_SKILL: Final = "agent_setup__skill_add"
 """Open the Add skill form for the agent on Details."""
+SLACK_SELECT_LIMIT: Final = 100
+
 ACTION_BACKEND_SELECT: Final = "agent_setup__backend_select"
 ACTION_BACKEND_CONFIRM: Final = "agent_setup__backend_confirm"
+"""Switch on a model card from before picks applied at once: applies its pick."""
+ACTION_EFFORT_SELECT: Final = "agent_setup__effort_select"
+"""The effort select on Details: states the level on the agent's provider at once."""
 ACTION_BACKEND_CANCEL: Final = "agent_setup__backend_cancel"
+ACTION_BACKEND_BACK: Final = "agent_setup__backend_back"
+"""The refusal's "Switch back to Claude" button."""
+ACTION_BACKEND_AGAIN: Final = "agent_setup__backend_again"
+"""The refusal's "Try again" button: previews the same pick again."""
 
 ACTION_REVOKE_TOKEN: Final = "agent_setup__revoke_token"
 """Revoke one minted token; the button's `value` is its jti.
@@ -301,6 +315,8 @@ MAX_ENVIRONMENT_LINES: Final = 10
 MAX_SHOWN_ENVIRONMENT_NAME: Final = 200
 _MORE_LINE_RESERVE: Final = len("\n_and 9999 more_")
 _MAX_OPTION_TEXT: Final = 75
+#: Slack shows at most 10 checkboxes.
+_MAX_REMOVE_OPTIONS: Final = 10
 CHANNEL_SKILLS_LABEL: Final = "Channel skills"
 CHANNEL_SKILLS_HEADER: Final = "Extra skills"
 CHANNEL_SKILLS_NOTE: Final = (
@@ -536,8 +552,7 @@ def build_details_view(
     attribution: str | None,
     avatar_url: str | None = None,
     avatar_editable: bool | None = None,
-    backend_options: tuple[Provider, ...] = (),
-    backend_selection: Provider | None = None,
+    model_picker: ModelPicker | None = None,
     viewer_owns: bool = False,
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
@@ -601,30 +616,35 @@ def build_details_view(
         )
     blocks.extend(_repo_blocks(details))
     blocks.extend(_detail_list_blocks(details, meta=meta))
-    if is_admin and backend_options:
-        choices = [
-            {
-                "text": {"type": "plain_text", "text": channel_backend.DEFAULT_BACKEND_LABEL},
-                "value": "clear",
-            },
-            *(
-                {"text": {"type": "plain_text", "text": provider}, "value": provider}
-                for provider in backend_options
-            ),
-        ]
+    if model_picker is not None and model_picker.choices:
+        options = [_model_option(choice) for choice in model_picker.limited(SLACK_SELECT_LIMIT)]
         picker: dict[str, Any] = {
             "type": "static_select",
             "action_id": ACTION_BACKEND_SELECT,
-            "placeholder": {"type": "plain_text", "text": "Model provider"},
-            "options": choices,
+            "placeholder": {"type": "plain_text", "text": "Model"},
+            "options": options,
         }
         current = next(
-            (option for option in choices if option["value"] == (backend_selection or "clear")),
-            None,
+            (option for option in options if option["value"] == _pick_value(model_picker)), None
         )
         if current is not None:
             picker["initial_option"] = current
-        blocks.append(_section("*Model provider*", accessory=picker))
+        blocks.append(_section("*Model*", accessory=picker))
+        if model_picker.efforts:
+            levels = [
+                {"text": {"type": "plain_text", "text": level.capitalize()}, "value": level}
+                for level in model_picker.efforts
+            ]
+            effort_select: dict[str, Any] = {
+                "type": "static_select",
+                "action_id": ACTION_EFFORT_SELECT,
+                "placeholder": {"type": "plain_text", "text": "Effort"},
+                "options": levels,
+            }
+            chosen = next((o for o in levels if o["value"] == model_picker.effort), None)
+            if chosen is not None:
+                effort_select["initial_option"] = chosen
+            blocks.append(_section("*Effort*", accessory=effort_select))
     actions: list[dict[str, Any]] = []
     if is_platform_admin or viewer_owns:
         actions.append(
@@ -671,52 +691,55 @@ def build_details_view(
     )
 
 
-def build_backend_preview_view(
-    preview: CompatibilityPreview,
+def _pick_value(picker: ModelPicker) -> str:
+    return f"{picker.current.provider}:{picker.current.id}"
+
+
+def _model_option(choice: ModelChoice) -> dict[str, Any]:
+    option: dict[str, Any] = {
+        "text": {"type": "plain_text", "text": choice.label[:75]},
+        "value": choice.value,
+    }
+    if choice.description:
+        option["description"] = {"type": "plain_text", "text": choice.description[:75]}
+    return option
+
+
+def build_model_switch_view(
+    lines: Sequence[str],
     *,
     meta: PanelMetadata,
-    applying: bool = False,
+    refused: bool = True,
+    action: RefusalAction | None = None,
 ) -> dict[str, Any]:
-    selection = "Use default" if meta.backend_target == "clear" else preview.target_backend
-    lines = [f"*Model provider: {selection}*"]
-    for label, items in (
-        ("Unsupported skills", preview.unsupported_skills),
-        ("Unsupported connections", preview.unsupported_mcps),
-        ("Unsupported capabilities", preview.unsupported_capabilities),
-        ("Shared-thread limits", preview.shared_thread_limits),
-    ):
-        names = ", ".join(escape_mrkdwn(item) for item in items) or "None"
-        shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
-        lines.append(f"{label}: {shown}")
-    lines.extend(
-        [
-            preview.cost_line,
-            conversations_follow_line(
-                meta.agent_name,
-                None if meta.backend_target == "clear" else preview.target_backend,
-            )
-            + " Channel settings still apply.",
-        ]
-    )
+    """What a model pick leads to: a refusal (Cancel, then its way forward), or what
+    the applied pick turned off (Back)."""
     blocks = [_section("\n".join(lines))]
-    if not preview.allowed:
-        blocks.append(_context("This provider is off for this workspace. Pick another."))
-    if applying:
-        blocks.append(_context("Applying…"))
-    else:
-        buttons = [
-            _button(action_id=ACTION_BACKEND_CANCEL, label="Cancel", value=meta.agent_name or "")
-        ]
-        if preview.allowed:
-            buttons.insert(
-                0,
+    name = meta.agent_name or ""
+    label = CANCEL_LABEL if refused else BACK_LABEL
+    buttons = [_button(action_id=ACTION_BACKEND_CANCEL, label=label, value=name)]
+    if refused:
+        if action == "switch_back_to_claude":
+            buttons.append(
                 _button(
-                    action_id=ACTION_BACKEND_CONFIRM, label="Confirm", value=meta.agent_name or ""
-                ),
+                    action_id=ACTION_BACKEND_BACK,
+                    label=SWITCH_BACK_LABEL,
+                    value=name,
+                    style="primary",
+                )
             )
-        blocks.append({"type": "actions", "elements": buttons})
+        elif action == "fresh_preview" and meta.backend_target:
+            buttons.append(
+                _button(
+                    action_id=ACTION_BACKEND_AGAIN,
+                    label=TRY_AGAIN_LABEL,
+                    value=name,
+                    style="primary",
+                )
+            )
+    blocks.append({"type": "actions", "elements": buttons})
     return finish_modal(
-        title="Model provider",
+        title="Model",
         blocks=blocks,
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_DETAILS,
@@ -1183,7 +1206,10 @@ def build_channel_skills_form(
             {
                 "type": "input",
                 "block_id": CHANNEL_SKILLS_REMOVE_INPUT_ID,
-                "label": {"type": "plain_text", "text": "Remove"},
+                "label": {
+                    "type": "plain_text",
+                    "text": remove_label(_MAX_REMOVE_OPTIONS, len(rows)),
+                },
                 "optional": True,
                 "element": {
                     "type": "checkboxes",
@@ -1193,7 +1219,7 @@ def build_channel_skills_form(
                             "text": {"type": "plain_text", "text": row.name[:_MAX_OPTION_TEXT]},
                             "value": row.skill_id,
                         }
-                        for row in rows[:10]
+                        for row in rows[:_MAX_REMOVE_OPTIONS]
                     ],
                 },
             }

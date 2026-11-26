@@ -130,6 +130,7 @@ services:
       DAIMON_SIDECAR__DATABASE_URL: ${DAIMON_SIDECAR__DATABASE_URL:-postgresql+asyncpg://sidecar:unconfigured@postgres:5432/daimon}
       DAIMON_WATCHES__ENABLED: ${DAIMON_WATCHES__ENABLED:-false}
       DAIMON_SIDECAR__SIGNING_KEYS: "${DAIMON_SIDECAR__SIGNING_KEYS:-{}}"
+      DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES: ${DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES:-4096}
       DAIMON_SIDECAR__EXECUTOR_SECRET: ${DAIMON_WATCHES__EXECUTOR_SECRET:-}
       DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN: "http://watch-executor:8767"
       DAIMON_SIDECAR__POLL_INTERVAL_S: "5"
@@ -156,6 +157,7 @@ services:
         condition: service_healthy
     environment:
       DAIMON_SIDECAR_PUBLIC_HOST: ${DAIMON_SIDECAR_PUBLIC_HOST:-localhost}
+      DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES: ${DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES:-4096}
     ports: ["${DAIMON_SIDECAR_TLS_PORT:-443}:443"]
     volumes:
       - ./Caddyfile.sidecar:/etc/caddy/Caddyfile:ro

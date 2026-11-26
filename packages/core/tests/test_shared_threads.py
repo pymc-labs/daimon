@@ -35,9 +35,8 @@ from daimon.core.channel_backend import (
 from daimon.core.config import McpSettings, load_turn_settings
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mux_backend import managed_agents
-from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.scope import ResolvedConfig
 from daimon.core.shared_threads import (
     SharedThread,
     may_have_shared_binding,
@@ -50,13 +49,12 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import mux_state, tenant_ledger, usage_events
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
-from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.admission import Admission, admit
+from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn, bind_session
-from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import admit_chat, new_thread_session, plain_turn_deps
 from daimon.testing.factories import (
     make_account,
     make_ledger_entry,
@@ -245,23 +243,7 @@ class _Fake:
 
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], fake: _Fake) -> TurnDeps:
-    return TurnDeps(
-        anthropic=build_fake_anthropic(fake.dispatch),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        channel_backends=True,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    return plain_turn_deps(build_fake_anthropic(fake.dispatch), sessionmaker, channel_backends=True)
 
 
 async def _app_agent(
@@ -466,19 +448,17 @@ async def test_legacy_private_history_is_never_the_shared_session(
     alice = await make_account(db_session, tenant=tenant)
     bob = await make_account(db_session, tenant=tenant)
     agent, env = await _app_agent(db_session, tenant)
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-1",
         account_id=alice.id,
         ma_session_id="sess_private",
     )
     legacy_sentinel = uuid.uuid5(uuid.NAMESPACE_URL, f"legacy-thread-sentinel:{tenant.id}:thread-1")
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-1",
         account_id=legacy_sentinel,
         ma_session_id="sess_legacy_shared",
@@ -613,6 +593,9 @@ async def test_another_tenants_thread_with_the_same_ids_is_another_binding(
 # Per caller stays byte-identical, with no extra reads
 
 
+_WRITE_VERBS = ("INSERT", "UPDATE", "DELETE")
+
+
 async def test_unconfigured_and_per_caller_binds_read_nothing_new(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -666,15 +649,21 @@ async def test_unconfigured_and_per_caller_binds_read_nothing_new(
 
     assert traces[0] == traces[1] == traces[2]
     touched = " ".join(traces[1] + traces[2])
+    writes = " ".join(
+        s for s in traces[1] + traces[2] if s.lstrip().upper().startswith(_WRITE_VERBS)
+    )
     # The mux path publishes every non-DM first bind to the neutral binding
     # tables (`turn/prepare.py` `prepared_persistence`), shared or not, so
-    # those are touched there and only there. The traces above are identical
-    # for the unconfigured, per-caller and reconfigured channels either way.
+    # those are written there and only there. Both paths read the thread's
+    # binding slot first, to carry over a conversation from a provider the
+    # thread was moved off (`turn/carry_over.py` `adoption_predecessor`). The
+    # traces above are identical for the unconfigured, per-caller and
+    # reconfigured channels either way.
     published = ("provider_binding", "journal_session")
     on_mux = load_turn_settings().path == "mux"
     for table in published:
-        assert (table in touched) == on_mux
-    assert "channel_config_revision" not in touched
+        assert (table in writes) == on_mux, f"{table} is written on the mux path only"
+    assert "channel_config_revision" not in touched, "no channel revision is read"
 
 
 # SYS-047 / SYS-048 still decide first
@@ -715,16 +704,7 @@ async def test_access_policy_and_protection_refuse_before_a_shared_thread_is_con
     )
 
     with pytest.raises(AdmissionDenied) as raised:
-        await admit(
-            deps,
-            origin="chat",
-            tenant_id=tenant.id,
-            requester_org=RequesterOrg.HOST,
-            platform="discord",
-            external_user_id="user-1",
-            channel_id="chan-1",
-            now=_NOW,
-        )
+        await admit_chat(deps, tenant, now=_NOW)
     assert raised.value.reason == reason
     assert calls == []
 

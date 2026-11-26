@@ -32,6 +32,12 @@ def now() -> datetime:
 async def web_admin_of(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:
     """The calling chat admin as the web app sees them, with the web role they hold."""
     _require_admin(auth)
+    return await web_actor_of(runtime, auth)
+
+
+async def web_actor_of(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:
+    """The caller as the web app sees them, whoever they are: for a tool that checks the
+    capability itself, so a web admin who is no chat admin still gets its refusal."""
     async with runtime.session_factory() as db:
         person = await web_people.get_person_for_account(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id
@@ -59,7 +65,9 @@ async def web_admin_of(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:
 
 
 async def agent_names(runtime: McpRuntime, tenant_id: uuid.UUID) -> dict[str, str]:
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=tenant_id, records=runtime.session_factory
+    )
     return {a.id: a.name for a in agents}
 
 

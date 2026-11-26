@@ -7,16 +7,31 @@ from dataclasses import MISSING, fields, replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
-from daimon.adapters.discord.budget_notice import discord_budget_notifier, with_budget_notifier
+from daimon.adapters.discord import budget_notice
+from daimon.adapters.discord.budget_notice import (
+    discord_budget_alerter,
+    discord_budget_notifier,
+    with_budget_notifier,
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.turn.deps import TurnDeps
+from daimon.testing.factories import budget_alert
 from daimon.testing.turn_fakes import deps_for
 
 _TENANT = uuid.uuid4()
+
+
+@pytest.fixture(autouse=True)
+def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The default agent's grant admits everyone unless a test says otherwise."""
+    admits = AsyncMock(return_value=True)
+    monkeypatch.setattr(budget_notice, "sender_admits", admits)
+    return admits
 
 
 def _required(cls: Any, **given: object) -> dict[str, object]:
@@ -27,11 +42,7 @@ def _required(cls: Any, **given: object) -> dict[str, object]:
 def _runtime(policies: dict[uuid.UUID, DirectMessagePolicy]) -> DiscordRuntime:
     settings = MagicMock()
     settings.direct_message_policies = policies
-    return DiscordRuntime(
-        **_required(
-            DiscordRuntime, settings=settings, turn_deps=replace(deps_for(), turn_path=None)
-        )
-    )
+    return DiscordRuntime(**_required(DiscordRuntime, settings=settings, turn_deps=deps_for()))
 
 
 def _notice() -> BudgetNotice:
@@ -67,6 +78,21 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     assert dms["1"].send.await_args.kwargs["embed"].color.value == COLOR_RED
     assert text.startswith("<#222> has used its $5.00 monthly budget.\n\n"), text
     dms["3"].send.assert_not_awaited()  # the DM policy leaves 3 out
+
+
+async def test_a_recipient_the_default_agent_does_not_admit_gets_no_dm(
+    default_agent_grant: AsyncMock,
+) -> None:
+    """The workspace default agent's grant holds a budget notice like any agent-sent DM."""
+    default_agent_grant.side_effect = lambda *_a, user_id, **_k: user_id == "1"
+    sent = AsyncMock()
+
+    async def open_dm(_guild_id: int, _user_id: int) -> Any:
+        return sent
+
+    notifier = discord_budget_notifier(_runtime({}), open_dm, lambda: False)
+    assert await notifier(_notice()) == 1, "only the admitted recipient is messaged"
+    sent.send.assert_awaited_once()
 
 
 async def test_a_closed_client_counts_as_undelivered_instead_of_raising() -> None:
@@ -106,3 +132,120 @@ def test_a_real_runtime_gets_the_notifier_and_a_stand_in_is_left_alone() -> None
     assert runtime.turn_deps.budget_notifier is None, "the original runtime is not mutated"
     stand_in = MagicMock()
     assert with_budget_notifier(stand_in, AsyncMock(), lambda: False) is stand_in
+
+
+async def test_the_default_agents_grant_reads_the_recipients_server_roles(
+    default_agent_grant: AsyncMock,
+) -> None:
+    """A grant listing a role admits its holders: the notice looks the roles up."""
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def membership(_tenant: uuid.UUID, guild_id: str, user_id: str) -> Membership:
+        assert guild_id == "111"
+        return Membership(is_member=True, role_ids=("R1",) if user_id == "1" else ())
+
+    seen: dict[str, frozenset[str]] = {}
+
+    async def admits(*_a: object, user_id: str, groups: Any, **_k: object) -> bool:
+        seen[user_id] = await groups(user_id, frozenset({"R1", "R2"}))
+        return "R1" in seen[user_id]
+
+    default_agent_grant.side_effect = admits
+    plain = _runtime({})
+    deps = replace(plain.turn_deps, membership_resolver=CachedMembershipResolver(membership))
+    runtime = replace(plain, turn_deps=deps)
+    sent = AsyncMock()
+
+    async def open_dm(_guild_id: int, _user_id: int) -> Any:
+        return sent
+
+    assert await discord_budget_notifier(runtime, open_dm, lambda: False)(_notice()) == 1
+    assert seen == {"1": frozenset({"R1"}), "2": frozenset(), "3": frozenset()}
+
+
+async def test_an_alert_posts_a_neutral_card_and_a_closed_channel_is_refused() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=channel)
+    alerter = discord_budget_alerter(client)
+    alert = budget_alert(workspace_id="1", destination_id="9", platform="discord")
+    assert await alerter(alert) == "sent"
+    assert channel.send.await_args.kwargs["embed"].color != COLOR_RED, "information, not an error"
+    channel.send.side_effect = discord.Forbidden(MagicMock(status=403), "no")
+    assert await alerter(alert) == "refused", "the next post would be refused too"
+    channel.send.side_effect = discord.HTTPException(MagicMock(status=500), "down")
+    assert await alerter(alert) == "failed", "a server error may pass on the next poll"
+
+
+class _FakeSessions:
+    """A sessionmaker stand-in: the audience mode and fact are patched, so no row is read."""
+
+    def __call__(self) -> Any:
+        return MagicMock(
+            __aenter__=AsyncMock(return_value=MagicMock()), __aexit__=AsyncMock(return_value=False)
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "contained", "own", "outcome", "posted"),
+    [
+        ("off", True, True, "sent", True),
+        ("shadow", True, True, "sent", True),
+        ("on", False, True, "sent", True),
+        ("on", True, True, "refused", False),
+        ("on", True, False, "sent", True),  # the deployment's own alert channel, not a room
+    ],
+)
+async def test_the_alert_sender_takes_the_room_audience_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    contained: bool,
+    own: bool,
+    outcome: str,
+    posted: bool,
+) -> None:
+    """Through the real sender: an alert names another channel and its spend, so a
+    destination that outsiders can read gets none when `audience_hold` is on."""
+    from daimon.core import audience_gate
+    from daimon.core.channel_audience import ChannelAudience
+
+    reads: list[str] = []
+
+    async def fact(session: object, *, tenant_id: object, platform: str, channel_id: str) -> Any:
+        reads.append(channel_id)
+        return ChannelAudience(contained=contained, known=True, narrow=False, source="live")
+
+    async def read_mode(session: object, place: object) -> str:
+        return mode
+
+    monkeypatch.setattr(audience_gate, "audience_mode", read_mode)
+    monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=channel)
+    alerter = discord_budget_alerter(client, _FakeSessions())  # type: ignore[arg-type]
+    alert = budget_alert(workspace_id="1", destination_id="9", platform="discord", own=own)
+    assert await alerter(alert) == outcome
+    assert channel.send.await_count == int(posted)
+    assert reads == ([] if mode == "off" or not own else ["9"])
+
+
+async def test_an_alert_whose_audience_cannot_be_read_is_tried_again_next_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core import audience_gate
+
+    async def broken(session: object, place: object) -> str:
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(audience_gate, "audience_mode", broken)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=channel)
+    alerter = discord_budget_alerter(client, _FakeSessions())  # type: ignore[arg-type]
+    alert = budget_alert(workspace_id="1", destination_id="9", platform="discord")
+    assert await alerter(alert) == "failed", "the claim is freed, not spent"
+    channel.send.assert_not_awaited()

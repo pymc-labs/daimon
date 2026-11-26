@@ -19,6 +19,7 @@ from daimon.core.posted_controls.slack_blocks import (
     card_notification_text,
 )
 
+from ..shared_fakes import control_card as _control_card
 from .test_cards import AGENT, EXPIRES, KINDS, REQUESTER, STATES, TOKEN, build
 
 EXPIRES_UNIX = int(EXPIRES.timestamp())
@@ -163,3 +164,16 @@ def test_notification_text_is_the_headline(kind: CardKind, state: CardState) -> 
         "the notification fallback is the card's headline"
     )
     assert card_notification_text(card).strip(), f"{kind}/{state} must have a non-empty fallback"
+
+
+@pytest.mark.parametrize("kind", ["call", "switch"])
+def test_a_control_card_routes_each_button_by_its_own_custom_id(kind: str) -> None:
+    """A call or switch press is answered in place, so the click carries the card id, no token."""
+    card = _control_card(kind, REQUESTER)
+    blocks = build_card_blocks(card)
+    (actions,) = [b for b in blocks if b["type"] == "actions"]
+    ids = [e["action_id"] for e in actions["elements"]]
+    assert ids == [b.custom_id for b in card.buttons], "each button routes by its custom id"
+    assert [e.get("style") for e in actions["elements"]] == [None, "primary"], (
+        "only the rightmost button, the card's own action, is filled"
+    )

@@ -4,7 +4,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router"
 
 import { AgentAvatar } from "@/components/common"
-import { useConfirm } from "@/lib/confirm"
 import { creditTone } from "@/lib/credit"
 import { Page } from "@/components/shell/Page"
 import { RenameDialog } from "@/components/shell/RenameDialog"
@@ -19,11 +18,12 @@ import { useCan, useChatAgents, useMe, useSessions } from "@/lib/hooks"
 import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
 import { Pill } from "../agents/bits"
 import { AgentPicker } from "./AgentPicker"
-import { Refusal } from "./Cards"
+import { MonitoringNotice, Refusal } from "./Cards"
+import { ThreadModel } from "./ThreadModel"
 import { Composer } from "./Composer"
 import { AssistantMessage, UserMessage } from "./Message"
-import type { SessionDetail } from "./types"
-import { answer, evict, hydrate, loadEarlier, resume, send, stop, useThread } from "./turns"
+import type { Notice, SessionDetail } from "./types"
+import { answer, hydrate, loadEarlier, resume, send, stop, switchBack, useDeleteThread, useThread } from "./turns"
 
 
 /** Credit left, and the card that replaces the composer's promise when it is gone. */
@@ -45,9 +45,9 @@ function HeaderMeter({ meter }: { meter: CreditMeter }) {
   const tone = creditTone(meter)
   const pct = Math.max(0, Math.min(1, meter.left_usd / meter.total_usd))
   return (
-    <span className="ml-3 flex items-center gap-2 text-xs lg:hidden">
+    <span className="ml-3 flex shrink-0 items-center gap-2 text-xs whitespace-nowrap md:hidden">
       <span className={cn("font-medium tabular", tone === "out" && "text-destructive", tone === "low" && "text-warning")}>{usd(meter.left_usd)} left</span>
-      <span className="h-1 w-20 overflow-hidden rounded-full bg-foreground/10">
+      <span className="hidden h-1 w-20 overflow-hidden rounded-full bg-foreground/10 sm:block">
         <span className={cn("block h-full rounded-full", tone === "out" ? "bg-destructive" : tone === "low" ? "bg-warning" : "bg-teal")} style={{ width: `${pct * 100}%` }} />
       </span>
     </span>
@@ -72,12 +72,12 @@ export function NewChat() {
       navigate(`/chat/${s.id}`)
     },
   })
-  const go = (text: string, files: File[]) => { if (agent) start.mutate({ agentId: agent.id, text, files }) }
+  const go = (text: string, files: File[]) => agent && start.mutateAsync({ agentId: agent.id, text, files })
   const pick = (a: AgentRef) => setParams({ agent: a.id }, { replace: true })
 
   return (
     <Page crumbs={[{ label: "Chat" }, { label: "New thread" }]} flush>
-      <div className="mx-auto flex h-full max-w-[720px] flex-col justify-center px-4 pb-[10vh]">
+      <div className="mx-auto flex min-h-full max-w-[720px] flex-col justify-center px-4 pb-[10vh]">
         <QueryState
           query={agents} empty="No agent is available to you. Ask an admin."
           skeleton={<Skeleton className="mx-auto mb-7 h-28 w-48" />}
@@ -94,14 +94,14 @@ export function NewChat() {
               </div>
               {out && <div className="mb-3">{card}</div>}
               <Composer
-                key={agent.id} onSend={go} onStop={() => {}} busy={start.isPending} disabled={out} canAttach={can("files.attach")} autoFocus
+                key={agent.id} onSend={go} busy={start.isPending} disabled={out} canAttach={can("files.attach")} autoFocus
                 placeholder={out ? "Out of credit" : `Message ${agent.name}`}
                 picker={<AgentPicker agents={list} value={agent} onChange={pick} />}
               />
               {!out && !!agent.starters?.length && (
                 <div className="mt-3 flex flex-wrap justify-center gap-2">
                   {agent.starters.map((s) => (
-                    <button key={s} disabled={start.isPending} onClick={() => go(s, [])} className="h-8 rounded-md border px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">{s}</button>
+                    <button key={s} disabled={start.isPending} onClick={() => go(s, [])?.catch(() => {})} className="h-8 rounded-md border px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground">{s}</button>
                   ))}
                 </div>
               )}
@@ -115,9 +115,8 @@ export function NewChat() {
 
 export function ChatView() {
   const { id } = useParams()
-  const navigate = useNavigate()
   const qc = useQueryClient()
-  const { messages, busy, reconnecting, next, loadingEarlier } = useThread(id)
+  const { messages, busy, reconnecting, next, loadingEarlier, monitoring } = useThread(id)
   const { out, card, meter } = useCredit()
   const bottom = useRef<HTMLDivElement>(null)
   const scroller = useRef<HTMLDivElement>(null)
@@ -134,6 +133,14 @@ export function ChatView() {
     retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2,
   })
   const { data } = detail
+  // A notice streamed after a dismiss is a re-tell (monitoring switched on again): show it.
+  const [closed, setClosed] = useState<{ id?: string; monitoring?: Notice }>()
+  const notice = closed?.id === id && closed?.monitoring === monitoring ? undefined : monitoring ?? data?.monitoring
+  // Gone for this person and agent until monitoring is switched on again; the server keeps it.
+  const closeNotice = () => {
+    setClosed({ id, monitoring })
+    api.post(`/api/chat/sessions/${id}/monitoring/dismiss`).catch(() => setClosed(undefined))
+  }
   useEffect(() => {
     if (!id || !data) return
     hydrate(id, data)
@@ -153,23 +160,10 @@ export function ChatView() {
   const { data: sessions } = useSessions()
   const session = sessions?.find((s) => s.id === id) ?? data?.session
   const agent = session?.agent
-  const confirm = useConfirm()
   const { data: me } = useMe()
   const can = useCan()
   const [renaming, setRenaming] = useState<ChatSession | null>(null)
-  const del = useMutation({
-    mutationFn: (s: ChatSession) => api.del(`/api/chat/sessions/${s.id}`),
-    onSuccess: (_, s) => {
-      evict(s.id)
-      qc.removeQueries({ queryKey: ["chat", "session", s.id] })
-      qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
-      navigate("/chat")
-    },
-  })
-  const remove = async () => {
-    if (!session || !(await confirm({ title: "Delete thread?", body: session.title, action: "Delete", destructive: true }))) return
-    del.mutate(session)
-  }
+  const remove = useDeleteThread()
 
   if (detail.error instanceof ApiError && detail.error.status === 404) {
     return (
@@ -192,15 +186,15 @@ export function ChatView() {
           <span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
             <AgentAvatar src={session.agent.avatar} name={session.agent.name} className="size-4 rounded" />
             <span>{session.agent.name}</span>
-            {session.agent.model && <span className="text-faint">{session.agent.model}</span>}
           </span>
-          {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
+          <ThreadModel sid={session.id} model={session.agent.model ?? ""} />
+          {me?.role === "visitor" && <Pill className="hidden sm:inline-flex">Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Thread actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => setRenaming(session)}>Rename</DropdownMenuItem>
-              <DropdownMenuItem variant="destructive" onSelect={remove}>Delete</DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onSelect={() => void remove(session)}>Delete</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </>
@@ -233,7 +227,7 @@ export function ChatView() {
               {agent && messages.map((m, i) => (m.role === "user" ? <UserMessage key={m.id} m={m} /> : (
                 <AssistantMessage
                   key={m.id} m={m} agent={agent} first={messages[i - 1]?.role !== "assistant"} last={i === messages.length - 1} busy={busy}
-                  onAnswer={(c, a) => answer(qc, id!, c.id, a)}
+                  onAnswer={(c, a) => answer(qc, id!, c.id, a)} onSwitchBack={() => switchBack(qc, id!)}
                 />
               )))}
               <div ref={bottom} />
@@ -245,6 +239,7 @@ export function ChatView() {
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" />Reconnecting</div>
             )}
             {out && card}
+            {!out && notice && <MonitoringNotice notice={notice} onDismiss={closeNotice} />}
             {agent && (
               <Composer
                 key={id} onSend={(t, f) => { stick.current = true; send(qc, id!, t, f) }} onStop={() => stop(id!)} busy={busy} disabled={out} canAttach={can("files.attach")} autoFocus

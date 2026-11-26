@@ -18,8 +18,9 @@ nav:
   - Self-host:
       - Self-hosting: self-hosting.md
       - Model providers: providers.md
+      - Self-hosted harness: self-hosted-harness.md
       - Operations: operations.md
-      - Fly compute: compute.md
+      - Compute sessions: compute.md
   - Connect:
       - Slack: slack.md
       - Microsoft Teams: teams.md
@@ -31,15 +32,18 @@ nav:
       - Defaults: defaults.md
       - Routines: routines.md
       - Move routines in: routine-migration.md
+      - Move people in: people-migration.md
       - Watches: watches.md
       - Direct messages: direct-messages.md
       - Repository memory: repo-memory.md
       - Context providers: context-providers.md
       - Lead intake: lead-intake.md
+      - Ask a person: support.md
   - Concepts:
       - Architecture: architecture.md
       - Isolation: isolation.md
       - Permissions: permissions.md
+      - Rooms with outside people: outside-people.md
       - Admins: admins.md
       - Unattended turns: unattended.md
       - Billing: billing.md

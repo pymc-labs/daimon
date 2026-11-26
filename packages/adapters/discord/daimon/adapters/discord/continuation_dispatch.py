@@ -11,7 +11,13 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.watch_access import require_watch_thread_access
-from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    agent_display_name,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
+from daimon.core.bot_access import BotAccessUnavailable
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.continuity.dispatch import ContinuationContextUnavailable
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
@@ -70,15 +76,16 @@ async def dispatch_pending_continuations(
     client: discord.Client | None = None,
     public_base_url: str | None = None,
     identity_enabled: bool = False,
+    default_agent_name: str | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Dispatch under the caller's existing thread guard."""
 
     async def context(row: TaskContinuationRow) -> tuple[datetime | None, bool]:
-        # A timer is never superseded by newer messages, so it needs no history.
+        # A timer or a pressed card is never superseded by newer messages: no history.
         latest = (
             None
-            if row.reason in ("timer", "watch_fired", "job_finished")
+            if row.reason in ("timer", "watch_fired", "job_finished", "confirmed_call")
             else await _latest_human_message_at(thread, after=row.created_at)
         )
         async with sessionmaker() as session:
@@ -105,7 +112,7 @@ async def dispatch_pending_continuations(
             authorization = OutputAuthorization(check_watch_notice)
             try:
                 await authorization.check()
-            except AdmissionDenied:
+            except (AdmissionDenied, BotAccessUnavailable):
                 log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
                 return
             allowed = True
@@ -121,7 +128,17 @@ async def dispatch_pending_continuations(
                             session,
                             tenant_id=tenant_id,
                             agent_name=row.target_name,
-                            is_builtin=row.target_name.casefold() == "daimon",
+                            display_name=await agent_display_name(
+                                sessionmaker,
+                                tenant_id=tenant_id,
+                                agent_id=row.target_ma_agent_id,
+                                fallback=row.target_name,
+                            ),
+                            is_builtin=is_builtin_agent(
+                                name=row.target_name,
+                                metadata=None,
+                                default_agent_name=default_agent_name,
+                            ),
                             public_base_url=public_base_url,
                             enabled=identity_enabled,
                             background_sessionmaker=sessionmaker,

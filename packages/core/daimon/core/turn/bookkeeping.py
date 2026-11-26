@@ -6,9 +6,12 @@ existing failure policy; `release_turn_markers` calls the marker stores itself.
 """
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from functools import partial
 from typing import Protocol
 from uuid import UUID
 
+from anthropic import AsyncAnthropic
+from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -16,6 +19,7 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
 )
 from daimon.core.turn.running import RunningTurns
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -87,6 +91,36 @@ async def recover_orphan_marker(
         if cleared and not await interrupt(session_id=row.ma_session_id):
             await mark_dead(session, id=row.id)
     return cleared
+
+
+def orphan_scope(row: ThreadSessionRow, *, platform: str) -> Scope | None:
+    """The scope a boot sweep interrupts an orphaned session under."""
+    if row.account_id is None:
+        return None
+    return Scope(
+        tenant_id=str(row.tenant_id),
+        account_id=str(row.account_id),
+        principal_id="daimon",
+        authorization_id=f"{platform}-orphan-sweep",
+    )
+
+
+async def retire_orphan_marker(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    row: ThreadSessionRow,
+    *,
+    platform: str,
+) -> bool:
+    """`recover_orphan_marker` with the stores' compare-and-clear and the MA interrupt."""
+    return await recover_orphan_marker(
+        sessionmaker,
+        row,
+        clear=clear_active_turn_if_message_id,
+        interrupt=partial(
+            interrupt_orphaned_session, anthropic, scope=orphan_scope(row, platform=platform)
+        ),
+    )
 
 
 async def reconcile_found_card(

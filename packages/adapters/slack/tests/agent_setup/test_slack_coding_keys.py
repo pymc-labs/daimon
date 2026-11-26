@@ -21,8 +21,8 @@ from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
 from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
+from daimon.testing.slack_notices import shown_text
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

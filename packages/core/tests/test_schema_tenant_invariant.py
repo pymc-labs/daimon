@@ -37,6 +37,7 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     "tenants": "identity table — `id` is the tenant_id",
     # One row per running Discord worker process, not per tenant.
     "discord_worker_heartbeats": "process liveness for worker ownership; holds no tenant data",
+    "provider_key_cooldowns": "a provider API key's rate-limit wait per model; keyed by key digest, holds no tenant data",
     "discord_gateway_lease": "one row per database: which process holds the Discord gateway; no tenant data",
     # Keyed by agent_id, which is uuid5(tenant_id, ma_agent_id) via
     # derive_agent_uuid — tenant-salted, so globally unique per tenant.
@@ -88,8 +89,12 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # File-GC queue keyed by server-minted file_id; rows are transient and
     # reference no tenant-owned data beyond the opaque handle.
     "pending_file_deletes": "keyed by server-minted file_id; transient GC queue",
+    "web_search_allowances": (
+        "keyed by provider account and month; a deployment-wide count with no tenant data"
+    ),
     "usage_reconcile_progress": (
-        "keyed by MA session id (globally unique); a read cursor holding no tenant data"
+        "keyed by MA session id (globally unique); its settle cursor and, for an agent-chat "
+        "session, who drives it and where it came from, read only by that session id or grant"
     ),
     # A signed Stripe refund/dispute can arrive before Checkout completion.
     # The event has no tenant identity yet; the verified payment_intent links
@@ -113,6 +118,7 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # Promo codes are created by the operator for the whole deployment and hold
     # no tenant data; each tenant's use of one is a promo_redemptions row, which
     # carries tenant_id.
+    "deployment_identity": "one row naming this install; holds no tenant data",
     "promo_codes": "deployment-level operator codes; per-tenant redemptions carry tenant_id",
 }
 

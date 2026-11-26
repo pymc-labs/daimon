@@ -16,7 +16,7 @@ ALLOWED_MODEL_IDS: tuple[str, ...] = tuple(AGENT_MODEL_PRICING.keys())
 
 # Human-readable label for each selectable model, keyed by the same ids as
 # `ALLOWED_MODEL_IDS`. Every entry in `pricing.AGENT_MODEL_PRICING` must have
-# one here — `models_catalog.list_model_choices` falls back to the raw id for
+# one here — `models_catalog.claude_model_choices` falls back to the raw id for
 # any id missing from this map, and `test_models_catalog` asserts none does.
 MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
     "claude-opus-5-5": "Opus 5.5",
@@ -36,7 +36,7 @@ MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
 # prefill and every "no model supplied" fallback reads this one value. It used
 # to be a bare literal repeated across the Discord panel, the Discord section
 # modal and the Slack submit path, which is how three surfaces ended up a
-# generation behind `defaults/agents/daimon.yaml` while each looked correct in
+# generation behind `defaults/agents/default.yaml` while each looked correct in
 # isolation. Keep it equal to the model that file pins.
 DEFAULT_AGENT_MODEL: str = "claude-sonnet-5-5"
 
@@ -46,12 +46,12 @@ DEFAULT_AGENT_MODEL: str = "claude-sonnet-5-5"
 # surfaces cannot disagree.
 #
 # These are deliberate product caps chosen to sit below the provider's own
-# per-agent limits — not a copy of them. The provider's real limit is
-# established by the re-runnable probe at
-# `packages/core/tests/contracts/test_skill_cap.py`, which reads the number
-# out of the provider's own rejection message rather than a hardcoded second
-# value here, because that number has moved before.
-AGENT_SKILL_CAP: int = 20
+# per-agent limits — not a copy of them. The skill cap is what every backend
+# carries: the OpenAI skill pins, digests included, sit in bounded agent
+# metadata, and `tests/test_skill_cap_backends.py` keeps this many within it. The
+# re-runnable probe at `packages/core/tests/contracts/test_skill_cap.py` checks
+# the provider accepts that many, because its own limit has moved before.
+AGENT_SKILL_CAP: int = 50
 AGENT_MCP_CAP: int = 20
 
 # The byte cap on a single key/token value entered through a private form.

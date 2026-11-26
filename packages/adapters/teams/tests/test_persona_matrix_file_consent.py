@@ -10,8 +10,10 @@ from typing import Any, Literal
 
 import httpx
 import pytest
-from anthropic.types.beta import FileMetadata
 from daimon.core import output_delivery
+from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.testing.builders import file_meta
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -51,14 +53,11 @@ async def test_file_consent_persona_matrix(
     monkeypatch.setattr(output_delivery, "_POLL_DELAYS_S", (0.0,))
     uploads: list[httpx.Request] = []
     deletes: list[str] = []
-    listing = FileMetadata(
+    listing = file_meta(
         id="file_1",
         created_at=datetime(2026, 9, 1, tzinfo=UTC),
         filename="file_example.txt",
-        mime_type="text/plain",
         size_bytes=4,
-        type="file",
-        downloadable=True,
     )
     router = MARouter()
     router.add(
@@ -93,7 +92,14 @@ async def test_file_consent_persona_matrix(
         ),
     )
     async with running_service(runtime, fake) as service:
-        await service.turns.outputs.sweep(make_inbound(user=requester.user_id), "sesn_1")
+        await service.turns.outputs.sweep(
+            make_inbound(user=requester.user_id),
+            AnthropicOutputRuntime(
+                runtime.anthropic,
+                "sesn_1",
+                scope=Scope.legacy_host_authorized(call_site="teams_tests"),
+            ),
+        )
         offer = next(
             request.body for request in fake.activity_requests if request.body.get("attachments")
         )

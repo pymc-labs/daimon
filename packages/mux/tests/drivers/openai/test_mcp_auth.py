@@ -11,13 +11,15 @@ from typing import cast
 
 import httpx
 import pytest
+from mux.contracts.actions import UserMessage
+from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Context, objects
 from mux.drivers.openai.agents import agent_body, agent_spec
-from mux.drivers.openai.mcp_auth import KEY, MCPSecretResolver
+from mux.drivers.openai.mcp_auth import KEY, METADATA_LIMIT, MCPSecretResolver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.skill_bindings import decode
 from mux.drivers.openai.transport import Object, SDKTransport, object_json
@@ -28,7 +30,7 @@ from mux.testing.isolated_sdk import build_async_openai
 from openai import AsyncOpenAI
 from pydantic import JsonValue
 
-from .conftest import SCOPE, native_session
+from .conftest import SCOPE, native_session, turn
 
 URL = "https://qa.example.com/mcp"
 
@@ -1021,6 +1023,148 @@ async def test_multiple_bound_servers_refuse_before_resolver_or_write(saved: boo
     assert wire.resolve_calls == []
 
 
+def _offline_context() -> Context:
+    from .conftest import FakeTransport
+
+    return Context(FakeTransport(), "project", "openai.persistent_workspace", None)
+
+
+def _shared(names: tuple[str, ...] = ("drive", "notion")) -> tuple[MCPConnection, ...]:
+    """Daimon's server plus relay routes under it, all on one credential."""
+    return (
+        *(spec().mcp_servers or ()),
+        *(
+            MCPConnection(name=n, url=f"{URL}/connectors/{n}", credential_ref="host:owned-token")
+            for n in names
+        ),
+    )
+
+
+async def test_shared_credential_servers_bind_one_vault_credential_per_destination() -> None:
+    wire = Wire()
+    resolved: list[str] = []
+    puts: list[Object] = []
+
+    async def resolve(scope: Scope, ref: str, destination: str) -> str:
+        assert scope == SCOPE and ref == "host:owned-token", "only the shared ref resolves"
+        resolved.append(destination)
+        return "fictional-shared-bearer"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/credentials"):
+            raw = {
+                "id": f"credential-{len(puts)}",
+                "vault_id": request.url.path.split("/")[3],
+                "created_at": 0,
+                **json.loads(request.content),
+            }
+            puts.append(raw)
+            return httpx.Response(200, json=raw)
+        return wire.handle(request)
+
+    connections = _shared()
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, _kind, _id: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            mcp_secrets=resolve,
+        )
+        agent = await driver.agents.create(
+            SCOPE, spec().model_copy(update={"mcp_servers": connections}), key="agent"
+        )
+        assert agent.spec.mcp_servers == connections, "every shared server round-trips"
+        await driver.sessions.create(
+            SCOPE,
+            SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+            key="shared-session",
+        )
+    intent = json.loads(str(object_json(wire.agent["metadata"])[KEY]))
+    assert intent["servers"][1:] == [
+        ["drive", "/connectors/drive"],
+        ["notion", "/connectors/notion"],
+    ]
+    assert resolved == [c.url for c in connections], "each destination is authorized"
+    assert [object_json(p["auth"])["mcp_server_url"] for p in puts] == resolved, "one per URL"
+    post = next(r for r in wire.requests if r.url.path == "/v1/agents/sessions")
+    tools = objects(object_json(object_json(json.loads(post.content))["agent"])["tools"])
+    ids = [t["credential_id"] for t in tools if t["type"] == "mcp"]
+    assert ids == ["credential-0", "credential-1", "credential-2"], "each tool its own credential"
+
+
+@pytest.mark.parametrize(
+    ("edit", "missing"),
+    [
+        ({"credential_ref": "host:other"}, "single_bound_mcp_server"),
+        ({"url": "https://qa.example.com/elsewhere"}, "single_bound_mcp_server"),
+        ({"credential_ref": None}, "unbound_mcp_destination"),
+    ],
+)
+def test_shared_credential_requires_one_ref_under_the_first_url(
+    edit: dict[str, object], missing: str
+) -> None:
+    connections = _shared()
+    changed = (*connections[:-1], connections[-1].model_copy(update=edit))
+    context = _offline_context()
+    with pytest.raises(UnsupportedCapability) as refused:
+        agent_body(spec().model_copy(update={"mcp_servers": changed}), context)
+    assert refused.value.missing == (missing,), "mixed refs or foreign URLs refuse"
+
+
+@pytest.mark.parametrize("edit", ["url", "policy", "digest"])
+def test_shared_credential_decode_refuses_a_changed_destination(edit: str) -> None:
+    context = _offline_context()
+    raw: Object = {
+        "id": "a",
+        "created_at": 0,
+        **agent_body(spec().model_copy(update={"mcp_servers": _shared()}), context),
+    }
+    tools = objects(raw["tools"])
+    metadata = object_json(raw["metadata"])
+    if edit == "url":
+        tools[-1]["transport"] = {"type": "http", "server_url": URL + "/connectors/other"}
+    elif edit == "policy":
+        tools[-1]["allowed_tools"] = ["delete_everything"]
+    else:
+        intent = json.loads(str(metadata[KEY]))
+        metadata[KEY] = json.dumps({**intent, "digest": "0" * 32})
+    raw["tools"], raw["metadata"] = list(tools), metadata
+    with pytest.raises(ValueError, match="changed"):
+        agent_spec(raw, context)
+
+
+@pytest.mark.parametrize("required", [None, True])
+def test_one_server_with_a_long_tool_list_round_trips_by_digest(required: bool | None) -> None:
+    """Daimon's own server lists ~40 tools: over 512 characters whole, so it binds by digest."""
+    names: list[JsonValue] = [f"tool_number_{n}" for n in range(40)]
+    policy: dict[str, JsonValue] = {"allowed_tools": names}
+    if required is not None:
+        policy["required"] = required
+    connection = MCPConnection(
+        name="daimon-mcp", url=URL, credential_ref="host:owned-token", tool_policy=policy
+    )
+    requested = spec(connection)
+    context = _offline_context()
+    body = agent_body(requested, context)
+    assert len(str(object_json(body["metadata"])[KEY])) <= METADATA_LIMIT
+    tools = objects(body["tools"])
+    tools[0].update(mode="live", context_size="medium", allowed_domains=None, location=None)
+    # The API echoes an unset `required` as false.
+    tools[-1].setdefault("required", False)
+    body["tools"] = list(tools)
+    raw: Object = {"id": "a", "created_at": 0, **body}
+    assert agent_spec(raw, context).mcp_servers == requested.mcp_servers, "read back as written"
+    tools[-1]["allowed_tools"] = [*names, "delete_everything"]
+    with pytest.raises(ValueError, match="changed"):
+        agent_spec({**raw, "tools": list(tools)}, context)
+
+
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [
@@ -1146,20 +1290,25 @@ async def test_raw_session_vault_ids_cannot_authorize_foreign_vault_cleanup() ->
 
 
 @pytest.mark.parametrize("secret", ["opaque-user-token", "eyJpartial.jwt-fragment"])
-@pytest.mark.parametrize("phase", ["credential", "session"])
+@pytest.mark.parametrize("phase", ["credential", "session", "turn"])
 async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase: str) -> None:
+    """Create masks the bearers it knows; a turn on a vault-bound session wipes every field."""
+
     class EchoWire(Wire):
         def handle(self, request: httpx.Request) -> httpx.Response:
             failure = (
                 request.url.path.endswith("/credentials")
                 if phase == "credential"
-                else request.url.path == "/v1/agents/sessions"
+                else request.url.path
+                == ("/v1/agents/sessions/s/events" if phase == "turn" else "/v1/agents/sessions")
             )
             if failure and request.method == "POST":
                 self.requests.append(request)
                 return httpx.Response(
                     403, json={"error": {"message": secret, "code": secret, "param": secret}}
                 )
+            if request.url.path == "/v1/agents/sessions/s/turns":
+                return httpx.Response(200, json={"data": [turn("in_progress")], "has_more": False})
             return super().handle(request)
 
     wire = EchoWire()
@@ -1172,14 +1321,21 @@ async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase:
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
         with pytest.raises(ProviderError) as refused:
-            await driver.sessions.create(
+            session = await driver.sessions.create(
                 SCOPE,
                 SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
                 key="session",
             )
+            wire.sessions["s"]["status"] = "in_progress"
+            steer = UserMessage(content=(TextPart(text="more"),), mode="steer")
+            await driver.events.send(SCOPE, session.ref, [steer], key="turn")
     error = refused.value
     assert error.category == "permission" and error.native_code == "403"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    fields = (error.native_message, error.native_error_code, error.native_param)
+    if phase == "turn":
+        assert fields == (None,) * 3, "the vault may echo an earlier turn's bearer: wiped"
+        return
+    assert fields == ("[redacted]",) * 3, "a known MCP secret is masked, never kept"
     assert not wire.vaults
     assert not any(r.method == "GET" and r.url.path == "/v1/vaults" for r in wire.requests)
     for request in wire.requests:
@@ -1218,7 +1374,7 @@ async def test_mcp_cleanup_failure_preserves_original_error(phase: str) -> None:
             )
     error = refused.value
     assert error.category == "invalid_request" and error.native_code == "400"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    assert error.native_message == "[redacted]", "the echoed MCP secret is masked"
     assert any(
         "cleanup failed (ProviderError)" in note and "vault-1" in note for note in error.__notes__
     )

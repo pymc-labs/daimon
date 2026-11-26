@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.agent_setup.permissions_view import (
     COPY_LABEL,
     RELEASE_LABEL,
@@ -47,7 +47,7 @@ def _runtime(sessionmaker: object, state: FakeMAState | None = None) -> DiscordR
         billing_config=None,
         deployment_default=DeploymentDefault(agent_name="daimon"),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
+        turn_deps=deps_for(),
     )
 
 
@@ -81,6 +81,8 @@ def _interaction(*, admin: bool = True) -> MagicMock:
     interaction.user.guild_permissions.administrator = admin
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
+    interaction.channel_id = CHANNEL_ID  # the press comes from inside the channel
+    interaction.channel = MagicMock(spec=discord.TextChannel)
     interaction.response.is_done = MagicMock(return_value=False)
     interaction.response.send_message = AsyncMock()
     interaction.response.defer = AsyncMock()
@@ -341,3 +343,94 @@ async def test_here_confidential_shortcut_rechecks_admin(
         assert (await load_access_policy(session, tenant_id=tenant.id)).channel_rules[
             str(CHANNEL_ID)
         ].readers == "own"
+
+
+async def test_team_role_picker_saves_internal_roles_only_and_follows_the_internal_set(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(internal_role_ids=("222", "333")),
+        )
+    base = _view(_runtime(db_session_factory), account.id)
+    assert not hasattr(base, "team_roles_select"), "no team choice before internal roles"
+    view = PermissionsView(
+        base.state,
+        runtime=base.runtime,
+        allowed_user_id=42,
+        status=ChannelRuleStatus(OPEN_RULE, ()),
+        internal_role_ids=("222", "333"),
+    )
+
+    async def saved() -> TenantAccessPolicy:
+        async with db_session_factory() as session:
+            return await load_access_policy(session, tenant_id=tenant.id)
+
+    view.team_roles_select._values = [discord.Object(id=333, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_team_roles(_interaction(admin=False))  # pyright: ignore[reportPrivateUsage]
+    assert (await saved()).team_role_ids == (), "only an admin may choose"
+    await view._on_team_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    assert (await saved()).team_role_ids == ("333",)
+
+    view.team_roles_select._values = [discord.Object(id=999, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_team_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    assert (await saved()).team_role_ids == ("333",), "a role that is not internal is refused"
+
+    view.internal_roles_select._values = [discord.Object(id=222, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_internal_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    policy = await saved()
+    assert policy.internal_role_ids == ("222",) and policy.team_role_ids == ()
+
+
+async def test_internal_role_picker_saves_no_automatic_rule_and_loses_none(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the audience mode on, a narrow room keeps its computed rule through this save."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core.audience_facts import RoomFacts
+    from daimon.core.permissions import effective_channel_rule
+    from daimon.core.stores import access_policy as policy_store
+    from daimon.core.stores.audience_facts import StoredRoom, publish_facts
+    from sqlalchemy import text
+
+    async def mode_on(*_: object, **__: object) -> str:
+        return "on"
+
+    monkeypatch.setattr(policy_store, "audience_mode", mode_on)
+    narrow = "9000000000000001"
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(channel_rules={str(CHANNEL_ID): ChannelRule(writers="none")}),
+        )
+        await publish_facts(
+            session,
+            tenant_id=tenant.id,
+            rooms={narrow: StoredRoom(RoomFacts(contained=False, narrow=True))},
+            now=now,
+            fresh_until=now + timedelta(minutes=10),
+        )
+    view = _view(_runtime(db_session_factory), account.id)
+    view.internal_roles_select._values = [discord.Object(id=222, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_internal_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        stored = (
+            await session.execute(
+                text("SELECT policy FROM tenant_access_policies WHERE tenant_id = :t"),
+                {"t": tenant.id},
+            )
+        ).scalar_one()
+        policy = await policy_store.load_access_policy(session, tenant_id=tenant.id)
+    assert "automatic" not in str(stored) and narrow not in stored["channel_rules"]
+    assert stored["internal_role_ids"] == ["222"]
+    assert effective_channel_rule(policy, narrow).readers == "inside", "none was lost"

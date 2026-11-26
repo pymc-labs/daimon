@@ -17,6 +17,7 @@ from typing import Any
 import anthropic
 import structlog
 from daimon.adapters.web.cards import WebCards
+from daimon.adapters.web.control_cards import WebControlCards
 from daimon.adapters.web.credential_cards import WebCredentialCards
 from daimon.adapters.web.files import attachment_prompt, keep_output, seal_attachment
 from daimon.adapters.web.lifecycle import WebTurnLifecycle
@@ -25,6 +26,7 @@ from daimon.adapters.web.stream import StreamRegistry, TurnStream
 from daimon.adapters.web.stream_events import ReplyView
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Surface
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, WebSettings
 from daimon.core.direct_messages import bounded_turns
 from daimon.core.errors import UserFacingError
@@ -35,11 +37,13 @@ from daimon.core.output_delivery import (
     DeliverableFile,
     OutputPostingUnavailable,
     SkippedFile,
-    sweep_session_outputs,
+    sweep_outputs,
 )
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import (
+    Role,
     WebCard,
     WebMessageBlocks,
     WebMessageRow,
@@ -56,6 +60,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
+from daimon.core.stores.web_notices import WebControlNotice, WebNotice
 from daimon.core.turn import turn_deadline
 from daimon.core.turn.admission import (
     Admission,
@@ -79,6 +84,7 @@ from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key, with_spend_person
+from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -100,9 +106,17 @@ class WebTurns:
         self.credentials = WebCredentialCards(
             deps.sessionmaker, deps.anthropic, self.lifecycles.get
         )
+        self.controls = WebControlCards(settings, deps, self.lifecycles.get)
         self.draining = False
         self._cancels: dict[uuid.UUID, asyncio.Event] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+
+    async def on_notice(self, notice: WebNotice) -> None:
+        """Raise the card an MCP process's notice names."""
+        if isinstance(notice, WebControlNotice):
+            await self.controls.raise_card(notice)
+        else:
+            await self.credentials.raise_card(notice)
 
     @property
     def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
@@ -297,6 +311,8 @@ class WebTurns:
                 channel_id=place,
                 thread_id=key,
                 role=principal.role,
+                role_ids=principal.role_ids,
+                verified_membership=principal.verified_membership,
                 now=datetime.now(UTC),
                 requester_org=principal.org,
                 requester_home_id=principal.home_id,
@@ -311,7 +327,10 @@ class WebTurns:
             AdmissionDenied,
             UserFacingError,
         ) as err:
-            await lifecycle.finish("done", card=refusal_for(err))
+            await lifecycle.finish(
+                "done",
+                card=refusal_for(err, agent=thread.agent_name, admin=principal.role is Role.ADMIN),
+            )
             return
         async with self.sessionmaker.begin() as session:
             intent = await create_turn_card_intent(
@@ -368,7 +387,7 @@ class WebTurns:
     ) -> None:
         deps, key, tenant_id = self.deps, thread_key(thread.id), thread.tenant_id
         place = place_of(thread.person_id)
-        deadline = turn_deadline(now=datetime.now(UTC))
+        deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         try:
             prepared = await bind_session(
                 deps,
@@ -382,7 +401,12 @@ class WebTurns:
                 deadline=deadline,
             )
         except _BIND_REFUSALS as error:
-            await lifecycle.finish("done", card=refusal_for(error))
+            await lifecycle.finish(
+                "done",
+                card=refusal_for(
+                    error, agent=thread.agent_name, admin=principal.role is Role.ADMIN
+                ),
+            )
             return
         if prepared.mapping_id is not None:
             async with self.sessionmaker.begin() as session:
@@ -392,6 +416,7 @@ class WebTurns:
                     active_turn_message_id=str(lifecycle.reply_id),
                     active_turn_channel_id=key,
                     now=datetime.now(UTC),
+                    deadline=deadline,
                 )
             markers.add(prepared.mapping_id)
         prefix, images = await attachment_prompt(
@@ -439,7 +464,8 @@ class WebTurns:
                     if m.seq < message.seq and m.content
                 ]
                 history = render_previous_session(
-                    bounded_turns(previous), from_agent_name=admission.agent.name
+                    bounded_turns(previous, admission.dm_history),
+                    from_agent_name=admission.agent.name,
                 )
                 return f"{controls}\n{history}\n\n{prefix}{message.content}"
 
@@ -452,6 +478,7 @@ class WebTurns:
                 external_user_id=principal.external_id,
                 user_message=f"{controls}\n\n{prefix}{message.content}",
                 request_text=message.content,
+                request_ref=str(message.id),
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,
@@ -480,10 +507,12 @@ class WebTurns:
         else:
             used_tools = any(isinstance(b, ToolUseBlock) for b in outcome.state.content)
             revision = admission.backend_revision
-            if used_tools and (revision is None or revision.backend != "selfhosted"):
-                lifecycle.files = await self._outputs(
-                    outcome.ma_session_id, tenant_id, thread.person_id
-                )
+            if (
+                used_tools
+                and outcome.outputs is not None
+                and (revision is None or revision.backend != "selfhosted")
+            ):
+                lifecycle.files = await self._outputs(outcome.outputs, tenant_id, thread.person_id)
             await lifecycle.finish("done")
 
     def _link_for(self, tenant_id: uuid.UUID) -> Callable[[str], str] | None:
@@ -499,7 +528,7 @@ class WebTurns:
         return link
 
     async def _outputs(
-        self, session_id: str, tenant_id: uuid.UUID, person_id: uuid.UUID
+        self, outputs: OutputRuntime, tenant_id: uuid.UUID, person_id: uuid.UUID
     ) -> tuple[WebOutputFile, ...]:
         """The files the turn left in its session's outputs, kept for its reply."""
         kept: list[WebOutputFile] = []
@@ -519,16 +548,22 @@ class WebTurns:
             log.info("web.output.too_large", size=file.size_bytes)
 
         try:
-            await sweep_session_outputs(
-                self.deps.anthropic,
-                session_id=session_id,
+            await sweep_outputs(
+                outputs,
                 post=post,
                 on_skip=skip,
                 max_bytes=file_uploads.MAX_UPLOAD_BYTES,
+                tenant_id=tenant_id,
+                platform="web",
+                sessions=self.sessionmaker,
             )
-        except (anthropic.APIError, OutputPostingUnavailable) as err:
+        except (anthropic.APIError, ProviderError, OutputPostingUnavailable) as err:
             # Files missed now stay listed; the session's next tool turn sweeps them.
-            log.warning("web.output.sweep_failed", err_type=type(err).__name__)
+            log.warning(
+                "web.output.sweep_failed",
+                err_type=type(err).__name__,
+                causes=backend_refusal_causes(err),
+            )
         return tuple(kept)
 
     def _recover(

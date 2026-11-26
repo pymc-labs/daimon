@@ -200,7 +200,9 @@ async def test_selfhosted_timer_dispatch_never_resolves_at_anthropic(
         AgentSpec(name="timer-agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
         key="timer-target",
     )
-    monkeypatch.setattr("daimon.core.turn.runtimes.ensure_channel_runtime", lambda _: ready)
+    monkeypatch.setattr(
+        "daimon.core.turn.runtimes.hosted_backend", lambda _: object() if ready else None
+    )
     now = datetime.now(UTC)
     request = ContinuationRequest(
         tenant_id=tenant.id,

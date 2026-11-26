@@ -25,6 +25,9 @@ class RequesterOrg(StrEnum):
     HOST = "host"
     #: Verified to belong to another organisation.
     OTHER = "other"
+    #: A verified member of this server with no internal role. A client for this turn;
+    #: nothing is recorded about them.
+    OUTSIDER = "outsider"
     #: The platform could not say. Treated as another organisation for this turn only.
     UNKNOWN = "unknown"
 
@@ -47,6 +50,9 @@ class TurnHold:
     platform: str
     channel_id: str
     client: bool
+    #: An agent with a signed-identity relay server answers here: its earlier tool
+    #: results are for the audience of that moment, so it reads no session transcript.
+    relay: bool = False
 
     def contains(self, channel_id: str | None, parent_channel_id: str | None = None) -> bool:
         """Whether a target channel or thread lies inside the held channel."""

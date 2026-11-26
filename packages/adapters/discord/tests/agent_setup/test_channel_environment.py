@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -94,7 +93,7 @@ def _runtime(sessionmaker: Any, anthropic: AsyncAnthropic) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DEFAULT,
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+        turn_deps=deps_for(),
     )
 
 
@@ -130,6 +129,8 @@ def _interaction(*, admin: bool) -> MagicMock:
     interaction.user.guild_permissions.manage_guild = False
     interaction.user.guild.owner_id = 999
     interaction.guild = None
+    interaction.channel_id = CHANNEL_ID  # the press is from inside the channel
+    interaction.channel = MagicMock(parent_id=None)
     interaction.response.is_done = MagicMock(return_value=False)
     interaction.response.send_message = AsyncMock()
     interaction.response.defer = AsyncMock(

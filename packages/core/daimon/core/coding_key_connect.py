@@ -155,7 +155,7 @@ async def connect_status(
 ) -> ConnectStatus:
     """Whether the actor's batch for this agent has been claimed; not found for anyone else's."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
-    require_setup(target, "Coding keys")
+    require_setup(target, "Coding keys", read_only=True)
     if coding_key_access(is_admin=actor.subject.is_admin, owns_agent=target.owned) is None:
         raise AgentEditError("No such batch.", kind="not_found")
     async with deps.session_factory() as session:
