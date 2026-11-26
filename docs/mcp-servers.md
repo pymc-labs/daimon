@@ -100,12 +100,27 @@ sandbox.
    server's own URL, with no token. Daimon forwards each request with an
    `Authorization: Bearer <EdDSA JWT>` valid for two minutes.
 
-The token carries `iss`, `aud`, `iat`, `exp`, `jti`, `agent`, `agent_name`, `ws`
-(`<platform>:<workspace id>`) and, when a person asked, `sub`
-(`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat, the web
-app's tool list and senders from another organisation name no person. Each request gets
-a new token with its own `jti`, so a server may accept each one once. Without `workspaces`, every
-workspace's agents reach the server. Request bodies over 4 MiB are refused.
+The token carries these claims:
+
+| Claim | Value |
+| --- | --- |
+| `iss`, `aud`, `iat`, `exp` | the issuer and audience it gave you; two minutes apart |
+| `jti` | a new id on every request, so a server may accept each token once |
+| `agent`, `agent_name` | the calling agent's id and name |
+| `ws` | `<platform>:<workspace id>` |
+| `sub` | `<platform>:<user id>` of the person who asked |
+| `channel`, `msg` | the channel, thread or DM of the turn, and the message that asked |
+| `room` | on Discord, with `channel`: the kind of place the answer goes to |
+
+`room` is `dm` for a direct message. In a room it is `contained` or `narrow` as
+[Rooms with outside people](outside-people.md#contained-and-narrow-rooms) defines them,
+and `team` for any other room. Contained wins over narrow, and a room Daimon cannot judge
+is `contained`. Daimon judges the room again on every request, whatever that feature is
+set to.
+
+Routines, agent chat, the web app's tool list and senders from another organisation name
+no person. Without `workspaces`, every workspace's agents reach the server. Request bodies
+over 4 MiB are refused.
 
 A channel turn of an agent with a relay server runs held: it posts only in its
 channel and its threads, sends no DMs and has no admin tools. The agent keeps no

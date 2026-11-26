@@ -194,9 +194,10 @@ TAIL = (
     "0230_agent_chat_signed_in",
     "0231_agent_chat_send_count",
     "0232_agent_chat_session_grant",
-    "0233_evals_foundation",
-    "0234_eval_scrub_entities",
-    "0235_eval_world",
+    "0233_turn_origin_public_thread",
+    "0234_evals_foundation",
+    "0235_eval_scrub_entities",
+    "0236_eval_world",
 )
 HEAD = TAIL[-1]
 
@@ -541,7 +542,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "column"
-            and name in {"self_helpers", "helper_key", "own_dm_reach", "reach_read"}
+            and name
+            in {"self_helpers", "helper_key", "own_dm_reach", "reach_read", "public_thread"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):
